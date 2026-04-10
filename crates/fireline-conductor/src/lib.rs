@@ -25,6 +25,7 @@
 #![forbid(unsafe_code)]
 
 pub mod build;
+pub mod runtime;
 pub mod session;
 pub mod shared_terminal;
 pub mod topology;

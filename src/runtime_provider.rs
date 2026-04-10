@@ -1,0 +1,55 @@
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use fireline_conductor::runtime::{
+    CreateRuntimeSpec, LocalRuntimeLauncher, ManagedRuntime, RuntimeLaunch,
+};
+
+use crate::bootstrap::{BootstrapConfig, BootstrapHandle};
+
+pub struct BootstrapRuntimeLauncher;
+
+#[async_trait]
+impl LocalRuntimeLauncher for BootstrapRuntimeLauncher {
+    async fn start_local_runtime(
+        &self,
+        spec: CreateRuntimeSpec,
+        runtime_key: String,
+        node_id: String,
+    ) -> Result<RuntimeLaunch> {
+        let peer_directory_path = match spec.peer_directory_path {
+            Some(path) => path,
+            None => fireline_components::LocalPeerDirectory::default_path()?,
+        };
+
+        let handle = crate::bootstrap::start(BootstrapConfig {
+            host: spec.host,
+            port: spec.port,
+            name: spec.name,
+            runtime_key,
+            node_id,
+            agent_command: spec.agent_command,
+            state_stream: spec.state_stream,
+            stream_storage: spec.stream_storage,
+            peer_directory_path,
+            topology: spec.topology,
+        })
+        .await
+        .context("start local runtime")?;
+
+        Ok(RuntimeLaunch {
+            runtime_id: handle.runtime_id.clone(),
+            provider_instance_id: handle.runtime_id.clone(),
+            acp_url: handle.acp_url.clone(),
+            state_stream_url: handle.state_stream_url.clone(),
+            helper_api_base_url: None,
+            runtime: Box::new(handle),
+        })
+    }
+}
+
+#[async_trait]
+impl ManagedRuntime for BootstrapHandle {
+    async fn shutdown(self: Box<Self>) -> Result<()> {
+        (*self).shutdown().await
+    }
+}

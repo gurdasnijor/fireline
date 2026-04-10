@@ -3,13 +3,14 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, DurableStream, Producer};
+use fireline_components::PeerComponent;
 use fireline_components::audit::{AuditConfig, AuditSink, AuditTracer};
 use fireline_components::context::{
     ContextConfig, ContextInjectionComponent, ContextPlacement, ContextSource, DatetimeSource,
     WorkspaceFileSource,
 };
+use fireline_components::directory::PeerRegistry;
 use fireline_components::lookup::{ActiveTurnLookup, ChildSessionEdgeSink};
-use fireline_components::PeerComponent;
 use fireline_conductor::topology::{TopologyRegistry, TopologySpec, TraceWriterInstance};
 use serde::Deserialize;
 
@@ -20,7 +21,7 @@ pub struct ComponentContext {
     pub runtime_id: String,
     pub node_id: String,
     pub stream_base_url: String,
-    pub peer_directory_path: PathBuf,
+    pub peer_registry: Arc<dyn PeerRegistry>,
     pub active_turn_lookup: Arc<dyn ActiveTurnLookup>,
     pub child_session_edge_sink: Arc<dyn ChildSessionEdgeSink>,
 }
@@ -77,10 +78,7 @@ pub fn audit_stream_names(topology: &TopologySpec) -> Result<Vec<String>> {
         .collect()
 }
 
-pub async fn ensure_named_streams(
-    stream_base_url: &str,
-    stream_names: &[String],
-) -> Result<()> {
+pub async fn ensure_named_streams(stream_base_url: &str, stream_names: &[String]) -> Result<()> {
     let client = DurableStreamsClient::new();
     for stream_name in stream_names {
         let url = stream_url(stream_base_url, stream_name);
@@ -96,34 +94,35 @@ pub fn build_runtime_topology_registry(context: ComponentContext) -> TopologyReg
         .register_component("peer_mcp", {
             let context = context.clone();
             move |_config| {
-            Ok(sacp::DynConnectTo::new(PeerComponent::new(
-                context.peer_directory_path.clone(),
-                context.active_turn_lookup.clone(),
-                context.child_session_edge_sink.clone(),
-                context.runtime_id.clone(),
-            )))
-        }})
+                Ok(sacp::DynConnectTo::new(PeerComponent::new(
+                    context.peer_registry.clone(),
+                    context.active_turn_lookup.clone(),
+                    context.child_session_edge_sink.clone(),
+                    context.runtime_id.clone(),
+                )))
+            }
+        })
         .register_tracer("audit", {
             let context = context.clone();
             move |config| {
-            let config = config
-                .ok_or_else(|| anyhow!("topology component 'audit' requires config"))?;
-            let parsed: AuditComponentConfig =
-                serde_json::from_value(config.clone()).context("parse audit config")?;
-            let producer = build_named_producer(
-                &context.stream_base_url,
-                &parsed.stream_name,
-                format!("audit-{}", uuid::Uuid::new_v4()),
-            );
-            Ok(Box::new(AuditTracer::new(AuditConfig {
-                sink: AuditSink::DurableStream { producer },
-                include_methods: parsed.include_methods,
-            })) as TraceWriterInstance)
-        }})
+                let config =
+                    config.ok_or_else(|| anyhow!("topology component 'audit' requires config"))?;
+                let parsed: AuditComponentConfig =
+                    serde_json::from_value(config.clone()).context("parse audit config")?;
+                let producer = build_named_producer(
+                    &context.stream_base_url,
+                    &parsed.stream_name,
+                    format!("audit-{}", uuid::Uuid::new_v4()),
+                );
+                Ok(Box::new(AuditTracer::new(AuditConfig {
+                    sink: AuditSink::DurableStream { producer },
+                    include_methods: parsed.include_methods,
+                })) as TraceWriterInstance)
+            }
+        })
         .register_component("context_injection", move |config| {
-            let config = config.ok_or_else(|| {
-                anyhow!("topology component 'context_injection' requires config")
-            })?;
+            let config = config
+                .ok_or_else(|| anyhow!("topology component 'context_injection' requires config"))?;
             let parsed: ContextInjectionConfig =
                 serde_json::from_value(config.clone()).context("parse context injection config")?;
             Ok(sacp::DynConnectTo::new(ContextInjectionComponent::new(

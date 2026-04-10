@@ -25,10 +25,10 @@
 
 pub mod peer;
 
-pub mod audit;
-pub mod context;
 pub mod approval;
+pub mod audit;
 pub mod budget;
+pub mod context;
 pub mod smithery;
 
 // Backwards-compatible re-exports that match the old `fireline_peer`
@@ -37,5 +37,5 @@ pub mod smithery;
 // `fireline_peer::lookup::*` — the same paths work with
 // `fireline_components::` after a simple crate-name substitution.
 pub use peer::PeerComponent;
-pub use peer::directory::{self, Directory};
+pub use peer::directory::{self, Directory, LocalPeerDirectory, PeerRegistry};
 pub use peer::lookup;

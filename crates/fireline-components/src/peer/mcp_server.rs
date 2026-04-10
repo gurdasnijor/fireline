@@ -15,7 +15,7 @@ use std::time::Duration;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::directory::Directory;
+use super::directory::PeerRegistry;
 use super::lookup::{ActiveTurnLookup, ChildSessionEdgeInput, ChildSessionEdgeSink};
 use super::transport;
 
@@ -54,7 +54,7 @@ pub(crate) struct PromptPeerOutput {
 }
 
 pub(crate) fn build_peer_mcp_server(
-    directory: Directory,
+    peer_registry: Arc<dyn PeerRegistry>,
     active_turn_lookup: Arc<dyn ActiveTurnLookup>,
     child_session_edge_sink: Arc<dyn ChildSessionEdgeSink>,
     runtime_id: String,
@@ -66,10 +66,11 @@ pub(crate) fn build_peer_mcp_server(
             "list_peers",
             "List running Fireline peers available through the local directory.",
             {
-                let directory = directory.clone();
+                let peer_registry = peer_registry.clone();
                 async move |_input: ListPeersInput, _cx| {
-                    let peers = directory
-                        .list()
+                    let peers = peer_registry
+                        .list_peers()
+                        .await
                         .map_err(|e| sacp::util::internal_error(format!("list peers: {e}")))?
                         .into_iter()
                         .map(|peer| PeerInfo {
@@ -89,14 +90,15 @@ pub(crate) fn build_peer_mcp_server(
             "prompt_peer",
             "Send a prompt to a named Fireline peer and return its response.",
             {
-                let directory = directory.clone();
+                let peer_registry = peer_registry.clone();
                 let active_turn_lookup = active_turn_lookup.clone();
                 let child_session_edge_sink = child_session_edge_sink.clone();
                 let runtime_id = runtime_id.clone();
                 let session_binding = session_binding.clone();
                 async move |input: PromptPeerInput, cx| {
-                    let peer = directory
-                        .lookup(&input.agent_name)
+                    let peer = peer_registry
+                        .lookup_peer(&input.agent_name)
+                        .await
                         .map_err(|e| sacp::util::internal_error(format!("lookup peer: {e}")))?
                         .ok_or_else(|| {
                             sacp::util::internal_error(format!(

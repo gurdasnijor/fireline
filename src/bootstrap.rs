@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use axum::Router;
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, DurableStream, Producer};
-use fireline_components::Directory;
+use fireline_components::LocalPeerDirectory;
 use fireline_conductor::topology::{TopologyRegistry, TopologySpec};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -51,7 +51,7 @@ pub struct BootstrapConfig {
     pub node_id: String,
     pub agent_command: Vec<String>,
     pub state_stream: Option<String>,
-    pub stream_storage: Option<crate::stream_host::StreamStorageConfig>,
+    pub stream_storage: Option<fireline_conductor::runtime::StreamStorageConfig>,
     pub peer_directory_path: PathBuf,
     pub topology: TopologySpec,
 }
@@ -73,7 +73,7 @@ pub struct BootstrapHandle {
 
 impl BootstrapHandle {
     pub async fn shutdown(mut self) -> Result<()> {
-        Directory::load(&self.peer_directory_path)?
+        LocalPeerDirectory::load(&self.peer_directory_path)?
             .unregister(&self.runtime_id)
             .context("unregister peer runtime")?;
 
@@ -130,7 +130,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         .build();
     let node_id = config.node_id;
     let peer_directory_path = config.peer_directory_path;
-    let directory = Directory::load(&peer_directory_path)?;
+    let directory = LocalPeerDirectory::load(&peer_directory_path)?;
     let session_index = crate::session_index::SessionIndex::new();
     let active_turn_index = crate::active_turn_index::ActiveTurnIndex::new();
     let runtime_materializer = crate::runtime_materializer::RuntimeMaterializer::new(vec![
@@ -139,19 +139,18 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     ]);
     let shared_terminal =
         fireline_conductor::shared_terminal::SharedTerminal::spawn(config.agent_command).await?;
-    let topology_registry = crate::topology::build_runtime_topology_registry(
-        crate::topology::ComponentContext {
+    let topology_registry =
+        crate::topology::build_runtime_topology_registry(crate::topology::ComponentContext {
             runtime_key: runtime_key.clone(),
             runtime_id: runtime_id.clone(),
             node_id: node_id.clone(),
             stream_base_url: stream_base_url.clone(),
-            peer_directory_path: peer_directory_path.clone(),
+            peer_registry: std::sync::Arc::new(directory.clone()),
             active_turn_lookup: std::sync::Arc::new(active_turn_index.clone()),
             child_session_edge_sink: std::sync::Arc::new(
                 crate::child_session_edge::ChildSessionEdgeWriter::new(state_producer.clone()),
             ),
-        },
-    );
+        });
 
     let app_state = AppState {
         conductor_name: runtime_name.clone(),

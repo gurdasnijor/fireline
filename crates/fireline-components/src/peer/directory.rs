@@ -27,6 +27,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,12 +40,19 @@ pub struct Peer {
     pub registered_at_ms: i64,
 }
 
+#[async_trait]
+pub trait PeerRegistry: Send + Sync {
+    async fn list_peers(&self) -> Result<Vec<Peer>>;
+
+    async fn lookup_peer(&self, agent_name: &str) -> Result<Option<Peer>>;
+}
+
 #[derive(Clone, Debug)]
-pub struct Directory {
+pub struct LocalPeerDirectory {
     path: PathBuf,
 }
 
-impl Directory {
+impl LocalPeerDirectory {
     pub fn load(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         if let Some(parent) = path.parent() {
@@ -88,6 +96,19 @@ impl Directory {
             .find(|peer| peer.agent_name == agent_name))
     }
 }
+
+#[async_trait]
+impl PeerRegistry for LocalPeerDirectory {
+    async fn list_peers(&self) -> Result<Vec<Peer>> {
+        self.list()
+    }
+
+    async fn lookup_peer(&self, agent_name: &str) -> Result<Option<Peer>> {
+        self.lookup(agent_name)
+    }
+}
+
+pub type Directory = LocalPeerDirectory;
 
 fn read_peers(path: &Path) -> Result<Vec<Peer>> {
     let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;

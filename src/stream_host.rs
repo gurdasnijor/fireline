@@ -31,7 +31,6 @@
 //! For persistent runs, set `DS_STORAGE__MODE=file-durable` (or `acid`)
 //! and `DS_STORAGE__DATA_DIR=/path/to/data`.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -41,42 +40,7 @@ use durable_streams_server::{
     router,
     storage::{acid::AcidStorage, file::FileStorage, memory::InMemoryStorage},
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamStorageMode {
-    Memory,
-    FileFast,
-    FileDurable,
-    Acid,
-}
-
-impl StreamStorageMode {
-    fn into_ds_mode(self) -> StorageMode {
-        match self {
-            Self::Memory => StorageMode::Memory,
-            Self::FileFast => StorageMode::FileFast,
-            Self::FileDurable => StorageMode::FileDurable,
-            Self::Acid => StorageMode::Acid,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StreamStorageConfig {
-    pub mode: StreamStorageMode,
-    pub data_dir: Option<PathBuf>,
-    pub acid_shard_count: Option<usize>,
-}
-
-impl StreamStorageConfig {
-    pub fn file_durable(data_dir: impl Into<PathBuf>) -> Self {
-        Self {
-            mode: StreamStorageMode::FileDurable,
-            data_dir: Some(data_dir.into()),
-            acid_shard_count: None,
-        }
-    }
-}
+pub use fireline_conductor::runtime::{StreamStorageConfig, StreamStorageMode};
 
 /// Build the embedded stream server router.
 ///
@@ -162,11 +126,20 @@ fn apply_storage_override(
         return;
     };
 
-    ds_config.storage_mode = storage.mode.into_ds_mode();
+    ds_config.storage_mode = into_ds_mode(storage.mode);
     if let Some(data_dir) = &storage.data_dir {
         ds_config.data_dir = data_dir.display().to_string();
     }
     if let Some(acid_shard_count) = storage.acid_shard_count {
         ds_config.acid_shard_count = acid_shard_count;
+    }
+}
+
+fn into_ds_mode(mode: StreamStorageMode) -> StorageMode {
+    match mode {
+        StreamStorageMode::Memory => StorageMode::Memory,
+        StreamStorageMode::FileFast => StorageMode::FileFast,
+        StreamStorageMode::FileDurable => StorageMode::FileDurable,
+        StreamStorageMode::Acid => StorageMode::Acid,
     }
 }

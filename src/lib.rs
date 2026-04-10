@@ -37,6 +37,7 @@ pub mod load_coordinator;
 pub mod routes;
 pub mod runtime_host;
 pub mod runtime_materializer;
+mod runtime_provider;
 pub mod runtime_registry;
 pub mod session_index;
 pub mod stream_host;

@@ -14,18 +14,17 @@ pub mod lookup;
 pub(crate) mod mcp_server;
 pub(crate) mod transport;
 
-use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use sacp::{Client, ConnectTo, Proxy};
 
-use self::directory::Directory;
+use self::directory::PeerRegistry;
 use self::lookup::{ActiveTurnLookup, ChildSessionEdgeSink};
 use self::mcp_server::build_peer_mcp_server;
 
 #[derive(Clone)]
 pub struct PeerComponent {
-    directory_path: PathBuf,
+    peer_registry: Arc<dyn PeerRegistry>,
     active_turn_lookup: Arc<dyn ActiveTurnLookup>,
     child_session_edge_sink: Arc<dyn ChildSessionEdgeSink>,
     runtime_id: String,
@@ -33,13 +32,13 @@ pub struct PeerComponent {
 
 impl PeerComponent {
     pub fn new(
-        directory_path: impl Into<PathBuf>,
+        peer_registry: Arc<dyn PeerRegistry>,
         active_turn_lookup: Arc<dyn ActiveTurnLookup>,
         child_session_edge_sink: Arc<dyn ChildSessionEdgeSink>,
         runtime_id: impl Into<String>,
     ) -> Self {
         Self {
-            directory_path: directory_path.into(),
+            peer_registry,
             active_turn_lookup,
             child_session_edge_sink,
             runtime_id: runtime_id.into(),
@@ -49,8 +48,7 @@ impl PeerComponent {
 
 impl ConnectTo<sacp::Conductor> for PeerComponent {
     async fn connect_to(self, client: impl ConnectTo<Proxy>) -> Result<(), sacp::Error> {
-        let directory = Directory::load(self.directory_path)
-            .map_err(|e| sacp::util::internal_error(format!("load peer directory: {e}")))?;
+        let peer_registry = self.peer_registry;
         let active_turn_lookup = self.active_turn_lookup;
         let child_session_edge_sink = self.child_session_edge_sink;
         let runtime_id = self.runtime_id;
@@ -61,14 +59,14 @@ impl ConnectTo<sacp::Conductor> for PeerComponent {
             .on_receive_request_from(
                 Client,
                 {
-                    let directory = directory.clone();
+                    let peer_registry = peer_registry.clone();
                     let active_turn_lookup = active_turn_lookup.clone();
                     let child_session_edge_sink = child_session_edge_sink.clone();
                     let runtime_id = runtime_id.clone();
                     async move |request: sacp::schema::NewSessionRequest, responder, cx| {
                         let session_binding = Arc::new(OnceLock::new());
                         let mcp_server = build_peer_mcp_server(
-                            directory.clone(),
+                            peer_registry.clone(),
                             active_turn_lookup.clone(),
                             child_session_edge_sink.clone(),
                             runtime_id.clone(),
