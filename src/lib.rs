@@ -3,7 +3,7 @@
 //! These modules are the binary's internal wiring. They're not
 //! published as a library and aren't intended for external consumers.
 //! The public substrate lives in `fireline-conductor` and
-//! `fireline-peer`; everything in this crate is process-level glue:
+//! `fireline-components`; everything in this crate is process-level glue:
 //!
 //! - [`bootstrap`] — composes the axum Router, embedded stream
 //!   server, conductor builder, and connection lookup machinery into

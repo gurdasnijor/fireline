@@ -1,10 +1,10 @@
 [package]
-name = "fireline-peer"
+name = "fireline-components"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Cross-agent peer-call component for Fireline (impl Component<ProxyToConductor>)"
+description = "Prebuilt topology components for Fireline (peer calls, audit, context, approval, budget, smithery bridge)"
 
 [dependencies]
 # Async runtime
@@ -31,10 +31,17 @@ toml.workspace = true
 # ACP SDK
 agent-client-protocol.workspace = true
 sacp.workspace = true
+sacp-conductor.workspace = true
 tokio-tungstenite.workspace = true
 
 # Peer transport
 yopo.workspace = true
+
+# Audit tracer sink
+durable-streams.workspace = true
+
+# Smithery bridge HTTP client
+reqwest.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

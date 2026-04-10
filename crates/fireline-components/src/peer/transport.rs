@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Map, Value};
 
-use crate::directory::Peer;
+use super::directory::Peer;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PeerCallResult {

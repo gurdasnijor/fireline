@@ -8,14 +8,20 @@
 //! - inject a per-session MCP server with `with_mcp_server(...)`
 //! - hand the live session back to the SDK with `on_proxy_session_start(...)`
 
+pub mod directory;
+pub mod lookup;
+
+pub(crate) mod mcp_server;
+pub(crate) mod transport;
+
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use sacp::{Client, ConnectTo, Proxy};
 
-use crate::directory::Directory;
-use crate::lookup::{ActiveTurnLookup, ChildSessionEdgeSink};
-use crate::mcp_server::build_peer_mcp_server;
+use self::directory::Directory;
+use self::lookup::{ActiveTurnLookup, ChildSessionEdgeSink};
+use self::mcp_server::build_peer_mcp_server;
 
 #[derive(Clone)]
 pub struct PeerComponent {
