@@ -59,6 +59,7 @@ pub struct BootstrapConfig {
 pub struct BootstrapHandle {
     pub runtime_id: String,
     pub state_stream: String,
+    pub health_url: String,
     pub acp_url: String,
     pub state_stream_url: String,
     runtime_name: String,
@@ -113,6 +114,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         .local_addr()
         .context("resolve bound listener address")?;
     let connect_host_name = connect_host(local_addr.ip());
+    let health_url = format!("http://{connect_host_name}:{}/healthz", local_addr.port());
     let acp_url = format!("ws://{connect_host_name}:{}/acp", local_addr.port());
     let state_stream_url = format!(
         "http://{connect_host_name}:{}/v1/stream/{state_stream}",
@@ -207,6 +209,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     Ok(BootstrapHandle {
         runtime_id,
         state_stream,
+        health_url,
         acp_url,
         state_stream_url,
         runtime_name,

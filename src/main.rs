@@ -8,14 +8,17 @@
 //! — lives in the binary's `lib.rs` module
 //! tree, not here.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use fireline::bootstrap::{self, BootstrapConfig};
+use fireline::control_plane_client::ControlPlaneClient;
 use fireline::runtime_host::{Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
 use fireline::runtime_registry::RuntimeRegistry;
+use fireline_conductor::runtime::{HeartbeatMetrics, RuntimeRegistration};
 use fireline_conductor::topology::TopologySpec;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -56,6 +59,10 @@ struct Cli {
     #[arg(long, hide = true)]
     node_id: Option<String>,
 
+    /// Optional control-plane base URL used by managed runtimes in push mode.
+    #[arg(long, env = "FIRELINE_CONTROL_PLANE_URL", hide = true)]
+    control_plane_url: Option<String>,
+
     /// Optional runtime topology JSON payload.
     #[arg(long)]
     topology_json: Option<String>,
@@ -78,15 +85,17 @@ async fn main() -> Result<()> {
         Some(ref json) => serde_json::from_str::<TopologySpec>(json)?,
         None => TopologySpec::default(),
     };
-    let registry = load_runtime_registry(cli.runtime_registry_path.clone())?;
     let managed_runtime_key = cli.runtime_key.clone();
     let managed_node_id = cli.node_id.clone();
 
     match (managed_runtime_key, managed_node_id) {
         (Some(runtime_key), Some(node_id)) => {
-            run_managed_runtime(cli, host, topology, registry, runtime_key, node_id).await
+            run_managed_runtime(cli, host, topology, runtime_key, node_id).await
         }
-        (None, None) => run_direct_host(cli, host, topology, registry).await,
+        (None, None) => {
+            let registry = load_runtime_registry(cli.runtime_registry_path.clone())?;
+            run_direct_host(cli, host, topology, registry).await
+        }
         _ => Err(anyhow::anyhow!(
             "--runtime-key and --node-id must be provided together"
         )),
@@ -123,7 +132,6 @@ async fn run_managed_runtime(
     cli: Cli,
     host: IpAddr,
     topology: TopologySpec,
-    registry: RuntimeRegistry,
     runtime_key: String,
     node_id: String,
 ) -> Result<()> {
@@ -145,6 +153,7 @@ async fn run_managed_runtime(
         topology,
     })
     .await?;
+    wait_for_runtime_listener_ready(&handle.health_url).await?;
 
     let descriptor = RuntimeDescriptor {
         runtime_key: runtime_key.clone(),
@@ -159,16 +168,48 @@ async fn run_managed_runtime(
         created_at_ms: started_at_ms,
         updated_at_ms: started_at_ms,
     };
-    registry.upsert(descriptor.clone())?;
+
+    let heartbeat_task = if let Some(control_plane_url) = cli.control_plane_url.clone() {
+        let token = std::env::var("FIRELINE_CONTROL_PLANE_TOKEN")
+            .context("FIRELINE_CONTROL_PLANE_TOKEN is required in push mode")?;
+        let control_plane_client = Arc::new(ControlPlaneClient::new(
+            control_plane_url,
+            token,
+            runtime_key,
+        )?);
+        control_plane_client
+            .register(RuntimeRegistration {
+                runtime_id: descriptor.runtime_id.clone(),
+                node_id: descriptor.node_id.clone(),
+                provider: descriptor.provider,
+                provider_instance_id: descriptor.provider_instance_id.clone(),
+                advertised_acp_url: descriptor.acp.url.clone(),
+                advertised_state_stream_url: descriptor.state.url.clone(),
+                helper_api_base_url: descriptor.helper_api_base_url.clone(),
+            })
+            .await?;
+        Some(control_plane_client.spawn_heartbeat_loop(HeartbeatMetrics::default))
+    } else {
+        let registry = load_runtime_registry(cli.runtime_registry_path.clone())?;
+        registry.upsert(descriptor.clone())?;
+        None
+    };
 
     log_runtime_started(&descriptor);
     tokio::signal::ctrl_c().await.ok();
+    if let Some(task) = heartbeat_task {
+        task.abort();
+        let _ = task.await;
+    }
     handle.shutdown().await?;
 
-    let mut stopped = descriptor;
-    stopped.status = RuntimeStatus::Stopped;
-    stopped.updated_at_ms = now_ms();
-    registry.upsert(stopped)?;
+    if cli.control_plane_url.is_none() {
+        let registry = load_runtime_registry(cli.runtime_registry_path.clone())?;
+        let mut stopped = descriptor;
+        stopped.status = RuntimeStatus::Stopped;
+        stopped.updated_at_ms = now_ms();
+        registry.upsert(stopped)?;
+    }
     Ok(())
 }
 
@@ -188,6 +229,27 @@ fn log_runtime_started(descriptor: &RuntimeDescriptor) {
         state_stream_url = %descriptor.state.url,
         "fireline runtime started"
     );
+}
+
+async fn wait_for_runtime_listener_ready(health_url: &str) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+        .context("build runtime healthcheck client")?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match client.get(health_url).send().await {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(_) | Err(_) if tokio::time::Instant::now() >= deadline => {
+                return Err(anyhow::anyhow!(
+                    "runtime listener did not become healthy before registration"
+                ));
+            }
+            Ok(_) | Err(_) => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    }
 }
 
 fn now_ms() -> i64 {
