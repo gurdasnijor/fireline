@@ -26,6 +26,8 @@ pub struct ChildProcessRuntimeLauncher {
 }
 
 impl ChildProcessRuntimeLauncher {
+    // The local launcher is assembled from CLI/runtime wiring rather than a config object.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         fireline_bin: PathBuf,
         runtime_registry: RuntimeRegistry,
