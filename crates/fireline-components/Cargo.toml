@@ -31,10 +31,17 @@ toml.workspace = true
 # ACP SDK
 agent-client-protocol.workspace = true
 sacp.workspace = true
+sacp-conductor.workspace = true
 tokio-tungstenite.workspace = true
 
 # Peer transport
 yopo.workspace = true
+
+# Audit tracer sink
+durable-streams.workspace = true
+
+# Smithery bridge HTTP client
+reqwest.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
