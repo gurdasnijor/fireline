@@ -1,13 +1,4 @@
-import {
-  ClientSideConnection,
-  PROTOCOL_VERSION,
-  type Client,
-  type InitializeRequest,
-  type RequestPermissionRequest,
-  type RequestPermissionResponse,
-  type Stream,
-} from '@agentclientprotocol/sdk'
-import { createFirelineDB } from '@fireline/state'
+import { createBrowserFirelineClient } from '@fireline/client/browser'
 
 const STATE_STREAM_NAME =
   import.meta.env.VITE_FIRELINE_STATE_STREAM ?? 'fireline-harness-state'
@@ -51,6 +42,7 @@ root.textContent = 'Fireline browser e2e driver ready'
 
 window.firelineE2E = {
   async run() {
+    const client = createBrowserFirelineClient()
     await deleteRuntime().catch(() => undefined)
 
     const created = await fetchJson<{ runtime: HarnessRuntime }>(`${HARNESS_API_BASE}/runtime`, {
@@ -59,13 +51,20 @@ window.firelineE2E = {
     })
 
     const runtime = created.runtime
-    const db = createFirelineDB({ stateStreamUrl: STATE_PROXY_URL })
+    const db = client.state.open({ stateStreamUrl: STATE_PROXY_URL })
     await db.preload()
 
-    const acp = await openBrowserAcpConnection({ url: ACP_PROXY_URL })
+    const acp = await client.acp.connect({ url: ACP_PROXY_URL })
 
     try {
-      await initializeAcp(acp.connection)
+      await acp.initialize({
+        clientCapabilities: { fs: { readTextFile: false } },
+        clientInfo: {
+          name: '@fireline/browser-harness/e2e',
+          version: '0.0.1',
+          title: 'Fireline Browser E2E Driver',
+        },
+      })
 
       const session = await acp.connection.newSession({
         cwd: '/',
@@ -124,162 +123,10 @@ window.firelineE2E = {
     } finally {
       await acp.close()
       db.close()
+      await client.close()
       await deleteRuntime().catch(() => undefined)
     }
   },
-}
-
-async function initializeAcp(connection: ClientSideConnection): Promise<void> {
-  const request: InitializeRequest = {
-    protocolVersion: PROTOCOL_VERSION,
-    clientCapabilities: { fs: { readTextFile: false } },
-    clientInfo: {
-      name: '@fireline/browser-harness/e2e',
-      version: '0.0.1',
-      title: 'Fireline Browser E2E Driver',
-    },
-  }
-
-  await connection.initialize(request)
-}
-
-async function openBrowserAcpConnection(options: { url: string }): Promise<{
-  connection: ClientSideConnection
-  close(): Promise<void>
-}> {
-  const websocket = new WebSocket(options.url)
-  await waitForSocketOpen(websocket)
-
-  const connection = new ClientSideConnection(
-    () => createClientHandler(),
-    createWebSocketStream(websocket),
-  )
-
-  return {
-    connection,
-    async close() {
-      if (websocket.readyState === WebSocket.OPEN || websocket.readyState === WebSocket.CONNECTING) {
-        websocket.close()
-      }
-      await waitForSocketClose(websocket)
-    },
-  }
-}
-
-function createClientHandler(): Client {
-  return {
-    async requestPermission(_request: RequestPermissionRequest): Promise<RequestPermissionResponse> {
-      return {
-        outcome: {
-          outcome: 'cancelled',
-        },
-      }
-    },
-
-    async sessionUpdate(): Promise<void> {
-      // The e2e reads durable state directly and does not need live UI updates.
-    },
-
-    async writeTextFile(): Promise<never> {
-      throw new Error('browser e2e does not implement writeTextFile')
-    },
-    async readTextFile(): Promise<never> {
-      throw new Error('browser e2e does not implement readTextFile')
-    },
-    async createTerminal(): Promise<never> {
-      throw new Error('browser e2e does not implement createTerminal')
-    },
-    async terminalOutput(): Promise<never> {
-      throw new Error('browser e2e does not implement terminalOutput')
-    },
-    async releaseTerminal(): Promise<never> {
-      throw new Error('browser e2e does not implement releaseTerminal')
-    },
-    async waitForTerminalExit(): Promise<never> {
-      throw new Error('browser e2e does not implement waitForTerminalExit')
-    },
-    async killTerminal(): Promise<never> {
-      throw new Error('browser e2e does not implement killTerminal')
-    },
-    async extMethod(method: string): Promise<Record<string, unknown>> {
-      throw new Error(`browser e2e does not implement client ext method '${method}'`)
-    },
-    async extNotification(): Promise<void> {
-      // Ignore unknown extension notifications.
-    },
-  }
-}
-
-function createWebSocketStream(ws: WebSocket): Stream {
-  return {
-    readable: new ReadableStream({
-      start(controller) {
-        ws.addEventListener('message', (event) => {
-          toText(event.data)
-            .then((text) => controller.enqueue(JSON.parse(text)))
-            .catch((error) => controller.error(error))
-        })
-        ws.addEventListener('close', () => controller.close(), { once: true })
-        ws.addEventListener('error', () => controller.error(new Error('WebSocket error')), {
-          once: true,
-        })
-      },
-    }),
-    writable: new WritableStream({
-      write(message) {
-        ws.send(JSON.stringify(message))
-      },
-      close() {
-        ws.close()
-      },
-      abort() {
-        ws.close()
-      },
-    }),
-  }
-}
-
-async function waitForSocketOpen(ws: WebSocket): Promise<void> {
-  if (ws.readyState === WebSocket.OPEN) {
-    return
-  }
-
-  await new Promise<void>((resolve, reject) => {
-    const onOpen = () => {
-      cleanup()
-      resolve()
-    }
-    const onError = () => {
-      cleanup()
-      reject(new Error('WebSocket failed to open'))
-    }
-    const cleanup = () => {
-      ws.removeEventListener('open', onOpen)
-      ws.removeEventListener('error', onError)
-    }
-    ws.addEventListener('open', onOpen, { once: true })
-    ws.addEventListener('error', onError, { once: true })
-  })
-}
-
-async function waitForSocketClose(ws: WebSocket): Promise<void> {
-  if (ws.readyState === WebSocket.CLOSED) {
-    return
-  }
-
-  await new Promise<void>((resolve) => {
-    ws.addEventListener('close', () => resolve(), { once: true })
-  })
-}
-
-async function toText(data: Blob | ArrayBuffer | string): Promise<string> {
-  if (typeof data === 'string') {
-    return data
-  }
-  if (data instanceof Blob) {
-    return await data.text()
-  }
-  return new TextDecoder().decode(data)
 }
 
 async function deleteRuntime(): Promise<void> {
