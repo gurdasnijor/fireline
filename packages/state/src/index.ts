@@ -1,24 +1,23 @@
 /**
  * @fireline/state
  *
- * Fireline state schema and derived collection helpers.
+ * Fireline state schema and stream-db factory.
  *
  * This package owns the canonical schema for what flows on the
- * Fireline durable stream. The Rust side validates its output
- * against the JSON Schema this package emits — see
- * `scripts/emit-schema.ts` and `dist/schema.json`.
- *
- * Exports:
- * - `firelineSchema` — the `createStateSchema` instance describing
- *   the wire format
- * - `createFirelineDB` — the factory function that wraps
- *   `createStreamDB` from `@durable-streams/state` with the Fireline
- *   schema
- * - Derived collection helpers — TanStack DB live queries that
- *   project the raw `messages` collection into useful entity views
- *   (prompt turns, chunks, sessions, etc.)
+ * Fireline durable stream. The Rust producer side emits
+ * STATE-PROTOCOL events matching the zod schemas defined here;
+ * consumers call `createFirelineDB()` to get a locally-materialized,
+ * typed view backed by `@durable-streams/state` + `@tanstack/db`.
  */
 
-export * from './schema.js'
-// TODO: export * from './factory.js'
-// TODO: export * from './collections/index.js'
+// Schema + row types (single source of truth via z.infer)
+export { firelineState, type ChunkRow } from './schema.js'
+export type { StateEvent } from '@durable-streams/state'
+
+// Stream-db factory
+export {
+  createFirelineDB,
+  type FirelineDB,
+  type FirelineDBConfig,
+  type FirelineCollections,
+} from './collection.js'

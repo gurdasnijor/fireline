@@ -1,5 +1,9 @@
 # Slice 01: Minimal Vertical Slice
 
+## Status
+
+Complete.
+
 ## Objective
 
 Get one real Fireline conductor path working end to end:
@@ -37,6 +41,21 @@ Get one real Fireline conductor path working end to end:
 - the integration test proves prompt + trace emission
 - the repo has a stable substrate to build the next slice on
 
+## Outcome
+
+Delivered:
+
+- `fireline-conductor::build::build_subprocess_conductor`
+- `fireline-conductor::trace::DurableStreamTracer`
+- `fireline-conductor::transports::{duplex, stdio}`
+- `fireline-testy` minimal ACP agent binary
+- `tests/minimal_vertical_slice.rs`
+
+Validated with:
+
+- `cargo check`
+- `cargo test`
+
 ## Follow-on
 
 After this slice:
@@ -44,4 +63,3 @@ After this slice:
 1. binary bootstrap + `/acp` route
 2. TS trace schema + conformance
 3. peer component and ACP-native mesh peering
-

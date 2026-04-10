@@ -61,6 +61,7 @@ agent-client-protocol = { git = "https://github.com/agentclientprotocol/rust-sdk
 sacp = { git = "https://github.com/agentclientprotocol/rust-sdk", package = "agent-client-protocol-core" }
 sacp-conductor = { git = "https://github.com/agentclientprotocol/rust-sdk", package = "agent-client-protocol-conductor" }
 sacp-tokio = { git = "https://github.com/agentclientprotocol/rust-sdk", package = "agent-client-protocol-tokio" }
+yopo = { git = "https://github.com/agentclientprotocol/rust-sdk", package = "agent-client-protocol-yopo" }
 
 # ============================================================================
 # Top-level binary package
@@ -81,6 +82,7 @@ fireline-peer.workspace = true
 
 # Async runtime
 tokio.workspace = true
+tokio-util.workspace = true
 anyhow.workspace = true
 
 # CLI
@@ -112,6 +114,15 @@ uuid.workspace = true
 # Durable streams (for webhook subscriber + dashboard binary)
 durable-streams.workspace = true
 durable-streams-server.workspace = true
+
+# ACP SDK (used by bins and future host routes)
+agent-client-protocol.workspace = true
+sacp.workspace = true
+sacp-conductor.workspace = true
+sacp-tokio.workspace = true
+
+[dev-dependencies]
+yopo.workspace = true
 
 [[bin]]
 name = "fireline"

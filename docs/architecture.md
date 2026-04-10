@@ -139,7 +139,7 @@ transport-serving code.
 Examples:
 
 - ACP over WebSocket
-- local stdio attach
+- local stdio attach via `sacp_tokio::Stdio`
 - in-memory transport for tests
 - MCP bridge HTTP/SSE listeners when they are part of protocol bridging
 

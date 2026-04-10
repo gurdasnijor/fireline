@@ -16,10 +16,8 @@
 //!    message modification, no correlator state machine.
 //!
 //! 3. [`transports`] — a set of feature-gated transport adapters
-//!    that wrap a duplex byte source ([`tokio::io::AsyncRead`] +
-//!    [`tokio::io::AsyncWrite`], an [`axum::extract::ws::WebSocket`],
-//!    an in-memory [`tokio::io::DuplexStream`]) in an
-//!    [`sacp::ByteStreams`] and run the conductor over it.
+//!    for listener-style hosting and in-memory testing. Stdio attach
+//!    uses [`sacp_tokio::Stdio`] directly rather than a Fireline wrapper.
 //!
 //! See [`docs/architecture.md`](../../../docs/architecture.md) for the
 //! full architectural context.

@@ -12,5 +12,5 @@ It is intentionally execution-oriented:
 
 Current slices:
 
-- [`01-minimal-vertical-slice.md`](./01-minimal-vertical-slice.md)
-
+- [`01-minimal-vertical-slice.md`](./01-minimal-vertical-slice.md) — complete
+- [`02-hosted-runtime.md`](./02-hosted-runtime.md)

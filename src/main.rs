@@ -11,9 +11,13 @@
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
+use std::net::IpAddr;
 
 #[derive(Debug, Parser)]
-#[command(name = "fireline", about = "Fireline runtime substrate for ACP-compatible agents")]
+#[command(
+    name = "fireline",
+    about = "Fireline runtime substrate for ACP-compatible agents"
+)]
 struct Cli {
     /// Bind port for the embedded durable-streams server (helper API uses port + 1).
     #[arg(long, default_value_t = 4437)]
@@ -27,6 +31,10 @@ struct Cli {
     #[arg(long, default_value = "default")]
     name: String,
 
+    /// Optional explicit name for the durable trace stream.
+    #[arg(long)]
+    state_stream: Option<String>,
+
     /// The agent command to run, e.g. `npx -y @zed-industries/claude-code-acp`.
     #[arg(trailing_var_arg = true, required = true)]
     agent_command: Vec<String>,
@@ -39,21 +47,24 @@ async fn main() -> Result<()> {
         .without_time()
         .init();
 
-    let _cli = Cli::parse();
+    let cli = Cli::parse();
+    let host: IpAddr = cli.host.parse()?;
+    let handle = fireline::bootstrap::start(fireline::bootstrap::BootstrapConfig {
+        host,
+        port: cli.port,
+        name: cli.name,
+        agent_command: cli.agent_command,
+        state_stream: cli.state_stream,
+    })
+    .await?;
 
-    // TODO: call fireline::bootstrap::start(config) and wait for shutdown.
-    //
-    // ```rust,ignore
-    // let handle = fireline::bootstrap::start(BootstrapConfig {
-    //     host: cli.host.parse()?,
-    //     port: cli.port,
-    //     name: cli.name,
-    //     agent_command: cli.agent_command,
-    // }).await?;
-    //
-    // tokio::signal::ctrl_c().await.ok();
-    // handle.shutdown().await?;
-    // ```
+    tracing::info!(
+        runtime_id = %handle.runtime_id,
+        acp_url = %handle.acp_url,
+        state_stream_url = %handle.state_stream_url,
+        "fireline runtime started"
+    );
 
-    Ok(())
+    tokio::signal::ctrl_c().await.ok();
+    handle.shutdown().await
 }

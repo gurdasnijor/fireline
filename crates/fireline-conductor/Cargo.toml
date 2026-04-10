@@ -34,10 +34,9 @@ durable-streams.workspace = true
 axum = { workspace = true, optional = true }
 
 [features]
-default = ["transport-stdio", "transport-websocket", "transport-duplex"]
+default = ["transport-websocket", "transport-duplex"]
 
 # Each transport is feature-gated so consumers can opt in to what they need.
-transport-stdio = []
 transport-websocket = ["dep:axum"]
 transport-duplex = []
 

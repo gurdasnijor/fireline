@@ -8,10 +8,10 @@
 //! interface.
 //!
 //! Each adapter is feature-gated so consumers can opt in to only the
-//! transports they need. The default features include all of them.
-
-#[cfg(feature = "transport-stdio")]
-pub mod stdio;
+//! transports they need.
+//!
+//! Stdio is intentionally not wrapped here: callers should use
+//! `sacp_tokio::Stdio` directly.
 
 #[cfg(feature = "transport-websocket")]
 pub mod websocket;

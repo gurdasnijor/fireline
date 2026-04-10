@@ -10,38 +10,39 @@
 //! and the conductor — it's the explicit "developer wires HTTP into
 //! the substrate" point that the rivet HTTP server pattern advocates.
 
-// TODO: implement acp_websocket_handler
-//
-// Target shape:
-//
-// ```rust,ignore
-// use axum::extract::{State, ws::WebSocketUpgrade};
-// use axum::response::IntoResponse;
-// use fireline_conductor::{build, transports, trace::DurableStreamTracer};
-// use fireline_peer::PeerComponent;
-// use sacp::{DynComponent, ProxyToConductor};
-//
-// pub async fn acp_websocket_handler(
-//     State(app): State<crate::bootstrap::AppState>,
-//     ws: WebSocketUpgrade,
-// ) -> impl IntoResponse {
-//     ws.on_upgrade(move |socket| async move {
-//         let components: Vec<DynComponent<ProxyToConductor>> = vec![
-//             DynComponent::new(PeerComponent::new(app.peer_directory_path.clone())),
-//         ];
-//         let trace_writer = DurableStreamTracer::new(
-//             app.producer.clone(),
-//             app.runtime_id.clone(),
-//         );
-//         let conductor = build::build_subprocess_conductor(
-//             "fireline",
-//             app.agent_command.clone(),
-//             components,
-//             trace_writer,
-//         );
-//         if let Err(e) = transports::websocket::handle_upgrade(conductor, socket).await {
-//             tracing::warn!(error = %e, "ACP session ended");
-//         }
-//     })
-// }
-// ```
+use axum::Router;
+use axum::extract::{State, ws::WebSocketUpgrade};
+use axum::response::IntoResponse;
+use axum::routing::get;
+use fireline_conductor::{build, trace::DurableStreamTracer, transports};
+use fireline_peer::PeerComponent;
+use sacp::{Conductor, DynConnectTo};
+
+pub fn router(state: crate::bootstrap::AppState) -> Router {
+    Router::new()
+        .route("/acp", get(acp_websocket_handler))
+        .with_state(state)
+}
+
+pub async fn acp_websocket_handler(
+    State(app): State<crate::bootstrap::AppState>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| async move {
+        let components: Vec<DynConnectTo<Conductor>> =
+            vec![DynConnectTo::new(PeerComponent::new(app.peer_directory_path.clone()))];
+
+        let trace_writer =
+            DurableStreamTracer::new(app.trace_producer.clone(), app.runtime_id.clone());
+        let conductor = build::build_subprocess_conductor(
+            app.conductor_name.clone(),
+            app.agent_command.clone(),
+            components,
+            trace_writer,
+        );
+
+        if let Err(e) = transports::websocket::handle_upgrade(conductor, socket).await {
+            tracing::warn!(error = %e, "ACP session ended");
+        }
+    })
+}
