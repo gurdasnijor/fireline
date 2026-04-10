@@ -49,23 +49,28 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let host: IpAddr = cli.host.parse()?;
-    let handle = fireline::bootstrap::start(fireline::bootstrap::BootstrapConfig {
-        host,
-        port: cli.port,
-        name: cli.name,
-        agent_command: cli.agent_command,
-        state_stream: cli.state_stream,
-        peer_directory_path: None,
-    })
-    .await?;
+    let runtime_host = fireline::runtime_host::RuntimeHost::with_default_registry()?;
+    let descriptor = runtime_host
+        .create(fireline::runtime_host::CreateRuntimeSpec {
+            provider: fireline::runtime_host::RuntimeProviderRequest::Local,
+            host,
+            port: cli.port,
+            name: cli.name,
+            agent_command: cli.agent_command,
+            state_stream: cli.state_stream,
+            peer_directory_path: None,
+        })
+        .await?;
 
     tracing::info!(
-        runtime_id = %handle.runtime_id,
-        acp_url = %handle.acp_url,
-        state_stream_url = %handle.state_stream_url,
+        runtime_key = %descriptor.runtime_key,
+        runtime_id = %descriptor.runtime_id,
+        provider = ?descriptor.provider,
+        acp_url = %descriptor.acp_url,
+        state_stream_url = %descriptor.state_stream_url,
         "fireline runtime started"
     );
 
     tokio::signal::ctrl_c().await.ok();
-    handle.shutdown().await
+    runtime_host.stop(&descriptor.runtime_key).await.map(|_| ())
 }

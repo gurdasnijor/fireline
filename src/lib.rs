@@ -24,5 +24,7 @@ pub mod agent_catalog;
 pub mod bootstrap;
 pub mod connections;
 pub mod routes;
+pub mod runtime_host;
+pub mod runtime_registry;
 pub mod stream_host;
 pub mod webhook;

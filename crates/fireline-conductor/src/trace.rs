@@ -353,11 +353,8 @@ impl DurableStreamTracer {
                 let Some(acp_url) = req.params.get("acp_url").and_then(Value::as_str) else {
                     return;
                 };
-                let Some(pending_request_id) = self
-                    .correlation
-                    .pending_session_new_order
-                    .first()
-                    .cloned()
+                let Some(pending_request_id) =
+                    self.correlation.pending_session_new_order.first().cloned()
                 else {
                     return;
                 };
