@@ -31,7 +31,7 @@ export class TopologyBuilder {
   audit(config: AuditTopologyConfig): this {
     this.components.push({
       name: 'audit',
-      config,
+      config: { ...config },
     })
     return this
   }
@@ -39,7 +39,7 @@ export class TopologyBuilder {
   contextInjection(config: ContextInjectionTopologyConfig): this {
     this.components.push({
       name: 'context_injection',
-      config,
+      config: { ...config },
     })
     return this
   }

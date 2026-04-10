@@ -19,12 +19,16 @@ pnpm --filter @fireline/browser-harness dev
 
 That starts:
 
-- Fireline on `127.0.0.1:4437`
 - browser-harness control API on `127.0.0.1:4436`
 - Vite on `http://localhost:5173`
+- Fireline runtime on `127.0.0.1:4437` only after you launch an agent from the UI
 
 The harness uses a local-only runtime registry and peer directory under
 `packages/browser-harness/.tmp/`.
+
+The control server on `4436` is the startup authority. The browser should not
+expect `/acp` or `/v1/stream/*` on `4437` to exist until a runtime has been
+created and reported `ready`.
 
 ## What It Exercises
 

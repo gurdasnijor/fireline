@@ -21,8 +21,8 @@ import { createFirelineDB, type FirelineDB } from '@fireline/state'
 
 const STATE_STREAM_NAME =
   import.meta.env.VITE_FIRELINE_STATE_STREAM ?? 'fireline-harness-state'
-const ACP_URL = `ws://${window.location.host}/acp`
-const STATE_STREAM_URL = `${window.location.origin}/v1/stream/${STATE_STREAM_NAME}`
+const ACP_PROXY_URL = `ws://${window.location.host}/acp`
+const STATE_PROXY_URL = `${window.location.origin}/v1/stream/${STATE_STREAM_NAME}`
 const HARNESS_API_BASE = `${window.location.origin}/api`
 
 type HarnessStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
@@ -66,7 +66,10 @@ function useDb(): FirelineDB {
 export function App() {
   const [dbEnabled, setDbEnabled] = useState(false)
   const [dbEpoch, setDbEpoch] = useState(0)
-  const db = useMemo(() => createFirelineDB({ stateStreamUrl: STATE_STREAM_URL }), [dbEpoch])
+  const db = useMemo(
+    () => (dbEnabled ? createFirelineDB({ stateStreamUrl: STATE_PROXY_URL }) : null),
+    [dbEnabled, dbEpoch],
+  )
   const [dbReady, setDbReady] = useState(false)
   const [dbError, setDbError] = useState<string | null>(null)
 
@@ -75,11 +78,8 @@ export function App() {
     setDbReady(false)
     setDbError(null)
 
-    if (!dbEnabled) {
-      return () => {
-        cancelled = true
-        db.close()
-      }
+    if (!dbEnabled || !db) {
+      return
     }
 
     void db
@@ -99,7 +99,7 @@ export function App() {
       cancelled = true
       db.close()
     }
-  }, [db])
+  }, [db, dbEnabled])
 
   return (
     <DbContext.Provider value={db}>
@@ -124,8 +124,11 @@ export function App() {
         >
           <HarnessHeader />
           <SessionHarness
+            dbActive={dbEnabled}
+            dbReady={dbReady}
+            dbError={dbError}
             onRuntimeChanged={(runtime) => {
-              setDbEnabled(Boolean(runtime))
+              setDbEnabled(runtime?.status === 'ready')
               setDbEpoch((current) => current + 1)
             }}
           />
@@ -138,7 +141,7 @@ export function App() {
             flexDirection: 'column',
           }}
         >
-          <StateExplorer ready={dbReady} error={dbError} />
+          <StateExplorer active={dbEnabled} ready={dbReady} error={dbError} />
         </div>
       </div>
     </DbContext.Provider>
@@ -167,11 +170,16 @@ function HarnessHeader() {
 }
 
 function SessionHarness({
+  dbActive,
+  dbReady,
+  dbError,
   onRuntimeChanged,
 }: {
+  dbActive: boolean
+  dbReady: boolean
+  dbError: string | null
   onRuntimeChanged(runtime: HarnessRuntime | null): void
 }) {
-  const db = useDb()
   const [status, setStatus] = useState<HarnessStatus>('disconnected')
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [input, setInput] = useState('')
@@ -187,25 +195,7 @@ function SessionHarness({
   const sessionIdRef = useRef<string | null>(null)
   const permissionResolverRef = useRef<PermissionResolver | null>(null)
   const bottomRef = useRef<HTMLDivElement | null>(null)
-
-  const currentSessionQuery = useLiveQuery((q) => q.from({ s: db.collections.sessions }))
-  const currentTurnQuery = useLiveQuery((q) =>
-    q.from({ t: db.collections.promptTurns }).orderBy(({ t }) => t.startedAt, 'desc'),
-  )
-
-  const currentSessionRow = useMemo(() => {
-    if (!sessionId) {
-      return null
-    }
-    return currentSessionQuery.data?.find((row) => row.sessionId === sessionId) ?? null
-  }, [currentSessionQuery.data, sessionId])
-
-  const currentTurns = useMemo(() => {
-    if (!sessionId) {
-      return []
-    }
-    return (currentTurnQuery.data ?? []).filter((turn) => turn.sessionId === sessionId).slice(0, 5)
-  }, [currentTurnQuery.data, sessionId])
+  const runtimeReady = runtime?.status === 'ready'
 
   useEffect(() => {
     void refreshAgents()
@@ -221,7 +211,12 @@ function SessionHarness({
   }, [events.length])
 
   async function openConnection(mode: 'new' | 'load') {
-    if (!runtime) {
+    if (!runtimeReady) {
+      if (runtime) {
+        setLastError(`Runtime is not ready yet (${runtime.status})`)
+        setStatus('error')
+        return
+      }
       if (mode !== 'new') {
         setLastError('No active runtime to load a session from')
         setStatus('error')
@@ -243,9 +238,9 @@ function SessionHarness({
     await disconnect({ preserveSessionId: true, clearError: true })
     setStatus('connecting')
     setLastError(null)
-    pushEvent('connection', { mode, url: ACP_URL })
+    pushEvent('connection', { mode, url: ACP_PROXY_URL })
 
-    const websocket = new WebSocket(ACP_URL)
+    const websocket = new WebSocket(ACP_PROXY_URL)
     websocketRef.current = websocket
 
     try {
@@ -513,12 +508,16 @@ function SessionHarness({
         >
           {runtime ? 'Relaunch Agent' : 'Launch Agent'}
         </button>
-        <button style={buttonStyle('#2563eb')} onClick={() => void openConnection('new')}>
+        <button
+          style={buttonStyle('#2563eb')}
+          disabled={runtimePending || Boolean(runtime && !runtimeReady)}
+          onClick={() => void openConnection('new')}
+        >
           New Session
         </button>
         <button
           style={buttonStyle('#0f766e')}
-          disabled={!sessionId || status === 'connecting'}
+          disabled={!sessionId || status === 'connecting' || !runtimeReady}
           onClick={() => void openConnection('load')}
         >
           Reconnect + Load
@@ -646,53 +645,32 @@ function SessionHarness({
           <InspectorCard title="Current Session">
             <KeyValueRow label="status" value={status} />
             <KeyValueRow label="sessionId" value={sessionId ?? 'none'} mono />
-            <KeyValueRow
-              label="supportsLoadSession"
-              value={
-                currentSessionRow
-                  ? String(currentSessionRow.supportsLoadSession)
-                  : 'n/a'
-              }
-            />
-            <KeyValueRow
-              label="traceId"
-              value={currentSessionRow?.traceId ?? 'n/a'}
-              mono
-            />
+            <KeyValueRow label="runtimeStatus" value={runtime?.status ?? 'not running'} />
             <KeyValueRow
               label="lastError"
-              value={lastError ?? currentSessionRow?.state ?? 'none'}
+              value={lastError ?? 'none'}
             />
             <KeyValueRow
               label="runtime"
               value={runtime?.runtimeId ?? 'not running'}
               mono
             />
+            {dbActive ? (
+              <CurrentSessionFields sessionId={sessionId} ready={dbReady} error={dbError} />
+            ) : (
+              <KeyValueRow label="statePlane" value="idle until runtime is ready" />
+            )}
           </InspectorCard>
 
           <InspectorCard title="Recent Turns">
-            {currentTurns.length === 0 ? (
-              <EmptyState label="No turns for current session yet" />
+            {!dbActive ? (
+              <EmptyState label="Launch a ready runtime to observe durable state" />
+            ) : dbError ? (
+              <EmptyState label={`State stream error: ${dbError}`} />
+            ) : !dbReady ? (
+              <EmptyState label="Connecting durable state…" />
             ) : (
-              currentTurns.map((turn) => (
-                <div
-                  key={turn.promptTurnId}
-                  style={{
-                    padding: '8px 0',
-                    borderBottom: '1px solid #1f2a44',
-                  }}
-                >
-                  <div style={{ color: stateColor(turn.state), fontSize: 11 }}>
-                    {turn.state}
-                  </div>
-                  <div style={{ color: '#d4d7dd', fontSize: 12, marginTop: 2 }}>
-                    {turn.text ?? '(no text)'}
-                  </div>
-                  <div style={{ color: '#7081a3', fontSize: 10, marginTop: 3 }}>
-                    {new Date(turn.startedAt).toLocaleTimeString()}
-                  </div>
-                </div>
-              ))
+              <RecentTurnsPanel sessionId={sessionId} />
             )}
           </InspectorCard>
         </div>
@@ -701,7 +679,15 @@ function SessionHarness({
   )
 }
 
-function StateExplorer({ ready, error }: { ready: boolean; error: string | null }) {
+function StateExplorer({
+  active,
+  ready,
+  error,
+}: {
+  active: boolean
+  ready: boolean
+  error: string | null
+}) {
   const [tab, setTab] = useState<'sessions' | 'turns' | 'edges' | 'chunks' | 'connections'>(
     'sessions',
   )
@@ -739,7 +725,9 @@ function StateExplorer({ ready, error }: { ready: boolean; error: string | null 
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-        {error ? (
+        {!active ? (
+          <EmptyState label="Idle until a runtime is ready" />
+        ) : error ? (
           <EmptyState label={`State stream error: ${error}`} />
         ) : !ready ? (
           <EmptyState label="Connecting durable state…" />
@@ -753,6 +741,82 @@ function StateExplorer({ ready, error }: { ready: boolean; error: string | null 
           </>
         )}
       </div>
+    </>
+  )
+}
+
+function CurrentSessionFields({
+  sessionId,
+  ready,
+  error,
+}: {
+  sessionId: string | null
+  ready: boolean
+  error: string | null
+}) {
+  const db = useDb()
+  const query = useLiveQuery((q) => q.from({ s: db.collections.sessions }))
+  const currentSessionRow = useMemo(() => {
+    if (!sessionId) {
+      return null
+    }
+    return query.data?.find((row) => row.sessionId === sessionId) ?? null
+  }, [query.data, sessionId])
+
+  if (error) {
+    return <KeyValueRow label="statePlane" value={error} />
+  }
+  if (!ready) {
+    return <KeyValueRow label="statePlane" value="connecting" />
+  }
+
+  return (
+    <>
+      <KeyValueRow
+        label="supportsLoadSession"
+        value={currentSessionRow ? String(currentSessionRow.supportsLoadSession) : 'n/a'}
+      />
+      <KeyValueRow label="traceId" value={currentSessionRow?.traceId ?? 'n/a'} mono />
+      <KeyValueRow label="sessionState" value={currentSessionRow?.state ?? 'n/a'} />
+    </>
+  )
+}
+
+function RecentTurnsPanel({ sessionId }: { sessionId: string | null }) {
+  const db = useDb()
+  const query = useLiveQuery((q) =>
+    q.from({ t: db.collections.promptTurns }).orderBy(({ t }) => t.startedAt, 'desc'),
+  )
+  const currentTurns = useMemo(() => {
+    if (!sessionId) {
+      return []
+    }
+    return (query.data ?? []).filter((turn) => turn.sessionId === sessionId).slice(0, 5)
+  }, [query.data, sessionId])
+
+  if (currentTurns.length === 0) {
+    return <EmptyState label="No turns for current session yet" />
+  }
+
+  return (
+    <>
+      {currentTurns.map((turn) => (
+        <div
+          key={turn.promptTurnId}
+          style={{
+            padding: '8px 0',
+            borderBottom: '1px solid #1f2a44',
+          }}
+        >
+          <div style={{ color: stateColor(turn.state), fontSize: 11 }}>{turn.state}</div>
+          <div style={{ color: '#d4d7dd', fontSize: 12, marginTop: 2 }}>
+            {turn.text ?? '(no text)'}
+          </div>
+          <div style={{ color: '#7081a3', fontSize: 10, marginTop: 3 }}>
+            {new Date(turn.startedAt).toLocaleTimeString()}
+          </div>
+        </div>
+      ))}
     </>
   )
 }
