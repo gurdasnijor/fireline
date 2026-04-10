@@ -2,23 +2,23 @@
 
 ## Purpose
 
-Fireline produces durable trace. TypeScript consumers should materialize state
-from that trace locally.
+Fireline's canonical consumer contract is a durable stream of
+`STATE-PROTOCOL` change messages.
 
-This document defines the intended consumer-side state surface.
+TypeScript consumers should materialize local collections from that stream.
 
 ## Ownership
 
 Rust owns:
 
-- durable trace production
-- transport exposure
-- component-level protocol behavior
+- observation of ACP traffic via `trace_to(WriteEvent)`
+- correlation needed to project ACP traffic into normalized entity changes
+- durable append of `STATE-PROTOCOL` messages
 
 TypeScript owns:
 
 - schema definition
-- trace ingestion
+- stream-db ingestion
 - materialized collections
 - derived queries
 - sink adapters
@@ -27,46 +27,56 @@ TypeScript owns:
 
 `@fireline/state` should own:
 
-- the schema for Fireline's consumer entities
-- trace record ingestion
-- local materialization
-- query helpers
-- optional sink helpers
+- the schema for Fireline's normalized entity collections
+- `createFirelineDB(...)`
+- derived live-query collections
+- schema export artifacts for Rust conformance tests
 
 It should not depend on a Rust state server.
 
 ## Input contract
 
-The input is Fireline trace.
+The input is a durable stream of `STATE-PROTOCOL` change messages.
 
-At minimum each trace record should provide:
+At minimum the initial Fireline producer should emit:
 
-- the observed ACP event
-- `runtimeId`
-- `observedAtMs`
-- any lineage metadata required for cross-node stitching
+- `connection`
+- `prompt_turn`
+- `runtime_instance`
+- `chunk`
+
+The schema also reserves:
+
+- `pending_request`
+- `permission`
+- `terminal`
+
+Those can be added incrementally without changing the stream protocol.
 
 ## Output contract
 
 Consumers should be able to build local collections such as:
 
-- connections
-- prompt turns
-- chunks
-- permissions
-- terminals
+- `connections`
+- `promptTurns`
+- `pendingRequests`
+- `permissions`
+- `terminals`
+- `runtimeInstances`
+- `chunks`
 
-Those collections are consumer-owned views, not producer-owned wire types.
+These collections are defined in TypeScript and synchronized by
+`@durable-streams/state`.
 
 ## Query model
 
-Queries should stay in TypeScript.
+Queries stay in TypeScript.
 
-The ideal shape is:
+The intended path is:
 
-- ingest trace into local collections
-- expose live-query helpers over those collections
-- let applications build dashboards, operator tools, and sinks without polling
+1. subscribe to the Fireline state stream
+2. materialize local collections with `createFirelineDB(...)`
+3. build live queries and sink adapters over those collections
 
 ## Webhooks and sinks
 
@@ -74,8 +84,8 @@ Webhooks are not a first-class architectural primitive.
 
 They are one example of:
 
-- subscribe to state or trace
-- filter/project
+- subscribe to state
+- filter or derive
 - deliver to a sink
 
 That same pattern should support:
@@ -85,10 +95,24 @@ That same pattern should support:
 - metrics
 - audit exports
 
-## Relationship to Fireline's helper APIs
+## Relationship to ACP `_meta`
+
+ACP `_meta` remains the protocol-extension channel for active components such as
+peer calls and lineage propagation.
+
+If those extensions need to become queryable state, the Rust producer projects
+them into normalized `STATE-PROTOCOL` rows. Consumers should not parse raw ACP
+messages as their primary contract.
+
+## Relationship to helper APIs
 
 Host helper APIs may exist for operational convenience, but they should not be
 the canonical state contract.
 
-The forward direction is trace -> local materialization, not REST snapshot ->
-client polling.
+The forward direction is:
+
+`STATE-PROTOCOL stream -> local materialization -> app queries`
+
+not:
+
+`REST snapshot -> client polling`

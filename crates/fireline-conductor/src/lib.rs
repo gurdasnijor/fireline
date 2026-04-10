@@ -11,9 +11,11 @@
 //!    transport.
 //!
 //! 2. [`trace::DurableStreamTracer`] — a [`sacp_conductor::trace::WriteEvent`]
-//!    implementation that appends every observed [`sacp_conductor::trace::TraceEvent`]
-//!    to a durable stream as a JSON record. Pure observation, no
-//!    message modification, no correlator state machine.
+//!    implementation that observes [`sacp_conductor::trace::TraceEvent`]s,
+//!    correlates them into normalized `STATE-PROTOCOL` entity changes, and
+//!    appends those changes to a durable stream. It is passive with respect to
+//!    ACP message flow: it may read `_meta`, but active components remain
+//!    responsible for stamping `_meta` extensions.
 //!
 //! 3. [`transports`] — a set of feature-gated transport adapters
 //!    for listener-style hosting and in-memory testing. Stdio attach

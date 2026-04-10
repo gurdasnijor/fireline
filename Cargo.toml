@@ -123,6 +123,8 @@ sacp-tokio.workspace = true
 
 [dev-dependencies]
 yopo.workspace = true
+futures.workspace = true
+tokio-tungstenite = "0.28"
 
 [[bin]]
 name = "fireline"

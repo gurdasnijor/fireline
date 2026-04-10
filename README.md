@@ -21,8 +21,8 @@ foundational architectural index.
 
 The short version:
 
-- **Rust** is a durable-stream producer. It runs the conductor, traces
-  ACP protocol events, projects them into typed entity events, and
+- **Rust** is a durable-stream producer. It runs the conductor, observes
+  ACP protocol events, projects them into `STATE-PROTOCOL` entity events, and
   appends to a durable stream. It does not maintain materialized
   state, does not serve queries, does not own a "state API." That
   responsibility lives in TypeScript.
@@ -60,9 +60,9 @@ fireline/
 
 ## Status
 
-This repo is in initial scaffolding. The architectural index is the
-first deliverable; crates, packages, and binaries will be scaffolded
-next, then implementation begins.
+The minimal local vertical slice and hosted `/acp` runtime are implemented.
+The next build-out work is the canonical state-stream contract, TypeScript
+schema/package alignment, and ACP-native peer mesh work.
 
 ## License
 

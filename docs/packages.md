@@ -17,7 +17,7 @@ Owns:
 
 - conductor assembly
 - reusable transport adapters
-- durable trace sink wiring
+- state-writer wiring fed by ACP observation
 - local attach helpers for stdio / in-memory testing
 
 Does not own:
@@ -78,7 +78,7 @@ Consumer-side state package.
 Owns:
 
 - schema definition
-- trace ingestion
+- state-stream ingestion
 - local materialization
 - live-query helpers
 - sink helpers and adapters, if those remain close to state
@@ -100,14 +100,14 @@ fireline-conductor -------'
 TypeScript:
 
 ```text
-@fireline/state   -> depends on trace contract and consumer schema
+@fireline/state   -> depends on the state-stream contract and consumer schema
 @fireline/client  -> depends on transport/runtime/peer primitives
 ```
 
 The main rule is conceptual rather than mechanical:
 
-- Rust produces trace and hosts transports.
-- TypeScript consumes trace and defines the read model.
+- Rust produces `STATE-PROTOCOL` and hosts transports.
+- TypeScript consumes the state stream and defines the read model.
 
 ## Things that should not become packages yet
 

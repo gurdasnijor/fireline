@@ -14,7 +14,7 @@ fn testy_bin() -> PathBuf {
 }
 
 #[tokio::test]
-async fn minimal_vertical_slice_prompts_and_emits_trace() -> Result<()> {
+async fn minimal_vertical_slice_prompts_and_emits_state_events() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
 
@@ -32,8 +32,12 @@ async fn minimal_vertical_slice_prompts_and_emits_trace() -> Result<()> {
     let stream = client.stream(&stream_url);
     stream.create().await?;
 
-    let producer = stream.producer("trace-writer").build();
-    let tracer = DurableStreamTracer::new(producer.clone(), runtime_id);
+    let producer = stream.producer("state-writer").build();
+    let tracer = DurableStreamTracer::new(
+        producer.clone(),
+        runtime_id,
+        "conn:minimal-vertical-slice",
+    );
 
     let conductor = build_subprocess_conductor(
         "fireline-test",
@@ -72,12 +76,16 @@ async fn minimal_vertical_slice_prompts_and_emits_trace() -> Result<()> {
     }
 
     assert!(
-        body.contains("\"runtimeId\":\"minimal-vertical-slice\""),
-        "trace stream should contain runtimeId metadata: {body}"
+        body.contains("\"type\":\"connection\""),
+        "state stream should contain connection rows: {body}"
     );
     assert!(
-        body.contains("\"method\":\"session/prompt\""),
-        "trace stream should contain session/prompt trace events: {body}"
+        body.contains("\"type\":\"prompt_turn\""),
+        "state stream should contain prompt turns: {body}"
+    );
+    assert!(
+        body.contains("\"type\":\"pending_request\""),
+        "state stream should contain pending request rows: {body}"
     );
 
     conductor_task.abort();

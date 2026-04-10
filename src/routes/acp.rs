@@ -2,7 +2,9 @@
 //!
 //! Each WebSocket connection gets a fresh conductor with the
 //! `PeerComponent` in its component chain and a `DurableStreamTracer`
-//! attached via `trace_to`. The handler delegates to
+//! attached via `trace_to`. The writer observes ACP traffic and emits
+//! `STATE-PROTOCOL` entity changes onto the runtime's durable state
+//! stream. The handler delegates to
 //! `fireline_conductor::transports::websocket::handle_upgrade` for
 //! the actual byte-stream wrapping and conductor execution.
 //!
@@ -17,6 +19,7 @@ use axum::routing::get;
 use fireline_conductor::{build, trace::DurableStreamTracer, transports};
 use fireline_peer::PeerComponent;
 use sacp::{Conductor, DynConnectTo};
+use uuid::Uuid;
 
 pub fn router(state: crate::bootstrap::AppState) -> Router {
     Router::new()
@@ -29,11 +32,16 @@ pub async fn acp_websocket_handler(
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| async move {
-        let components: Vec<DynConnectTo<Conductor>> =
-            vec![DynConnectTo::new(PeerComponent::new(app.peer_directory_path.clone()))];
+        let logical_connection_id = format!("conn:{}", Uuid::new_v4());
+        let components: Vec<DynConnectTo<Conductor>> = vec![DynConnectTo::new(PeerComponent::new(
+            app.peer_directory_path.clone(),
+        ))];
 
-        let trace_writer =
-            DurableStreamTracer::new(app.trace_producer.clone(), app.runtime_id.clone());
+        let trace_writer = DurableStreamTracer::new(
+            app.state_producer.clone(),
+            app.runtime_id.clone(),
+            logical_connection_id,
+        );
         let conductor = build::build_subprocess_conductor(
             app.conductor_name.clone(),
             app.agent_command.clone(),

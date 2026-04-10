@@ -1,7 +1,7 @@
 //! Conductor builder.
 //!
 //! [`build_subprocess_conductor`] composes injected components and a
-//! trace writer into a running [`sacp_conductor::ConductorImpl`].
+//! state writer into a running [`sacp_conductor::ConductorImpl`].
 //! The agent is spawned as a subprocess via
 //! [`sacp_tokio::AcpAgent::from_args`] and becomes the terminal
 //! component of the chain.

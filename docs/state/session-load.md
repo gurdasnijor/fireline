@@ -5,7 +5,7 @@
 `session/load` is the protocol-side reattachment primitive that lets a client
 come back to an existing logical ACP session.
 
-In Fireline, it should pair with durable trace replay.
+In Fireline, it should pair with durable state-stream replay.
 
 ## What `session/load` solves
 
@@ -32,7 +32,7 @@ The intended reconnect path is:
 1. client reconnects to the runtime's ACP endpoint
 2. client sends `session/load(sessionId)`
 3. runtime or terminal agent replays session updates
-4. client combines replayed ACP updates with durable stream replay as needed
+4. client combines replayed ACP updates with durable state-stream replay as needed
 
 ## Capability negotiation
 
@@ -44,12 +44,12 @@ So Fireline should be explicit about:
 - whether Fireline can offer a runtime-managed fallback
 - what degraded mode means when neither exists
 
-## Relationship to trace replay
+## Relationship to state-stream replay
 
-Trace replay and `session/load` solve different layers.
+State-stream replay and `session/load` solve different layers.
 
 - `session/load` is the protocol-side reattachment primitive
-- trace replay is the durable observation primitive
+- state-stream replay is the durable observation primitive
 
 Fireline should use both, not choose one over the other.
 

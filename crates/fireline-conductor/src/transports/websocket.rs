@@ -30,14 +30,20 @@ pub async fn handle_upgrade(
         match message {
             Ok(Message::Text(text)) => {
                 let line = text.trim().to_string();
-                if line.is_empty() { None } else { Some(Ok(line)) }
+                if line.is_empty() {
+                    None
+                } else {
+                    Some(Ok(line))
+                }
             }
-            Ok(Message::Binary(bytes)) => String::from_utf8(bytes.to_vec())
-                .ok()
-                .and_then(|text| {
-                    let line = text.trim().to_string();
-                    if line.is_empty() { None } else { Some(Ok(line)) }
-                }),
+            Ok(Message::Binary(bytes)) => String::from_utf8(bytes.to_vec()).ok().and_then(|text| {
+                let line = text.trim().to_string();
+                if line.is_empty() {
+                    None
+                } else {
+                    Some(Ok(line))
+                }
+            }),
             Ok(Message::Close(_)) => None,
             Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => None,
             Err(err) => Some(Err(std::io::Error::other(err))),

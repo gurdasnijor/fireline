@@ -4,12 +4,12 @@
 
 Fireline should let one runtime invoke another over ACP while preserving enough
 lineage for downstream observers to reconstruct the causal graph from persisted
-trace alone.
+state streams alone.
 
 ## Core question
 
 Can one Fireline node invoke another over ACP, while preserving lineage that is
-recoverable from persisted trace streams alone?
+recoverable from persisted state streams alone?
 
 ## Keep the tool surface, replace the wire
 

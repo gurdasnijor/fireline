@@ -97,13 +97,13 @@ type StreamHandle<T> = {
 Initial entry point:
 
 ```ts
-client.stream.openTrace(endpoint): StreamHandle<TraceRecord>
+client.stream.openState(endpoint): StreamHandle<StateEvent>
 ```
 
 This primitive underlies:
 
 - dashboards
-- protocol viewers
+- state-driven operator views
 - sinks
 - replay tools
 - mesh observers
@@ -154,7 +154,7 @@ const acp = await client.acp.attach({ transport: runtime.acpTransport });
 
 ## `client.state`
 
-State is a local materialization over trace.
+State is a local materialization over the Fireline state stream.
 
 ```ts
 type StateHandle<TCollections> = {
@@ -167,7 +167,7 @@ type StateHandle<TCollections> = {
 Entry point:
 
 ```ts
-client.state.open({ traceStreamUrl }): Promise<StateHandle<FirelineCollections>>
+client.state.open({ stateStreamUrl }): Promise<StateHandle<FirelineCollections>>
 ```
 
 This should be implemented by `@fireline/state`, not by a Rust state server.

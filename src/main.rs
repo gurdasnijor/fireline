@@ -10,8 +10,8 @@
 
 use anyhow::Result;
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
 use std::net::IpAddr;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -31,7 +31,7 @@ struct Cli {
     #[arg(long, default_value = "default")]
     name: String,
 
-    /// Optional explicit name for the durable trace stream.
+    /// Optional explicit name for the durable state stream.
     #[arg(long)]
     state_stream: Option<String>,
 

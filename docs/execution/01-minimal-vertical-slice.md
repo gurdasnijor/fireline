@@ -11,20 +11,20 @@ Get one real Fireline conductor path working end to end:
 1. build a subprocess-backed conductor
 2. run it over an in-memory duplex transport
 3. talk to it using a minimal ACP test agent
-4. emit durable trace records
+4. emit durable state events
 5. prove the whole path in an integration test
 
 ## In Scope
 
 - `fireline-conductor`
   - conductor builder
-  - durable trace writer
+  - durable state writer
   - duplex transport
 - `fireline-testy`
   - minimal ACP test agent over stdio
 - integration test
   - prompt succeeds
-  - durable trace receives records
+  - durable state stream receives events
 
 ## Out of Scope
 

@@ -6,8 +6,9 @@
 ## What Fireline Is
 
 Fireline runs an ACP conductor in front of an ACP-compatible terminal agent,
-observes the protocol traffic that flows through that conductor, and persists a
-durable trace that TypeScript consumers materialize into state.
+observes the protocol traffic that flows through that conductor, projects those
+observations into normalized `STATE-PROTOCOL` entity events, and persists those
+events to a durable stream that TypeScript consumers materialize locally.
 
 It is deliberately narrow:
 
@@ -23,7 +24,7 @@ What Fireline does own:
 
 - conductor composition
 - transport adapters that expose the conductor over a wire or local attach
-- durable trace production
+- durable state-event production
 - host-mediated peer calls
 - helper endpoints that are tightly coupled to the host process
 
@@ -45,7 +46,7 @@ Fireline
   runtime substrate
   - ACP conductor
   - transport adapters
-  - durable trace
+  - durable state stream
   - peer component
   - runtime hosting boundary
 
@@ -67,7 +68,7 @@ The boundary is intentional:
 
 ### 1. Producer-only Rust posture
 
-Rust produces durable protocol trace. It does not own the consumer read model.
+Rust produces durable state events. It does not own the consumer read model.
 
 That means:
 
@@ -75,20 +76,20 @@ That means:
 - no Rust-owned entity schema as the source of truth
 - no parallel Rust and TypeScript state systems trying to stay in sync
 
-If a consumer wants state, it reads the trace stream and materializes it
-locally in TypeScript.
+If a consumer wants state, it reads the durable state stream and materializes
+it locally in TypeScript.
 
 ### 2. TypeScript owns the consumer schema
 
 Entity shapes such as prompt turns, chunks, permissions, and derived session
-views live in TypeScript.
+views live in TypeScript and are expressed as `STATE-PROTOCOL` collections.
 
 The expected shape is:
 
 - `@fireline/state` defines the schema and projections
 - schema artifacts can be exported for Rust conformance tests
-- Rust emits protocol trace and validates against the published contract where
-  needed
+- Rust emits `STATE-PROTOCOL` change messages and validates against the
+  published contract where needed
 
 Rust should not invent a second canonical entity model.
 
@@ -108,9 +109,11 @@ and be composed into the conductor normally.
 
 Observation is not a component concern.
 
-When the system wants to record every protocol message that flowed through a
-connection, it should use `trace_to(WriteEvent)` and append those observations
-to the durable stream. That path is passive by design.
+When the system wants to observe every protocol message that flowed through a
+connection, it should use `trace_to(WriteEvent)` and derive producer-owned
+state events from those observations. That path is passive with respect to ACP
+message flow: it observes, correlates, and emits durable state, but it does not
+mutate messages in flight.
 
 ### 5. Use ACP `_meta` for protocol extensions
 
@@ -125,9 +128,11 @@ That applies to:
 
 Important nuance:
 
-- ACP message extensions belong in `_meta`
-- durable stream records may still wrap observed `TraceEvent`s with producer
-  metadata such as `runtimeId` and `observedAtMs`
+- active components stamp protocol extensions into ACP `_meta`
+- passive observers such as the state writer may read `_meta`, but they do not
+  invent or mutate it
+- durable stream records are `STATE-PROTOCOL` change messages, not raw
+  `TraceEvent` envelopes
 
 Those are different layers and should not be conflated.
 
@@ -172,15 +177,15 @@ behind it.
 
 Clients should treat Fireline as the agent they connect to.
 
-### Durable trace surface
+### Durable state surface
 
-Fireline appends trace records to durable streams. That trace is the durable
-source of truth for observation and replay.
+Fireline appends normalized `STATE-PROTOCOL` change messages to durable
+streams. That state stream is the canonical consumer contract.
 
 ### Host helper surface
 
 Small host-specific helper endpoints may exist where the host process must
-mediate something that is not yet projected through ACP or the trace stream.
+mediate something that is not yet projected through ACP or the state stream.
 These are helper surfaces, not the architectural center.
 
 ## Crate and package shape
@@ -190,7 +195,7 @@ Rust:
 - `fireline-conductor`
   - conductor assembly
   - transport adapters
-  - durable trace sink / writer glue
+  - state writer / protocol observation glue
 - `fireline-peer`
   - peer component
   - peer discovery bootstrap descriptors
@@ -215,7 +220,7 @@ A Fireline runtime is the host process that owns:
 
 - a conductor instance
 - zero or more components
-- one durable trace stream
+- one durable state stream
 - one or more transport adapters that expose the conductor
 
 A control plane such as Flamecast should think in terms of runtime descriptors,
@@ -234,20 +239,20 @@ The agent sees tools such as:
 
 Under the hood, Fireline should perform ACP-native peer calls and propagate
 lineage through `_meta` so downstream observers can reconstruct the causal
-graph from persisted streams alone.
+graph from persisted state streams alone.
 
 See [`mesh/peering-and-lineage.md`](./mesh/peering-and-lineage.md).
 
 ## State model
 
-Rust produces trace.
+Rust produces normalized `STATE-PROTOCOL` change messages.
 
-TypeScript consumes trace and materializes state.
+TypeScript consumes those state events and materializes local collections.
 
 That means the forward path is:
 
-1. Fireline emits durable trace.
-2. `@fireline/state` defines projections and local collections.
+1. Fireline emits durable state events.
+2. `@fireline/state` defines collection schemas and local projections.
 3. Consumers build dashboards, sinks, and UX on top of those local views.
 
 See:

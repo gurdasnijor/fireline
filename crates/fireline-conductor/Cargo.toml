@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "ACP conductor wiring + transport adapters + durable trace observer for Fireline"
+description = "ACP conductor wiring + transport adapters + state-stream observer for Fireline"
 
 [dependencies]
 # Async runtime
@@ -14,9 +14,10 @@ futures.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 
-# Serde (for the trace writer's JSON construction)
+# Serde (for the state writer's JSON construction)
 serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
 
 # Tracing
 tracing.workspace = true
@@ -27,7 +28,7 @@ sacp.workspace = true
 sacp-conductor.workspace = true
 sacp-tokio.workspace = true
 
-# Durable streams (the trace writer's Producer)
+# Durable streams (the state writer's Producer)
 durable-streams.workspace = true
 
 # WebSocket transport adapter (feature-gated to keep stdio-only consumers light)

@@ -2,8 +2,9 @@
 
 Fireline is the runtime substrate that sits under Flamecast.
 
-It hosts ACP conductors, exposes transport adapters, produces durable trace,
-and mediates cross-agent calls. Flamecast remains the control plane above it.
+It hosts ACP conductors, exposes transport adapters, produces durable
+`STATE-PROTOCOL` streams, and mediates cross-agent calls. Flamecast remains the
+control plane above it.
 
 ## Reading order
 
@@ -20,7 +21,7 @@ and mediates cross-agent calls. Flamecast remains the control plane above it.
 - [`mesh/peering-and-lineage.md`](./mesh/peering-and-lineage.md)
   How Fireline nodes call each other over ACP while preserving durable lineage.
 - [`state/consumer-surface.md`](./state/consumer-surface.md)
-  How TypeScript consumers materialize state from Fireline trace.
+  How TypeScript consumers materialize state from Fireline's durable stream.
 - [`state/session-load.md`](./state/session-load.md)
   How reconnect and `session/load` fit into the model.
 
