@@ -2,6 +2,12 @@
 
 Status: planned
 
+Related:
+
+- [`../runtime/control-and-data-plane.md`](../runtime/control-and-data-plane.md)
+- [`../ts/primitives.md`](../ts/primitives.md)
+- [`12-programmable-topology-first-mover.md`](./12-programmable-topology-first-mover.md)
+
 ## Objective
 
 Prove that Fireline can create, discover, and observe heterogeneous runtimes
@@ -88,9 +94,51 @@ Without this slice:
   the same durable-streams deployment.
 - lineage and state joins remain reconstructible from persisted trace alone.
 
+## Scope structure
+
+This slice now follows the three-phase delivery plan committed in
+[`../runtime/control-and-data-plane.md`](../runtime/control-and-data-plane.md),
+especially §8 "Phased delivery". Each phase should land as its own reviewable
+PR.
+
+### Phase 0 — pure refactor
+
+This is the prerequisite that unblocks the rest of slice 13. It is explicitly a
+zero-behavior-change refactor:
+
+- extract `RuntimeHost` and its provider-backed lifecycle boundary into
+  `fireline-conductor`
+- introduce a `PeerRegistry` trait and keep the current file-backed
+  implementation as the local adapter
+- keep `LocalProvider` as the only runtime provider
+- land the architectural split in
+  [`../runtime/control-and-data-plane.md`](../runtime/control-and-data-plane.md)
+  as the source of truth
+
+### Phase 1 — control-plane and distributed runtime foundation
+
+This is the bulk of slice 13's current Rust/runtime scope:
+
+- control-plane binary
+- `DockerProvider`
+- runtime registration and heartbeat
+- advertised-endpoint bootstrap contract
+- shared durable-streams deployment model
+- control-plane-backed discovery and auth
+
+### Phase 2 — TypeScript surface and client behavior
+
+This is the TS-facing projection layer that closes the loop:
+
+- `client.host` control-plane adapter
+- `RuntimeDescriptor` endpoint objects
+- multi-stream observation
+- readiness-disciplined TS clients that only touch the data plane after reading
+  `status: "ready"` from a control-plane descriptor
+
 ## Scope
 
-### 1. Control-plane runtime API
+### 1. Control-plane runtime API (phase 1)
 
 Add a control-plane-backed runtime lifecycle surface that implements the same
 primitive contract already described in [`../ts/primitives.md`](../ts/primitives.md):
@@ -125,7 +173,7 @@ This keeps the control plane explicit in deployment and testing:
 - the control plane remains a distinct process
 - the end-to-end tests can bring both up deliberately
 
-### 2. Runtime manager and provider boundary
+### 2. Runtime manager and provider boundary (phase 0 foundation, phase 1 expansion)
 
 Introduce a provider-neutral Rust boundary that owns imperative runtime
 lifecycle.
@@ -138,10 +186,11 @@ Recommended shape:
 - add a `RuntimeProvider` trait behind that surface
 - add provider-specific implementations behind that trait
 
-Expected providers:
+Expected delivery by phase:
 
-- `LocalProvider`
-- `DockerProvider`
+- phase 0: `LocalProvider` only, behind the extracted `RuntimeProvider` /
+  `RuntimeManager` boundary
+- phase 1: add `DockerProvider` on top of that extracted boundary
 
 The point of this slice is not to implement every provider fully. The point is
 to establish the common runtime fabric they all plug into.
@@ -156,7 +205,7 @@ Implementation note:
 - slice 13 should treat this as a refactor/extraction, not as a net-new public
   API
 
-### 3. Runtime bootstrap contract
+### 3. Runtime bootstrap contract (phase 1)
 
 Refactor bootstrap so runtime bring-up no longer assumes:
 
@@ -174,7 +223,7 @@ The runtime should instead accept:
 - control-plane registration endpoint
 - registration/auth credentials
 
-### 4. Runtime registration and heartbeat
+### 4. Runtime registration and heartbeat (phase 1)
 
 Each runtime should self-register with the control plane after boot and publish:
 
@@ -190,6 +239,12 @@ Each runtime should self-register with the control plane after boot and publish:
 The control plane should treat registration plus successful health as the
 transition to `ready`.
 
+That `ready` transition must follow the data-plane contract defined in
+[`../runtime/control-and-data-plane.md`](../runtime/control-and-data-plane.md)
+§4a "Startup and readiness invariants": clients must not treat process start,
+port reachability, or dev-mode proxies as readiness signals. `ready` is the
+point at which ACP and state-plane endpoints are actually valid to use.
+
 Recommended defaults for this slice:
 
 - heartbeat period: 5 seconds
@@ -200,7 +255,7 @@ Recommended defaults for this slice:
 The point is not to perfect runtime liveness semantics in this slice. The point
 is to avoid ghost runtimes and make failure modes observable from day one.
 
-### 5. Shared durable-streams deployment
+### 5. Shared durable-streams deployment (phase 1)
 
 This slice adopts a specific deployment model:
 
@@ -217,7 +272,7 @@ This is intentionally **not**:
 The shared durable-streams service becomes the durability substrate; the runtime
 may still embed durable-streams in local-only mode.
 
-### 6. TypeScript primitive projection
+### 6. TypeScript primitive projection (phase 2)
 
 Update the TS primitive surface so distributed runtimes project cleanly.
 
@@ -239,7 +294,7 @@ type RuntimeDescriptor = {
   nodeId: string;
   provider: "local" | "docker" | "cloudflare";
   providerInstanceId: string;
-  status: "starting" | "ready" | "busy" | "idle" | "stale" | "broken" | "stopped";
+  status: "starting" | "ready" | "busy" | "idle" | "stale" | "broken" | "stopped"; // see docs/runtime/control-and-data-plane.md §4a for the readiness contract
   acp: Endpoint;
   state: Endpoint;
   helperApiBaseUrl?: string;
@@ -293,7 +348,7 @@ Acceptable options:
 The important point is that multi-runtime observation becomes an explicit
 primitive concern rather than an ad hoc control-plane snapshot.
 
-### 7. Discovery model
+### 7. Discovery model (phase 0 trait extraction, phase 1 control-plane backing)
 
 Replace the current file-backed discovery story with a control-plane-backed
 runtime catalog.
@@ -320,7 +375,7 @@ Expected direction:
 - introduce a broader runtime/peer registry trait
 - use the control plane as the distributed implementation of that trait
 
-### 8. Auth model
+### 8. Auth model (phase 1)
 
 This slice should define auth on three surfaces:
 
@@ -427,6 +482,9 @@ observer
 
 ## Acceptance criteria
 
+- phase 0 lands as a pure refactor: `RuntimeHost` is extracted into
+  `fireline-conductor`, `PeerRegistry` exists, and current local behavior is
+  unchanged.
 - a control-plane-backed `client.host` adapter exists
 - the runtime/control-plane API can return runtime descriptors for a mixed
   topology of local and Docker-backed runtimes
@@ -444,6 +502,11 @@ observer
   deployment using distinct per-runtime streams
 - a TypeScript consumer can observe those runtimes by opening multiple streams
   from the same durable-streams deployment
+- a TypeScript client does not probe `/acp` or `/v1/stream/*` speculatively; it
+  only opens ACP and state observation after reading `status: "ready"` from a
+  control-plane descriptor, per
+  [`../runtime/control-and-data-plane.md`](../runtime/control-and-data-plane.md)
+  §4a. Dev-mode Vite proxies are transport conveniences, not readiness signals.
 - one cross-runtime peer call proves lineage and durable joins still work across
   that shared deployment
 
@@ -459,6 +522,8 @@ observer
   - verifies a cross-runtime peer call can be reconstructed from durable state
 - one TS integration test that:
   - lists runtimes through `client.host`
+  - waits for or reads `status: "ready"` from the returned descriptor before
+    touching ACP or `/v1/stream/*`
   - opens ACP against one returned runtime endpoint
   - opens state observation across multiple returned state endpoints
 
