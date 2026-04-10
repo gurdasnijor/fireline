@@ -103,6 +103,17 @@ export const sessionSchema = z.object({
   lastSeenAt: z.number(),
 })
 
+export const childSessionEdgeSchema = z.object({
+  edgeId: z.string(),
+  traceId: z.string().optional(),
+  parentRuntimeId: z.string(),
+  parentSessionId: z.string(),
+  parentPromptTurnId: z.string(),
+  childRuntimeId: z.string(),
+  childSessionId: z.string(),
+  createdAt: z.number(),
+})
+
 export const chunkSchema = z.object({
   chunkId: z.string(),
   promptTurnId: z.string(),
@@ -121,6 +132,7 @@ export type PermissionRow = z.infer<typeof permissionSchema>
 export type TerminalRow = z.infer<typeof terminalSchema>
 export type RuntimeInstanceRow = z.infer<typeof runtimeInstanceSchema>
 export type SessionRow = z.infer<typeof sessionSchema>
+export type ChildSessionEdgeRow = z.infer<typeof childSessionEdgeSchema>
 export type ChunkRow = z.infer<typeof chunkSchema>
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
 
@@ -165,6 +177,12 @@ export const firelineState = createStateSchema({
     schema: sessionSchema,
     type: 'session',
     primaryKey: 'sessionId',
+  },
+
+  childSessionEdges: {
+    schema: childSessionEdgeSchema,
+    type: 'child_session_edge',
+    primaryKey: 'edgeId',
   },
 
   chunks: {

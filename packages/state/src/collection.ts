@@ -3,6 +3,7 @@ import type { Collection } from '@tanstack/db'
 
 import { firelineState } from './schema.js'
 import type {
+  ChildSessionEdgeRow,
   ChunkRow,
   ConnectionRow,
   PendingRequestRow,
@@ -21,6 +22,7 @@ export interface FirelineCollections {
   terminals: Collection<TerminalRow>
   runtimeInstances: Collection<RuntimeInstanceRow>
   sessions: Collection<SessionRow>
+  childSessionEdges: Collection<ChildSessionEdgeRow>
   chunks: Collection<ChunkRow>
 }
 

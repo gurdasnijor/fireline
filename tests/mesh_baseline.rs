@@ -189,8 +189,9 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
 
         let parent = find_prompt_turn(&body_a, |text| text.contains("\"tool\":\"prompt_peer\""));
         let child = find_prompt_turn(&body_b, |text| text.contains("hello across mesh"));
+        let edge = find_child_session_edge(&body_a);
 
-        if let (Some(parent), Some(child)) = (parent, child) {
+        if let (Some(parent), Some(child), Some(edge)) = (parent, child, edge) {
             assert_eq!(
                 child.parent_prompt_turn_id.as_deref(),
                 Some(parent.prompt_turn_id.as_str()),
@@ -200,6 +201,31 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
                 child.trace_id.as_deref(),
                 parent.trace_id.as_deref(),
                 "child prompt turn should inherit the parent trace id: {body_b}"
+            );
+            assert_eq!(
+                edge.parent_runtime_id, handle_a.runtime_id,
+                "child_session_edge should point at the parent runtime: {body_a}"
+            );
+            assert_eq!(
+                edge.parent_session_id, parent.session_id,
+                "child_session_edge should point at the parent session: {body_a}"
+            );
+            assert_eq!(
+                edge.parent_prompt_turn_id, parent.prompt_turn_id,
+                "child_session_edge should point at the parent turn: {body_a}"
+            );
+            assert_eq!(
+                edge.child_runtime_id, handle_b.runtime_id,
+                "child_session_edge should point at the child runtime: {body_a}"
+            );
+            assert_eq!(
+                edge.child_session_id, child.session_id,
+                "child_session_edge should point at the remote child session: {body_a}"
+            );
+            assert_eq!(
+                edge.trace_id.as_deref(),
+                parent.trace_id.as_deref(),
+                "child_session_edge should carry the parent trace id: {body_a}"
             );
             break;
         }
@@ -223,6 +249,10 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
         find_prompt_turn(&body_b, |text| text.contains("hello across mesh")).is_some(),
         "missing child prompt turn in runtime B: {body_b}"
     );
+    assert!(
+        find_child_session_edge(&body_a).is_some(),
+        "missing child_session_edge in runtime A: {body_a}"
+    );
 
     handle_a.shutdown().await?;
     handle_b.shutdown().await?;
@@ -232,8 +262,19 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
 #[derive(Debug)]
 struct PromptTurnEvent {
     prompt_turn_id: String,
+    session_id: String,
     trace_id: Option<String>,
     parent_prompt_turn_id: Option<String>,
+}
+
+#[derive(Debug)]
+struct ChildSessionEdgeEvent {
+    parent_runtime_id: String,
+    parent_session_id: String,
+    parent_prompt_turn_id: String,
+    child_runtime_id: String,
+    child_session_id: String,
+    trace_id: Option<String>,
 }
 
 fn find_prompt_turn(body: &str, predicate: impl Fn(&str) -> bool) -> Option<PromptTurnEvent> {
@@ -250,12 +291,34 @@ fn find_prompt_turn(body: &str, predicate: impl Fn(&str) -> bool) -> Option<Prom
 
         Some(PromptTurnEvent {
             prompt_turn_id: value.get("promptTurnId")?.as_str()?.to_string(),
+            session_id: value.get("sessionId")?.as_str()?.to_string(),
             trace_id: value
                 .get("traceId")
                 .and_then(Value::as_str)
                 .map(str::to_string),
             parent_prompt_turn_id: value
                 .get("parentPromptTurnId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+    })
+}
+
+fn find_child_session_edge(body: &str) -> Option<ChildSessionEdgeEvent> {
+    parse_state_events(body).into_iter().find_map(|event| {
+        if event.get("type")?.as_str()? != "child_session_edge" {
+            return None;
+        }
+
+        let value = event.get("value")?;
+        Some(ChildSessionEdgeEvent {
+            parent_runtime_id: value.get("parentRuntimeId")?.as_str()?.to_string(),
+            parent_session_id: value.get("parentSessionId")?.as_str()?.to_string(),
+            parent_prompt_turn_id: value.get("parentPromptTurnId")?.as_str()?.to_string(),
+            child_runtime_id: value.get("childRuntimeId")?.as_str()?.to_string(),
+            child_session_id: value.get("childSessionId")?.as_str()?.to_string(),
+            trace_id: value
+                .get("traceId")
                 .and_then(Value::as_str)
                 .map(str::to_string),
         })

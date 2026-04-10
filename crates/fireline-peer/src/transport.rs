@@ -13,6 +13,7 @@ use crate::directory::Peer;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PeerCallResult {
+    pub child_session_id: String,
     pub response_text: String,
     pub stop_reason: String,
 }
@@ -110,6 +111,7 @@ pub(crate) async fn dispatch_peer_call(
             cx.build_session(std::path::Path::new("."))
                 .block_task()
                 .run_until(async |mut session| {
+                    let child_session_id = session.session_id().to_string();
                     session.send_prompt(&prompt_text)?;
 
                     let mut response_text = String::new();
@@ -135,6 +137,7 @@ pub(crate) async fn dispatch_peer_call(
                             }
                             sacp::SessionMessage::StopReason(reason) => {
                                 break Ok(PeerCallResult {
+                                    child_session_id: child_session_id.clone(),
                                     response_text,
                                     stop_reason: format!("{reason:?}"),
                                 });

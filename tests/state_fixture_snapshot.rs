@@ -73,7 +73,22 @@ fn temp_peer_directory() -> PathBuf {
 #[tokio::test]
 #[ignore = "updates the committed NDJSON conformance fixture for @fireline/state"]
 async fn update_rust_state_fixture_snapshot() -> Result<()> {
-    let handle = start(BootstrapConfig {
+    let peer_directory_path = temp_peer_directory();
+
+    let handle_b = start(BootstrapConfig {
+        host: "127.0.0.1".parse::<IpAddr>()?,
+        port: 0,
+        name: "fixture-child".to_string(),
+        runtime_key: format!("runtime:{}", Uuid::new_v4()),
+        node_id: "node:test-fixture".to_string(),
+        agent_command: vec![testy_bin()],
+        state_stream: Some(format!("fireline-fixture-child-{}", Uuid::new_v4())),
+        stream_storage: None,
+        peer_directory_path: peer_directory_path.clone(),
+    })
+    .await?;
+
+    let handle_a = start(BootstrapConfig {
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
         name: "fixture-snapshot".to_string(),
@@ -82,21 +97,33 @@ async fn update_rust_state_fixture_snapshot() -> Result<()> {
         agent_command: vec![testy_bin()],
         state_stream: Some(format!("fireline-fixture-{}", Uuid::new_v4())),
         stream_storage: None,
-        peer_directory_path: temp_peer_directory(),
+        peer_directory_path,
     })
     .await?;
 
     let response = yopo::prompt(
         WebSocketTransport {
-            url: handle.acp_url.clone(),
+            url: handle_a.acp_url.clone(),
         },
-        "fixture snapshot prompt",
+        agent_client_protocol_test::testy::TestyCommand::CallTool {
+            server: "fireline-peer".to_string(),
+            tool: "prompt_peer".to_string(),
+            params: serde_json::json!({
+                "agentName": "fixture-child",
+                "prompt": agent_client_protocol_test::testy::TestyCommand::Echo {
+                    message: "fixture snapshot prompt".to_string(),
+                }
+                .to_prompt(),
+            }),
+        }
+        .to_prompt(),
     )
     .await?;
-    assert_eq!(response, "Hello, world!");
+    assert!(response.contains("fixture-child"));
+    assert!(response.contains("fixture snapshot prompt"));
 
     let client = DsClient::new();
-    let stream = client.stream(&handle.state_stream_url);
+    let stream = client.stream(&handle_a.state_stream_url);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut body = String::new();
 
@@ -114,6 +141,7 @@ async fn update_rust_state_fixture_snapshot() -> Result<()> {
         if body.contains("\"type\":\"prompt_turn\"")
             && body.contains("\"type\":\"session\"")
             && body.contains("\"type\":\"chunk\"")
+            && body.contains("\"type\":\"child_session_edge\"")
         {
             break;
         }
@@ -150,6 +178,7 @@ async fn update_rust_state_fixture_snapshot() -> Result<()> {
 
     std::fs::write(&fixture_path, format!("{ndjson}\n"))?;
 
-    handle.shutdown().await?;
+    handle_a.shutdown().await?;
+    handle_b.shutdown().await?;
     Ok(())
 }

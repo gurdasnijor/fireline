@@ -16,6 +16,7 @@ export type {
   TerminalRow,
   RuntimeInstanceRow,
   SessionRow,
+  ChildSessionEdgeRow,
   ChunkRow,
   ConnectionStatus,
 } from './schema.js'

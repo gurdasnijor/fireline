@@ -51,6 +51,10 @@ pub async fn acp_websocket_handler(
             DynConnectTo::new(PeerComponent::new(
                 app.peer_directory_path.clone(),
                 std::sync::Arc::new(app.active_turn_index.clone()),
+                std::sync::Arc::new(crate::child_session_edge::ChildSessionEdgeWriter::new(
+                    app.state_producer.clone(),
+                )),
+                app.runtime_id.clone(),
             )),
         ];
 

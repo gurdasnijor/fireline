@@ -1,5 +1,7 @@
 # 09: Multi-Node Child-Session Topology
 
+Status: complete
+
 ## Objective
 
 Persist the distributed session graph explicitly when one Fireline runtime
@@ -87,6 +89,19 @@ Why:
 This should be projected into the durable state stream as its own entity type,
 not inferred later from local host state.
 
+Implemented shape:
+
+- the parent runtime emits `child_session_edge` rows directly to its own durable
+  state stream when `prompt_peer` receives the remote `childSessionId`
+- `edgeId` is a deterministic SHA-256 of:
+  - `parentRuntimeId`
+  - `parentSessionId`
+  - `parentPromptTurnId`
+  - `childRuntimeId`
+  - `childSessionId`
+- TypeScript consumers query the new `childSessionEdges` collection alongside
+  `sessions` and `promptTurns`
+
 ## Why a dedicated edge record
 
 `parentPromptTurnId` on `prompt_turn` is enough to reconstruct the causal tree.
@@ -144,6 +159,20 @@ Then extend to:
   and child runtime
 - TS state consumers can reconstruct the distributed session graph from the
   state stream alone
+
+## What landed
+
+- `fireline-peer` now returns the remote `childSessionId` from the SDK session
+  handle
+- the parent runtime appends a durable `child_session_edge` row with a
+  deterministic identity
+- the strict `@fireline/state` fixture now includes a real `child_session_edge`
+  emitted by Rust
+- the 2-node mesh integration test asserts:
+  - parent prompt-turn lineage
+  - inherited `traceId`
+  - durable `child_session_edge` fields for parent runtime/session/turn and
+    child runtime/session
 
 ## Non-goals
 

@@ -16,7 +16,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::directory::Directory;
-use crate::lookup::ActiveTurnLookup;
+use crate::lookup::{ActiveTurnLookup, ChildSessionEdgeInput, ChildSessionEdgeSink};
 use crate::transport;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -56,6 +56,8 @@ pub(crate) struct PromptPeerOutput {
 pub(crate) fn build_peer_mcp_server(
     directory: Directory,
     active_turn_lookup: Arc<dyn ActiveTurnLookup>,
+    child_session_edge_sink: Arc<dyn ChildSessionEdgeSink>,
+    runtime_id: String,
     session_binding: Arc<OnceLock<String>>,
 ) -> sacp::mcp_server::McpServer<Conductor, impl sacp::RunWithConnectionTo<Conductor>> {
     sacp::mcp_server::McpServer::builder("fireline-peer")
@@ -89,6 +91,8 @@ pub(crate) fn build_peer_mcp_server(
             {
                 let directory = directory.clone();
                 let active_turn_lookup = active_turn_lookup.clone();
+                let child_session_edge_sink = child_session_edge_sink.clone();
+                let runtime_id = runtime_id.clone();
                 let session_binding = session_binding.clone();
                 async move |input: PromptPeerInput, cx| {
                     let peer = directory
@@ -109,17 +113,46 @@ pub(crate) fn build_peer_mcp_server(
                     })?;
 
                     let parent_lineage =
-                        current_parent_lineage(active_turn_lookup.as_ref(), &session_id).await;
-
-                    let result =
-                        transport::dispatch_peer_call(&peer, &input.prompt, parent_lineage)
+                        current_parent_lineage(active_turn_lookup.as_ref(), &session_id)
                             .await
-                            .map_err(|e| {
+                            .ok_or_else(|| {
                                 sacp::util::internal_error(format!(
-                                    "prompt peer '{}': {e}",
+                                    "prompt peer '{}' before active turn projection caught up",
                                     input.agent_name
                                 ))
                             })?;
+
+                    let result = transport::dispatch_peer_call(
+                        &peer,
+                        &input.prompt,
+                        Some(parent_lineage.clone()),
+                    )
+                    .await
+                    .map_err(|e| {
+                        sacp::util::internal_error(format!(
+                            "prompt peer '{}': {e}",
+                            input.agent_name
+                        ))
+                    })?;
+
+                    child_session_edge_sink
+                        .emit_child_session_edge(ChildSessionEdgeInput {
+                            trace_id: parent_lineage.trace_id.clone(),
+                            parent_runtime_id: runtime_id.clone(),
+                            parent_session_id: session_id,
+                            parent_prompt_turn_id: parent_lineage
+                                .parent_prompt_turn_id
+                                .expect("parent lineage should always include an active turn id"),
+                            child_runtime_id: peer.runtime_id.clone(),
+                            child_session_id: result.child_session_id.clone(),
+                        })
+                        .await
+                        .map_err(|e| {
+                            sacp::util::internal_error(format!(
+                                "record child session edge '{}': {e}",
+                                input.agent_name
+                            ))
+                        })?;
 
                     Ok(PromptPeerOutput {
                         runtime_id: peer.runtime_id,

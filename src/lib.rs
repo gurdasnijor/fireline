@@ -30,6 +30,7 @@
 pub mod active_turn_index;
 pub mod agent_catalog;
 pub mod bootstrap;
+pub mod child_session_edge;
 pub mod connections;
 pub mod error_codes;
 pub mod load_coordinator;

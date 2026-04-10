@@ -5,6 +5,7 @@ import { z } from 'zod'
 
 import {
   chunkSchema,
+  childSessionEdgeSchema,
   connectionSchema,
   pendingRequestSchema,
   promptTurnSchema,
@@ -29,6 +30,7 @@ const baseEnvelopeSchema = z
 
 const strictValueSchemas = {
   chunk: chunkSchema.strict(),
+  child_session_edge: childSessionEdgeSchema.strict(),
   connection: connectionSchema.strict(),
   pending_request: pendingRequestSchema.strict(),
   prompt_turn: promptTurnSchema.strict(),
