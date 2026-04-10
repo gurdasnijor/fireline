@@ -19,6 +19,6 @@ Current slices:
 - [`05-ts-host-primitive.md`](./05-ts-host-primitive.md) — complete
 - [`06-ts-acp-connect.md`](./06-ts-acp-connect.md) — complete
 - [`07-durable-session-catalog-and-load-local.md`](./07-durable-session-catalog-and-load-local.md) — complete
-- [`08-runtime-owned-terminal-sessions.md`](./08-runtime-owned-terminal-sessions.md) — in progress
+- [`08-runtime-owned-terminal-sessions.md`](./08-runtime-owned-terminal-sessions.md) — complete
 - [`09-multi-node-child-session-topology.md`](./09-multi-node-child-session-topology.md) — complete
 - [`10-acp-shared-session-bridge.md`](./10-acp-shared-session-bridge.md) — deferred

@@ -1,5 +1,7 @@
 # 08: Runtime-Owned Terminal Sessions
 
+Status: complete
+
 ## Objective
 
 Move terminal and session ownership above transient ACP transport attachments so
@@ -139,13 +141,16 @@ Implemented in Fireline now:
 - single-attachment enforcement with `runtime_busy`
 - terminal reuse after ACP disconnect
 
-Still not proven end-to-end in this repo:
+Now proven end-to-end in this repo:
 
-- successful `session/load` reattach against a terminal that advertises and
-  implements `loadSession`
-
-That remaining proof depends on a suitable downstream agent capability, not on
-more transport-plumbing work inside Fireline.
+- `fireline-testy-load` is a local fork of the SDK `Testy` behavior
+- it advertises `loadSession: true`
+- it resumes sessions from the same long-lived terminal process
+- the integration test proves `session/load` succeeds across ACP disconnect and
+  a subsequent prompt still executes on the loaded session
+- a separate restart test proves the current boundary honestly: full runtime
+  restart loses terminal-owned session state and downstream returns
+  `session_not_found`
 
 ## Explicitly rejected designs
 
@@ -154,16 +159,18 @@ more transport-plumbing work inside Fireline.
 - a Fireline-level ACP multiplexer for concurrent clients
 - a Fireline-owned session engine separate from the ACP SDK
 
-## Upstream dependency
+## Temporary proof agent
 
-There is one small upstream SDK dependency for end-to-end testing:
+Fireline currently uses a local test-only proof agent for this slice:
 
-- `agent_client_protocol_test::testy::Testy` should implement `loadSession`
-- it should advertise `loadSession: true` during `initialize`
+- `fireline-testy-load`
 
-That is a test-agent capability PR, not a transport-plumbing PR.
+This is a narrow local fork of the SDK `Testy` semantics used only to prove the
+shared-terminal reattach path while upstream test-agent support remains absent.
 
-Fireline should not grow a fake persistent test agent to work around that gap.
+It is not a new Fireline session engine and it does not change the runtime
+architecture. It only gives the tests a downstream agent that truthfully
+supports `loadSession`.
 
 ## Non-goals
 

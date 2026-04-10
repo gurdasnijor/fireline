@@ -3,13 +3,16 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_client_protocol::{
-    InitializeRequest, LoadSessionRequest, NewSessionRequest, ProtocolVersion,
+    ContentBlock, ContentChunk, InitializeRequest, LoadSessionRequest, NewSessionRequest,
+    PromptRequest, ProtocolVersion, SessionNotification, SessionUpdate,
 };
+use agent_client_protocol_test::testy::TestyCommand;
 use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
 use fireline::bootstrap::{BootstrapConfig, start};
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
+use std::sync::Arc;
 use uuid::Uuid;
 
 struct WebSocketTransport {
@@ -66,6 +69,12 @@ impl sacp::ConnectTo<sacp::Client> for WebSocketTransport {
 
 fn testy_bin() -> String {
     PathBuf::from(env!("CARGO_BIN_EXE_fireline-testy"))
+        .display()
+        .to_string()
+}
+
+fn resumable_testy_bin() -> String {
+    PathBuf::from(env!("CARGO_BIN_EXE_fireline-testy-load"))
         .display()
         .to_string()
 }
@@ -216,6 +225,108 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
     Ok(())
 }
 
+#[tokio::test]
+async fn session_load_reattaches_against_runtime_owned_terminal_when_agent_supports_it() -> Result<()>
+{
+    let handle = start(BootstrapConfig {
+        host: "127.0.0.1".parse::<IpAddr>()?,
+        port: 0,
+        name: "session-load-resumable".to_string(),
+        runtime_key: format!("runtime:{}", Uuid::new_v4()),
+        node_id: "node:test-session-load".to_string(),
+        agent_command: vec![resumable_testy_bin()],
+        state_stream: None,
+        stream_storage: None,
+        peer_directory_path: temp_peer_directory(),
+    })
+    .await?;
+
+    let cwd = repo_root();
+    let session_id = create_session(&handle.acp_url, &cwd).await?;
+    wait_for_session_row(&handle.state_stream_url, &session_id).await?;
+
+    let response = load_session_and_prompt(
+        &handle.acp_url,
+        &session_id,
+        &cwd,
+        &TestyCommand::Echo {
+            message: "reattach succeeded".to_string(),
+        }
+        .to_prompt(),
+    )
+    .await?;
+
+    assert_eq!(response, "reattach succeeded");
+
+    handle.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not_found()
+-> Result<()> {
+    let runtime_key = format!("runtime:{}", Uuid::new_v4());
+    let state_stream = format!("fireline-session-load-resumable-{}", Uuid::new_v4());
+    let peer_directory_path = temp_peer_directory();
+    let cwd = repo_root();
+    let stream_data_dir = temp_stream_data_dir();
+
+    std::fs::create_dir_all(&stream_data_dir)?;
+
+    let handle = start(BootstrapConfig {
+        host: "127.0.0.1".parse::<IpAddr>()?,
+        port: 0,
+        name: "session-load-resumable-restart".to_string(),
+        runtime_key: runtime_key.clone(),
+        node_id: "node:test-session-load".to_string(),
+        agent_command: vec![resumable_testy_bin()],
+        state_stream: Some(state_stream.clone()),
+        stream_storage: Some(fireline::stream_host::StreamStorageConfig::file_durable(
+            stream_data_dir.clone(),
+        )),
+        peer_directory_path: peer_directory_path.clone(),
+    })
+    .await?;
+
+    let session_id = create_session(&handle.acp_url, &cwd).await?;
+    wait_for_session_row(&handle.state_stream_url, &session_id).await?;
+    handle.shutdown().await?;
+
+    let restarted = start(BootstrapConfig {
+        host: "127.0.0.1".parse::<IpAddr>()?,
+        port: 0,
+        name: "session-load-resumable-restart".to_string(),
+        runtime_key,
+        node_id: "node:test-session-load".to_string(),
+        agent_command: vec![resumable_testy_bin()],
+        state_stream: Some(state_stream),
+        stream_storage: Some(fireline::stream_host::StreamStorageConfig::file_durable(
+            stream_data_dir,
+        )),
+        peer_directory_path,
+    })
+    .await?;
+
+    let load_result = load_session(&restarted.acp_url, &session_id, &cwd).await?;
+    let error = load_result.expect_err(
+        "restarted runtime should forward to downstream loadSession and surface session_not_found",
+    );
+
+    assert_eq!(error.message, "session_not_found");
+    assert_eq!(i32::from(error.code), -32061);
+    assert_eq!(
+        error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("sessionId"))
+            .and_then(Value::as_str),
+        Some(session_id.as_str())
+    );
+
+    restarted.shutdown().await?;
+    Ok(())
+}
+
 async fn create_session(acp_url: &str, cwd: &Path) -> Result<String> {
     let cwd = cwd.to_path_buf();
 
@@ -278,6 +389,72 @@ async fn load_session(
         )
         .await
         .map_err(anyhow::Error::from)
+}
+
+async fn load_session_and_prompt(
+    acp_url: &str,
+    session_id: &str,
+    cwd: &Path,
+    prompt_text: &str,
+) -> Result<String> {
+    let cwd = cwd.to_path_buf();
+    let session_id = session_id.to_string();
+    let prompt_text = prompt_text.to_string();
+    let response_text = Arc::new(tokio::sync::Mutex::new(String::new()));
+
+    sacp::Client
+        .builder()
+        .on_receive_notification(
+            {
+                let response_text = response_text.clone();
+                async move |notification: SessionNotification, _cx| {
+                    if let SessionUpdate::AgentMessageChunk(ContentChunk {
+                        content: ContentBlock::Text(text),
+                        ..
+                    }) = notification.update
+                    {
+                        response_text.lock().await.push_str(&text.text);
+                    }
+                    Ok(())
+                }
+            },
+            sacp::on_receive_notification!(),
+        )
+        .connect_with(
+            WebSocketTransport {
+                url: acp_url.to_string(),
+            },
+            move |cx: sacp::ConnectionTo<sacp::Agent>| {
+                let cwd = cwd.clone();
+                let session_id = session_id.clone();
+                let prompt_text = prompt_text.clone();
+                async move {
+                    let _ = cx
+                        .send_request(InitializeRequest::new(ProtocolVersion::LATEST))
+                        .block_task()
+                        .await?;
+
+                    let _ = cx
+                        .send_request(LoadSessionRequest::new(session_id.clone(), cwd))
+                        .block_task()
+                        .await?;
+
+                    let _ = cx
+                        .send_request(PromptRequest::new(
+                            session_id,
+                            vec![prompt_text.into()],
+                        ))
+                        .block_task()
+                        .await?;
+
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .map_err(anyhow::Error::from)?;
+
+    Ok(response_text.lock().await.clone())
 }
 
 async fn wait_for_session_row(state_stream_url: &str, session_id: &str) -> Result<()> {

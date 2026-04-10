@@ -146,3 +146,7 @@ path = "src/bin/agents.rs"
 [[bin]]
 name = "fireline-testy"
 path = "src/bin/testy.rs"
+
+[[bin]]
+name = "fireline-testy-load"
+path = "src/bin/testy_load.rs"
