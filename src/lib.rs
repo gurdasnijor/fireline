@@ -40,3 +40,4 @@ pub mod runtime_materializer;
 pub mod runtime_registry;
 pub mod session_index;
 pub mod stream_host;
+pub mod topology;

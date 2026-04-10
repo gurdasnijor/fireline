@@ -6,6 +6,7 @@ use agent_client_protocol_test::testy::TestyCommand;
 use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
 use fireline::bootstrap::{BootstrapConfig, start};
+use fireline_conductor::topology::TopologySpec;
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use uuid::Uuid;
@@ -86,6 +87,7 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
         state_stream: None,
         stream_storage: None,
         peer_directory_path: peer_directory_path.clone(),
+        topology: TopologySpec::default(),
     })
     .await?;
 
@@ -99,6 +101,7 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
         state_stream: None,
         stream_storage: None,
         peer_directory_path: peer_directory_path.clone(),
+        topology: TopologySpec::default(),
     })
     .await?;
 

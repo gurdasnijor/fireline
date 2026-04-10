@@ -19,6 +19,27 @@ use sacp_conductor::trace::{TraceEvent, WriteEvent};
 
 use crate::state_projector::{StateProjector, runtime_instance_started, runtime_instance_stopped};
 
+pub type BoxedTraceWriter = Box<dyn WriteEvent + Send>;
+
+pub struct CompositeTraceWriter {
+    writers: Vec<BoxedTraceWriter>,
+}
+
+impl CompositeTraceWriter {
+    pub fn new(writers: Vec<BoxedTraceWriter>) -> Self {
+        Self { writers }
+    }
+}
+
+impl WriteEvent for CompositeTraceWriter {
+    fn write_event(&mut self, event: &TraceEvent) -> io::Result<()> {
+        for writer in &mut self.writers {
+            writer.write_event(event)?;
+        }
+        Ok(())
+    }
+}
+
 pub struct DurableStreamTracer {
     producer: Producer,
     projector: StateProjector,

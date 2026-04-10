@@ -10,17 +10,16 @@
 //!
 //! - [`peer`] — cross-agent peer calls over ACP with in-band lineage
 //!   propagation and child-session edge emission
-//! - [`audit`] — a durable-stream audit tracer (SKETCH)
-//! - [`context`] — inbound prompt context injection proxy (SKETCH)
+//! - [`audit`] — a durable-stream audit tracer
+//! - [`context`] — inbound prompt context injection proxy
 //! - [`approval`] — policy-driven approval gate proxy (SKETCH)
 //! - [`budget`] — per-session token / tool-call / duration budget gate (SKETCH)
 //! - [`smithery`] — bridge that injects MCP servers hosted on Smithery (SKETCH)
 //!
-//! Components marked **SKETCH** compile and expose the right shapes but
-//! their request-interception logic is TODO-marked pending a design
-//! review on `ComponentRegistry` / `ComponentContext`. None of the
-//! sketches are wired into the default conductor chain yet; the binary
-//! crate continues to hand-wire [`peer::PeerComponent`] as before.
+//! `audit` and `context` are fully implemented and intended for
+//! topology/bootstrapping integration. Components still marked
+//! **SKETCH** compile and expose the right shapes but are not yet
+//! wired into Fireline's runtime topology path.
 
 #![forbid(unsafe_code)]
 

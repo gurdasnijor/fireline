@@ -199,7 +199,7 @@ pub struct SmitheryCallInput {
     pub server: String,
     /// Name of the tool to call on that server, as exposed by its MCP `tools/list`.
     pub tool: String,
-    /// JSON arguments to pass to the tool. Defaults to `{}` if omitted.
+    /// JSON arguments to pass to the tool. Defaults to `null` if omitted.
     #[serde(default)]
     pub arguments: serde_json::Value,
 }

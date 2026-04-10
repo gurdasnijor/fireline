@@ -17,8 +17,11 @@ use axum::extract::{State, ws::WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use fireline_conductor::{build, trace::DurableStreamTracer, transports};
-use fireline_components::PeerComponent;
+use fireline_conductor::{
+    build,
+    trace::{CompositeTraceWriter, DurableStreamTracer},
+    transports,
+};
 use sacp::{Client, Conductor, DynConnectTo};
 use uuid::Uuid;
 
@@ -44,32 +47,34 @@ pub async fn acp_websocket_handler(
 
     ws.on_upgrade(move |socket| async move {
         let logical_connection_id = format!("conn:{}", Uuid::new_v4());
-        let components: Vec<DynConnectTo<Conductor>> = vec![
+        let mut components: Vec<DynConnectTo<Conductor>> = vec![
             DynConnectTo::new(crate::load_coordinator::LoadCoordinatorComponent::new(
                 app.session_index.clone(),
             )),
-            DynConnectTo::new(PeerComponent::new(
-                app.peer_directory_path.clone(),
-                std::sync::Arc::new(app.active_turn_index.clone()),
-                std::sync::Arc::new(crate::child_session_edge::ChildSessionEdgeWriter::new(
-                    app.state_producer.clone(),
-                )),
-                app.runtime_id.clone(),
-            )),
         ];
+        let resolved_topology = match app.topology_registry.build(&app.topology) {
+            Ok(resolved_topology) => resolved_topology,
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to build runtime topology components");
+                return;
+            }
+        };
+        components.extend(resolved_topology.proxy_components);
 
-        let trace_writer = DurableStreamTracer::new_with_runtime_context(
+        let mut trace_writers = Vec::with_capacity(1 + resolved_topology.trace_writers.len());
+        trace_writers.push(Box::new(DurableStreamTracer::new_with_runtime_context(
             app.state_producer.clone(),
             app.runtime_key.clone(),
             app.runtime_id.clone(),
             app.node_id.clone(),
             logical_connection_id,
-        );
+        )) as fireline_conductor::trace::BoxedTraceWriter);
+        trace_writers.extend(resolved_topology.trace_writers);
         let conductor = build::build_conductor_with_terminal(
             app.conductor_name.clone(),
             components,
             DynConnectTo::<Client>::new(terminal_attachment),
-            trace_writer,
+            CompositeTraceWriter::new(trace_writers),
         );
 
         if let Err(e) = transports::websocket::handle_upgrade(conductor, socket).await {

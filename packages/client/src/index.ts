@@ -40,6 +40,16 @@ import {
   type RuntimeAgentSpec,
   type UvxDistribution,
 } from './catalog.js'
+import {
+  createTopologyBuilder,
+  type AuditTopologyConfig,
+  type ContextPlacement,
+  type ContextInjectionTopologyConfig,
+  type ContextSourceSpec,
+  type TopologyBuilder,
+  type TopologyComponentSpec,
+  type TopologySpec,
+} from './topology.js'
 
 export type {
   AcpConnectOptions,
@@ -70,6 +80,13 @@ export type {
   RuntimeProviderRequest,
   RuntimeStatus,
   UvxDistribution,
+  AuditTopologyConfig,
+  ContextPlacement,
+  ContextInjectionTopologyConfig,
+  ContextSourceSpec,
+  TopologyBuilder,
+  TopologyComponentSpec,
+  TopologySpec,
 }
 
 export interface FirelineClient {
@@ -78,6 +95,9 @@ export interface FirelineClient {
   }
   host: HostClient
   catalog: CatalogClient
+  topology: {
+    builder(): TopologyBuilder
+  }
   state: {
     open(config: FirelineDBConfig): FirelineDB
   }
@@ -103,6 +123,11 @@ export function createFirelineClient(options: FirelineClientOptions = {}): Firel
     },
     host,
     catalog,
+    topology: {
+      builder() {
+        return createTopologyBuilder()
+      },
+    },
     state: {
       open(config) {
         return createFirelineDB(config)
@@ -121,4 +146,5 @@ export {
   createHostClient,
   defaultRuntimeRegistryPath,
   resolveAgentLaunch,
+  createTopologyBuilder,
 }

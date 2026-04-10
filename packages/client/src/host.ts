@@ -12,6 +12,7 @@ import {
   type CatalogClientOptions,
   type RuntimeAgentSpec,
 } from './catalog.js'
+import type { TopologySpec } from './topology.js'
 
 export type RuntimeProviderRequest = 'auto' | 'local'
 export type RuntimeProviderKind = 'local'
@@ -55,6 +56,7 @@ interface CreateRuntimeSpecBase {
   name?: string
   stateStream?: string
   peerDirectoryPath?: string
+  topology?: TopologySpec
 }
 
 export type CreateRuntimeSpec =
@@ -118,6 +120,7 @@ export function createHostClient(options: HostClientOptions = {}): HostClient {
         stateStream: spec.stateStream,
         agentCommand,
         peerDirectoryPath: spec.peerDirectoryPath,
+        topology: spec.topology,
       })
 
       const owner: OwnedRuntime = {
@@ -295,6 +298,7 @@ function spawnFireline(spec: {
   stateStream?: string
   agentCommand: string[]
   peerDirectoryPath?: string
+  topology?: TopologySpec
 }): FirelineChildProcess {
   const args = [
     '--host',
@@ -311,6 +315,9 @@ function spawnFireline(spec: {
   }
   if (spec.stateStream) {
     args.push('--state-stream', spec.stateStream)
+  }
+  if (spec.topology) {
+    args.push('--topology-json', JSON.stringify(spec.topology))
   }
   args.push('--', ...spec.agentCommand)
 

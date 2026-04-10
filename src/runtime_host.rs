@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
+use fireline_conductor::topology::TopologySpec;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -79,6 +80,7 @@ pub struct CreateRuntimeSpec {
     pub state_stream: Option<String>,
     pub stream_storage: Option<crate::stream_host::StreamStorageConfig>,
     pub peer_directory_path: Option<PathBuf>,
+    pub topology: TopologySpec,
 }
 
 #[derive(Clone)]
@@ -218,6 +220,7 @@ async fn start_local_runtime(
         state_stream: spec.state_stream,
         stream_storage: spec.stream_storage,
         peer_directory_path,
+        topology: spec.topology,
     })
     .await
     .context("start local runtime")

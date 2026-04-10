@@ -21,6 +21,7 @@ use anyhow::{Context, Result};
 use axum::Router;
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, DurableStream, Producer};
 use fireline_components::Directory;
+use fireline_conductor::topology::{TopologyRegistry, TopologySpec};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -37,6 +38,8 @@ pub struct AppState {
     pub session_index: crate::session_index::SessionIndex,
     pub active_turn_index: crate::active_turn_index::ActiveTurnIndex,
     pub shared_terminal: fireline_conductor::shared_terminal::SharedTerminal,
+    pub topology_registry: TopologyRegistry,
+    pub topology: TopologySpec,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +53,7 @@ pub struct BootstrapConfig {
     pub state_stream: Option<String>,
     pub stream_storage: Option<crate::stream_host::StreamStorageConfig>,
     pub peer_directory_path: PathBuf,
+    pub topology: TopologySpec,
 }
 
 pub struct BootstrapHandle {
@@ -114,6 +118,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         "http://{connect_host_name}:{}/v1/stream/{state_stream}",
         local_addr.port()
     );
+    let stream_base_url = format!("http://{connect_host_name}:{}/v1/stream", local_addr.port());
     let runtime_name = config.name.clone();
 
     let stream_client = DurableStreamsClient::new();
@@ -134,6 +139,19 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     ]);
     let shared_terminal =
         fireline_conductor::shared_terminal::SharedTerminal::spawn(config.agent_command).await?;
+    let topology_registry = crate::topology::build_runtime_topology_registry(
+        crate::topology::ComponentContext {
+            runtime_key: runtime_key.clone(),
+            runtime_id: runtime_id.clone(),
+            node_id: node_id.clone(),
+            stream_base_url: stream_base_url.clone(),
+            peer_directory_path: peer_directory_path.clone(),
+            active_turn_lookup: std::sync::Arc::new(active_turn_index.clone()),
+            child_session_edge_sink: std::sync::Arc::new(
+                crate::child_session_edge::ChildSessionEdgeWriter::new(state_producer.clone()),
+            ),
+        },
+    );
 
     let app_state = AppState {
         conductor_name: runtime_name.clone(),
@@ -145,6 +163,8 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         session_index: session_index.clone(),
         active_turn_index: active_turn_index.clone(),
         shared_terminal: shared_terminal.clone(),
+        topology_registry,
+        topology: config.topology.clone(),
     };
 
     let app = Router::new()
@@ -163,6 +183,11 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
             .map_err(anyhow::Error::from)
     });
 
+    crate::topology::ensure_named_streams(
+        &stream_base_url,
+        &crate::topology::audit_stream_names(&config.topology)?,
+    )
+    .await?;
     ensure_stream_exists(&state_stream_handle).await?;
     let runtime_materializer_task = runtime_materializer.connect(state_stream_url.clone());
     runtime_materializer_task.preload().await?;

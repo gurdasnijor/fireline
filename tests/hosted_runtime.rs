@@ -6,6 +6,7 @@ use agent_client_protocol::{InitializeRequest, ProtocolVersion};
 use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
 use fireline::bootstrap::{BootstrapConfig, start};
+use fireline_conductor::topology::TopologySpec;
 use uuid::Uuid;
 
 struct WebSocketTransport {
@@ -82,6 +83,7 @@ async fn hosted_runtime_serves_acp_and_emits_state_events() -> Result<()> {
         state_stream: None,
         stream_storage: None,
         peer_directory_path: temp_peer_directory(),
+        topology: TopologySpec::default(),
     })
     .await?;
 
@@ -155,6 +157,7 @@ async fn hosted_runtime_rejects_concurrent_attachment_and_recovers_after_disconn
         state_stream: None,
         stream_storage: None,
         peer_directory_path: temp_peer_directory(),
+        topology: TopologySpec::default(),
     })
     .await?;
 

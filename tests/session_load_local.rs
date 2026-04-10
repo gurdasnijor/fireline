@@ -10,6 +10,7 @@ use agent_client_protocol_test::testy::TestyCommand;
 use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
 use fireline::bootstrap::{BootstrapConfig, start};
+use fireline_conductor::topology::TopologySpec;
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::sync::Arc;
@@ -103,6 +104,7 @@ async fn session_load_returns_explicit_non_resumable_error_with_durable_record()
         state_stream: None,
         stream_storage: None,
         peer_directory_path: temp_peer_directory(),
+        topology: TopologySpec::default(),
     })
     .await?;
 
@@ -173,6 +175,7 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
             stream_data_dir.clone(),
         )),
         peer_directory_path: peer_directory_path.clone(),
+        topology: TopologySpec::default(),
     })
     .await?;
 
@@ -192,6 +195,7 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
             stream_data_dir,
         )),
         peer_directory_path,
+        topology: TopologySpec::default(),
     })
     .await?;
 
@@ -238,6 +242,7 @@ async fn session_load_reattaches_against_runtime_owned_terminal_when_agent_suppo
         state_stream: None,
         stream_storage: None,
         peer_directory_path: temp_peer_directory(),
+        topology: TopologySpec::default(),
     })
     .await?;
 
@@ -285,6 +290,7 @@ async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not
             stream_data_dir.clone(),
         )),
         peer_directory_path: peer_directory_path.clone(),
+        topology: TopologySpec::default(),
     })
     .await?;
 
@@ -304,6 +310,7 @@ async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not
             stream_data_dir,
         )),
         peer_directory_path,
+        topology: TopologySpec::default(),
     })
     .await?;
 

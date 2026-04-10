@@ -10,6 +10,7 @@
 
 use anyhow::Result;
 use clap::Parser;
+use fireline_conductor::topology::TopologySpec;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
@@ -44,6 +45,10 @@ struct Cli {
     #[arg(long)]
     peer_directory_path: Option<PathBuf>,
 
+    /// Optional runtime topology JSON payload.
+    #[arg(long)]
+    topology_json: Option<String>,
+
     /// The agent command to run, e.g. `npx -y @zed-industries/claude-code-acp`.
     #[arg(trailing_var_arg = true, required = true)]
     agent_command: Vec<String>,
@@ -58,6 +63,10 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let host: IpAddr = cli.host.parse()?;
+    let topology = match cli.topology_json {
+        Some(json) => serde_json::from_str::<TopologySpec>(&json)?,
+        None => TopologySpec::default(),
+    };
     let registry = match cli.runtime_registry_path {
         Some(path) => fireline::runtime_registry::RuntimeRegistry::load(path)?,
         None => fireline::runtime_registry::RuntimeRegistry::load(
@@ -75,6 +84,7 @@ async fn main() -> Result<()> {
             state_stream: cli.state_stream,
             stream_storage: None,
             peer_directory_path: cli.peer_directory_path,
+            topology,
         })
         .await?;
 

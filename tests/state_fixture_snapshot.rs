@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
 use fireline::bootstrap::{BootstrapConfig, start};
+use fireline_conductor::topology::TopologySpec;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -85,6 +86,7 @@ async fn update_rust_state_fixture_snapshot() -> Result<()> {
         state_stream: Some(format!("fireline-fixture-child-{}", Uuid::new_v4())),
         stream_storage: None,
         peer_directory_path: peer_directory_path.clone(),
+        topology: TopologySpec::default(),
     })
     .await?;
 
@@ -98,6 +100,7 @@ async fn update_rust_state_fixture_snapshot() -> Result<()> {
         state_stream: Some(format!("fireline-fixture-{}", Uuid::new_v4())),
         stream_storage: None,
         peer_directory_path,
+        topology: TopologySpec::default(),
     })
     .await?;
 

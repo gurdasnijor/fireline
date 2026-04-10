@@ -24,3 +24,4 @@ Current slices:
 - [`10-acp-shared-session-bridge.md`](./10-acp-shared-session-bridge.md) — deferred
 - [`11-agent-catalog-and-runtime-launch.md`](./11-agent-catalog-and-runtime-launch.md) — complete
 - [`12-programmable-topology-first-mover.md`](./12-programmable-topology-first-mover.md) — planned
+- [`13-distributed-runtime-fabric-foundation.md`](./13-distributed-runtime-fabric-foundation.md) — planned

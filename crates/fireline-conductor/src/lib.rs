@@ -27,6 +27,7 @@
 pub mod build;
 pub mod session;
 pub mod shared_terminal;
+pub mod topology;
 pub mod trace;
 pub mod transports;
 

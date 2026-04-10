@@ -6,6 +6,7 @@ use fireline::runtime_host::{
     CreateRuntimeSpec, RuntimeHost, RuntimeProviderKind, RuntimeProviderRequest, RuntimeStatus,
 };
 use fireline::runtime_registry::RuntimeRegistry;
+use fireline_conductor::topology::TopologySpec;
 use uuid::Uuid;
 
 fn testy_bin() -> String {
@@ -37,6 +38,7 @@ async fn runtime_host_pins_provider_and_persists_runtime_descriptor() -> Result<
             state_stream: None,
             stream_storage: None,
             peer_directory_path: Some(temp_peer_directory()),
+            topology: TopologySpec::default(),
         })
         .await?;
 
