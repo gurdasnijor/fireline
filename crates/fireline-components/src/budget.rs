@@ -1,25 +1,35 @@
-//! Per-session budget gate — SKETCH.
+//! Per-session budget gate.
 //!
-//! Intended shape: maintain per-session counters (tokens, tool calls,
-//! wall clock) and terminate the turn (or deny further calls) when a
-//! configured limit is crossed.
+//! Maintains per-session counters (tokens, tool calls, wall clock)
+//! and terminates the current `session/prompt` — or lets it through
+//! with a warning — when a configured limit is crossed. The
+//! prompt-token counting path is fully wired: the component
+//! intercepts `PromptRequest` on the client-facing side of the
+//! proxy, extracts the text blocks, increments the session's
+//! counter, and refuses the request when the configured ceiling
+//! is exceeded.
 //!
-//! # SKETCH STATUS
+//! # What's wired vs TODO
 //!
-//! - Counter state, `record_prompt_tokens`, `record_tool_call`, and
-//!   `is_exceeded` are fully implemented and unit-tested.
-//! - Token counting is a crude `ceil(chars/4)` placeholder — TODO:
-//!   switch to a real tokenizer.
-//! - The `ConnectTo<Conductor>` impl is a pass-through proxy; the
-//!   interception hook that actually calls the counter methods on
-//!   each `session/prompt` request and tool call is TODO. Same SDK
-//!   gap as `approval.rs`.
+//! - **`record_prompt_tokens`** is called on every `session/prompt`
+//!   by the `ConnectTo<Conductor>` impl below.
+//! - **`record_tool_call`** is *not* yet called on agent→MCP tool
+//!   dispatches. Tool calls travel as MCP-over-ACP and don't
+//!   present a clean proxy-level hook today. The counter method
+//!   is fully implemented and unit-tested so it can be wired as
+//!   soon as the SDK exposes the interception point.
+//! - **Token counting** is `ceil(chars / 4)` — approximate enough
+//!   for coarse budgets, not a substitute for a real tokenizer.
+//!   TODO: swap in `tiktoken-rs` or an adapter over the model
+//!   provider's tokenizer once there's a consumer that needs the
+//!   precision.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use sacp::{ConnectTo, Proxy};
+use sacp::schema::{ContentBlock, PromptRequest};
+use sacp::{Agent, Client, ConnectTo, Proxy};
 
 #[derive(Clone, Debug, Default)]
 pub struct BudgetConfig {
@@ -31,12 +41,13 @@ pub struct BudgetConfig {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BudgetAction {
-    /// End the current turn with a budget-exceeded error.
+    /// Refuse the current prompt turn with a budget-exceeded error.
+    /// The agent sees a failure response for the offending request.
     #[default]
     TerminateTurn,
-    /// Deny further tool calls but let the current turn finish.
+    /// Forward the current request but record the exceeded state
+    /// so later reads of `is_exceeded` return `true`.
     DenyFurtherCalls,
-    // TODO: RequireApproval — compose with ApprovalGateComponent.
 }
 
 #[derive(Debug)]
@@ -71,10 +82,9 @@ impl BudgetComponent {
     }
 
     /// Record token usage against a session. Returns `true` if the
-    /// session has now exceeded any configured limit. Token estimate
-    /// is `ceil(chars / 4)` — TODO: swap for a real tokenizer.
+    /// session has now exceeded any configured limit.
     pub fn record_prompt_tokens(&self, session_id: &str, text: &str) -> bool {
-        let approx = (text.chars().count() as u64).div_ceil(4);
+        let approx = approximate_tokens(text);
         let mut state = self.state.lock().expect("budget state poisoned");
         let entry = state
             .entry(session_id.to_string())
@@ -83,8 +93,9 @@ impl BudgetComponent {
         self.is_exceeded_entry(entry)
     }
 
-    /// Record that a tool call happened in the given session. Returns
-    /// `true` if the session has now exceeded any configured limit.
+    /// Record that a tool call happened in the given session.
+    /// Returns `true` if the session has now exceeded any
+    /// configured limit.
     pub fn record_tool_call(&self, session_id: &str) -> bool {
         let mut state = self.state.lock().expect("budget state poisoned");
         let entry = state
@@ -101,6 +112,21 @@ impl BudgetComponent {
             .get(session_id)
             .map(|entry| self.is_exceeded_entry(entry))
             .unwrap_or(false)
+    }
+
+    /// Extract the joined text from all `ContentBlock::Text`
+    /// entries of a `PromptRequest`. Used by the interceptor to
+    /// derive a token count.
+    pub fn join_prompt_text(request: &PromptRequest) -> String {
+        request
+            .prompt
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     fn is_exceeded_entry(&self, entry: &SessionBudgetState) -> bool {
@@ -125,17 +151,51 @@ impl BudgetComponent {
 
 impl ConnectTo<sacp::Conductor> for BudgetComponent {
     async fn connect_to(self, client: impl ConnectTo<Proxy>) -> Result<(), sacp::Error> {
-        let _this = self;
-        // TODO: intercept `session/prompt` to call
-        // `_this.record_prompt_tokens(session_id, text)`, intercept
-        // tool-call traffic to call `_this.record_tool_call(session_id)`,
-        // and on `is_exceeded` invoke the `on_exceeded` action.
+        let this = self.clone();
         sacp::Proxy
             .builder()
             .name("fireline-budget")
+            .on_receive_request_from(
+                Client,
+                {
+                    let this = this.clone();
+                    async move |request: PromptRequest, responder, cx| {
+                        let session_id = request.session_id.to_string();
+                        let prompt_text = BudgetComponent::join_prompt_text(&request);
+                        let exceeded = this.record_prompt_tokens(&session_id, &prompt_text);
+                        if exceeded {
+                            match this.config.on_exceeded {
+                                BudgetAction::TerminateTurn => {
+                                    return Err(sacp::util::internal_error(format!(
+                                        "budget_gate: session {session_id} exceeded its budget"
+                                    )));
+                                }
+                                BudgetAction::DenyFurtherCalls => {
+                                    // Fall through — this request still runs,
+                                    // but subsequent `is_exceeded` reads will
+                                    // return `true`, and a future tool-call
+                                    // interceptor can refuse based on that.
+                                }
+                            }
+                        }
+                        cx.send_request_to(Agent, request)
+                            .forward_response_to(responder)
+                    }
+                },
+                sacp::on_receive_request!(),
+            )
             .connect_to(client)
             .await
     }
+}
+
+/// Approximate token count as `ceil(chars / 4)`. This is a
+/// deliberately crude placeholder — good enough for order-of-
+/// magnitude budget decisions, wrong enough that nobody should
+/// use it for billing. Swap for a real tokenizer once there's a
+/// concrete consumer that needs the precision.
+fn approximate_tokens(text: &str) -> u64 {
+    (text.chars().count() as u64).div_ceil(4)
 }
 
 #[cfg(test)]
@@ -148,11 +208,8 @@ mod tests {
             max_tokens: Some(10),
             ..Default::default()
         });
-        // "hello" is 5 chars → ceil(5/4) = 2 tokens
         assert!(!component.record_prompt_tokens("s1", "hello"));
-        // another 5 chars → 2 tokens, total 4
         assert!(!component.record_prompt_tokens("s1", "world"));
-        // a longer message → cumulative > 10
         assert!(component.record_prompt_tokens(
             "s1",
             "this is a substantially longer prompt that should blow the budget",
@@ -189,5 +246,26 @@ mod tests {
             ..Default::default()
         });
         assert!(!component.is_exceeded("never-seen"));
+    }
+
+    #[test]
+    fn join_prompt_text_concats_text_blocks_only() {
+        let request = PromptRequest::new(
+            sacp::schema::SessionId::from("sess-1"),
+            vec![
+                ContentBlock::from("hello".to_string()),
+                ContentBlock::from("world".to_string()),
+            ],
+        );
+        let joined = BudgetComponent::join_prompt_text(&request);
+        assert_eq!(joined, "hello world");
+    }
+
+    #[test]
+    fn approximate_tokens_rounds_up() {
+        assert_eq!(approximate_tokens(""), 0);
+        assert_eq!(approximate_tokens("a"), 1);
+        assert_eq!(approximate_tokens("aaaa"), 1);
+        assert_eq!(approximate_tokens("aaaaa"), 2);
     }
 }
