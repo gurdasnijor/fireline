@@ -92,10 +92,10 @@ impl RuntimeHost {
             .await
             .insert(runtime_key.clone(), launch);
 
-        if let Some(descriptor) = self.inner.registry.get(&runtime_key)? {
-            if descriptor.status != RuntimeStatus::Starting || !descriptor.runtime_id.is_empty() {
-                return Ok(descriptor);
-            }
+        if let Some(descriptor) = self.inner.registry.get(&runtime_key)?
+            && (descriptor.status != RuntimeStatus::Starting || !descriptor.runtime_id.is_empty())
+        {
+            return Ok(descriptor);
         }
 
         let descriptor = RuntimeDescriptor {
