@@ -83,9 +83,9 @@ impl ApprovalMatch {
 
     pub fn matches_prompt(&self, prompt_text: &str) -> bool {
         match self {
-            ApprovalMatch::PromptContains { needle } => {
-                prompt_text.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
-            }
+            ApprovalMatch::PromptContains { needle } => prompt_text
+                .to_ascii_lowercase()
+                .contains(&needle.to_ascii_lowercase()),
             ApprovalMatch::Tool { .. } | ApprovalMatch::ToolPrefix { .. } => false,
         }
     }
@@ -224,7 +224,9 @@ mod tests {
                 deny_policy("drop table", "destructive DB operation"),
             ],
         };
-        let policy = config.policy_for_prompt("help me write a DROP TABLE query").unwrap();
+        let policy = config
+            .policy_for_prompt("help me write a DROP TABLE query")
+            .unwrap();
         assert_eq!(policy.reason, "destructive DB operation");
         assert!(config.policy_for_prompt("help me refactor").is_none());
     }

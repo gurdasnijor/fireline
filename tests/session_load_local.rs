@@ -230,8 +230,8 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
 }
 
 #[tokio::test]
-async fn session_load_reattaches_against_runtime_owned_terminal_when_agent_supports_it() -> Result<()>
-{
+async fn session_load_reattaches_against_runtime_owned_terminal_when_agent_supports_it()
+-> Result<()> {
     let handle = start(BootstrapConfig {
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
@@ -447,10 +447,7 @@ async fn load_session_and_prompt(
                         .await?;
 
                     let _ = cx
-                        .send_request(PromptRequest::new(
-                            session_id,
-                            vec![prompt_text.into()],
-                        ))
+                        .send_request(PromptRequest::new(session_id, vec![prompt_text.into()]))
                         .block_task()
                         .await?;
 

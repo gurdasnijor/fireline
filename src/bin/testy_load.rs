@@ -114,9 +114,8 @@ impl ConnectTo<Client> for ResumableTesty {
                         if agent.has_session(&request.session_id) {
                             responder.respond(LoadSessionResponse::new())
                         } else {
-                            responder.respond_with_error(session_not_found_error(
-                                &request.session_id,
-                            ))
+                            responder
+                                .respond_with_error(session_not_found_error(&request.session_id))
                         }
                     }
                 },

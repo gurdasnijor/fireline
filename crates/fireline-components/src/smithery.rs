@@ -301,11 +301,15 @@ mod tests {
             ],
         });
         assert_eq!(
-            component.resolve_server("my-notion").map(|s| s.connection_id.as_str()),
+            component
+                .resolve_server("my-notion")
+                .map(|s| s.connection_id.as_str()),
             Some("notion")
         );
         assert_eq!(
-            component.resolve_server("slack").map(|s| s.connection_id.as_str()),
+            component
+                .resolve_server("slack")
+                .map(|s| s.connection_id.as_str()),
             Some("slack")
         );
         assert!(component.resolve_server("unknown").is_none());

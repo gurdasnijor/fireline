@@ -1,9 +1,9 @@
+use anyhow::Result;
 use sacp::schema::{
     AgentCapabilities, ContentBlock, ContentChunk, InitializeRequest, InitializeResponse,
     NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, SessionId,
     SessionNotification, SessionUpdate, StopReason, TextContent,
 };
-use anyhow::Result;
 use sacp::{Agent, Client, ConnectTo, ConnectionTo, Responder};
 
 #[derive(Clone, Debug, Default)]
@@ -76,8 +76,6 @@ impl ConnectTo<Client> for PromptEchoAgent {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    PromptEchoAgent
-        .connect_to(sacp_tokio::Stdio::new())
-        .await?;
+    PromptEchoAgent.connect_to(sacp_tokio::Stdio::new()).await?;
     Ok(())
 }

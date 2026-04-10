@@ -47,11 +47,9 @@ pub async fn acp_websocket_handler(
 
     ws.on_upgrade(move |socket| async move {
         let logical_connection_id = format!("conn:{}", Uuid::new_v4());
-        let mut components: Vec<DynConnectTo<Conductor>> = vec![
-            DynConnectTo::new(crate::load_coordinator::LoadCoordinatorComponent::new(
-                app.session_index.clone(),
-            )),
-        ];
+        let mut components: Vec<DynConnectTo<Conductor>> = vec![DynConnectTo::new(
+            crate::load_coordinator::LoadCoordinatorComponent::new(app.session_index.clone()),
+        )];
         let resolved_topology = match app.topology_registry.build(&app.topology) {
             Ok(resolved_topology) => resolved_topology,
             Err(error) => {

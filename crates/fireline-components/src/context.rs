@@ -99,7 +99,11 @@ impl ContextInjectionComponent {
     /// block according to the configured placement. Exposed publicly
     /// so callers (and the unit tests) can exercise the rewrite
     /// logic without a live ACP connection.
-    pub fn rewrite_prompt(&self, mut request: PromptRequest, context_text: String) -> PromptRequest {
+    pub fn rewrite_prompt(
+        &self,
+        mut request: PromptRequest,
+        context_text: String,
+    ) -> PromptRequest {
         if context_text.is_empty() {
             return request;
         }

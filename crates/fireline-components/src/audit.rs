@@ -42,7 +42,9 @@ use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use durable_streams::Producer;
-use sacp_conductor::trace::{NotificationEvent, RequestEvent, ResponseEvent, TraceEvent, WriteEvent};
+use sacp_conductor::trace::{
+    NotificationEvent, RequestEvent, ResponseEvent, TraceEvent, WriteEvent,
+};
 use serde::Serialize;
 
 /// Configuration for an [`AuditTracer`].
