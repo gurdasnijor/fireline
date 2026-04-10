@@ -78,7 +78,8 @@ impl StreamStorageConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateRuntimeSpec {
     pub provider: RuntimeProviderRequest,
     pub host: IpAddr,

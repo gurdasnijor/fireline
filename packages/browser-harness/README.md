@@ -20,20 +20,22 @@ pnpm --filter @fireline/browser-harness dev
 That starts:
 
 - browser-harness control API on `127.0.0.1:4436`
+- Fireline control plane on `127.0.0.1:4440`
 - Vite on `http://localhost:5173`
 - Fireline runtime on `127.0.0.1:4437` only after you launch an agent from the UI
 
 The harness uses a local-only runtime registry and peer directory under
 `packages/browser-harness/.tmp/`.
 
-The control server on `4436` is the startup authority. The browser should not
-expect `/acp` or `/v1/stream/*` on `4437` to exist until a runtime has been
-created and reported `ready`.
+The control server on `4436` is the browser-facing startup authority and talks
+to the Fireline control plane on `4440`. The browser should not expect `/acp`
+or `/v1/stream/*` on `4437` to exist until the control plane has created a
+runtime and reported `ready`.
 
 ## What It Exercises
 
 - browse launchable ACP registry agents
-- launch a selected agent into a local Fireline runtime
+- launch a selected agent into a Fireline runtime through the control plane
 - open a live ACP connection from the browser
 - initialize and create a session
 - prompt the terminal agent

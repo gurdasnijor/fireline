@@ -41,6 +41,8 @@ export interface RuntimeDescriptor {
 }
 
 export interface HostClientOptions {
+  controlPlaneUrl?: string
+  controlPlaneToken?: string
   firelineBin?: string
   runtimeRegistryPath?: string
   pollIntervalMs?: number
@@ -97,6 +99,10 @@ const DEFAULT_STOP_TIMEOUT_MS = 10_000
 const LOG_RING_SIZE = 32
 
 export function createHostClient(options: HostClientOptions = {}): HostClient {
+  if (options.controlPlaneUrl) {
+    return createControlPlaneHostClient(options)
+  }
+
   const runtimeRegistryPath = options.runtimeRegistryPath ?? defaultRuntimeRegistryPath()
   const firelineBin = options.firelineBin ?? 'fireline'
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS
@@ -209,6 +215,81 @@ export function createHostClient(options: HostClientOptions = {}): HostClient {
   }
 
   return hostClient
+}
+
+function createControlPlaneHostClient(options: HostClientOptions): HostClient {
+  const controlPlaneUrl = options.controlPlaneUrl
+  if (!controlPlaneUrl) {
+    throw new Error('controlPlaneUrl is required for control-plane host mode')
+  }
+
+  const catalog = createCatalogClient(options.catalog)
+  const baseUrl = controlPlaneUrl.replace(/\/$/, '')
+
+  return {
+    async create(spec) {
+      const runtimeName = spec.name ?? `fireline-ts-${randomUUID()}`
+      const agentCommand = await resolveCreateRuntimeAgentCommand(spec, catalog)
+      return requestControlPlane<RuntimeDescriptor>(baseUrl, '/v1/runtimes', {
+        token: options.controlPlaneToken,
+        method: 'POST',
+        body: JSON.stringify({
+          provider: spec.provider ?? 'local',
+          host: spec.host ?? '127.0.0.1',
+          port: spec.port ?? 0,
+          name: runtimeName,
+          agentCommand,
+          stateStream: spec.stateStream,
+          peerDirectoryPath: spec.peerDirectoryPath,
+          topology: spec.topology ?? { components: [] },
+        }),
+      })
+    },
+
+    async get(runtimeKey) {
+      return requestControlPlane<RuntimeDescriptor | null>(
+        baseUrl,
+        `/v1/runtimes/${encodeURIComponent(runtimeKey)}`,
+        {
+          token: options.controlPlaneToken,
+          allowNotFound: true,
+        },
+      )
+    },
+
+    async list() {
+      return requestControlPlane<RuntimeDescriptor[]>(baseUrl, '/v1/runtimes', {
+        token: options.controlPlaneToken,
+      })
+    },
+
+    async stop(runtimeKey) {
+      return requestControlPlane<RuntimeDescriptor>(
+        baseUrl,
+        `/v1/runtimes/${encodeURIComponent(runtimeKey)}/stop`,
+        {
+          token: options.controlPlaneToken,
+          method: 'POST',
+        },
+      )
+    },
+
+    async delete(runtimeKey) {
+      return requestControlPlane<RuntimeDescriptor | null>(
+        baseUrl,
+        `/v1/runtimes/${encodeURIComponent(runtimeKey)}`,
+        {
+          token: options.controlPlaneToken,
+          method: 'DELETE',
+          allowNotFound: true,
+        },
+      )
+    },
+
+    async close() {
+      // Control-plane lifecycle is owned by the server process.
+    },
+  }
 }
 
 async function resolveCreateRuntimeAgentCommand(
@@ -436,4 +517,45 @@ function isMissingFileError(error: unknown): boolean {
     'code' in error &&
     (error as { code?: string }).code === 'ENOENT'
   )
+}
+
+async function requestControlPlane<T>(
+  baseUrl: string,
+  path: string,
+  options: {
+    token?: string
+    method?: string
+    body?: string
+    allowNotFound?: boolean
+  } = {},
+): Promise<T> {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: options.method ?? 'GET',
+    headers: {
+      accept: 'application/json',
+      ...(options.body ? { 'content-type': 'application/json' } : {}),
+      ...(options.token ? { authorization: `Bearer ${options.token}` } : {}),
+    },
+    body: options.body,
+  })
+
+  if (response.status === 404 && options.allowNotFound) {
+    return null as T
+  }
+
+  if (!response.ok) {
+    const message = await readControlPlaneError(response)
+    throw new Error(`${response.status} ${response.statusText}: ${message}`)
+  }
+
+  return (await response.json()) as T
+}
+
+async function readControlPlaneError(response: Response): Promise<string> {
+  try {
+    const payload = (await response.json()) as { error?: string }
+    return payload.error ?? response.statusText
+  } catch {
+    return response.statusText
+  }
 }

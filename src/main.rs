@@ -10,6 +10,9 @@
 
 use anyhow::Result;
 use clap::Parser;
+use fireline::bootstrap::{self, BootstrapConfig};
+use fireline::runtime_host::{RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
+use fireline::runtime_registry::RuntimeRegistry;
 use fireline_conductor::topology::TopologySpec;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -45,6 +48,14 @@ struct Cli {
     #[arg(long)]
     peer_directory_path: Option<PathBuf>,
 
+    /// Optional explicit runtime key for control-plane-managed subprocess mode.
+    #[arg(long, hide = true)]
+    runtime_key: Option<String>,
+
+    /// Optional explicit node id for control-plane-managed subprocess mode.
+    #[arg(long, hide = true)]
+    node_id: Option<String>,
+
     /// Optional runtime topology JSON payload.
     #[arg(long)]
     topology_json: Option<String>,
@@ -64,15 +75,30 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let host: IpAddr = cli.host.parse()?;
     let topology = match cli.topology_json {
-        Some(json) => serde_json::from_str::<TopologySpec>(&json)?,
+        Some(ref json) => serde_json::from_str::<TopologySpec>(json)?,
         None => TopologySpec::default(),
     };
-    let registry = match cli.runtime_registry_path {
-        Some(path) => fireline::runtime_registry::RuntimeRegistry::load(path)?,
-        None => fireline::runtime_registry::RuntimeRegistry::load(
-            fireline::runtime_registry::RuntimeRegistry::default_path()?,
-        )?,
-    };
+    let registry = load_runtime_registry(cli.runtime_registry_path.clone())?;
+    let managed_runtime_key = cli.runtime_key.clone();
+    let managed_node_id = cli.node_id.clone();
+
+    match (managed_runtime_key, managed_node_id) {
+        (Some(runtime_key), Some(node_id)) => {
+            run_managed_runtime(cli, host, topology, registry, runtime_key, node_id).await
+        }
+        (None, None) => run_direct_host(cli, host, topology, registry).await,
+        _ => Err(anyhow::anyhow!(
+            "--runtime-key and --node-id must be provided together"
+        )),
+    }
+}
+
+async fn run_direct_host(
+    cli: Cli,
+    host: IpAddr,
+    topology: TopologySpec,
+    registry: RuntimeRegistry,
+) -> Result<()> {
     let runtime_host = fireline::runtime_host::RuntimeHost::new(registry);
     let descriptor = runtime_host
         .create(fireline::runtime_host::CreateRuntimeSpec {
@@ -88,6 +114,72 @@ async fn main() -> Result<()> {
         })
         .await?;
 
+    log_runtime_started(&descriptor);
+    tokio::signal::ctrl_c().await.ok();
+    runtime_host.stop(&descriptor.runtime_key).await.map(|_| ())
+}
+
+async fn run_managed_runtime(
+    cli: Cli,
+    host: IpAddr,
+    topology: TopologySpec,
+    registry: RuntimeRegistry,
+    runtime_key: String,
+    node_id: String,
+) -> Result<()> {
+    let peer_directory_path = match cli.peer_directory_path {
+        Some(path) => path,
+        None => fireline_components::LocalPeerDirectory::default_path()?,
+    };
+    let started_at_ms = now_ms();
+    let handle = bootstrap::start(BootstrapConfig {
+        host,
+        port: cli.port,
+        name: cli.name,
+        runtime_key: runtime_key.clone(),
+        node_id: node_id.clone(),
+        agent_command: cli.agent_command,
+        state_stream: cli.state_stream,
+        stream_storage: None,
+        peer_directory_path,
+        topology,
+    })
+    .await?;
+
+    let descriptor = RuntimeDescriptor {
+        runtime_key: runtime_key.clone(),
+        runtime_id: handle.runtime_id.clone(),
+        node_id,
+        provider: RuntimeProviderKind::Local,
+        provider_instance_id: handle.runtime_id.clone(),
+        status: RuntimeStatus::Ready,
+        acp_url: handle.acp_url.clone(),
+        state_stream_url: handle.state_stream_url.clone(),
+        helper_api_base_url: None,
+        created_at_ms: started_at_ms,
+        updated_at_ms: started_at_ms,
+    };
+    registry.upsert(descriptor.clone())?;
+
+    log_runtime_started(&descriptor);
+    tokio::signal::ctrl_c().await.ok();
+    handle.shutdown().await?;
+
+    let mut stopped = descriptor;
+    stopped.status = RuntimeStatus::Stopped;
+    stopped.updated_at_ms = now_ms();
+    registry.upsert(stopped)?;
+    Ok(())
+}
+
+fn load_runtime_registry(path: Option<PathBuf>) -> Result<RuntimeRegistry> {
+    match path {
+        Some(path) => RuntimeRegistry::load(path),
+        None => RuntimeRegistry::load(RuntimeRegistry::default_path()?),
+    }
+}
+
+fn log_runtime_started(descriptor: &RuntimeDescriptor) {
     tracing::info!(
         runtime_key = %descriptor.runtime_key,
         runtime_id = %descriptor.runtime_id,
@@ -96,7 +188,11 @@ async fn main() -> Result<()> {
         state_stream_url = %descriptor.state_stream_url,
         "fireline runtime started"
     );
+}
 
-    tokio::signal::ctrl_c().await.ok();
-    runtime_host.stop(&descriptor.runtime_key).await.map(|_| ())
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time went backwards")
+        .as_millis() as i64
 }

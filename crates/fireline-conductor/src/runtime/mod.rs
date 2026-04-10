@@ -67,11 +67,18 @@ impl RuntimeHost {
             updated_at_ms: created_at_ms,
         })?;
 
-        let (provider, launch) = self
+        let (provider, launch) = match self
             .inner
             .manager
             .start(spec, runtime_key.clone(), node_id.clone())
-            .await?;
+            .await
+        {
+            Ok(started) => started,
+            Err(error) => {
+                let _ = self.inner.registry.remove(&runtime_key);
+                return Err(error);
+            }
+        };
 
         let descriptor = RuntimeDescriptor {
             runtime_key: runtime_key.clone(),

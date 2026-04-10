@@ -1,4 +1,5 @@
 import { createServer } from 'node:http'
+import { spawn } from 'node:child_process'
 import { mkdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,14 +12,13 @@ const tmpDir = join(packageDir, '.tmp')
 const runtimeRegistryPath = join(tmpDir, 'runtimes.toml')
 const peerDirectoryPath = join(tmpDir, 'peers.toml')
 const firelineBin = join(repoRoot, 'target', 'debug', 'fireline')
+const firelineControlPlaneBin = join(repoRoot, 'target', 'debug', 'fireline-control-plane')
 const firelineTestyLoadBin = join(repoRoot, 'target', 'debug', 'fireline-testy-load')
+const controlPlaneUrl = 'http://127.0.0.1:4440'
 
 const client = createFirelineClient({
   host: {
-    firelineBin,
-    runtimeRegistryPath,
-    startupTimeoutMs: 20_000,
-    stopTimeoutMs: 10_000,
+    controlPlaneUrl,
   },
   catalog: {
     localEntries: [
@@ -40,8 +40,10 @@ const client = createFirelineClient({
 })
 
 let currentRuntime = null
+let controlPlaneProcess = null
 
 await mkdir(tmpDir, { recursive: true })
+await startControlPlane()
 
 const server = createServer(async (req, res) => {
   try {
@@ -153,6 +155,7 @@ async function shutdown() {
   server.close()
   await stopCurrentRuntime()
   await client.close()
+  await stopControlPlane()
 }
 
 function sendJson(res, statusCode, payload) {
@@ -181,4 +184,89 @@ function toErrorMessage(error) {
     return error.message
   }
   return String(error)
+}
+
+async function startControlPlane() {
+  controlPlaneProcess = spawn(
+    firelineControlPlaneBin,
+    [
+      '--host',
+      '127.0.0.1',
+      '--port',
+      '4440',
+      '--fireline-bin',
+      firelineBin,
+      '--runtime-registry-path',
+      runtimeRegistryPath,
+      '--peer-directory-path',
+      peerDirectoryPath,
+      '--startup-timeout-ms',
+      '20000',
+      '--stop-timeout-ms',
+      '10000',
+    ],
+    {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: process.env,
+    },
+  )
+
+  for (const stream of [controlPlaneProcess.stdout, controlPlaneProcess.stderr]) {
+    stream?.on('data', (chunk) => {
+      process.stdout.write(`[control-plane] ${chunk.toString('utf8')}`)
+    })
+  }
+
+  await waitForHttpReady(`${controlPlaneUrl}/healthz`, controlPlaneProcess)
+}
+
+async function stopControlPlane() {
+  if (!controlPlaneProcess) {
+    return
+  }
+
+  const child = controlPlaneProcess
+  controlPlaneProcess = null
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return
+  }
+
+  child.kill('SIGTERM')
+  await waitForExit(child, 5_000).catch(() => undefined)
+}
+
+async function waitForHttpReady(url, child) {
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(`control plane exited before becoming ready (${child.exitCode ?? child.signalCode})`)
+    }
+
+    try {
+      const response = await fetch(url)
+      if (response.ok) {
+        return
+      }
+    } catch {
+      // Keep polling until the server is listening.
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+
+  throw new Error('timed out waiting for control plane to become ready')
+}
+
+async function waitForExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return
+  }
+
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('timed out waiting for process exit')), timeoutMs)
+    child.once('exit', () => {
+      clearTimeout(timeout)
+      resolve()
+    })
+  })
 }

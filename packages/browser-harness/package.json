@@ -4,11 +4,11 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "predev": "pnpm dev:clean && pnpm --filter @fireline/client build && cargo build -q --manifest-path ../../Cargo.toml --bin fireline --bin fireline-testy-load",
+    "predev": "pnpm dev:clean && pnpm --filter @fireline/client build && cargo build -q --manifest-path ../../Cargo.toml -p fireline --bin fireline --bin fireline-testy-load -p fireline-control-plane --bin fireline-control-plane",
     "dev": "concurrently -k --kill-signal SIGTERM -n control,vite -c cyan,magenta \"pnpm dev:server\" \"pnpm dev:vite\"",
     "dev:server": "node ./dev-server.mjs",
     "dev:vite": "vite --host --strictPort",
-    "dev:clean": "rm -rf ./.tmp && for p in 4437 5173; do lsof -ti tcp:$p 2>/dev/null | xargs kill 2>/dev/null; done; true",
+    "dev:clean": "rm -rf ./.tmp && for p in 4437 4440 5173; do lsof -ti tcp:$p 2>/dev/null | xargs kill 2>/dev/null; done; true",
     "build": "vite build",
     "test": "tsc --noEmit",
     "lint": "tsc --noEmit"
