@@ -89,7 +89,7 @@ pub(crate) async fn dispatch_peer_call(
 
     sacp::Client
         .builder()
-        .name(&format!("fireline-peer-client-{}", peer.agent_name))
+        .name(format!("fireline-peer-client-{}", peer.agent_name))
         .on_receive_request(
             async move |req: agent_client_protocol::RequestPermissionRequest, responder, _cx| {
                 let outcome = if let Some(opt) = req.options.first() {

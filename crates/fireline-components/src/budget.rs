@@ -130,20 +130,20 @@ impl BudgetComponent {
     }
 
     fn is_exceeded_entry(&self, entry: &SessionBudgetState) -> bool {
-        if let Some(max) = self.config.max_tokens {
-            if entry.tokens_used > max {
-                return true;
-            }
+        if let Some(max) = self.config.max_tokens
+            && entry.tokens_used > max
+        {
+            return true;
         }
-        if let Some(max) = self.config.max_tool_calls {
-            if entry.tool_calls_made > max {
-                return true;
-            }
+        if let Some(max) = self.config.max_tool_calls
+            && entry.tool_calls_made > max
+        {
+            return true;
         }
-        if let Some(max) = self.config.max_duration {
-            if entry.started_at.elapsed() > max {
-                return true;
-            }
+        if let Some(max) = self.config.max_duration
+            && entry.started_at.elapsed() > max
+        {
+            return true;
         }
         false
     }
