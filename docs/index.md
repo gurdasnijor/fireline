@@ -11,6 +11,10 @@ control plane above it.
 - [`architecture.md`](./architecture.md)
   The canonical statement of what Fireline is, what it owns, and what it does
   not own.
+- [`durable-agent-fabric.md`](./durable-agent-fabric.md)
+  Product framing for Fireline as a durable agent fabric built around
+  sessions, workspaces, capability profiles, and reusable conductor
+  extensions.
 - [`packages.md`](./packages.md)
   The intended Rust crate and TypeScript package boundaries.
 - [`ts/primitives.md`](./ts/primitives.md)
