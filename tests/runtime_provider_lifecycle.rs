@@ -8,10 +8,10 @@ use fireline::runtime_host::{
     CreateRuntimeSpec, RuntimeHost, RuntimeProviderKind, RuntimeProviderRequest, RuntimeStatus,
 };
 use fireline::runtime_registry::RuntimeRegistry;
+use fireline_conductor::runtime::LocalProvider;
 use fireline_conductor::runtime::{
     Endpoint, ManagedRuntime, RuntimeHost as ConductorRuntimeHost, RuntimeLaunch, RuntimeManager,
 };
-use fireline_conductor::runtime::LocalProvider;
 use fireline_conductor::topology::TopologySpec;
 use uuid::Uuid;
 
@@ -86,9 +86,7 @@ async fn conductor_runtime_host_stays_starting_until_register_arrives() -> Resul
     let registry = RuntimeRegistry::load(temp_runtime_registry())?;
     let runtime_host = ConductorRuntimeHost::new(
         registry,
-        RuntimeManager::new(Arc::new(LocalProvider::new(Arc::new(
-            FakeRuntimeLauncher,
-        )))),
+        RuntimeManager::new(Arc::new(LocalProvider::new(Arc::new(FakeRuntimeLauncher)))),
     );
 
     let descriptor = runtime_host
