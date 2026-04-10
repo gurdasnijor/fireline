@@ -52,6 +52,7 @@ Owns:
 - router composition
 - helper endpoints that are specific to the host process
 - durable-streams embedding
+- runtime-local state materializer wiring for narrow operational indexes
 
 The binary should stay thin in concept even if it contains multiple modules.
 

@@ -11,23 +11,26 @@
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-use fireline_conductor::lineage::LineageTracker;
 use sacp::{Client, ConnectTo, Proxy};
 
 use crate::directory::Directory;
+use crate::lookup::ActiveTurnLookup;
 use crate::mcp_server::build_peer_mcp_server;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PeerComponent {
     directory_path: PathBuf,
-    lineage_tracker: LineageTracker,
+    active_turn_lookup: Arc<dyn ActiveTurnLookup>,
 }
 
 impl PeerComponent {
-    pub fn new(directory_path: impl Into<PathBuf>, lineage_tracker: LineageTracker) -> Self {
+    pub fn new(
+        directory_path: impl Into<PathBuf>,
+        active_turn_lookup: Arc<dyn ActiveTurnLookup>,
+    ) -> Self {
         Self {
             directory_path: directory_path.into(),
-            lineage_tracker,
+            active_turn_lookup,
         }
     }
 }
@@ -36,7 +39,7 @@ impl ConnectTo<sacp::Conductor> for PeerComponent {
     async fn connect_to(self, client: impl ConnectTo<Proxy>) -> Result<(), sacp::Error> {
         let directory = Directory::load(self.directory_path)
             .map_err(|e| sacp::util::internal_error(format!("load peer directory: {e}")))?;
-        let lineage_tracker = self.lineage_tracker;
+        let active_turn_lookup = self.active_turn_lookup;
 
         sacp::Proxy
             .builder()
@@ -45,12 +48,12 @@ impl ConnectTo<sacp::Conductor> for PeerComponent {
                 Client,
                 {
                     let directory = directory.clone();
-                    let lineage_tracker = lineage_tracker.clone();
+                    let active_turn_lookup = active_turn_lookup.clone();
                     async move |request: sacp::schema::NewSessionRequest, responder, cx| {
                         let session_binding = Arc::new(OnceLock::new());
                         let mcp_server = build_peer_mcp_server(
                             directory.clone(),
-                            lineage_tracker.clone(),
+                            active_turn_lookup.clone(),
                             session_binding.clone(),
                         );
                         cx.build_session_from(request)

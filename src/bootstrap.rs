@@ -35,6 +35,7 @@ pub struct AppState {
     pub state_producer: Producer,
     pub peer_directory_path: PathBuf,
     pub session_index: crate::session_index::SessionIndex,
+    pub active_turn_index: crate::active_turn_index::ActiveTurnIndex,
     pub shared_terminal: fireline_conductor::shared_terminal::SharedTerminal,
 }
 
@@ -60,7 +61,7 @@ pub struct BootstrapHandle {
     runtime_created_at: i64,
     state_producer: Producer,
     peer_directory_path: PathBuf,
-    session_index_task: crate::session_index::SessionIndexTask,
+    runtime_materializer_task: crate::runtime_materializer::RuntimeMaterializerTask,
     shared_terminal: fireline_conductor::shared_terminal::SharedTerminal,
     shutdown_tx: Option<oneshot::Sender<()>>,
     server_task: JoinHandle<Result<()>>,
@@ -79,7 +80,7 @@ impl BootstrapHandle {
             self.runtime_created_at,
         );
 
-        self.session_index_task.abort();
+        self.runtime_materializer_task.abort();
 
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
@@ -126,6 +127,11 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     let peer_directory_path = config.peer_directory_path;
     let directory = Directory::load(&peer_directory_path)?;
     let session_index = crate::session_index::SessionIndex::new();
+    let active_turn_index = crate::active_turn_index::ActiveTurnIndex::new();
+    let runtime_materializer = crate::runtime_materializer::RuntimeMaterializer::new(vec![
+        std::sync::Arc::new(session_index.clone()),
+        std::sync::Arc::new(active_turn_index.clone()),
+    ]);
     let shared_terminal =
         fireline_conductor::shared_terminal::SharedTerminal::spawn(config.agent_command).await?;
 
@@ -137,6 +143,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         state_producer: state_producer.clone(),
         peer_directory_path: peer_directory_path.clone(),
         session_index: session_index.clone(),
+        active_turn_index: active_turn_index.clone(),
         shared_terminal: shared_terminal.clone(),
     };
 
@@ -157,8 +164,8 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     });
 
     ensure_stream_exists(&state_stream_handle).await?;
-    let session_index_task = session_index.connect(state_stream_url.clone());
-    session_index_task.preload().await?;
+    let runtime_materializer_task = runtime_materializer.connect(state_stream_url.clone());
+    runtime_materializer_task.preload().await?;
     fireline_conductor::trace::emit_runtime_instance_started(
         &state_producer,
         &runtime_id,
@@ -182,7 +189,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         runtime_created_at,
         state_producer,
         peer_directory_path,
-        session_index_task,
+        runtime_materializer_task,
         shared_terminal,
         shutdown_tx: Some(shutdown_tx),
         server_task,

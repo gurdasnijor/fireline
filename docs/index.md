@@ -22,6 +22,9 @@ control plane above it.
   How Fireline nodes call each other over ACP while preserving durable lineage.
 - [`state/consumer-surface.md`](./state/consumer-surface.md)
   How TypeScript consumers materialize state from Fireline's durable stream.
+- [`state/runtime-materializer.md`](./state/runtime-materializer.md)
+  How Fireline maintains small runtime-local projections over the durable state
+  stream without reviving a Rust-side consumer DB.
 - [`state/session-load.md`](./state/session-load.md)
   How reconnect and `session/load` fit into the model.
 

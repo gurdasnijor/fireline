@@ -16,6 +16,10 @@
 //!   identifiers used in `_meta.fireline` responses
 //! - [`load_coordinator`] — `session/load` coordination against the
 //!   materialized session index
+//! - [`active_turn_index`] — in-memory materialization of durable
+//!   `prompt_turn` rows used for peer-call lineage lookup
+//! - [`runtime_materializer`] — shared runtime-side stream replay / live-follow
+//!   loop that feeds narrow operational projections
 //! - [`session_index`] — in-memory materialization of durable `session`
 //!   rows used for session lookup and future `session/load` coordination
 //! - [`stream_host`] — embeds `durable-streams-server` in the same
@@ -23,6 +27,7 @@
 //! - [`agent_catalog`] — ACP registry client used by the
 //!   `fireline-agents` CLI to resolve agent IDs to runnable commands
 
+pub mod active_turn_index;
 pub mod agent_catalog;
 pub mod bootstrap;
 pub mod connections;
@@ -30,6 +35,7 @@ pub mod error_codes;
 pub mod load_coordinator;
 pub mod routes;
 pub mod runtime_host;
+pub mod runtime_materializer;
 pub mod runtime_registry;
 pub mod session_index;
 pub mod stream_host;

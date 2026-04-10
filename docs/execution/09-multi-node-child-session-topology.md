@@ -61,6 +61,29 @@ type ChildSessionEdge = {
 }
 ```
 
+`edgeId` should be deterministic, not freshly minted.
+
+Recommended rule:
+
+- `edgeId = sha256(parentRuntimeId, parentSessionId, parentPromptTurnId, childRuntimeId, childSessionId)`
+
+where the hash input is a canonical byte sequence or delimiter-stable string built
+from those five fields in that exact order.
+
+Why:
+
+- this entity is a durable topology record, not an event log entry
+- replay should upsert the same edge instead of minting duplicates
+- a parent turn that creates two distinct child sessions still yields two distinct
+  edge ids because `childSessionId` differs
+- if we later want to model repeated peer-call attempts or reattachment attempts,
+  that should be a separate event entity rather than overloading the topology edge
+
+`traceId` and `createdAt` are deliberately not part of the identity:
+
+- `traceId` is correlation context, not edge identity
+- `createdAt` is observation time and would break replay idempotence
+
 This should be projected into the durable state stream as its own entity type,
 not inferred later from local host state.
 

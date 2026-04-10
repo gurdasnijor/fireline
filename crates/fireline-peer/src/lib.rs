@@ -11,9 +11,9 @@
 //!    [Sparkle](https://github.com/sparkle-ai-space/sparkle-mcp/blob/main/src/acp_component.rs)
 //!    uses to inject embodiment).
 //!
-//! 2. Reads `_meta.parentSessionId` and `_meta.parentPromptTurnId`
-//!    from incoming peer-call `initialize` requests and stores them
-//!    in per-session lineage state.
+//! 2. Reads Fireline lineage from incoming peer-call `initialize`
+//!    requests and relies on runtime-local durable-state projections
+//!    for the current caller turn.
 //!
 //! 3. When the agent calls `prompt_peer`, dispatches the call to the
 //!    target peer over the configured transport, stamping
@@ -29,8 +29,8 @@
 //! - The MCP server that's injected per session (see [`mcp_server`]).
 //! - The peer transport (HTTP today, ACP-native after the spike — see
 //!   [`transport`]).
-//! - A small per-session lineage `HashMap` tracking which sessions are
-//!   descended from cross-node peer calls.
+//! - Narrow lookup traits that let the runtime provide materialized
+//!   operational views without leaking its binary-internal types.
 //!
 //! See [`docs/architecture.md`](../../../docs/architecture.md) for
 //! the full architectural context.
@@ -39,6 +39,7 @@
 
 pub mod component;
 pub mod directory;
+pub mod lookup;
 
 pub(crate) mod mcp_server;
 pub(crate) mod transport;

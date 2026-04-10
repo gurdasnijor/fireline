@@ -30,7 +30,6 @@ toml.workspace = true
 
 # ACP SDK
 agent-client-protocol.workspace = true
-fireline-conductor.workspace = true
 sacp.workspace = true
 tokio-tungstenite.workspace = true
 

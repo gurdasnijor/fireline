@@ -84,6 +84,7 @@ fireline-peer.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 anyhow.workspace = true
+async-trait.workspace = true
 
 # CLI
 clap.workspace = true

@@ -10,13 +10,14 @@
 //! normal SDK ACP client session against the peer's hosted endpoint.
 
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::directory::Directory;
+use crate::lookup::ActiveTurnLookup;
 use crate::transport;
-use fireline_conductor::lineage::LineageTracker;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct ListPeersInput {}
@@ -54,7 +55,7 @@ pub(crate) struct PromptPeerOutput {
 
 pub(crate) fn build_peer_mcp_server(
     directory: Directory,
-    lineage_tracker: LineageTracker,
+    active_turn_lookup: Arc<dyn ActiveTurnLookup>,
     session_binding: Arc<OnceLock<String>>,
 ) -> sacp::mcp_server::McpServer<Conductor, impl sacp::RunWithConnectionTo<Conductor>> {
     sacp::mcp_server::McpServer::builder("fireline-peer")
@@ -87,7 +88,7 @@ pub(crate) fn build_peer_mcp_server(
             "Send a prompt to a named Fireline peer and return its response.",
             {
                 let directory = directory.clone();
-                let lineage_tracker = lineage_tracker.clone();
+                let active_turn_lookup = active_turn_lookup.clone();
                 let session_binding = session_binding.clone();
                 async move |input: PromptPeerInput, cx| {
                     let peer = directory
@@ -108,12 +109,7 @@ pub(crate) fn build_peer_mcp_server(
                     })?;
 
                     let parent_lineage =
-                        lineage_tracker
-                            .lineage_for_session(&session_id)
-                            .map(|lineage| transport::ParentLineage {
-                                trace_id: Some(lineage.trace_id),
-                                parent_prompt_turn_id: Some(lineage.prompt_turn_id),
-                            });
+                        current_parent_lineage(active_turn_lookup.as_ref(), &session_id).await;
 
                     let result =
                         transport::dispatch_peer_call(&peer, &input.prompt, parent_lineage)
@@ -139,3 +135,16 @@ pub(crate) fn build_peer_mcp_server(
 }
 
 use sacp::Conductor;
+
+async fn current_parent_lineage(
+    active_turn_lookup: &dyn ActiveTurnLookup,
+    session_id: &str,
+) -> Option<transport::ParentLineage> {
+    active_turn_lookup
+        .wait_for_current_turn(session_id, Duration::from_millis(250))
+        .await
+        .map(|turn| transport::ParentLineage {
+            trace_id: turn.trace_id,
+            parent_prompt_turn_id: Some(turn.prompt_turn_id),
+        })
+}

@@ -11,11 +11,9 @@
 //!    transport.
 //!
 //! 2. [`trace::DurableStreamTracer`] — a [`sacp_conductor::trace::WriteEvent`]
-//!    implementation that observes [`sacp_conductor::trace::TraceEvent`]s,
-//!    correlates them into normalized `STATE-PROTOCOL` entity changes, and
-//!    appends those changes to a durable stream. It is passive with respect to
-//!    ACP message flow: it may read `_meta`, but active components remain
-//!    responsible for stamping `_meta` extensions.
+//!    implementation that forwards [`sacp_conductor::trace::TraceEvent`]s into
+//!    the Fireline state projector and appends the resulting
+//!    `STATE-PROTOCOL` changes to a durable stream.
 //!
 //! 3. [`transports`] — a set of feature-gated transport adapters
 //!    for listener-style hosting and in-memory testing. Stdio attach
@@ -27,8 +25,9 @@
 #![forbid(unsafe_code)]
 
 pub mod build;
-pub mod lineage;
-pub mod shared_terminal;
 pub mod session;
+pub mod shared_terminal;
 pub mod trace;
 pub mod transports;
+
+mod state_projector;

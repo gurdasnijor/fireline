@@ -95,6 +95,10 @@ runtime-local ACP sessions.
 Add durable `session` rows to Fireline's state stream and materialize an
 in-memory index keyed by `sessionId`.
 
+This should follow the shared runtime-materializer pattern described in
+[`runtime-materializer.md`](./runtime-materializer.md), not a one-off local
+file store and not a revived Rust-side `StreamDb`.
+
 The minimum record shape should be:
 
 ```ts

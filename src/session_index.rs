@@ -9,39 +9,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use durable_streams::{Client, LiveMode, Offset};
+use async_trait::async_trait;
 use fireline_conductor::session::SessionRecord;
-use serde::Deserialize;
-use serde_json::Value;
-use tokio::sync::{Notify, RwLock};
-use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tokio::sync::RwLock;
+
+use crate::runtime_materializer::{RawStateEnvelope, StateProjection};
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionIndex {
     inner: Arc<RwLock<HashMap<String, SessionRecord>>>,
 }
 
-pub struct SessionIndexTask {
-    up_to_date: Arc<Notify>,
-    handle: JoinHandle<()>,
-}
-
 impl SessionIndex {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn connect(&self, state_stream_url: impl Into<String>) -> SessionIndexTask {
-        let up_to_date = Arc::new(Notify::new());
-        let url = state_stream_url.into();
-        let index = self.clone();
-        let notify = up_to_date.clone();
-        let handle = tokio::spawn(async move {
-            consume_session_rows(url, index, notify).await;
-        });
-
-        SessionIndexTask { up_to_date, handle }
     }
 
     pub async fn get(&self, session_id: &str) -> Option<SessionRecord> {
@@ -52,28 +33,17 @@ impl SessionIndex {
         self.inner.read().await.values().cloned().collect()
     }
 
-    async fn apply_chunk_bytes(&self, bytes: &[u8]) -> Result<()> {
-        let events = serde_json::from_slice::<Vec<Value>>(bytes)?;
-        for event in events {
-            self.apply_state_event(event).await?;
-        }
-        Ok(())
-    }
-
-    async fn apply_state_event(&self, event: Value) -> Result<()> {
-        let envelope: RawStateEnvelope =
-            serde_json::from_value(event).map_err(anyhow::Error::from)?;
-
+    async fn apply_envelope(&self, envelope: &RawStateEnvelope) -> Result<()> {
         if envelope.entity_type != "session" {
             return Ok(());
         }
 
         match envelope.headers.operation.as_str() {
             "insert" | "update" => {
-                let Some(value) = envelope.value else {
+                let Some(value) = envelope.value.as_ref() else {
                     return Ok(());
                 };
-                let record: SessionRecord = serde_json::from_value(value)?;
+                let record: SessionRecord = serde_json::from_value(value.clone())?;
                 self.inner
                     .write()
                     .await
@@ -89,82 +59,22 @@ impl SessionIndex {
     }
 }
 
-impl SessionIndexTask {
-    pub async fn preload(&self) -> Result<()> {
-        self.up_to_date.notified().await;
-        Ok(())
+#[async_trait]
+impl StateProjection for SessionIndex {
+    async fn apply_state_event(&self, event: &RawStateEnvelope) -> Result<()> {
+        self.apply_envelope(event).await
     }
-
-    pub fn abort(self) {
-        self.handle.abort();
-    }
-}
-
-async fn consume_session_rows(url: String, index: SessionIndex, up_to_date: Arc<Notify>) {
-    let client = Client::new();
-    let stream = client.stream(&url);
-
-    let mut reader = match stream
-        .read()
-        .offset(Offset::Beginning)
-        .live(LiveMode::Sse)
-        .build()
-    {
-        Ok(reader) => reader,
-        Err(error) => {
-            warn!(error = %error, "build session index stream reader");
-            return;
-        }
-    };
-
-    loop {
-        match reader.next_chunk().await {
-            Ok(Some(chunk)) => {
-                if !chunk.data.is_empty()
-                    && let Err(error) = index.apply_chunk_bytes(&chunk.data).await
-                {
-                    debug!(error = %error, "skip unparseable session index chunk");
-                }
-
-                if chunk.up_to_date {
-                    up_to_date.notify_waiters();
-                }
-            }
-            Ok(None) => return,
-            Err(error) => {
-                warn!(error = %error, "session index stream read error");
-                if !error.is_retryable() {
-                    return;
-                }
-            }
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct RawStateEnvelope {
-    #[serde(rename = "type")]
-    entity_type: String,
-    key: String,
-    headers: RawStateHeaders,
-    #[serde(default)]
-    value: Option<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawStateHeaders {
-    operation: String,
 }
 
 #[cfg(test)]
 mod tests {
     use super::SessionIndex;
+    use crate::runtime_materializer::RawStateEnvelope;
 
     #[tokio::test]
     async fn materializes_session_rows_from_state_events() {
         let index = SessionIndex::new();
-        let payload = br#"[
-          {
+        let envelope: RawStateEnvelope = serde_json::from_value(serde_json::json!({
             "type":"session",
             "key":"sess-1",
             "headers":{"operation":"insert"},
@@ -182,10 +92,10 @@ mod tests {
               "updatedAt":2,
               "lastSeenAt":3
             }
-          }
-        ]"#;
+        }))
+        .unwrap();
 
-        index.apply_chunk_bytes(payload).await.unwrap();
+        index.apply_envelope(&envelope).await.unwrap();
 
         let session = index.get("sess-1").await.expect("session indexed");
         assert_eq!(session.runtime_key, "runtime:1");
