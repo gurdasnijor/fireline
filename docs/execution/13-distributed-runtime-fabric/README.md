@@ -87,16 +87,38 @@ Purpose:
 
 This is the first real Codex handoff target.
 
-### 3. `13b` — Docker provider and mixed-topology proof
+### 3. `13b` — push lifecycle and auth (LocalProvider only)
 
-[`13b-docker-provider-and-mixed-topology.md`](./13b-docker-provider-and-mixed-topology.md)
+[`13b-push-lifecycle-and-auth.md`](./13b-push-lifecycle-and-auth.md)
 
 Purpose:
 
-- add `DockerProvider`
-- add the push-based registration/heartbeat path needed for non-local providers
-- prove one mixed local + Docker topology against a shared durable-streams
+- gate the readiness flip in `RuntimeHost::create()` so push can drive it
+- add `POST /v1/runtimes/{key}/register` and `POST /v1/runtimes/{key}/heartbeat`
+- add the heartbeat tracker and `starting → ready → stale ↔ ready → stopping
+  → stopped` state machine, plus `broken`
+- add bearer auth via `POST /v1/auth/runtime-token` and middleware
+- add the runtime-side push client and `LocalProvider::prefer_push: bool`
+
+Stays on `LocalProvider` only. Polling remains the default; push is opt-in.
+
+### 4. `13c` — first remote provider and mixed-topology proof
+
+[`13c-first-remote-provider-and-mixed-topology.md`](./13c-first-remote-provider-and-mixed-topology.md)
+
+Purpose:
+
+- add the first non-local `RuntimeProvider` (Docker, E2B, or Daytona —
+  decided at handoff time)
+- prove one mixed local + remote topology against a shared durable-streams
   deployment
+- add multi-stream observation in TS clients
+- prove one cross-runtime peer call traverses the mixed topology with
+  reconstructible lineage
+
+Depends on `13b`. Without push lifecycle and auth in place, this slice would
+have to invent its own readiness signaling per provider and the runtime
+contract would silently bifurcate.
 
 ## Example Topology The Full Slice Should Unlock
 
@@ -133,10 +155,11 @@ Important consequences:
 
 The umbrella is done when:
 
-- the runtime/provider seam is extracted cleanly
-- a control-plane-backed runtime contract exists
-- external durable-streams is a valid deployment shape
-- a mixed local + Docker runtime fabric can be observed coherently
+- the runtime/provider seam is extracted cleanly (phase 0)
+- a control-plane-backed runtime contract exists (`13a`)
+- external durable-streams is a valid deployment shape (`13a`)
+- the push lifecycle and auth are in place against `LocalProvider` (`13b`)
+- a mixed local + remote runtime fabric can be observed coherently (`13c`)
 - TypeScript clients can consume that fabric through honest descriptors
 
 Until then, use the child docs as the actual implementation units.

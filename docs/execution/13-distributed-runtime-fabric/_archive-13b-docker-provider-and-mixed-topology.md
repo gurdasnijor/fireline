@@ -1,6 +1,21 @@
-# 13b: Docker Provider and Mixed Topology
+# 13b: Docker Provider and Mixed Topology (ARCHIVED)
 
-Status: planned
+Status: archived — split into `13b-push-lifecycle-and-auth.md` and
+`13c-first-remote-provider-and-mixed-topology.md`. See those for the current
+scope.
+
+This doc bundled the push protocol, the state machine, the first non-local
+provider, mixed-topology discovery, multi-stream observation, and a
+cross-runtime peer call into a single slice. That was too large to hand off
+cleanly. It also dropped per-runtime bearer auth from acceptance and dropped
+provider instance identity from validation, both of which are contract
+requirements per `control-and-data-plane.md` and
+`heartbeat-and-registration.md`.
+
+The replacement is two slices in the order
+`heartbeat-and-registration.md:191-225` already specifies: push lifecycle and
+auth first, then the first remote provider that depends on them.
+
 Type: execution slice
 
 Related:

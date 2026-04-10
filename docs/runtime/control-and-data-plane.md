@@ -332,6 +332,9 @@ These rules are the part Fireline has been leaving implicit. They are now explic
 5. **The control plane returns discovery material, the data plane carries work.**
    Endpoint URLs, bearer headers, and readiness status come from the control plane. Session prompts, session notifications, state rows, and peer ACP traffic do not.
 
+6. **`stale` and `broken` are not-ready states.**
+   A runtime that has missed its heartbeat threshold or whose provider reports failure does not satisfy rule 2's data-plane promise. Consumers must treat these the same as `starting` for the purpose of deciding whether to open `/acp` or state-stream subscriptions. This rule activates when the push lifecycle from `13b` lands; under the polling-only path it is unenforced because there is no liveness signal after `ready`.
+
 ## 5. Crate and code layout
 
 ```text

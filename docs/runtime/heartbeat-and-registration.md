@@ -5,7 +5,8 @@
 > Audience: maintainers implementing `DockerProvider`, `CloudflareProvider`, or any future provider whose runtimes do not share a filesystem with the control plane
 > Related:
 > - [`control-and-data-plane.md`](./control-and-data-plane.md) — §2, §4, §4a
-> - [`../execution/13-distributed-runtime-fabric/13b-docker-provider-and-mixed-topology.md`](../execution/13-distributed-runtime-fabric/13b-docker-provider-and-mixed-topology.md)
+> - [`../execution/13-distributed-runtime-fabric/13b-push-lifecycle-and-auth.md`](../execution/13-distributed-runtime-fabric/13b-push-lifecycle-and-auth.md)
+> - [`../execution/13-distributed-runtime-fabric/13c-first-remote-provider-and-mixed-topology.md`](../execution/13-distributed-runtime-fabric/13c-first-remote-provider-and-mixed-topology.md)
 > - `crates/fireline-control-plane/src/local_provider.rs` — current polling implementation
 > - `src/main.rs` `run_managed_runtime()` — the runtime side of the current model
 
