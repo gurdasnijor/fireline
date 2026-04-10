@@ -107,13 +107,15 @@ impl SharedTerminal {
 
 impl ConnectTo<Client> for SharedTerminalAttachment {
     async fn connect_to(mut self, client: impl ConnectTo<sacp::Agent>) -> Result<(), sacp::Error> {
-        let outgoing = futures::sink::unfold(self.outgoing_tx.clone(), |sender, line: String| async move {
-            sender
-                .send(line)
-                .await
-                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "shared terminal closed"))?;
-            Ok::<_, io::Error>(sender)
-        });
+        let outgoing = futures::sink::unfold(
+            self.outgoing_tx.clone(),
+            |sender, line: String| async move {
+                sender.send(line).await.map_err(|_| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "shared terminal closed")
+                })?;
+                Ok::<_, io::Error>(sender)
+            },
+        );
 
         let incoming_rx = self
             .incoming_rx
@@ -303,7 +305,9 @@ async fn drive_attachment_input(
         }
     }
 
-    let _ = actor_tx.send(ActorMessage::Detached { attachment_id }).await;
+    let _ = actor_tx
+        .send(ActorMessage::Detached { attachment_id })
+        .await;
 }
 
 async fn drain_stderr(stderr: ChildStderr) {
