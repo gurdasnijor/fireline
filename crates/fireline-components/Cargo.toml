@@ -1,10 +1,10 @@
 [package]
-name = "fireline-peer"
+name = "fireline-components"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Cross-agent peer-call component for Fireline (impl Component<ProxyToConductor>)"
+description = "Prebuilt topology components for Fireline (peer calls, audit, context, approval, budget, smithery bridge)"
 
 [dependencies]
 # Async runtime

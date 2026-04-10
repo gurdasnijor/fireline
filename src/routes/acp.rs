@@ -18,7 +18,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use fireline_conductor::{build, trace::DurableStreamTracer, transports};
-use fireline_peer::PeerComponent;
+use fireline_components::PeerComponent;
 use sacp::{Client, Conductor, DynConnectTo};
 use uuid::Uuid;
 

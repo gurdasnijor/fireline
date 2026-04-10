@@ -2,7 +2,7 @@
 members = [
     ".",
     "crates/fireline-conductor",
-    "crates/fireline-peer",
+    "crates/fireline-components",
 ]
 resolver = "2"
 
@@ -15,7 +15,7 @@ repository = "https://github.com/fireline/fireline"
 [workspace.dependencies]
 # Internal workspace crates
 fireline-conductor = { path = "crates/fireline-conductor" }
-fireline-peer = { path = "crates/fireline-peer" }
+fireline-components = { path = "crates/fireline-components" }
 
 # Async runtime + utility
 anyhow = "1"
@@ -79,7 +79,7 @@ description = "Fireline runtime substrate for ACP-compatible agents"
 [dependencies]
 # Workspace crates
 fireline-conductor.workspace = true
-fireline-peer.workspace = true
+fireline-components.workspace = true
 
 # Async runtime
 tokio.workspace = true

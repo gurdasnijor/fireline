@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 
 use async_trait::async_trait;
 use durable_streams::Producer;
-use fireline_peer::lookup::{ChildSessionEdgeInput, ChildSessionEdgeSink};
+use fireline_components::lookup::{ChildSessionEdgeInput, ChildSessionEdgeSink};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -102,7 +102,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::edge_id;
-    use fireline_peer::lookup::ChildSessionEdgeInput;
+    use fireline_components::lookup::ChildSessionEdgeInput;
 
     #[test]
     fn edge_id_is_deterministic_for_same_topology() {

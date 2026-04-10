@@ -205,7 +205,7 @@ async fn start_local_runtime(
 ) -> Result<BootstrapHandle> {
     let peer_directory_path = match spec.peer_directory_path {
         Some(path) => path,
-        None => fireline_peer::Directory::default_path()?,
+        None => fireline_components::Directory::default_path()?,
     };
 
     crate::bootstrap::start(BootstrapConfig {

@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use axum::Router;
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, DurableStream, Producer};
-use fireline_peer::Directory;
+use fireline_components::Directory;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -172,7 +172,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         &runtime_name,
         runtime_created_at,
     );
-    directory.register(fireline_peer::directory::Peer {
+    directory.register(fireline_components::directory::Peer {
         runtime_id: runtime_id.clone(),
         agent_name: runtime_name.clone(),
         acp_url: acp_url.clone(),
