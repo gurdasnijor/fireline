@@ -102,6 +102,8 @@ async fn session_load_returns_explicit_non_resumable_error_with_durable_record()
         node_id: "node:test-session-load".to_string(),
         agent_command: vec![testy_bin()],
         state_stream: None,
+        external_stream_base_url: None,
+        advertised_acp_url: None,
         stream_storage: None,
         peer_directory_path: temp_peer_directory(),
         topology: TopologySpec::default(),
@@ -171,6 +173,8 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
         node_id: "node:test-session-load".to_string(),
         agent_command: vec![testy_bin()],
         state_stream: Some(state_stream.clone()),
+        external_stream_base_url: None,
+        advertised_acp_url: None,
         stream_storage: Some(fireline::stream_host::StreamStorageConfig::file_durable(
             stream_data_dir.clone(),
         )),
@@ -191,6 +195,8 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
         node_id: "node:test-session-load".to_string(),
         agent_command: vec![testy_bin()],
         state_stream: Some(state_stream),
+        external_stream_base_url: None,
+        advertised_acp_url: None,
         stream_storage: Some(fireline::stream_host::StreamStorageConfig::file_durable(
             stream_data_dir,
         )),
@@ -240,6 +246,8 @@ async fn session_load_reattaches_against_runtime_owned_terminal_when_agent_suppo
         node_id: "node:test-session-load".to_string(),
         agent_command: vec![resumable_testy_bin()],
         state_stream: None,
+        external_stream_base_url: None,
+        advertised_acp_url: None,
         stream_storage: None,
         peer_directory_path: temp_peer_directory(),
         topology: TopologySpec::default(),
@@ -286,6 +294,8 @@ async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not
         node_id: "node:test-session-load".to_string(),
         agent_command: vec![resumable_testy_bin()],
         state_stream: Some(state_stream.clone()),
+        external_stream_base_url: None,
+        advertised_acp_url: None,
         stream_storage: Some(fireline::stream_host::StreamStorageConfig::file_durable(
             stream_data_dir.clone(),
         )),
@@ -306,6 +316,8 @@ async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not
         node_id: "node:test-session-load".to_string(),
         agent_command: vec![resumable_testy_bin()],
         state_stream: Some(state_stream),
+        external_stream_base_url: None,
+        advertised_acp_url: None,
         stream_storage: Some(fireline::stream_host::StreamStorageConfig::file_durable(
             stream_data_dir,
         )),

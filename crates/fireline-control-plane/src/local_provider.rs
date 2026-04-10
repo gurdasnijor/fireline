@@ -97,6 +97,18 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
             command.arg("--state-stream").arg(state_stream);
         }
 
+        if let Some(external_stream_base_url) = &spec.external_stream_base_url {
+            command
+                .arg("--external-stream-base-url")
+                .arg(external_stream_base_url);
+        }
+
+        if let Some(advertised_acp_url) = &spec.advertised_acp_url {
+            command
+                .arg("--advertised-acp-url")
+                .arg(advertised_acp_url);
+        }
+
         if let Some(peer_directory_path) = spec
             .peer_directory_path
             .as_ref()

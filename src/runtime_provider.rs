@@ -29,6 +29,8 @@ impl LocalRuntimeLauncher for BootstrapRuntimeLauncher {
             node_id,
             agent_command: spec.agent_command,
             state_stream: spec.state_stream,
+            external_stream_base_url: spec.external_stream_base_url,
+            advertised_acp_url: spec.advertised_acp_url,
             stream_storage: spec.stream_storage,
             peer_directory_path,
             topology: spec.topology,

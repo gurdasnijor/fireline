@@ -57,6 +57,8 @@ interface CreateRuntimeSpecBase {
   port?: number
   name?: string
   stateStream?: string
+  externalStreamBaseUrl?: string
+  advertisedAcpUrl?: string
   peerDirectoryPath?: string
   topology?: TopologySpec
 }
@@ -240,6 +242,8 @@ function createControlPlaneHostClient(options: HostClientOptions): HostClient {
           name: runtimeName,
           agentCommand,
           stateStream: spec.stateStream,
+          externalStreamBaseUrl: spec.externalStreamBaseUrl,
+          advertisedAcpUrl: spec.advertisedAcpUrl,
           peerDirectoryPath: spec.peerDirectoryPath,
           topology: spec.topology ?? { components: [] },
         }),
@@ -377,6 +381,8 @@ function spawnFireline(spec: {
   port: number
   name: string
   stateStream?: string
+  externalStreamBaseUrl?: string
+  advertisedAcpUrl?: string
   agentCommand: string[]
   peerDirectoryPath?: string
   topology?: TopologySpec
@@ -396,6 +402,12 @@ function spawnFireline(spec: {
   }
   if (spec.stateStream) {
     args.push('--state-stream', spec.stateStream)
+  }
+  if (spec.externalStreamBaseUrl) {
+    args.push('--external-stream-base-url', spec.externalStreamBaseUrl)
+  }
+  if (spec.advertisedAcpUrl) {
+    args.push('--advertised-acp-url', spec.advertisedAcpUrl)
   }
   if (spec.topology) {
     args.push('--topology-json', JSON.stringify(spec.topology))

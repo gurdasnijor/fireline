@@ -4,9 +4,11 @@ use std::time::Duration;
 
 use agent_client_protocol::{InitializeRequest, ProtocolVersion};
 use anyhow::Result;
+use axum::Router;
 use durable_streams::{Client as DsClient, Offset};
 use fireline::bootstrap::{BootstrapConfig, start};
 use fireline_conductor::topology::TopologySpec;
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 struct WebSocketTransport {
@@ -71,6 +73,43 @@ fn temp_peer_directory() -> PathBuf {
     std::env::temp_dir().join(format!("fireline-peers-{}.toml", Uuid::new_v4()))
 }
 
+struct ExternalStreamServer {
+    base_url: String,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+impl ExternalStreamServer {
+    async fn start() -> Result<Self> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let app: Router = fireline::stream_host::build_stream_router(None)?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .map_err(anyhow::Error::from)
+        });
+
+        Ok(Self {
+            base_url: format!("http://127.0.0.1:{}/v1/stream", addr.port()),
+            shutdown_tx: Some(shutdown_tx),
+            task,
+        })
+    }
+
+    async fn shutdown(mut self) -> Result<()> {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        self.task.await??;
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn hosted_runtime_serves_acp_and_emits_state_events() -> Result<()> {
     let handle = start(BootstrapConfig {
@@ -81,6 +120,8 @@ async fn hosted_runtime_serves_acp_and_emits_state_events() -> Result<()> {
         node_id: "node:test-hosted".to_string(),
         agent_command: vec![testy_bin()],
         state_stream: None,
+        external_stream_base_url: None,
+        advertised_acp_url: None,
         stream_storage: None,
         peer_directory_path: temp_peer_directory(),
         topology: TopologySpec::default(),
@@ -155,6 +196,8 @@ async fn hosted_runtime_rejects_concurrent_attachment_and_recovers_after_disconn
         node_id: "node:test-hosted".to_string(),
         agent_command: vec![testy_bin()],
         state_stream: None,
+        external_stream_base_url: None,
+        advertised_acp_url: None,
         stream_storage: None,
         peer_directory_path: temp_peer_directory(),
         topology: TopologySpec::default(),
@@ -203,5 +246,80 @@ async fn hosted_runtime_rejects_concurrent_attachment_and_recovers_after_disconn
     assert_eq!(response, "Hello, world!");
 
     handle.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn hosted_runtime_can_target_external_durable_streams() -> Result<()> {
+    let external_stream_server = ExternalStreamServer::start().await?;
+
+    let handle = start(BootstrapConfig {
+        host: "127.0.0.1".parse::<IpAddr>()?,
+        port: 0,
+        name: "hosted-external-stream".to_string(),
+        runtime_key: format!("runtime:{}", Uuid::new_v4()),
+        node_id: "node:test-hosted".to_string(),
+        agent_command: vec![testy_bin()],
+        state_stream: Some(format!("fireline-external-{}", Uuid::new_v4())),
+        external_stream_base_url: Some(external_stream_server.base_url.clone()),
+        advertised_acp_url: None,
+        stream_storage: None,
+        peer_directory_path: temp_peer_directory(),
+        topology: TopologySpec::default(),
+    })
+    .await?;
+
+    assert!(handle
+        .state_stream_url
+        .starts_with(&external_stream_server.base_url));
+
+    let response = yopo::prompt(
+        WebSocketTransport {
+            url: handle.acp_url.clone(),
+        },
+        "hello against external state plane",
+    )
+    .await;
+
+    assert_eq!(response?, "Hello, world!");
+
+    let client = DsClient::new();
+    let stream = client.stream(&handle.state_stream_url);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut body = String::new();
+
+    loop {
+        body.clear();
+
+        let mut reader = stream.read().offset(Offset::Beginning).build()?;
+        while let Some(chunk) = reader.next_chunk().await? {
+            body.push_str(std::str::from_utf8(&chunk.data)?);
+            if chunk.up_to_date {
+                break;
+            }
+        }
+
+        if body.contains("\"type\":\"prompt_turn\"") {
+            break;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    assert!(
+        body.contains("\"type\":\"runtime_instance\""),
+        "external state stream should contain runtime instance rows: {body}"
+    );
+    assert!(
+        body.contains("\"type\":\"prompt_turn\""),
+        "external state stream should contain prompt turns: {body}"
+    );
+
+    handle.shutdown().await?;
+    external_stream_server.shutdown().await?;
     Ok(())
 }

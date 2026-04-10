@@ -56,6 +56,14 @@ struct Cli {
     #[arg(long, hide = true)]
     node_id: Option<String>,
 
+    /// Optional explicit durable-streams base URL, e.g. `http://127.0.0.1:9000/v1/stream`.
+    #[arg(long, hide = true)]
+    external_stream_base_url: Option<String>,
+
+    /// Optional explicit advertised ACP URL distinct from the bound listener.
+    #[arg(long, hide = true)]
+    advertised_acp_url: Option<String>,
+
     /// Optional runtime topology JSON payload.
     #[arg(long)]
     topology_json: Option<String>,
@@ -108,6 +116,8 @@ async fn run_direct_host(
             name: cli.name,
             agent_command: cli.agent_command,
             state_stream: cli.state_stream,
+            external_stream_base_url: cli.external_stream_base_url,
+            advertised_acp_url: cli.advertised_acp_url,
             stream_storage: None,
             peer_directory_path: cli.peer_directory_path,
             topology,
@@ -140,6 +150,8 @@ async fn run_managed_runtime(
         node_id: node_id.clone(),
         agent_command: cli.agent_command,
         state_stream: cli.state_stream,
+        external_stream_base_url: cli.external_stream_base_url,
+        advertised_acp_url: cli.advertised_acp_url,
         stream_storage: None,
         peer_directory_path,
         topology,

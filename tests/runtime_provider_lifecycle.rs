@@ -36,6 +36,8 @@ async fn runtime_host_pins_provider_and_persists_runtime_descriptor() -> Result<
             name: "provider-test".to_string(),
             agent_command: vec![testy_bin()],
             state_stream: None,
+            external_stream_base_url: None,
+            advertised_acp_url: None,
             stream_storage: None,
             peer_directory_path: Some(temp_peer_directory()),
             topology: TopologySpec::default(),

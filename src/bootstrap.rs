@@ -19,6 +19,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use axum::Router;
+use axum::routing::get;
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, DurableStream, Producer};
 use fireline_components::LocalPeerDirectory;
 use fireline_conductor::topology::{TopologyRegistry, TopologySpec};
@@ -51,6 +52,8 @@ pub struct BootstrapConfig {
     pub node_id: String,
     pub agent_command: Vec<String>,
     pub state_stream: Option<String>,
+    pub external_stream_base_url: Option<String>,
+    pub advertised_acp_url: Option<String>,
     pub stream_storage: Option<fireline_conductor::runtime::StreamStorageConfig>,
     pub peer_directory_path: PathBuf,
     pub topology: TopologySpec,
@@ -113,12 +116,17 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         .local_addr()
         .context("resolve bound listener address")?;
     let connect_host_name = connect_host(local_addr.ip());
-    let acp_url = format!("ws://{connect_host_name}:{}/acp", local_addr.port());
-    let state_stream_url = format!(
-        "http://{connect_host_name}:{}/v1/stream/{state_stream}",
-        local_addr.port()
-    );
-    let stream_base_url = format!("http://{connect_host_name}:{}/v1/stream", local_addr.port());
+    let derived_acp_url = format!("ws://{connect_host_name}:{}/acp", local_addr.port());
+    let acp_url = config
+        .advertised_acp_url
+        .clone()
+        .unwrap_or(derived_acp_url);
+    let local_stream_base_url = format!("http://{connect_host_name}:{}/v1/stream", local_addr.port());
+    let stream_base_url = config
+        .external_stream_base_url
+        .clone()
+        .unwrap_or(local_stream_base_url);
+    let state_stream_url = format!("{}/{}", stream_base_url.trim_end_matches('/'), state_stream);
     let runtime_name = config.name.clone();
 
     let stream_client = DurableStreamsClient::new();
@@ -166,11 +174,14 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         topology: config.topology.clone(),
     };
 
-    let app = Router::new()
-        .merge(crate::routes::acp::router(app_state))
-        .merge(crate::stream_host::build_stream_router(
+    let mut app = Router::new().merge(crate::routes::acp::router(app_state));
+    if config.external_stream_base_url.is_some() {
+        app = app.route("/healthz", get(healthz));
+    } else {
+        app = app.merge(crate::stream_host::build_stream_router(
             config.stream_storage.as_ref(),
         )?);
+    }
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let server_task = tokio::spawn(async move {
@@ -218,6 +229,10 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         shutdown_tx: Some(shutdown_tx),
         server_task,
     })
+}
+
+async fn healthz() -> &'static str {
+    "ok"
 }
 
 fn connect_host(ip: IpAddr) -> String {

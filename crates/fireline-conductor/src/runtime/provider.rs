@@ -87,6 +87,10 @@ pub struct CreateRuntimeSpec {
     pub name: String,
     pub agent_command: Vec<String>,
     pub state_stream: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_stream_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertised_acp_url: Option<String>,
     pub stream_storage: Option<StreamStorageConfig>,
     pub peer_directory_path: Option<PathBuf>,
     pub topology: TopologySpec,
