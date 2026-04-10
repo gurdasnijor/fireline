@@ -17,16 +17,6 @@ import {
   type RuntimeProviderRequest,
   type RuntimeStatus,
 } from './host.js'
-import {
-  createPeerClient,
-  defaultPeerDirectoryPath,
-  type PeerCallRequest,
-  type PeerCallResult,
-  type PeerClient,
-  type PeerClientOptions,
-  type PeerDescriptor,
-  type PeerParentLineage,
-} from './peer.js'
 
 export type {
   AcpConnectOptions,
@@ -35,12 +25,6 @@ export type {
   HostClient,
   HostClientOptions,
   OpenAcpConnection,
-  PeerCallRequest,
-  PeerCallResult,
-  PeerClient,
-  PeerClientOptions,
-  PeerDescriptor,
-  PeerParentLineage,
   RuntimeDescriptor,
   RuntimeProviderKind,
   RuntimeProviderRequest,
@@ -52,7 +36,6 @@ export interface FirelineClient {
     connect(options: AcpConnectOptions): Promise<OpenAcpConnection>
   }
   host: HostClient
-  peer: PeerClient
   state: {
     open(config: FirelineDBConfig): FirelineDB
   }
@@ -61,12 +44,10 @@ export interface FirelineClient {
 
 export interface FirelineClientOptions {
   host?: HostClientOptions
-  peer?: PeerClientOptions
 }
 
 export function createFirelineClient(options: FirelineClientOptions = {}): FirelineClient {
   const host = createHostClient(options.host)
-  const peer = createPeerClient(options.peer)
   return {
     acp: {
       connect(options) {
@@ -74,7 +55,6 @@ export function createFirelineClient(options: FirelineClientOptions = {}): Firel
       },
     },
     host,
-    peer,
     state: {
       open(config) {
         return createFirelineDB(config)
@@ -86,4 +66,4 @@ export function createFirelineClient(options: FirelineClientOptions = {}): Firel
   }
 }
 
-export { connectAcp, createHostClient, createPeerClient, defaultPeerDirectoryPath, defaultRuntimeRegistryPath }
+export { connectAcp, createHostClient, defaultRuntimeRegistryPath }

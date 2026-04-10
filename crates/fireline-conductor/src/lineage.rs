@@ -14,20 +14,10 @@ pub struct LineageTracker {
 
 #[derive(Debug, Default)]
 struct LineageTrackerState {
-    acp_url_to_session_id: HashMap<String, String>,
     active_turn_by_session_id: HashMap<String, ActiveTurnLineage>,
 }
 
 impl LineageTracker {
-    pub fn register_session_mcp_urls(&self, session_id: &str, acp_urls: &[String]) {
-        let mut state = self.inner.lock().expect("lineage tracker poisoned");
-        for acp_url in acp_urls {
-            state
-                .acp_url_to_session_id
-                .insert(acp_url.clone(), session_id.to_string());
-        }
-    }
-
     pub fn note_active_turn(&self, session_id: &str, trace_id: &str, prompt_turn_id: &str) {
         let mut state = self.inner.lock().expect("lineage tracker poisoned");
         state.active_turn_by_session_id.insert(
@@ -50,9 +40,32 @@ impl LineageTracker {
         }
     }
 
-    pub fn lineage_for_acp_url(&self, acp_url: &str) -> Option<ActiveTurnLineage> {
+    pub fn lineage_for_session(&self, session_id: &str) -> Option<ActiveTurnLineage> {
         let state = self.inner.lock().expect("lineage tracker poisoned");
-        let session_id = state.acp_url_to_session_id.get(acp_url)?;
         state.active_turn_by_session_id.get(session_id).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LineageTracker;
+
+    #[test]
+    fn lineage_is_scoped_to_session() {
+        let tracker = LineageTracker::default();
+        tracker.note_active_turn("session-a", "trace-a", "turn-a");
+        tracker.note_active_turn("session-b", "trace-b", "turn-b");
+
+        let a = tracker
+            .lineage_for_session("session-a")
+            .expect("session-a lineage");
+        let b = tracker
+            .lineage_for_session("session-b")
+            .expect("session-b lineage");
+
+        assert_eq!(a.trace_id, "trace-a");
+        assert_eq!(a.prompt_turn_id, "turn-a");
+        assert_eq!(b.trace_id, "trace-b");
+        assert_eq!(b.prompt_turn_id, "turn-b");
     }
 }

@@ -9,6 +9,7 @@
 //! - hand the live session back to the SDK with `on_proxy_session_start(...)`
 
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 
 use fireline_conductor::lineage::LineageTracker;
 use sacp::{Client, ConnectTo, Proxy};
@@ -46,11 +47,18 @@ impl ConnectTo<sacp::Conductor> for PeerComponent {
                     let directory = directory.clone();
                     let lineage_tracker = lineage_tracker.clone();
                     async move |request: sacp::schema::NewSessionRequest, responder, cx| {
-                        let mcp_server =
-                            build_peer_mcp_server(directory.clone(), lineage_tracker.clone());
+                        let session_binding = Arc::new(OnceLock::new());
+                        let mcp_server = build_peer_mcp_server(
+                            directory.clone(),
+                            lineage_tracker.clone(),
+                            session_binding.clone(),
+                        );
                         cx.build_session_from(request)
                             .with_mcp_server(mcp_server)?
-                            .on_proxy_session_start(responder, async |_session_id| Ok(()))
+                            .on_proxy_session_start(responder, async move |session_id| {
+                                let _ = session_binding.set(session_id.to_string());
+                                Ok(())
+                            })
                     }
                 },
                 sacp::on_receive_request!(),

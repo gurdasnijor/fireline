@@ -9,6 +9,8 @@
 //! The actual peer wire is delegated to [`crate::transport`], which uses a
 //! normal SDK ACP client session against the peer's hosted endpoint.
 
+use std::sync::{Arc, OnceLock};
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +55,7 @@ pub(crate) struct PromptPeerOutput {
 pub(crate) fn build_peer_mcp_server(
     directory: Directory,
     lineage_tracker: LineageTracker,
+    session_binding: Arc<OnceLock<String>>,
 ) -> sacp::mcp_server::McpServer<Conductor, impl sacp::RunWithConnectionTo<Conductor>> {
     sacp::mcp_server::McpServer::builder("fireline-peer")
         .instructions("Discover and prompt peer Fireline runtimes over ACP.")
@@ -85,6 +88,7 @@ pub(crate) fn build_peer_mcp_server(
             {
                 let directory = directory.clone();
                 let lineage_tracker = lineage_tracker.clone();
+                let session_binding = session_binding.clone();
                 async move |input: PromptPeerInput, cx| {
                     let peer = directory
                         .lookup(&input.agent_name)
@@ -96,9 +100,16 @@ pub(crate) fn build_peer_mcp_server(
                             ))
                         })?;
 
+                    let session_id = session_binding.get().cloned().ok_or_else(|| {
+                        sacp::util::internal_error(format!(
+                            "peer tool invoked before session binding was established ({})",
+                            cx.acp_url()
+                        ))
+                    })?;
+
                     let parent_lineage =
                         lineage_tracker
-                            .lineage_for_acp_url(&cx.acp_url())
+                            .lineage_for_session(&session_id)
                             .map(|lineage| transport::ParentLineage {
                                 trace_id: Some(lineage.trace_id),
                                 parent_prompt_turn_id: Some(lineage.prompt_turn_id),

@@ -185,27 +185,10 @@ struct TraceCorrelationState {
     pending_initialize: HashSet<String>,
     prompt_request_to_turn: HashMap<String, String>,
     prompt_turns: HashMap<String, PromptTurnRow>,
-    pending_session_new: HashMap<String, PendingSessionNew>,
-    pending_session_new_order: Vec<String>,
     pending_requests: HashMap<String, PendingRequestRow>,
     session_active_turn: HashMap<String, String>,
     chunk_seq: HashMap<String, i64>,
     turn_counter: u64,
-}
-
-#[derive(Debug, Default)]
-struct PendingSessionNew {
-    mcp_acp_urls: Vec<String>,
-}
-
-impl PendingSessionNew {
-    fn merge_mcp_acp_urls(&mut self, urls: Vec<String>) {
-        for url in urls {
-            if !self.mcp_acp_urls.contains(&url) {
-                self.mcp_acp_urls.push(url);
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -342,24 +325,8 @@ impl DurableStreamTracer {
             }
             "session/new" => {
                 let request_id = req.id.to_string();
-                self.correlation
-                    .pending_session_new
-                    .entry(request_id.clone())
-                    .or_default()
-                    .merge_mcp_acp_urls(extract_mcp_acp_urls(&req.params));
-
                 if !is_canonical_client_request(req) {
                     return;
-                }
-
-                if !self
-                    .correlation
-                    .pending_session_new_order
-                    .contains(&request_id)
-                {
-                    self.correlation
-                        .pending_session_new_order
-                        .push(request_id.clone());
                 }
 
                 let pending = PendingRequestRow {
@@ -383,22 +350,6 @@ impl DurableStreamTracer {
                     "insert",
                     Some(&pending),
                 );
-            }
-            "_mcp/connect" => {
-                let Some(acp_url) = req.params.get("acp_url").and_then(Value::as_str) else {
-                    return;
-                };
-                let Some(pending_request_id) =
-                    self.correlation.pending_session_new_order.first().cloned()
-                else {
-                    return;
-                };
-
-                self.correlation
-                    .pending_session_new
-                    .entry(pending_request_id)
-                    .or_default()
-                    .merge_mcp_acp_urls(vec![acp_url.to_string()]);
             }
             "session/prompt" => {
                 if !is_canonical_client_request(req) {
@@ -498,75 +449,8 @@ impl DurableStreamTracer {
                 .unwrap_or(false);
         }
 
-        if let Some(pending_session_new) = self.correlation.pending_session_new.remove(&request_id)
-        {
-            self.correlation
-                .pending_session_new_order
-                .retain(|pending_id| pending_id != &request_id);
-
-            if let Some(mut pending) = self.correlation.pending_requests.remove(&request_id) {
-                pending.state = PendingRequestState::Resolved;
-                pending.resolved_at = Some(now_ms());
-                append_state(
-                    &self.producer,
-                    "pending_request",
-                    &request_id,
-                    "update",
-                    Some(&pending),
-                );
-            }
-
-            if resp.is_error {
-                self.connection.state = ConnectionState::Broken;
-                self.connection.last_error = Some(resp.payload.to_string());
-            } else if let Some(session_id) = resp
-                .payload
-                .get("sessionId")
-                .or_else(|| resp.payload.get("session_id"))
-                .and_then(Value::as_str)
-            {
-                let now = now_ms();
-                let session = SessionRecord {
-                    session_id: session_id.to_string(),
-                    runtime_key: self.runtime_key.clone(),
-                    runtime_id: self.runtime_id.clone(),
-                    node_id: self.node_id.clone(),
-                    logical_connection_id: self.logical_connection_id.clone(),
-                    state: SessionStatus::Active,
-                    supports_load_session: self.supports_load_session,
-                    trace_id: self.inherited_lineage.trace_id.clone(),
-                    parent_prompt_turn_id: self.inherited_lineage.parent_prompt_turn_id.clone(),
-                    created_at: now,
-                    updated_at: now,
-                    last_seen_at: now,
-                };
-                append_state(
-                    &self.producer,
-                    "session",
-                    session_id,
-                    "insert",
-                    Some(&session),
-                );
-
-                self.connection.state = ConnectionState::Attached;
-                self.connection.latest_session_id = Some(session_id.to_string());
-                self.connection.last_error = None;
-                self.lineage_tracker
-                    .register_session_mcp_urls(session_id, &pending_session_new.mcp_acp_urls);
-            }
-
-            self.connection.updated_at = now_ms();
-            append_state(
-                &self.producer,
-                "connection",
-                &self.logical_connection_id,
-                "update",
-                Some(&self.connection),
-            );
-            return;
-        }
-
         if let Some(mut pending) = self.correlation.pending_requests.remove(&request_id) {
+            let was_session_new = pending.method == "session/new";
             pending.state = PendingRequestState::Resolved;
             pending.resolved_at = Some(now_ms());
             append_state(
@@ -576,6 +460,55 @@ impl DurableStreamTracer {
                 "update",
                 Some(&pending),
             );
+
+            if was_session_new {
+                if resp.is_error {
+                    self.connection.state = ConnectionState::Broken;
+                    self.connection.last_error = Some(resp.payload.to_string());
+                } else if let Some(session_id) = resp
+                    .payload
+                    .get("sessionId")
+                    .or_else(|| resp.payload.get("session_id"))
+                    .and_then(Value::as_str)
+                {
+                    let now = now_ms();
+                    let session = SessionRecord {
+                        session_id: session_id.to_string(),
+                        runtime_key: self.runtime_key.clone(),
+                        runtime_id: self.runtime_id.clone(),
+                        node_id: self.node_id.clone(),
+                        logical_connection_id: self.logical_connection_id.clone(),
+                        state: SessionStatus::Active,
+                        supports_load_session: self.supports_load_session,
+                        trace_id: self.inherited_lineage.trace_id.clone(),
+                        parent_prompt_turn_id: self.inherited_lineage.parent_prompt_turn_id.clone(),
+                        created_at: now,
+                        updated_at: now,
+                        last_seen_at: now,
+                    };
+                    append_state(
+                        &self.producer,
+                        "session",
+                        session_id,
+                        "insert",
+                        Some(&session),
+                    );
+
+                    self.connection.state = ConnectionState::Attached;
+                    self.connection.latest_session_id = Some(session_id.to_string());
+                    self.connection.last_error = None;
+                }
+
+                self.connection.updated_at = now_ms();
+                append_state(
+                    &self.producer,
+                    "connection",
+                    &self.logical_connection_id,
+                    "update",
+                    Some(&self.connection),
+                );
+                return;
+            }
         }
 
         if let Some(prompt_turn_id) = self.correlation.prompt_request_to_turn.remove(&request_id) {
@@ -789,26 +722,6 @@ fn first_text_block(blocks: &[Value]) -> Option<String> {
             None
         }
     })
-}
-
-fn extract_mcp_acp_urls(params: &Value) -> Vec<String> {
-    params
-        .get("mcpServers")
-        .or_else(|| params.get("mcp_servers"))
-        .and_then(Value::as_array)
-        .map(|servers| {
-            servers
-                .iter()
-                .filter_map(|server| {
-                    server
-                        .get("url")
-                        .and_then(Value::as_str)
-                        .filter(|url| url.starts_with("acp:"))
-                        .map(str::to_string)
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn parse_fireline_lineage(params: &Value) -> InheritedLineage {
