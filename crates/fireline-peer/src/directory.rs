@@ -1,17 +1,27 @@
 //! Local peer directory.
 //!
-//! A file-backed directory of running Fireline instances on this
+//! This is a local-development bootstrap adapter, not part of Fireline's
+//! durable or client-facing contract.
+//!
+//! A file-backed directory of running Fireline instances on one
 //! machine. Each entry records the runtime ID, the ACP endpoint URL,
 //! the agent name, and the registration timestamp.
 //!
 //! Lifecycle:
-//! - On Fireline startup: register self in the directory file
+//! - On Fireline startup: register self in the local directory file
 //! - On Fireline shutdown: unregister self
 //! - On `list_peers` MCP tool call: read the current contents
 //! - On `prompt_peer` MCP tool call: look up the target peer's endpoint
 //!
 //! The default location is
 //! `~/.local/share/fireline/peers.toml` (resolved via the `dirs` crate).
+//!
+//! Important boundary:
+//!
+//! - this file is a local bootstrap convenience only
+//! - it must not be treated as authoritative mesh state
+//! - TypeScript clients and Flamecast should consume runtime descriptors,
+//!   ACP endpoints, and durable state streams instead
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -94,7 +104,10 @@ fn write_peers(path: &Path, peers: &[Peer]) -> Result<()> {
         peers: peers.to_vec(),
     })
     .context("serialize peers.toml")?;
-    fs::write(path, raw).with_context(|| format!("write {}", path.display()))?;
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    fs::write(&tmp, raw).with_context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
 }
 

@@ -126,7 +126,7 @@ impl RuntimeHost {
             updated_at_ms: created_at_ms,
         })?;
 
-        let handle = start_local_runtime(spec).await?;
+        let handle = start_local_runtime(spec, runtime_key.clone(), node_id.clone()).await?;
 
         let descriptor = RuntimeDescriptor {
             runtime_key: runtime_key.clone(),
@@ -197,16 +197,25 @@ impl RuntimeHost {
     }
 }
 
-async fn start_local_runtime(spec: CreateRuntimeSpec) -> Result<BootstrapHandle> {
+async fn start_local_runtime(
+    spec: CreateRuntimeSpec,
+    runtime_key: String,
+    node_id: String,
+) -> Result<BootstrapHandle> {
+    let peer_directory_path = match spec.peer_directory_path {
+        Some(path) => path,
+        None => fireline_peer::Directory::default_path()?,
+    };
+
     crate::bootstrap::start(BootstrapConfig {
         host: spec.host,
         port: spec.port,
         name: spec.name,
-        runtime_key: None,
-        node_id: None,
+        runtime_key,
+        node_id,
         agent_command: spec.agent_command,
         state_stream: spec.state_stream,
-        peer_directory_path: spec.peer_directory_path,
+        peer_directory_path,
     })
     .await
     .context("start local runtime")

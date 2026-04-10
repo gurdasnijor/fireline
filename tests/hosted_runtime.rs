@@ -1,9 +1,11 @@
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
 use fireline::bootstrap::{BootstrapConfig, start};
+use uuid::Uuid;
 
 struct WebSocketTransport {
     url: String,
@@ -63,17 +65,21 @@ fn testy_bin() -> String {
         .to_string()
 }
 
+fn temp_peer_directory() -> PathBuf {
+    std::env::temp_dir().join(format!("fireline-peers-{}.toml", Uuid::new_v4()))
+}
+
 #[tokio::test]
 async fn hosted_runtime_serves_acp_and_emits_state_events() -> Result<()> {
     let handle = start(BootstrapConfig {
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
         name: "hosted-test".to_string(),
-        runtime_key: None,
-        node_id: None,
+        runtime_key: format!("runtime:{}", Uuid::new_v4()),
+        node_id: "node:test-hosted".to_string(),
         agent_command: vec![testy_bin()],
         state_stream: None,
-        peer_directory_path: None,
+        peer_directory_path: temp_peer_directory(),
     })
     .await?;
 

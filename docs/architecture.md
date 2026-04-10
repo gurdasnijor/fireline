@@ -28,6 +28,12 @@ What Fireline does own:
 - host-mediated peer calls
 - helper endpoints that are tightly coupled to the host process
 
+The durable state stream is the architectural center.
+
+If something about a runtime, session, prompt turn, or mesh edge must survive
+restart and remain queryable, it belongs in the durable state stream, not in a
+host-local side file.
+
 ## Pairing with Flamecast
 
 ```text
@@ -78,6 +84,12 @@ That means:
 
 If a consumer wants state, it reads the durable state stream and materializes
 it locally in TypeScript.
+
+Corollary:
+
+- local files may exist for bootstrap convenience in strictly local provider
+  adapters
+- those files are not durable truth and must never outrank the state stream
 
 ### 2. TypeScript owns the consumer schema
 
@@ -165,6 +177,26 @@ The `fireline` binary owns:
 
 The binary mounts reusable transport handlers from `fireline-conductor`, but it
 owns the overall process.
+
+### 8. Bootstrap adapters are not authoritative state
+
+Bootstrap may use environment-specific adapters such as:
+
+- a local runtime registry
+- a local peer directory
+- provider-specific launch metadata
+
+But those adapters are:
+
+- local/provider scoped
+- replaceable
+- not part of the durable log contract
+
+Fireline should be designed so that bootstrap can become purer over time:
+
+- identity should be supplied by the caller or control plane
+- local file defaults should live in provider adapters, not in the core runtime
+- anything durable must still flow through the state stream
 
 ## Main Surfaces
 

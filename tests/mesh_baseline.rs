@@ -80,11 +80,11 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
         name: "agent-b".to_string(),
-        runtime_key: None,
-        node_id: None,
+        runtime_key: format!("runtime:{}", Uuid::new_v4()),
+        node_id: "node:test-mesh".to_string(),
         agent_command: vec![testy_bin()],
         state_stream: None,
-        peer_directory_path: Some(peer_directory_path.clone()),
+        peer_directory_path: peer_directory_path.clone(),
     })
     .await?;
 
@@ -92,11 +92,11 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
         name: "agent-a".to_string(),
-        runtime_key: None,
-        node_id: None,
+        runtime_key: format!("runtime:{}", Uuid::new_v4()),
+        node_id: "node:test-mesh".to_string(),
         agent_command: vec![testy_bin()],
         state_stream: None,
-        peer_directory_path: Some(peer_directory_path.clone()),
+        peer_directory_path: peer_directory_path.clone(),
     })
     .await?;
 

@@ -44,11 +44,11 @@ pub struct BootstrapConfig {
     pub host: IpAddr,
     pub port: u16,
     pub name: String,
-    pub runtime_key: Option<String>,
-    pub node_id: Option<String>,
+    pub runtime_key: String,
+    pub node_id: String,
     pub agent_command: Vec<String>,
     pub state_stream: Option<String>,
-    pub peer_directory_path: Option<PathBuf>,
+    pub peer_directory_path: PathBuf,
 }
 
 pub struct BootstrapHandle {
@@ -93,9 +93,7 @@ impl BootstrapHandle {
 
 pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     let runtime_uuid = Uuid::new_v4();
-    let runtime_key = config
-        .runtime_key
-        .unwrap_or_else(|| format!("runtime:{runtime_uuid}"));
+    let runtime_key = config.runtime_key;
     let runtime_id = format!("fireline:{}:{runtime_uuid}", config.name);
     let runtime_created_at = chrono_like_now_ms();
     let state_stream = config
@@ -121,12 +119,8 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         .producer(format!("state-writer-{runtime_uuid}"))
         .content_type("application/json")
         .build();
-    let node_id = config
-        .node_id
-        .unwrap_or_else(|| format!("node:{}", connect_host(local_addr.ip())));
-    let peer_directory_path = config
-        .peer_directory_path
-        .unwrap_or(Directory::default_path()?);
+    let node_id = config.node_id;
+    let peer_directory_path = config.peer_directory_path;
     let directory = Directory::load(&peer_directory_path)?;
     let session_index = crate::session_index::SessionIndex::new();
 

@@ -12,6 +12,10 @@ The goal is to make these all look the same from the outside:
 - E2B sandbox
 - Daytona workspace
 
+The runtime/provider surface is a bootstrap boundary, not the durable source of
+truth. Provider adapters may keep small local records to find or relaunch
+runtimes, but session and mesh durability still belong to the state stream.
+
 ## Core question
 
 Can Fireline present a provider-agnostic runtime API that returns a stable
@@ -89,6 +93,13 @@ The same runtime model should support both:
 
 That is why bootstrap belongs in `client.host`, not `client.acp`.
 
+Important boundary:
+
+- local registries and discovery files are implementation details of a local
+  provider adapter
+- they must not leak into the TypeScript client contract
+- they must not be used as durable session or mesh state
+
 ## Primary provider vs extension providers
 
 Fireline should distinguish between:
@@ -102,6 +113,18 @@ Fireline should distinguish between:
 
 This keeps the default runtime path simple and cheap while leaving room for
 heavier sandbox integrations later.
+
+## Bootstrap purity
+
+The core runtime bootstrap should avoid guessing environment policy.
+
+That means:
+
+- identity inputs like `runtimeKey` and `nodeId` should be supplied by the
+  caller or provider layer
+- local default paths belong in the local provider adapter, not in the core
+  bootstrap path
+- provider-specific assumptions should stay at the provider edge
 
 ## Relationship to Flamecast
 

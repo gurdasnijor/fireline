@@ -1,9 +1,14 @@
 //! File-backed runtime descriptor registry.
 //!
 //! This is the runtime-provider analogue of the local peer directory:
-//! a small durable record of runtime descriptors that survives process
-//! restarts and lets callers list/get runtimes without holding live
-//! process handles.
+//! a small local-provider bootstrap record of runtime descriptors that
+//! survives process restarts and lets callers list/get runtimes without
+//! holding live process handles.
+//!
+//! Important boundary:
+//!
+//! - this file is local provider metadata, not durable session/mesh state
+//! - control planes should treat it as an adapter, not as authoritative truth
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -83,7 +88,10 @@ fn write_runtimes(path: &Path, runtimes: &[RuntimeDescriptor]) -> Result<()> {
         runtimes: runtimes.to_vec(),
     })
     .context("serialize runtimes.toml")?;
-    fs::write(path, raw).with_context(|| format!("write {}", path.display()))?;
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    fs::write(&tmp, raw).with_context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
 }
 

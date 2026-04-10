@@ -67,6 +67,7 @@ Important rule:
 
 - `client.acp` should not perform hidden discovery
 - `client.host` or Flamecast should provide the endpoint or transport handle
+- local filesystem discovery is not part of the client contract
 
 This mirrors the distinction between:
 
@@ -243,6 +244,13 @@ client.host.delete(runtimeKey)
 
 The important rule is that `client.host` owns runtime creation and discovery;
 `client.acp` only speaks ACP over what `client.host` returns.
+
+Important boundary:
+
+- the client contract is runtime descriptors and ACP/stream endpoints
+- local registries or peer-directory files are provider-side implementation
+  details
+- TS consumers should not read host-local files to discover peers or sessions
 
 Current implementation note:
 
