@@ -1,10 +1,10 @@
 //! Conductor builder.
 //!
-//! [`build_subprocess_conductor`] composes injected components and a
-//! state writer into a running [`sacp_conductor::ConductorImpl`].
-//! The agent is spawned as a subprocess via
-//! [`sacp_tokio::AcpAgent::from_args`] and becomes the terminal
-//! component of the chain.
+//! [`build_conductor_with_terminal`] composes injected components, a terminal
+//! transport, and a state writer into a running
+//! [`sacp_conductor::ConductorImpl`].
+//! [`build_subprocess_conductor`] is the convenience wrapper that supplies a
+//! subprocess terminal via [`sacp_tokio::AcpAgent::from_args`].
 //!
 //! Per the architecture: components are passed in by the caller, not
 //! hard-coded here. The binary's bootstrap composes the proxy chain
@@ -28,6 +28,32 @@ pub fn build_subprocess_conductor(
                 AcpAgent::from_args(agent_command)
                     .map_err(|e| sacp::util::internal_error(format!("agent command: {e}")))?,
             );
+            Ok((req, components, terminal))
+        },
+        McpBridgeMode::default(),
+    )
+    .trace_to(trace_writer)
+}
+
+/// Build a conductor whose terminal component is supplied by the caller.
+pub fn build_conductor_with_terminal(
+    name: impl ToString,
+    components: Vec<DynConnectTo<Conductor>>,
+    terminal: DynConnectTo<Client>,
+    trace_writer: impl WriteEvent,
+) -> ConductorImpl<Agent> {
+    let mut components = Some(components);
+    let mut terminal = Some(terminal);
+
+    ConductorImpl::new_agent(
+        name,
+        move |req| async move {
+            let components = components.take().ok_or_else(|| {
+                sacp::util::internal_error("conductor components already instantiated")
+            })?;
+            let terminal = terminal
+                .take()
+                .ok_or_else(|| sacp::util::internal_error("terminal already instantiated"))?;
             Ok((req, components, terminal))
         },
         McpBridgeMode::default(),

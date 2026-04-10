@@ -31,6 +31,9 @@
 //! For persistent runs, set `DS_STORAGE__MODE=file-durable` (or `acid`)
 //! and `DS_STORAGE__DATA_DIR=/path/to/data`.
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use anyhow::Result;
 use axum::Router;
 use durable_streams_server::{
@@ -38,7 +41,42 @@ use durable_streams_server::{
     router,
     storage::{acid::AcidStorage, file::FileStorage, memory::InMemoryStorage},
 };
-use std::sync::Arc;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamStorageMode {
+    Memory,
+    FileFast,
+    FileDurable,
+    Acid,
+}
+
+impl StreamStorageMode {
+    fn into_ds_mode(self) -> StorageMode {
+        match self {
+            Self::Memory => StorageMode::Memory,
+            Self::FileFast => StorageMode::FileFast,
+            Self::FileDurable => StorageMode::FileDurable,
+            Self::Acid => StorageMode::Acid,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamStorageConfig {
+    pub mode: StreamStorageMode,
+    pub data_dir: Option<PathBuf>,
+    pub acid_shard_count: Option<usize>,
+}
+
+impl StreamStorageConfig {
+    pub fn file_durable(data_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            mode: StreamStorageMode::FileDurable,
+            data_dir: Some(data_dir.into()),
+            acid_shard_count: None,
+        }
+    }
+}
 
 /// Build the embedded stream server router.
 ///
@@ -53,9 +91,11 @@ use std::sync::Arc;
 /// - a `DS_*` env var is set but invalid
 /// - TLS or CORS config fails validation
 /// - a file-backed storage backend cannot open its data directory
-pub fn build_stream_router() -> Result<Router> {
+pub fn build_stream_router(storage_override: Option<&StreamStorageConfig>) -> Result<Router> {
     let ds_config = DsConfig::from_env()
         .map_err(|e| anyhow::anyhow!("load durable-streams config from env: {e}"))?;
+    let mut ds_config = ds_config;
+    apply_storage_override(&mut ds_config, storage_override);
     ds_config
         .validate()
         .map_err(|e| anyhow::anyhow!("validate durable-streams config: {e}"))?;
@@ -112,4 +152,21 @@ pub fn build_stream_router() -> Result<Router> {
     };
 
     Ok(router)
+}
+
+fn apply_storage_override(
+    ds_config: &mut DsConfig,
+    storage_override: Option<&StreamStorageConfig>,
+) {
+    let Some(storage) = storage_override else {
+        return;
+    };
+
+    ds_config.storage_mode = storage.mode.into_ds_mode();
+    if let Some(data_dir) = &storage.data_dir {
+        ds_config.data_dir = data_dir.display().to_string();
+    }
+    if let Some(acid_shard_count) = storage.acid_shard_count {
+        ds_config.acid_shard_count = acid_shard_count;
+    }
 }

@@ -84,6 +84,7 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
         node_id: "node:test-mesh".to_string(),
         agent_command: vec![testy_bin()],
         state_stream: None,
+        stream_storage: None,
         peer_directory_path: peer_directory_path.clone(),
     })
     .await?;
@@ -96,6 +97,7 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
         node_id: "node:test-mesh".to_string(),
         agent_command: vec![testy_bin()],
         state_stream: None,
+        stream_storage: None,
         peer_directory_path: peer_directory_path.clone(),
     })
     .await?;

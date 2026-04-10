@@ -30,7 +30,7 @@ TypeScript owns:
 - the schema for Fireline's normalized entity collections
 - `createFirelineDB(...)`
 - derived live-query collections
-- schema export artifacts for Rust conformance tests
+- strict fixture-based conformance tests against real Rust-emitted NDJSON
 
 It should not depend on a Rust state server.
 
@@ -94,6 +94,10 @@ That same pattern should support:
 - Slack notifications
 - metrics
 - audit exports
+
+Fireline does not currently ship a dedicated Rust webhook forwarder module.
+Webhook delivery remains a deferred sink composition on top of the state stream,
+with TypeScript as the preferred consumer-side implementation surface.
 
 ## Relationship to ACP `_meta`
 

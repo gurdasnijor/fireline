@@ -11,9 +11,8 @@
 //! 4. Build the axum Router and `.merge()` in the stream Router so
 //!    `/healthz`, `/v1/stream/{name}`, `/acp`, and `/api/v1/files/*`
 //!    all live on a single listener (Option A embedding)
-//! 5. Spawn the webhook subscriber if any webhooks are configured
-//! 6. Bind the listener on `config.host:config.port` and serve
-//! 7. Return a handle that can be `.shutdown()`'d gracefully
+//! 5. Bind the listener on `config.host:config.port` and serve
+//! 6. Return a handle that can be `.shutdown()`'d gracefully
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -31,12 +30,12 @@ use uuid::Uuid;
 pub struct AppState {
     pub conductor_name: String,
     pub runtime_key: String,
-    pub agent_command: Vec<String>,
     pub node_id: String,
     pub runtime_id: String,
     pub state_producer: Producer,
     pub peer_directory_path: PathBuf,
     pub session_index: crate::session_index::SessionIndex,
+    pub shared_terminal: fireline_conductor::shared_terminal::SharedTerminal,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +47,7 @@ pub struct BootstrapConfig {
     pub node_id: String,
     pub agent_command: Vec<String>,
     pub state_stream: Option<String>,
+    pub stream_storage: Option<crate::stream_host::StreamStorageConfig>,
     pub peer_directory_path: PathBuf,
 }
 
@@ -61,6 +61,7 @@ pub struct BootstrapHandle {
     state_producer: Producer,
     peer_directory_path: PathBuf,
     session_index_task: crate::session_index::SessionIndexTask,
+    shared_terminal: fireline_conductor::shared_terminal::SharedTerminal,
     shutdown_tx: Option<oneshot::Sender<()>>,
     server_task: JoinHandle<Result<()>>,
 }
@@ -83,6 +84,8 @@ impl BootstrapHandle {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
+
+        self.shared_terminal.shutdown().await?;
 
         self.server_task
             .await
@@ -123,21 +126,25 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     let peer_directory_path = config.peer_directory_path;
     let directory = Directory::load(&peer_directory_path)?;
     let session_index = crate::session_index::SessionIndex::new();
+    let shared_terminal =
+        fireline_conductor::shared_terminal::SharedTerminal::spawn(config.agent_command).await?;
 
     let app_state = AppState {
         conductor_name: runtime_name.clone(),
         runtime_key: runtime_key.clone(),
-        agent_command: config.agent_command,
         node_id: node_id.clone(),
         runtime_id: runtime_id.clone(),
         state_producer: state_producer.clone(),
         peer_directory_path: peer_directory_path.clone(),
         session_index: session_index.clone(),
+        shared_terminal: shared_terminal.clone(),
     };
 
     let app = Router::new()
         .merge(crate::routes::acp::router(app_state))
-        .merge(crate::stream_host::build_stream_router()?);
+        .merge(crate::stream_host::build_stream_router(
+            config.stream_storage.as_ref(),
+        )?);
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let server_task = tokio::spawn(async move {
@@ -176,6 +183,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         state_producer,
         peer_directory_path,
         session_index_task,
+        shared_terminal,
         shutdown_tx: Some(shutdown_tx),
         server_task,
     })

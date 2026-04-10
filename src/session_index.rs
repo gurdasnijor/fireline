@@ -17,7 +17,7 @@ use tokio::sync::{Notify, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct SessionIndex {
     inner: Arc<RwLock<HashMap<String, SessionRecord>>>,
 }

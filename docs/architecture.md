@@ -99,7 +99,7 @@ views live in TypeScript and are expressed as `STATE-PROTOCOL` collections.
 The expected shape is:
 
 - `@fireline/state` defines the schema and projections
-- schema artifacts can be exported for Rust conformance tests
+- strict TypeScript conformance tests validate real Rust-emitted NDJSON fixtures
 - Rust emits `STATE-PROTOCOL` change messages and validates against the
   published contract where needed
 
@@ -147,6 +147,9 @@ Important nuance:
   `TraceEvent` envelopes
 
 Those are different layers and should not be conflated.
+
+The current Fireline `_meta` contract is documented in
+[`protocol/meta-fireline.md`](./protocol/meta-fireline.md).
 
 ### 6. Reusable transport-serving code belongs in `fireline-conductor`
 

@@ -51,9 +51,6 @@ toml = "0.8"
 # IDs
 uuid = { version = "1", features = ["serde", "v4"] }
 
-# JSON Schema validation (used by conformance test)
-jsonschema = "0.30"
-
 # Durable streams ecosystem
 durable-streams = { git = "https://github.com/durable-streams/durable-streams", package = "durable-streams" }
 durable-streams-server = "0.1.3"

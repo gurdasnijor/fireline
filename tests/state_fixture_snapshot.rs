@@ -2,10 +2,10 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agent_client_protocol::{InitializeRequest, ProtocolVersion};
 use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
 use fireline::bootstrap::{BootstrapConfig, start};
+use serde_json::Value;
 use uuid::Uuid;
 
 struct WebSocketTransport {
@@ -61,7 +61,7 @@ impl sacp::ConnectTo<sacp::Client> for WebSocketTransport {
 }
 
 fn testy_bin() -> String {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_fireline-testy"))
+    PathBuf::from(env!("CARGO_BIN_EXE_fireline-testy"))
         .display()
         .to_string()
 }
@@ -71,15 +71,16 @@ fn temp_peer_directory() -> PathBuf {
 }
 
 #[tokio::test]
-async fn hosted_runtime_serves_acp_and_emits_state_events() -> Result<()> {
+#[ignore = "updates the committed NDJSON conformance fixture for @fireline/state"]
+async fn update_rust_state_fixture_snapshot() -> Result<()> {
     let handle = start(BootstrapConfig {
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
-        name: "hosted-test".to_string(),
+        name: "fixture-snapshot".to_string(),
         runtime_key: format!("runtime:{}", Uuid::new_v4()),
-        node_id: "node:test-hosted".to_string(),
+        node_id: "node:test-fixture".to_string(),
         agent_command: vec![testy_bin()],
-        state_stream: None,
+        state_stream: Some(format!("fireline-fixture-{}", Uuid::new_v4())),
         stream_storage: None,
         peer_directory_path: temp_peer_directory(),
     })
@@ -89,14 +90,10 @@ async fn hosted_runtime_serves_acp_and_emits_state_events() -> Result<()> {
         WebSocketTransport {
             url: handle.acp_url.clone(),
         },
-        "hello from hosted runtime",
+        "fixture snapshot prompt",
     )
     .await?;
-
-    assert_eq!(
-        response, "Hello, world!",
-        "fireline-testy should respond through the SDK test agent"
-    );
+    assert_eq!(response, "Hello, world!");
 
     let client = DsClient::new();
     let stream = client.stream(&handle.state_stream_url);
@@ -114,90 +111,44 @@ async fn hosted_runtime_serves_acp_and_emits_state_events() -> Result<()> {
             }
         }
 
-        if body.contains("\"type\":\"prompt_turn\"") {
+        if body.contains("\"type\":\"prompt_turn\"")
+            && body.contains("\"type\":\"session\"")
+            && body.contains("\"type\":\"chunk\"")
+        {
             break;
         }
 
         if tokio::time::Instant::now() >= deadline {
-            break;
+            anyhow::bail!("timed out waiting for fixture-worthy state stream output");
         }
 
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    assert!(
-        body.contains("\"type\":\"runtime_instance\""),
-        "state stream should contain runtime instance rows: {body}"
-    );
-    assert!(
-        body.contains("\"type\":\"prompt_turn\""),
-        "state stream should contain prompt turns: {body}"
-    );
-    assert!(
-        body.contains("\"type\":\"session\""),
-        "state stream should contain session rows: {body}"
-    );
-
-    handle.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn hosted_runtime_rejects_concurrent_attachment_and_recovers_after_disconnect() -> Result<()>
-{
-    let handle = start(BootstrapConfig {
-        host: "127.0.0.1".parse::<IpAddr>()?,
-        port: 0,
-        name: "hosted-busy-test".to_string(),
-        runtime_key: format!("runtime:{}", Uuid::new_v4()),
-        node_id: "node:test-hosted".to_string(),
-        agent_command: vec![testy_bin()],
-        state_stream: None,
-        stream_storage: None,
-        peer_directory_path: temp_peer_directory(),
-    })
-    .await?;
-
-    let acp_url = handle.acp_url.clone();
-    let held_connection = tokio::spawn(async move {
-        sacp::Client
-            .builder()
-            .connect_with(
-                WebSocketTransport {
-                    url: acp_url.clone(),
-                },
-                move |cx: sacp::ConnectionTo<sacp::Agent>| async move {
-                    let _ = cx
-                        .send_request(InitializeRequest::new(ProtocolVersion::LATEST))
-                        .block_task()
-                        .await?;
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    Ok::<(), sacp::Error>(())
-                },
-            )
-            .await
-    });
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    match tokio_tungstenite::connect_async(handle.acp_url.as_str()).await {
-        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
-            assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
-        }
-        other => panic!("expected runtime_busy conflict, got {other:?}"),
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("packages")
+        .join("state")
+        .join("test")
+        .join("fixtures")
+        .join("rust-state-producer.ndjson");
+    if let Some(parent) = fixture_path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
+    let ndjson = match serde_json::from_str::<Vec<Value>>(&body) {
+        Ok(events) => events
+            .into_iter()
+            .map(|event| serde_json::to_string(&event))
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n"),
+        Err(_) => body
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
 
-    held_connection.await??;
-
-    let response = yopo::prompt(
-        WebSocketTransport {
-            url: handle.acp_url.clone(),
-        },
-        "hello after disconnect",
-    )
-    .await?;
-
-    assert_eq!(response, "Hello, world!");
+    std::fs::write(&fixture_path, format!("{ndjson}\n"))?;
 
     handle.shutdown().await?;
     Ok(())

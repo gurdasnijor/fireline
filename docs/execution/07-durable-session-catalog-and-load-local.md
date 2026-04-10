@@ -1,31 +1,35 @@
-# 07: Durable Session Index and Load Local
+# 07: Durable Session Index and Load Coordination
 
 ## Objective
 
-Prove that Fireline can durably reattach to an existing local ACP session
-without inventing a custom session engine.
+Prove that Fireline can durably catalog sessions and coordinate `session/load`
+without inventing a custom session engine or pretending cross-transport resume
+already exists.
 
 This slice is about coordination and persistence:
 
 - Fireline persists session rows to the durable state stream
 - Fireline materializes a local session index from replay + live updates
 - Fireline can restart and still know what session a client is asking for
+- Fireline returns an explicit non-resumable error when the downstream terminal
+  does not support reattach
 - the ACP SDK remains the live session implementation
 
 ## What this slice proves
 
 - `sessionId` is durably indexed by Fireline
-- a disconnected client can reconnect and call `session/load`
-- the same logical session is reattached after a Fireline restart
-- peer-created child sessions are durably discoverable
+- `session/load` is coordinated against the materialized index
 - Fireline can distinguish resumable vs nonresumable sessions
+- Fireline can restart and still return the durable session record for a known
+  session
+- non-resumable sessions fail explicitly instead of silently disappearing
 
 ## Scope
 
 - add durable `session` rows
 - build a materialized `SessionIndex` from the state stream
-- record child session bindings from peer calls
-- coordinate `session/load` against one real downstream agent/runtime
+- coordinate `session/load` against the materialized durable record
+- return explicit `session_not_resumable` when `supportsLoadSession` is false
 - keep state-stream replay and ACP reattachment as separate layers
 
 ## Non-goals
@@ -33,6 +37,8 @@ This slice is about coordination and persistence:
 - shared-session / multiplayer semantics
 - custom prompt/update loops
 - a Fireline-only session protocol
+- full cross-transport session resume
+- runtime-owned terminal/session lifetime
 - full remote crash recovery when the downstream agent lacks `loadSession`
 
 ## Core design rules
@@ -41,26 +47,43 @@ This slice is about coordination and persistence:
 2. Fireline owns durable logical session records.
 3. `session/load` is coordinated by Fireline, not reimplemented by Fireline.
 4. Durable state must be sufficient to discover session topology after restart.
+5. If the successor cannot resume, Fireline must fail explicitly and include
+   the durable record in `error.data._meta.fireline`.
 
 ## Acceptance criteria
 
 - creating a session writes a durable `session` row
-- local reconnect via `session/load(sessionId)` succeeds
+- `session/load(sessionId)` consults the materialized `SessionIndex`
+- unsupported reattach returns `session_not_resumable`
+- the error payload includes the durable session record in
+  `error.data._meta.fireline.sessionRecord`
 - restarting Fireline does not lose session lookup because the index replays
   from the durable state stream
-- peer-created child sessions are durably bound to parent prompt turns
 - no new custom ACP session engine is introduced
 
 ## Validation
 
 - Rust integration test:
   - create session
-  - disconnect
-  - reconnect and `session/load`
-  - assert same logical session resumes
+  - call `session/load`
+  - assert `session_not_resumable`
+  - assert durable `SessionRecord` is present in `error.data._meta.fireline`
 - restart integration test:
   - stop and restart Fireline
   - assert session index rebuilds from durable state
-- mesh integration test:
-  - create child session through peer call
-  - assert durable child-session binding exists
+  - assert `session/load` still returns the same durable session record
+
+## Storage note
+
+The restart-replay proof requires persistent durable-stream storage.
+
+- default in-memory stream storage is sufficient for live catalog lookup
+- restart replay requires `file-durable` or `acid` stream storage
+- this slice does not claim restart durability when the runtime is backed only
+  by in-memory stream storage
+
+## Deferred to Slice 08
+
+- runtime-owned terminal/session lifetime
+- actual cross-transport resume semantics
+- long-lived session backends independent of transient ACP attachments

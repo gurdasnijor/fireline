@@ -118,6 +118,22 @@ type SessionRecord = {
 This record is Fireline-owned durable state. It is not a new ACP protocol
 object, and it should not be duplicated into a second local file store.
 
+### Slice 07 scope boundary
+
+Slice 07 proves durable catalog lookup and restart replay, not full
+cross-transport resume.
+
+That means:
+
+- Fireline materializes `SessionRecord` rows from the durable stream
+- Fireline intercepts `session/load` and checks the materialized record
+- if the downstream agent does not advertise `loadSession`, Fireline returns an
+  explicit `session_not_resumable` error
+- the durable session record is attached at `error.data._meta.fireline`
+
+This is an honest coordination surface. It does not pretend that a fresh
+terminal subprocess can resume a session when the downstream agent cannot.
+
 ### What gets persisted
 
 At minimum, Fireline should persist in the state stream:
@@ -154,7 +170,7 @@ The current hosted `/acp` path creates a fresh conductor and terminal subprocess
 per WebSocket connection. That is sufficient for the baseline, but not for
 restart-safe `session/load`.
 
-To support durable reattachment:
+To support true cross-transport reattachment:
 
 - runtime ownership must move above the transient WebSocket connection
 - a runtime must keep or recreate session backends independently of one client
@@ -171,9 +187,11 @@ It does require Fireline to become explicit about the lifetime of:
 - ACP session binding
 - client attachment
 
+This larger refactor is intentionally deferred to Slice 08.
+
 ## Load flow
 
-The intended happy path is:
+The full happy path is:
 
 1. client obtains `RuntimeDescriptor`
 2. client connects to `runtime.acpUrl`
@@ -185,6 +203,31 @@ The intended happy path is:
 8. if supported, Fireline delegates to the SDK/agent path
 9. Fireline resumes streaming `session/update`
 10. client combines live ACP replay with durable state-stream replay if needed
+
+### Slice 07 load-coordination path
+
+The concrete behavior for Slice 07 is:
+
+1. client connects to the runtime ACP endpoint
+2. client sends `initialize`
+3. client sends `session/load(sessionId)`
+4. Fireline looks up `SessionRecord` in the materialized `SessionIndex`
+5. if no record exists, Fireline returns `resource_not_found`
+6. if a record exists but `supportsLoadSession` is false, Fireline returns:
+   - error message: `session_not_resumable`
+   - error code: Fireline custom server error
+   - error metadata: `error.data._meta.fireline.sessionRecord`
+7. if a record exists and `supportsLoadSession` is true, Fireline forwards the
+   request to the successor unchanged
+
+The exact `_meta.fireline` error contract lives in
+[`../protocol/meta-fireline.md`](../protocol/meta-fireline.md).
+
+This lets Fireline make a durable claim today:
+
+- the session is known
+- the session survives restart in the catalog
+- the runtime can tell the client exactly why reattachment is unavailable
 
 ### Restart path
 
@@ -200,6 +243,10 @@ After a runtime or host restart:
 5. Fireline either:
    - reattaches through the downstream `loadSession` capability, or
    - returns a degraded-mode failure while preserving durable history
+
+This restart path depends on the underlying state stream actually persisting
+across process exit. With Fireline's embedded stream host, that means using a
+persistent durable-streams storage mode such as `file-durable` or `acid`.
 
 ## What Fireline should not do
 
@@ -244,18 +291,18 @@ Scope:
 
 - add durable `session` rows
 - materialize a `SessionIndex` from replay + live state updates
-- capture child session bindings from peer calls
-- decouple session identity from WebSocket lifetime
-- implement local `session/load` coordination against one real agent/runtime
-- explicitly defer remote restart recovery when the downstream agent does not
-  support `loadSession`
+- implement local `session/load` coordination against the materialized index
+- return explicit `session_not_resumable` when the downstream agent does not
+  support reattachment
+- explicitly defer runtime-owned terminal/session lifetime to Slice 08
 
 Acceptance criteria:
 
-- client can disconnect and reconnect to the same local session
-- `session/load` reattaches to the same logical Fireline session
+- creating a session writes a durable `session` row
+- `session/load(sessionId)` consults the materialized `SessionIndex`
+- when the downstream agent lacks `loadSession`, Fireline returns explicit
+  `session_not_resumable` with `error.data._meta.fireline.sessionRecord`
 - session records survive a Fireline restart through state-stream replay
-- peer-created child sessions are durably discoverable from Fireline state
 - no custom ACP session engine is introduced
 
 ## Parallel work with low overlap

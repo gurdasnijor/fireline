@@ -19,7 +19,7 @@ async fn minimal_vertical_slice_prompts_and_emits_state_events() -> Result<()> {
     let addr = listener.local_addr()?;
 
     let stream_server = tokio::spawn(async move {
-        axum::serve(listener, build_stream_router()?)
+        axum::serve(listener, build_stream_router(None)?)
             .await
             .map_err(anyhow::Error::from)
     });

@@ -5,7 +5,7 @@
 //!
 //! All bootstrap logic — wiring the stream server, the ACP host
 //! routes, the conductor builder with components, the helper API,
-//! the webhook subscriber — lives in the binary's `lib.rs` module
+//! — lives in the binary's `lib.rs` module
 //! tree, not here.
 
 use anyhow::Result;
@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
             name: cli.name,
             agent_command: cli.agent_command,
             state_stream: cli.state_stream,
+            stream_storage: None,
             peer_directory_path: cli.peer_directory_path,
         })
         .await?;

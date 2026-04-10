@@ -77,6 +77,7 @@ pub struct CreateRuntimeSpec {
     pub name: String,
     pub agent_command: Vec<String>,
     pub state_stream: Option<String>,
+    pub stream_storage: Option<crate::stream_host::StreamStorageConfig>,
     pub peer_directory_path: Option<PathBuf>,
 }
 
@@ -215,6 +216,7 @@ async fn start_local_runtime(
         node_id,
         agent_command: spec.agent_command,
         state_stream: spec.state_stream,
+        stream_storage: spec.stream_storage,
         peer_directory_path,
     })
     .await
