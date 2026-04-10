@@ -33,11 +33,8 @@ async fn minimal_vertical_slice_prompts_and_emits_state_events() -> Result<()> {
     stream.create().await?;
 
     let producer = stream.producer("state-writer").build();
-    let tracer = DurableStreamTracer::new(
-        producer.clone(),
-        runtime_id,
-        "conn:minimal-vertical-slice",
-    );
+    let tracer =
+        DurableStreamTracer::new(producer.clone(), runtime_id, "conn:minimal-vertical-slice");
 
     let conductor = build_subprocess_conductor(
         "fireline-test",
@@ -59,8 +56,8 @@ async fn minimal_vertical_slice_prompts_and_emits_state_events() -> Result<()> {
     .await?;
 
     assert_eq!(
-        response, "",
-        "fireline-testy should return an empty text response"
+        response, "Hello, world!",
+        "fireline-testy should respond through the SDK test agent"
     );
 
     producer.flush().await?;

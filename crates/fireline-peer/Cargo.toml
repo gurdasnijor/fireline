@@ -16,6 +16,7 @@ async-trait.workspace = true
 # Serde
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 
 # Tracing
 tracing.workspace = true
@@ -28,10 +29,12 @@ dirs.workspace = true
 toml.workspace = true
 
 # ACP SDK
+agent-client-protocol.workspace = true
 sacp.workspace = true
+tokio-tungstenite.workspace = true
 
-# Peer transport (HTTP today, ACP-native after the spike)
-reqwest.workspace = true
+# Peer transport
+yopo.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

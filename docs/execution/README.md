@@ -14,3 +14,4 @@ Current slices:
 
 - [`01-minimal-vertical-slice.md`](./01-minimal-vertical-slice.md) — complete
 - [`02-hosted-runtime.md`](./02-hosted-runtime.md) — complete
+- [`03-acp-mesh-baseline.md`](./03-acp-mesh-baseline.md) — complete

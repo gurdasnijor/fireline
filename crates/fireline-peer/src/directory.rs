@@ -24,6 +24,8 @@ pub struct Peer {
     pub runtime_id: String,
     pub agent_name: String,
     pub acp_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_stream_url: Option<String>,
     pub registered_at_ms: i64,
 }
 

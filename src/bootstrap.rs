@@ -43,6 +43,7 @@ pub struct BootstrapConfig {
     pub name: String,
     pub agent_command: Vec<String>,
     pub state_stream: Option<String>,
+    pub peer_directory_path: Option<PathBuf>,
 }
 
 pub struct BootstrapHandle {
@@ -53,12 +54,17 @@ pub struct BootstrapHandle {
     runtime_name: String,
     runtime_created_at: i64,
     state_producer: Producer,
+    peer_directory_path: PathBuf,
     shutdown_tx: Option<oneshot::Sender<()>>,
     server_task: JoinHandle<Result<()>>,
 }
 
 impl BootstrapHandle {
     pub async fn shutdown(mut self) -> Result<()> {
+        Directory::load(&self.peer_directory_path)?
+            .unregister(&self.runtime_id)
+            .context("unregister peer runtime")?;
+
         fireline_conductor::trace::emit_runtime_instance_stopped(
             &self.state_producer,
             &self.runtime_id,
@@ -102,13 +108,17 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     let state_producer = state_stream_handle
         .producer(format!("state-writer-{runtime_uuid}"))
         .build();
+    let peer_directory_path = config
+        .peer_directory_path
+        .unwrap_or(Directory::default_path()?);
+    let directory = Directory::load(&peer_directory_path)?;
 
     let app_state = AppState {
         conductor_name: runtime_name.clone(),
         agent_command: config.agent_command,
         runtime_id: runtime_id.clone(),
         state_producer: state_producer.clone(),
-        peer_directory_path: Directory::default_path()?,
+        peer_directory_path: peer_directory_path.clone(),
     };
 
     let app = Router::new()
@@ -132,6 +142,13 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         &runtime_name,
         runtime_created_at,
     );
+    directory.register(fireline_peer::directory::Peer {
+        runtime_id: runtime_id.clone(),
+        agent_name: runtime_name.clone(),
+        acp_url: acp_url.clone(),
+        state_stream_url: Some(state_stream_url.clone()),
+        registered_at_ms: runtime_created_at,
+    })?;
 
     Ok(BootstrapHandle {
         runtime_id,
@@ -141,6 +158,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         runtime_name,
         runtime_created_at,
         state_producer,
+        peer_directory_path,
         shutdown_tx: Some(shutdown_tx),
         server_task,
     })

@@ -55,6 +55,7 @@ async fn main() -> Result<()> {
         name: cli.name,
         agent_command: cli.agent_command,
         state_stream: cli.state_stream,
+        peer_directory_path: None,
     })
     .await?;
 

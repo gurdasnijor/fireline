@@ -71,6 +71,7 @@ async fn hosted_runtime_serves_acp_and_emits_state_events() -> Result<()> {
         name: "hosted-test".to_string(),
         agent_command: vec![testy_bin()],
         state_stream: None,
+        peer_directory_path: None,
     })
     .await?;
 
@@ -83,8 +84,8 @@ async fn hosted_runtime_serves_acp_and_emits_state_events() -> Result<()> {
     .await?;
 
     assert_eq!(
-        response, "",
-        "fireline-testy should return an empty text response"
+        response, "Hello, world!",
+        "fireline-testy should respond through the SDK test agent"
     );
 
     let client = DsClient::new();
