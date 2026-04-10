@@ -141,7 +141,53 @@ GET /v1/components/{name}/schema          → JSON Schema
 
 ## 3. Data plane — concrete spec
 
-The data plane is **three kinds of process**, not one. They are all data plane because they all carry session-adjacent traffic.
+The data plane is **three kinds of process**, not one. They are all data plane because they all carry session-adjacent traffic — but they play three distinct *roles* that are worth naming explicitly before the per-process specs.
+
+### Three roles
+
+```text
+                ┌─────────────────────────────────┐
+                │  COMPUTE — runtime processes    │
+                │                                 │
+                │  fireline binary × N            │
+                │   - accepts ACP connections     │
+                │   - runs agent subprocess       │
+                │   - EMITS trace events          │
+                └────────────┬────────────────────┘
+                             │ writes
+                             ▼
+                ┌─────────────────────────────────┐
+                │  PERSISTENCE — durable streams  │
+                │                                 │
+                │  durable-streams-server × 1     │
+                │   - STORES events durably       │
+                │   - BROADCASTS via SSE          │
+                │   - one stream per runtime      │
+                └────────────┬────────────────────┘
+                             │ reads
+                             ▼
+                ┌─────────────────────────────────┐
+                │  CONSUMERS — materializers      │
+                │                                 │
+                │  runtime-local (inside compute):│
+                │   - SessionIndex                │
+                │   - ActiveTurnIndex             │
+                │   - RuntimeMaterializer         │
+                │                                 │
+                │  external:                      │
+                │   - TS StreamDB (browser)       │
+                │   - Flamecast observer          │
+                │   - audit sinks                 │
+                └─────────────────────────────────┘
+```
+
+- **Compute** — the fireline runtime binaries. Ephemeral, many, spawned and torn down by the control plane. Accept ACP connections, host agent subprocesses, emit trace events. See §3a.
+- **Persistence** — the shared durable-streams deployment. Long-lived, one-per-environment, stateful, operationally independent of the control plane and of any individual runtime. Stores events durably, broadcasts via SSE. See §3b.
+- **Consumers** — materializers that *read* events and project them into queryable views. Some live inside compute processes (the runtime-local `SessionIndex`, `ActiveTurnIndex`, `RuntimeMaterializer`); others are external (TS `StreamDB` in the browser, Flamecast, audit sinks, future observers). Consumers are cross-cutting and don't have a dedicated subsection — they live wherever a query needs to be served.
+
+**Materialization happens in consumers, not in the persistence tier.** The DS server doesn't know what an event means — it stores bytes and broadcasts them. Every projection, every derived state, every "what's the active turn for session X?" answer is computed by a consumer reading from its subscription. This is what lets per-runtime streams and runtime-local materializers compose cleanly: the persistence layer has no opinion about entity types, so consumers can layer whatever projections they need without server-side schema coordination.
+
+Peer-to-peer ACP traffic (§3c) is a fourth wire shape — compute-to-compute traffic that bypasses persistence entirely. It's still data plane (it carries session payloads), but it doesn't participate in the three-role flow above.
 
 ### 3a. Fireline runtime binary (existing `fireline`)
 
@@ -185,9 +231,25 @@ GET  /api/v1/files/{...}            helper file API
 
 ### 3b. Shared durable-streams deployment
 
-**One process — or cluster — per environment.** Runs the upstream `durable-streams-server` binary unchanged. Fireline does not fork or extend it.
+**The persistence tier.** Functionally, a **durable append-only log with publish/subscribe** — think "Kafka's storage tier with SSE as the subscription transport, minus the partitioning." One process or cluster per environment. Runs the upstream `durable-streams-server` binary unchanged; Fireline does not fork or extend it.
 
-Each Fireline runtime creates and writes to **its own** stream in this deployment:
+#### What it IS
+
+- An append-only log server that stores event bytes durably
+- A fan-out point for SSE (or long-poll) subscriptions
+- The single source of truth for "what happened" in an environment
+- The longest-lived infrastructure in the stack — survives every runtime restart, every control plane restart, every consumer reconnect
+
+#### What it is NOT
+
+- **Not a stream processor.** It does not transform, filter, route between streams, or join. Bytes go in; the same bytes come out to subscribers in the order they were written.
+- **Not a materialization layer.** Materialization happens in consumers (runtime-local projections, TS `StreamDB`, Flamecast, audit pipelines). The DS server has no schema awareness and no opinion about what an event means.
+- **Not Fireline-aware.** The DS server knows nothing about Fireline's concepts — `TraceEnvelopeV2`, `SessionIndex`, ACP lineage, topology, peers. Every piece of Fireline semantics lives in Fireline's code on both ends of the wire (producer at write time, consumer at read time).
+- **Not a control-plane component.** The DS deployment does not know about the control plane. The control plane does not manage the DS deployment's lifecycle. They are independent services that happen to trust tokens issued by the same authority.
+
+#### Stream naming
+
+One stream per runtime, named by `runtime_key`:
 
 ```text
 https://ds.example.com/v1/stream/fireline-state-runtime-a
@@ -195,17 +257,35 @@ https://ds.example.com/v1/stream/fireline-state-runtime-b
 https://ds.example.com/v1/stream/fireline-state-runtime-c
 ```
 
-Fireline's `trace.rs` producer points at the external DS URL via `FIRELINE_EXTERNAL_STATE_STREAM_URL`. The runtime-local materializer reads from the same URL for its own stream.
+This is a deliberate choice over "one global stream for all runtimes." Per-runtime streams mean each runtime-local materializer's subscription has simple replay boundaries, each consumer knows exactly what scope it's observing, and the persistence tier doesn't have to carry any Fireline-specific filtering logic. A global aggregate stream may be valuable later for cross-runtime observers; it should be additive, not a replacement.
 
-**Auth:** bearer tokens issued by the control plane. The DS server's existing auth hooks are used; there is no Fireline-specific proxy in front of it.
+#### The two wire paths
 
-**Data plane traffic shape:**
+The DS server participates in the data-plane API conversation via exactly **two HTTP paths**:
 
-- Writes from runtimes — hot, per-session.
-- Reads from runtimes — continuous SSE subscription to the runtime's own stream.
-- Reads from observers (Flamecast, TS clients) — SSE subscriptions to many runtime streams.
+1. **Writes (from runtimes).** `POST` / `PUT` against `/v1/stream/{name}` with JSON bodies. One write per trace event, one stream per runtime. Produced by `fireline_conductor::trace::DurableStreamTracer` via a `durable_streams::Producer` handle pointed at the stream URL. `FIRELINE_EXTERNAL_STATE_STREAM_URL` on the runtime side picks whether the producer targets an embedded DS (dev mode) or the shared deployment (control-plane mode).
 
-**Control-plane dependency:** none. The DS deployment does not know about the control plane. The control plane does not manage the DS deployment's lifecycle. They are independent services that happen to trust tokens issued by the same authority.
+2. **Reads (from consumers).** `GET` with SSE or long-poll against `/v1/stream/{name}`, with `offset` and `live` parameters. One SSE subscription per consumer per stream. Consumed by:
+   - Runtime-local `RuntimeMaterializer` reading its own runtime's stream to populate `SessionIndex`, `ActiveTurnIndex`, and any future projection.
+   - TS `@durable-streams/state` `StreamDB` for browser-side reactive queries.
+   - Future: Flamecast cross-runtime observer reading N runtime streams in parallel and stitching them by lineage fields (`traceId`, `parentPromptTurnId`).
+
+Neither path goes through the control plane. Neither path requires the control plane to be reachable once the DS endpoint is known. **The control plane is the discovery step; the DS server is the data step.** TS clients call `client.host.get(runtimeKey)` to receive a `RuntimeDescriptor` whose `state: Endpoint` carries the DS URL + auth header; from that moment on, all reads flow directly between consumer and DS server without the control plane in the loop.
+
+#### Auth
+
+Bearer tokens issued by the control plane. The DS server's existing auth hooks validate them; there is no Fireline-specific proxy in front of it. The control plane mints tokens scoped to specific streams (write-to-own-stream for runtimes, read-from-N-streams for observers); the DS server validates against whatever scheme the control plane signs. See §2's token issuance endpoint.
+
+#### Independence and lifetime
+
+The DS deployment has its own lifecycle, independent of the control plane and of any runtime:
+
+- It starts before the control plane does, or alongside; ordering isn't strict because the control plane never calls the DS server.
+- It survives control plane restarts unchanged — runtimes keep writing, consumers keep reading.
+- It survives runtime restarts unchanged — a new runtime process with the same `runtime_key` continues writing to the same stream; the stream persists across the gap.
+- Scaling, replicating, or replacing the DS deployment (say, moving from in-memory dev mode to a clustered production deployment) should not require touching any other tier. Consumers reconnect; writers reconnect; nothing else cares.
+
+**This independence is the load-bearing reason** we chose "one deployment per environment, one stream per runtime" over "one embedded DS per runtime." The embedded model ties persistence to compute lifetime, which breaks the moment a runtime restarts and the stream it wrote to vanishes with it. The shared-deployment model makes persistence durable across every other tier in the stack, and it's what lets consumers like Flamecast observe a mixed multi-runtime fabric without needing to coordinate with compute-tier lifecycle at all.
 
 ### 3c. Peer-to-peer ACP traffic
 
@@ -422,7 +502,7 @@ These are deliberately **not** pinned by this doc. They will be decided inside s
    **No.** `RuntimeHost` is a Rust library type that owns provider-backed runtime lifecycle in a single process. The control plane is a process that *embeds* `RuntimeHost` and exposes it over HTTP. In dev mode, `client.host`'s direct adapter embeds `RuntimeHost` too — same type, no HTTP hop. Two deployments of the same primitive.
 
 2. **Does the durable-streams server belong to the control plane?**
-   **No.** It is data plane infrastructure. It is authenticated via tokens the control plane issues, but it is operationally independent and can be scaled, replicated, or replaced without touching the control plane.
+   **No. It is the persistence tier of the data plane** — see §3's three-role framing (compute, persistence, consumers). The DS server stores and broadcasts events but does not process them; it is not a stream processor and not a materialization layer. Materialization happens in consumers (runtime-local projections, TS `StreamDB`, Flamecast), never in the persistence tier itself. The DS deployment is authenticated via tokens the control plane issues but is operationally independent — its lifecycle, scaling, replication, and replacement are all decisions that can be made without touching the control plane or any runtime.
 
 3. **Where does auth happen?**
    **Control plane mints, data plane validates.** Every data-plane surface (ACP, helper files, durable-streams) accepts a bearer token in `Authorization:` and validates it against a known-good set — either a shared secret the control plane signs, a call back to the control plane's validation endpoint, or JWT signature verification. The implementation detail is open; the principle is "one authority."
