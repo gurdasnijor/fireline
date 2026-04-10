@@ -44,7 +44,10 @@ pub async fn handle_upgrade(
                     Some(Ok(line))
                 }
             }),
-            Ok(Message::Close(_)) => None,
+            Ok(Message::Close(_)) => Some(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "websocket closed",
+            ))),
             Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => None,
             Err(err) => Some(Err(std::io::Error::other(err))),
         }

@@ -18,20 +18,23 @@
   },
   "scripts": {
     "build": "tsc",
+    "test:browser": "pnpm --dir ../.. --filter @fireline/browser-harness predev && vitest run --config vitest.browser.config.ts",
     "test": "vitest run",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@iarna/toml": "^2.2.5",
     "@agentclientprotocol/sdk": "^0.18.1",
     "@durable-streams/state": "^0.2.3",
     "@fireline/state": "workspace:*",
+    "@iarna/toml": "^2.2.5",
     "@tanstack/db": "^0.6.4",
     "ws": "^8.18.3"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/ws": "^8.18.1",
+    "@vitest/browser": "^2.1.9",
+    "playwright": "^1.59.1",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
   }

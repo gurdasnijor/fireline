@@ -1,0 +1,13 @@
+import { defineConfig } from 'vitest/config'
+
+export default defineConfig({
+  test: {
+    include: ['test/**/*.test.ts'],
+    exclude: [
+      'test/browser-acp.browser.test.ts',
+      '**/node_modules/**',
+      '**/dist/**',
+      '**/__screenshots__/**',
+    ],
+  },
+})
