@@ -28,3 +28,7 @@ Current slices:
   - [`13-distributed-runtime-fabric/phase-0-runtime-host-and-peer-registry-refactor.md`](./13-distributed-runtime-fabric/phase-0-runtime-host-and-peer-registry-refactor.md) — planned prerequisite refactor
   - [`13-distributed-runtime-fabric/13a-control-plane-runtime-api-and-external-durable-stream-bootstrap.md`](./13-distributed-runtime-fabric/13a-control-plane-runtime-api-and-external-durable-stream-bootstrap.md) — planned first implementation slice
   - [`13-distributed-runtime-fabric/13b-docker-provider-and-mixed-topology.md`](./13-distributed-runtime-fabric/13b-docker-provider-and-mixed-topology.md) — planned mixed-topology expansion
+- [`14-runs-and-sessions-api.md`](./14-runs-and-sessions-api.md) — planned
+- [`15-workspace-object.md`](./15-workspace-object.md) — planned
+- [`16-capability-profiles.md`](./16-capability-profiles.md) — planned
+- [`17-out-of-band-approvals.md`](./17-out-of-band-approvals.md) — planned
