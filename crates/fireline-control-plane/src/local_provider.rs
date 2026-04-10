@@ -139,8 +139,8 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
         Ok(RuntimeLaunch {
             runtime_id: descriptor.runtime_id.clone(),
             provider_instance_id: descriptor.provider_instance_id.clone(),
-            acp_url: descriptor.acp_url.clone(),
-            state_stream_url: descriptor.state_stream_url.clone(),
+            acp: descriptor.acp.clone(),
+            state: descriptor.state.clone(),
             helper_api_base_url: descriptor.helper_api_base_url.clone(),
             runtime: Box::new(SpawnedRuntime {
                 child,

@@ -7,7 +7,7 @@ use crate::runtime_provider::BootstrapRuntimeLauncher;
 use crate::runtime_registry::RuntimeRegistry;
 
 pub use fireline_conductor::runtime::{
-    CreateRuntimeSpec, RuntimeDescriptor, RuntimeProviderKind, RuntimeProviderRequest,
+    CreateRuntimeSpec, Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeProviderRequest,
     RuntimeStatus, StreamStorageConfig, StreamStorageMode,
 };
 

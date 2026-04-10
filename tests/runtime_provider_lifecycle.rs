@@ -46,8 +46,8 @@ async fn runtime_host_pins_provider_and_persists_runtime_descriptor() -> Result<
     assert_eq!(descriptor.status, RuntimeStatus::Ready);
     assert!(descriptor.runtime_key.starts_with("runtime:"));
     assert!(descriptor.runtime_id.starts_with("fireline:provider-test:"));
-    assert!(descriptor.acp_url.starts_with("ws://"));
-    assert!(descriptor.state_stream_url.starts_with("http://"));
+    assert!(descriptor.acp.url.starts_with("ws://"));
+    assert!(descriptor.state.url.starts_with("http://"));
 
     let listed = runtime_host.list()?;
     assert_eq!(listed.len(), 1);

@@ -26,6 +26,11 @@ export type RuntimeStatus =
   | 'broken'
   | 'stopped'
 
+export interface Endpoint {
+  url: string
+  headers?: Record<string, string>
+}
+
 export interface RuntimeDescriptor {
   runtimeKey: string
   runtimeId: string
@@ -33,8 +38,8 @@ export interface RuntimeDescriptor {
   provider: RuntimeProviderKind
   providerInstanceId: string
   status: RuntimeStatus
-  acpUrl: string
-  stateStreamUrl: string
+  acp: Endpoint
+  state: Endpoint
   helperApiBaseUrl?: string
   createdAtMs: number
   updatedAtMs: number

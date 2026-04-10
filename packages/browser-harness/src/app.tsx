@@ -49,8 +49,14 @@ type HarnessRuntime = {
   runtimeKey: string
   runtimeId: string
   status: string
-  acpUrl: string
-  stateStreamUrl: string
+  acp: {
+    url: string
+    headers?: Record<string, string>
+  }
+  state: {
+    url: string
+    headers?: Record<string, string>
+  }
 }
 
 const DbContext = createContext<FirelineDB | null>(null)

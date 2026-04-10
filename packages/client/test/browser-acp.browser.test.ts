@@ -24,10 +24,10 @@ describe('browser client ACP + StreamDB', () => {
       })
 
       const runtime = await waitForRuntimeReady(harnessApiBase, created.runtime.runtimeKey)
-      const db = client.state.open({ stateStreamUrl: runtime.stateStreamUrl })
+      const db = client.state.open({ stateStreamUrl: runtime.state.url })
       await db.preload()
 
-      const firstConnection = await connectWithRetry(client, runtime.acpUrl)
+      const firstConnection = await connectWithRetry(client, runtime.acp.url)
       const firstUpdates = firstConnection.updates()[Symbol.asyncIterator]()
 
       try {
@@ -86,7 +86,7 @@ describe('browser client ACP + StreamDB', () => {
 
         await firstConnection.close()
 
-        const secondConnection = await connectWithRetry(client, runtime.acpUrl)
+        const secondConnection = await connectWithRetry(client, runtime.acp.url)
         const secondUpdates = secondConnection.updates()[Symbol.asyncIterator]()
 
         try {
@@ -176,8 +176,14 @@ type HarnessRuntime = {
   runtimeKey: string
   runtimeId: string
   status: string
-  acpUrl: string
-  stateStreamUrl: string
+  acp: {
+    url: string
+    headers?: Record<string, string>
+  }
+  state: {
+    url: string
+    headers?: Record<string, string>
+  }
 }
 
 async function waitForRuntimeReady(

@@ -52,10 +52,10 @@ describe('client.acp.connect', () => {
         peerDirectoryPath: join(tempRoot, 'peers.toml'),
       })
 
-      const db = client.state.open({ stateStreamUrl: runtime.stateStreamUrl })
+      const db = client.state.open({ stateStreamUrl: runtime.state.url })
       await db.preload()
 
-      const acp = await client.acp.connect({ url: runtime.acpUrl })
+      const acp = await client.acp.connect({ url: runtime.acp.url })
       const updates = acp.updates()[Symbol.asyncIterator]()
       const conn = acp.connection
 

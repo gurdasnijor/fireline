@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use fireline_conductor::runtime::{
-    CreateRuntimeSpec, LocalRuntimeLauncher, ManagedRuntime, RuntimeLaunch,
+    CreateRuntimeSpec, Endpoint, LocalRuntimeLauncher, ManagedRuntime, RuntimeLaunch,
 };
 
 use crate::bootstrap::{BootstrapConfig, BootstrapHandle};
@@ -39,8 +39,8 @@ impl LocalRuntimeLauncher for BootstrapRuntimeLauncher {
         Ok(RuntimeLaunch {
             runtime_id: handle.runtime_id.clone(),
             provider_instance_id: handle.runtime_id.clone(),
-            acp_url: handle.acp_url.clone(),
-            state_stream_url: handle.state_stream_url.clone(),
+            acp: Endpoint::new(handle.acp_url.clone()),
+            state: Endpoint::new(handle.state_stream_url.clone()),
             helper_api_base_url: None,
             runtime: Box::new(handle),
         })

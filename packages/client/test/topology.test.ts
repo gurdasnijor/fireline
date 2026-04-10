@@ -67,7 +67,7 @@ describe('runtime topology', () => {
       8_000,
     )
 
-    const acp = await client.acp.connect({ url: runtime.acpUrl })
+    const acp = await client.acp.connect({ url: runtime.acp.url })
     const updates = acp.updates()[Symbol.asyncIterator]()
 
     try {
@@ -111,7 +111,7 @@ describe('runtime topology', () => {
       expect(update.update.content.text).toContain('Injected runtime context')
       expect(update.update.content.text).toContain('Original prompt')
 
-      const auditStreamUrl = deriveSiblingStreamUrl(runtime.stateStreamUrl, auditStreamName)
+      const auditStreamUrl = deriveSiblingStreamUrl(runtime.state.url, auditStreamName)
       const auditBody = await withStepTimeout(
         'read audit stream catch-up',
         readStreamUntil(auditStreamUrl, '"method":"session/prompt"'),
@@ -148,7 +148,7 @@ describe('runtime topology', () => {
       8_000,
     )
 
-    const acp = await client.acp.connect({ url: runtime.acpUrl })
+    const acp = await client.acp.connect({ url: runtime.acp.url })
     const updates = acp.updates()[Symbol.asyncIterator]()
 
     try {

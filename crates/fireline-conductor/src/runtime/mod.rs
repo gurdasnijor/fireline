@@ -6,7 +6,7 @@ mod registry;
 pub use self::local::{LocalProvider, LocalRuntimeLauncher};
 pub use self::manager::RuntimeManager;
 pub use self::provider::{
-    CreateRuntimeSpec, ManagedRuntime, RuntimeDescriptor, RuntimeLaunch, RuntimeProvider,
+    CreateRuntimeSpec, Endpoint, ManagedRuntime, RuntimeDescriptor, RuntimeLaunch, RuntimeProvider,
     RuntimeProviderKind, RuntimeProviderRequest, RuntimeStatus, StreamStorageConfig,
     StreamStorageMode,
 };
@@ -60,8 +60,8 @@ impl RuntimeHost {
             provider: RuntimeProviderKind::Local,
             provider_instance_id: runtime_key.clone(),
             status: RuntimeStatus::Starting,
-            acp_url: String::new(),
-            state_stream_url: String::new(),
+            acp: Endpoint::new(""),
+            state: Endpoint::new(""),
             helper_api_base_url: None,
             created_at_ms,
             updated_at_ms: created_at_ms,
@@ -87,8 +87,8 @@ impl RuntimeHost {
             provider,
             provider_instance_id: launch.provider_instance_id.clone(),
             status: RuntimeStatus::Ready,
-            acp_url: launch.acp_url.clone(),
-            state_stream_url: launch.state_stream_url.clone(),
+            acp: launch.acp.clone(),
+            state: launch.state.clone(),
             helper_api_base_url: launch.helper_api_base_url.clone(),
             created_at_ms,
             updated_at_ms: now_ms(),

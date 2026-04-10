@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
@@ -34,6 +35,23 @@ pub enum RuntimeStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct Endpoint {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<BTreeMap<String, String>>,
+}
+
+impl Endpoint {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            headers: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeDescriptor {
     pub runtime_key: String,
     pub runtime_id: String,
@@ -41,8 +59,8 @@ pub struct RuntimeDescriptor {
     pub provider: RuntimeProviderKind,
     pub provider_instance_id: String,
     pub status: RuntimeStatus,
-    pub acp_url: String,
-    pub state_stream_url: String,
+    pub acp: Endpoint,
+    pub state: Endpoint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub helper_api_base_url: Option<String>,
     pub created_at_ms: i64,
@@ -95,8 +113,8 @@ pub struct CreateRuntimeSpec {
 pub struct RuntimeLaunch {
     pub runtime_id: String,
     pub provider_instance_id: String,
-    pub acp_url: String,
-    pub state_stream_url: String,
+    pub acp: Endpoint,
+    pub state: Endpoint,
     pub helper_api_base_url: Option<String>,
     pub runtime: Box<dyn ManagedRuntime>,
 }

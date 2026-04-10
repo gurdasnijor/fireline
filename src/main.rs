@@ -11,7 +11,7 @@
 use anyhow::Result;
 use clap::Parser;
 use fireline::bootstrap::{self, BootstrapConfig};
-use fireline::runtime_host::{RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
+use fireline::runtime_host::{Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
 use fireline::runtime_registry::RuntimeRegistry;
 use fireline_conductor::topology::TopologySpec;
 use std::net::IpAddr;
@@ -153,8 +153,8 @@ async fn run_managed_runtime(
         provider: RuntimeProviderKind::Local,
         provider_instance_id: handle.runtime_id.clone(),
         status: RuntimeStatus::Ready,
-        acp_url: handle.acp_url.clone(),
-        state_stream_url: handle.state_stream_url.clone(),
+        acp: Endpoint::new(handle.acp_url.clone()),
+        state: Endpoint::new(handle.state_stream_url.clone()),
         helper_api_base_url: None,
         created_at_ms: started_at_ms,
         updated_at_ms: started_at_ms,
@@ -184,8 +184,8 @@ fn log_runtime_started(descriptor: &RuntimeDescriptor) {
         runtime_key = %descriptor.runtime_key,
         runtime_id = %descriptor.runtime_id,
         provider = ?descriptor.provider,
-        acp_url = %descriptor.acp_url,
-        state_stream_url = %descriptor.state_stream_url,
+        acp_url = %descriptor.acp.url,
+        state_stream_url = %descriptor.state.url,
         "fireline runtime started"
     );
 }

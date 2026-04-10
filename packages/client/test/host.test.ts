@@ -73,8 +73,8 @@ describe('client.host', () => {
     expect(created.status).toBe('ready')
     expect(created.runtimeKey).toMatch(/^runtime:/)
     expect(created.runtimeId).toMatch(/^fireline:ts-host-/)
-    expect(created.acpUrl).toMatch(/^ws:\/\//)
-    expect(created.stateStreamUrl).toMatch(/^http:\/\//)
+    expect(created.acp.url).toMatch(/^ws:\/\//)
+    expect(created.state.url).toMatch(/^http:\/\//)
 
     const fetched = await host.get(created.runtimeKey)
     expect(fetched).toEqual(created)
@@ -132,8 +132,8 @@ describe('client.host', () => {
     expect(created.status).toBe('ready')
     expect(created.runtimeKey).toMatch(/^runtime:/)
     expect(created.runtimeId).toMatch(/^fireline:cp-host-/)
-    expect(created.acpUrl).toMatch(/^ws:\/\//)
-    expect(created.stateStreamUrl).toMatch(/^http:\/\//)
+    expect(created.acp.url).toMatch(/^ws:\/\//)
+    expect(created.state.url).toMatch(/^http:\/\//)
 
     const fetched = await host.get(created.runtimeKey)
     expect(fetched).toEqual(created)
