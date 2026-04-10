@@ -16,6 +16,8 @@ export const promptTurnSchema = z.object({
   logicalConnectionId: z.string(),
   sessionId: z.string(),
   requestId: z.string(),
+  traceId: z.string().optional(),
+  parentPromptTurnId: z.string().optional(),
   text: z.string().optional(),
   state: z.enum([
     'queued',

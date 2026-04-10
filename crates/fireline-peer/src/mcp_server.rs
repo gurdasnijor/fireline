@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::directory::Directory;
 use crate::transport;
+use fireline_conductor::lineage::LineageTracker;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct ListPeersInput {}
@@ -51,6 +52,7 @@ pub(crate) struct PromptPeerOutput {
 
 pub(crate) fn build_peer_mcp_server(
     directory: Directory,
+    lineage_tracker: LineageTracker,
 ) -> sacp::mcp_server::McpServer<Conductor, impl sacp::RunWithConnectionTo<Conductor>> {
     sacp::mcp_server::McpServer::builder("fireline-peer")
         .instructions("Discover and prompt peer Fireline runtimes over ACP.")
@@ -82,7 +84,8 @@ pub(crate) fn build_peer_mcp_server(
             "Send a prompt to a named Fireline peer and return its response.",
             {
                 let directory = directory.clone();
-                async move |input: PromptPeerInput, _cx| {
+                let lineage_tracker = lineage_tracker.clone();
+                async move |input: PromptPeerInput, cx| {
                     let peer = directory
                         .lookup(&input.agent_name)
                         .map_err(|e| sacp::util::internal_error(format!("lookup peer: {e}")))?
@@ -93,14 +96,23 @@ pub(crate) fn build_peer_mcp_server(
                             ))
                         })?;
 
-                    let result = transport::dispatch_peer_call(&peer, &input.prompt, None)
-                        .await
-                        .map_err(|e| {
-                            sacp::util::internal_error(format!(
-                                "prompt peer '{}': {e}",
-                                input.agent_name
-                            ))
-                        })?;
+                    let parent_lineage =
+                        lineage_tracker
+                            .lineage_for_acp_url(&cx.acp_url())
+                            .map(|lineage| transport::ParentLineage {
+                                trace_id: Some(lineage.trace_id),
+                                parent_prompt_turn_id: Some(lineage.prompt_turn_id),
+                            });
+
+                    let result =
+                        transport::dispatch_peer_call(&peer, &input.prompt, parent_lineage)
+                            .await
+                            .map_err(|e| {
+                                sacp::util::internal_error(format!(
+                                    "prompt peer '{}': {e}",
+                                    input.agent_name
+                                ))
+                            })?;
 
                     Ok(PromptPeerOutput {
                         runtime_id: peer.runtime_id,

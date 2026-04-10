@@ -24,6 +24,8 @@ use sacp_conductor::trace::{
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::lineage::LineageTracker;
+
 #[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
 #[serde(rename_all = "snake_case")]
@@ -98,6 +100,10 @@ struct PromptTurnRow {
     logical_connection_id: String,
     session_id: String,
     request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_prompt_turn_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
     state: PromptTurnState,
@@ -177,11 +183,33 @@ struct StateEnvelope<T> {
 struct TraceCorrelationState {
     prompt_request_to_turn: HashMap<String, String>,
     prompt_turns: HashMap<String, PromptTurnRow>,
-    pending_session_new: HashMap<String, ()>,
+    pending_session_new: HashMap<String, PendingSessionNew>,
+    pending_session_new_order: Vec<String>,
     pending_requests: HashMap<String, PendingRequestRow>,
     session_active_turn: HashMap<String, String>,
     chunk_seq: HashMap<String, i64>,
     turn_counter: u64,
+}
+
+#[derive(Debug, Default)]
+struct PendingSessionNew {
+    mcp_acp_urls: Vec<String>,
+}
+
+impl PendingSessionNew {
+    fn merge_mcp_acp_urls(&mut self, urls: Vec<String>) {
+        for url in urls {
+            if !self.mcp_acp_urls.contains(&url) {
+                self.mcp_acp_urls.push(url);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct InheritedLineage {
+    trace_id: Option<String>,
+    parent_prompt_turn_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +226,8 @@ pub struct DurableStreamTracer {
     logical_connection_id: String,
     connection: ConnectionRow,
     correlation: TraceCorrelationState,
+    inherited_lineage: InheritedLineage,
+    lineage_tracker: LineageTracker,
 }
 
 impl DurableStreamTracer {
@@ -205,6 +235,20 @@ impl DurableStreamTracer {
         producer: Producer,
         runtime_id: impl Into<String>,
         logical_connection_id: impl Into<String>,
+    ) -> Self {
+        Self::new_with_tracker(
+            producer,
+            runtime_id,
+            logical_connection_id,
+            LineageTracker::default(),
+        )
+    }
+
+    pub fn new_with_tracker(
+        producer: Producer,
+        runtime_id: impl Into<String>,
+        logical_connection_id: impl Into<String>,
+        lineage_tracker: LineageTracker,
     ) -> Self {
         let runtime_id = runtime_id.into();
         let logical_connection_id = logical_connection_id.into();
@@ -233,6 +277,8 @@ impl DurableStreamTracer {
             logical_connection_id,
             connection,
             correlation: TraceCorrelationState::default(),
+            inherited_lineage: InheritedLineage::default(),
+            lineage_tracker,
         }
     }
 }
@@ -252,14 +298,34 @@ impl WriteEvent for DurableStreamTracer {
 
 impl DurableStreamTracer {
     fn handle_request(&mut self, req: &RequestEvent) {
-        if !is_canonical_client_request(req) {
-            return;
-        }
-
         match req.method.as_str() {
+            "initialize" | "_proxy/initialize" => {
+                if !is_canonical_client_request(req) {
+                    return;
+                }
+                self.inherited_lineage = parse_fireline_lineage(&req.params);
+            }
             "session/new" => {
                 let request_id = req.id.to_string();
-                self.correlation.pending_session_new.insert(request_id.clone(), ());
+                self.correlation
+                    .pending_session_new
+                    .entry(request_id.clone())
+                    .or_default()
+                    .merge_mcp_acp_urls(extract_mcp_acp_urls(&req.params));
+
+                if !is_canonical_client_request(req) {
+                    return;
+                }
+
+                if !self
+                    .correlation
+                    .pending_session_new_order
+                    .contains(&request_id)
+                {
+                    self.correlation
+                        .pending_session_new_order
+                        .push(request_id.clone());
+                }
 
                 let pending = PendingRequestRow {
                     request_id: request_id.clone(),
@@ -283,7 +349,29 @@ impl DurableStreamTracer {
                     Some(&pending),
                 );
             }
+            "_mcp/connect" => {
+                let Some(acp_url) = req.params.get("acp_url").and_then(Value::as_str) else {
+                    return;
+                };
+                let Some(pending_request_id) = self
+                    .correlation
+                    .pending_session_new_order
+                    .first()
+                    .cloned()
+                else {
+                    return;
+                };
+
+                self.correlation
+                    .pending_session_new
+                    .entry(pending_request_id)
+                    .or_default()
+                    .merge_mcp_acp_urls(vec![acp_url.to_string()]);
+            }
             "session/prompt" => {
+                if !is_canonical_client_request(req) {
+                    return;
+                }
                 let session_id = req
                     .params
                     .get("sessionId")
@@ -293,6 +381,12 @@ impl DurableStreamTracer {
                     .to_string();
                 let request_id = req.id.to_string();
                 let prompt_turn_id = self.next_prompt_turn_id();
+                let trace_id = self
+                    .inherited_lineage
+                    .trace_id
+                    .clone()
+                    .unwrap_or_else(|| prompt_turn_id.clone());
+                let parent_prompt_turn_id = self.inherited_lineage.parent_prompt_turn_id.clone();
                 let text = req
                     .params
                     .get("prompt")
@@ -311,6 +405,8 @@ impl DurableStreamTracer {
                     logical_connection_id: self.logical_connection_id.clone(),
                     session_id: session_id.clone(),
                     request_id: request_id.clone(),
+                    trace_id: Some(trace_id.clone()),
+                    parent_prompt_turn_id,
                     text,
                     state: PromptTurnState::Active,
                     position: None,
@@ -328,6 +424,8 @@ impl DurableStreamTracer {
                 self.correlation
                     .prompt_turns
                     .insert(prompt_turn_id.clone(), turn);
+                self.lineage_tracker
+                    .note_active_turn(&session_id, &trace_id, &prompt_turn_id);
 
                 let pending = PendingRequestRow {
                     request_id: request_id.clone(),
@@ -358,7 +456,12 @@ impl DurableStreamTracer {
     fn handle_response(&mut self, resp: &ResponseEvent) {
         let request_id = resp.id.to_string();
 
-        if self.correlation.pending_session_new.remove(&request_id).is_some() {
+        if let Some(pending_session_new) = self.correlation.pending_session_new.remove(&request_id)
+        {
+            self.correlation
+                .pending_session_new_order
+                .retain(|pending_id| pending_id != &request_id);
+
             if let Some(mut pending) = self.correlation.pending_requests.remove(&request_id) {
                 pending.state = PendingRequestState::Resolved;
                 pending.resolved_at = Some(now_ms());
@@ -383,6 +486,8 @@ impl DurableStreamTracer {
                 self.connection.state = ConnectionState::Attached;
                 self.connection.latest_session_id = Some(session_id.to_string());
                 self.connection.last_error = None;
+                self.lineage_tracker
+                    .register_session_mcp_urls(session_id, &pending_session_new.mcp_acp_urls);
             }
 
             self.connection.updated_at = now_ms();
@@ -437,6 +542,8 @@ impl DurableStreamTracer {
                 .session_active_turn
                 .retain(|_, value| value != &prompt_turn_id);
             self.correlation.chunk_seq.remove(&prompt_turn_id);
+            self.lineage_tracker
+                .clear_active_turn(&turn.session_id, &prompt_turn_id);
 
             append_state(
                 &self.producer,
@@ -559,7 +666,13 @@ pub fn emit_runtime_instance_started(
         created_at,
         updated_at: created_at,
     };
-    append_state(producer, "runtime_instance", runtime_id, "insert", Some(&row));
+    append_state(
+        producer,
+        "runtime_instance",
+        runtime_id,
+        "insert",
+        Some(&row),
+    );
 }
 
 pub fn emit_runtime_instance_stopped(
@@ -575,7 +688,13 @@ pub fn emit_runtime_instance_stopped(
         created_at,
         updated_at: now_ms(),
     };
-    append_state(producer, "runtime_instance", runtime_id, "update", Some(&row));
+    append_state(
+        producer,
+        "runtime_instance",
+        runtime_id,
+        "update",
+        Some(&row),
+    );
 }
 
 fn append_state<T: Serialize>(
@@ -597,11 +716,102 @@ fn append_state<T: Serialize>(
 fn first_text_block(blocks: &[Value]) -> Option<String> {
     blocks.iter().find_map(|block| {
         if block.get("type").and_then(Value::as_str) == Some("text") {
-            block.get("text").and_then(Value::as_str).map(str::to_string)
+            block
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_string)
         } else {
             None
         }
     })
+}
+
+fn extract_mcp_acp_urls(params: &Value) -> Vec<String> {
+    params
+        .get("mcpServers")
+        .or_else(|| params.get("mcp_servers"))
+        .and_then(Value::as_array)
+        .map(|servers| {
+            servers
+                .iter()
+                .filter_map(|server| {
+                    server
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .filter(|url| url.starts_with("acp:"))
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_fireline_lineage(params: &Value) -> InheritedLineage {
+    let top_level_meta = params.get("_meta").and_then(Value::as_object);
+    let client_meta = params
+        .get("clientCapabilities")
+        .or_else(|| params.get("client_capabilities"))
+        .and_then(|caps| caps.get("_meta").or_else(|| caps.get("meta")))
+        .and_then(Value::as_object);
+
+    let trace_id = top_level_meta
+        .and_then(|meta| meta.get("fireline"))
+        .and_then(Value::as_object)
+        .and_then(|fireline| fireline.get("traceId"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            top_level_meta
+                .and_then(|meta| meta.get("fireline/trace-id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            client_meta
+                .and_then(|meta| meta.get("fireline"))
+                .and_then(Value::as_object)
+                .and_then(|fireline| fireline.get("traceId"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            client_meta
+                .and_then(|meta| meta.get("fireline/trace-id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+
+    let parent_prompt_turn_id = top_level_meta
+        .and_then(|meta| meta.get("fireline"))
+        .and_then(Value::as_object)
+        .and_then(|fireline| fireline.get("parentPromptTurnId"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            top_level_meta
+                .and_then(|meta| meta.get("fireline/parent-prompt-turn-id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            client_meta
+                .and_then(|meta| meta.get("fireline"))
+                .and_then(Value::as_object)
+                .and_then(|fireline| fireline.get("parentPromptTurnId"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            client_meta
+                .and_then(|meta| meta.get("fireline/parent-prompt-turn-id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+
+    InheritedLineage {
+        trace_id,
+        parent_prompt_turn_id,
+    }
 }
 
 fn parse_trace_endpoint(raw: &str) -> TraceEndpoint {

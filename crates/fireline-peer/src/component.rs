@@ -10,6 +10,7 @@
 
 use std::path::PathBuf;
 
+use fireline_conductor::lineage::LineageTracker;
 use sacp::{Client, ConnectTo, Proxy};
 
 use crate::directory::Directory;
@@ -18,12 +19,14 @@ use crate::mcp_server::build_peer_mcp_server;
 #[derive(Debug, Clone)]
 pub struct PeerComponent {
     directory_path: PathBuf,
+    lineage_tracker: LineageTracker,
 }
 
 impl PeerComponent {
-    pub fn new(directory_path: impl Into<PathBuf>) -> Self {
+    pub fn new(directory_path: impl Into<PathBuf>, lineage_tracker: LineageTracker) -> Self {
         Self {
             directory_path: directory_path.into(),
+            lineage_tracker,
         }
     }
 }
@@ -32,6 +35,7 @@ impl ConnectTo<sacp::Conductor> for PeerComponent {
     async fn connect_to(self, client: impl ConnectTo<Proxy>) -> Result<(), sacp::Error> {
         let directory = Directory::load(self.directory_path)
             .map_err(|e| sacp::util::internal_error(format!("load peer directory: {e}")))?;
+        let lineage_tracker = self.lineage_tracker;
 
         sacp::Proxy
             .builder()
@@ -40,8 +44,10 @@ impl ConnectTo<sacp::Conductor> for PeerComponent {
                 Client,
                 {
                     let directory = directory.clone();
+                    let lineage_tracker = lineage_tracker.clone();
                     async move |request: sacp::schema::NewSessionRequest, responder, cx| {
-                        let mcp_server = build_peer_mcp_server(directory.clone());
+                        let mcp_server =
+                            build_peer_mcp_server(directory.clone(), lineage_tracker.clone());
                         cx.build_session_from(request)
                             .with_mcp_server(mcp_server)?
                             .on_proxy_session_start(responder, async |_session_id| Ok(()))

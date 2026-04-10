@@ -7,6 +7,7 @@ use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
 use fireline::bootstrap::{BootstrapConfig, start};
 use futures::{SinkExt, StreamExt};
+use serde_json::Value;
 use uuid::Uuid;
 
 struct WebSocketTransport {
@@ -154,22 +155,46 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
     );
 
     let client = DsClient::new();
-    let stream = client.stream(&handle_b.state_stream_url);
+    let stream_a = client.stream(&handle_a.state_stream_url);
+    let stream_b = client.stream(&handle_b.state_stream_url);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let mut body = String::new();
+    let mut body_a = String::new();
+    let mut body_b = String::new();
 
     loop {
-        body.clear();
+        body_a.clear();
+        body_b.clear();
 
-        let mut reader = stream.read().offset(Offset::Beginning).build()?;
-        while let Some(chunk) = reader.next_chunk().await? {
-            body.push_str(std::str::from_utf8(&chunk.data)?);
+        let mut reader_a = stream_a.read().offset(Offset::Beginning).build()?;
+        while let Some(chunk) = reader_a.next_chunk().await? {
+            body_a.push_str(std::str::from_utf8(&chunk.data)?);
             if chunk.up_to_date {
                 break;
             }
         }
 
-        if body.contains("\"type\":\"prompt_turn\"") {
+        let mut reader_b = stream_b.read().offset(Offset::Beginning).build()?;
+        while let Some(chunk) = reader_b.next_chunk().await? {
+            body_b.push_str(std::str::from_utf8(&chunk.data)?);
+            if chunk.up_to_date {
+                break;
+            }
+        }
+
+        let parent = find_prompt_turn(&body_a, |text| text.contains("\"tool\":\"prompt_peer\""));
+        let child = find_prompt_turn(&body_b, |text| text.contains("hello across mesh"));
+
+        if let (Some(parent), Some(child)) = (parent, child) {
+            assert_eq!(
+                child.parent_prompt_turn_id.as_deref(),
+                Some(parent.prompt_turn_id.as_str()),
+                "child prompt turn should point at the parent prompt turn: {body_b}"
+            );
+            assert_eq!(
+                child.trace_id.as_deref(),
+                parent.trace_id.as_deref(),
+                "child prompt turn should inherit the parent trace id: {body_b}"
+            );
             break;
         }
 
@@ -181,11 +206,54 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
     }
 
     assert!(
-        body.contains("\"type\":\"prompt_turn\""),
-        "remote peer runtime should record the cross-runtime prompt as a prompt_turn: {body}"
+        body_b.contains("\"type\":\"prompt_turn\""),
+        "remote peer runtime should record the cross-runtime prompt as a prompt_turn: {body_b}"
+    );
+    assert!(
+        find_prompt_turn(&body_a, |text| text.contains("\"tool\":\"prompt_peer\"")).is_some(),
+        "missing parent prompt turn in runtime A: {body_a}"
+    );
+    assert!(
+        find_prompt_turn(&body_b, |text| text.contains("hello across mesh")).is_some(),
+        "missing child prompt turn in runtime B: {body_b}"
     );
 
     handle_a.shutdown().await?;
     handle_b.shutdown().await?;
     Ok(())
+}
+
+#[derive(Debug)]
+struct PromptTurnEvent {
+    prompt_turn_id: String,
+    trace_id: Option<String>,
+    parent_prompt_turn_id: Option<String>,
+}
+
+fn find_prompt_turn(body: &str, predicate: impl Fn(&str) -> bool) -> Option<PromptTurnEvent> {
+    let mut stream = serde_json::Deserializer::from_str(body).into_iter::<Value>();
+    std::iter::from_fn(move || stream.next()).find_map(|result| {
+        let event = result.ok()?;
+        if event.get("type")?.as_str()? != "prompt_turn" {
+            return None;
+        }
+
+        let value = event.get("value")?;
+        let text = value.get("text").and_then(Value::as_str).unwrap_or("");
+        if !predicate(text) {
+            return None;
+        }
+
+        Some(PromptTurnEvent {
+            prompt_turn_id: value.get("promptTurnId")?.as_str()?.to_string(),
+            trace_id: value
+                .get("traceId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            parent_prompt_turn_id: value
+                .get("parentPromptTurnId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+    })
 }

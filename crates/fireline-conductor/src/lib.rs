@@ -27,5 +27,6 @@
 #![forbid(unsafe_code)]
 
 pub mod build;
+pub mod lineage;
 pub mod trace;
 pub mod transports;

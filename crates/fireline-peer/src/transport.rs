@@ -179,6 +179,6 @@ fn initialize_request(
     let mut meta = Map::new();
     meta.insert("fireline".to_string(), Value::Object(fireline));
 
-    init.client_capabilities = agent_client_protocol::ClientCapabilities::new().meta(meta);
+    init = init.meta(meta);
     init
 }

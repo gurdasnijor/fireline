@@ -16,7 +16,7 @@ use axum::Router;
 use axum::extract::{State, ws::WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use fireline_conductor::{build, trace::DurableStreamTracer, transports};
+use fireline_conductor::{build, lineage::LineageTracker, trace::DurableStreamTracer, transports};
 use fireline_peer::PeerComponent;
 use sacp::{Conductor, DynConnectTo};
 use uuid::Uuid;
@@ -33,14 +33,17 @@ pub async fn acp_websocket_handler(
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| async move {
         let logical_connection_id = format!("conn:{}", Uuid::new_v4());
+        let lineage_tracker = LineageTracker::default();
         let components: Vec<DynConnectTo<Conductor>> = vec![DynConnectTo::new(PeerComponent::new(
             app.peer_directory_path.clone(),
+            lineage_tracker.clone(),
         ))];
 
-        let trace_writer = DurableStreamTracer::new(
+        let trace_writer = DurableStreamTracer::new_with_tracker(
             app.state_producer.clone(),
             app.runtime_id.clone(),
             logical_connection_id,
+            lineage_tracker,
         );
         let conductor = build::build_subprocess_conductor(
             app.conductor_name.clone(),
