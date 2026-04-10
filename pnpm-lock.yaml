@@ -51,6 +51,9 @@ importers:
       vite:
         specifier: ^6.0.0
         version: 6.4.2(@types/node@24.12.2)
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@24.12.2)
 
   packages/client:
     dependencies:

@@ -32,6 +32,24 @@ to the Fireline control plane on `4440`. The browser should not expect `/acp`
 or `/v1/stream/*` on `4437` to exist until the control plane has created a
 runtime and reported `ready`.
 
+## E2E
+
+Run:
+
+```sh
+pnpm --filter @fireline/browser-harness test:e2e
+```
+
+This boots the harness backend, opens a real browser page with `agent-browser`,
+and asks a dedicated `e2e.html` driver page to exercise the actual browser-side
+contracts:
+
+- ACP session creation and prompt invocation over `/acp`
+- durable state observation over `/v1/stream/:name`
+- StreamDB projections updating in response to prompt output
+
+The e2e does not assert on the harness UI layout or component tree.
+
 ## What It Exercises
 
 - browse launchable ACP registry agents
