@@ -36,14 +36,14 @@ impl LocalRuntimeLauncher for BootstrapRuntimeLauncher {
         .await
         .context("start local runtime")?;
 
-        Ok(RuntimeLaunch {
-            runtime_id: handle.runtime_id.clone(),
-            provider_instance_id: handle.runtime_id.clone(),
-            acp: Endpoint::new(handle.acp_url.clone()),
-            state: Endpoint::new(handle.state_stream_url.clone()),
-            helper_api_base_url: None,
-            runtime: Box::new(handle),
-        })
+        Ok(RuntimeLaunch::ready(
+            handle.runtime_id.clone(),
+            handle.runtime_id.clone(),
+            Endpoint::new(handle.acp_url.clone()),
+            Endpoint::new(handle.state_stream_url.clone()),
+            None,
+            Box::new(handle),
+        ))
     }
 }
 

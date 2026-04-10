@@ -41,7 +41,7 @@ tokio-tungstenite = "0.28"
 nix = { version = "0.29", features = ["signal", "process"] }
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # Tracing / logging
 tracing = "0.1"

@@ -10,11 +10,16 @@ use fireline_conductor::runtime::{
 };
 use tokio::process::{Child, Command};
 
+use crate::auth::RuntimeTokenStore;
+
 pub struct ChildProcessRuntimeLauncher {
     fireline_bin: PathBuf,
     runtime_registry: RuntimeRegistry,
     runtime_registry_path: PathBuf,
     default_peer_directory_path: Option<PathBuf>,
+    prefer_push: bool,
+    control_plane_url: String,
+    token_store: RuntimeTokenStore,
     startup_timeout: Duration,
     stop_timeout: Duration,
     poll_interval: Duration,
@@ -26,6 +31,9 @@ impl ChildProcessRuntimeLauncher {
         runtime_registry: RuntimeRegistry,
         runtime_registry_path: PathBuf,
         default_peer_directory_path: Option<PathBuf>,
+        prefer_push: bool,
+        control_plane_url: String,
+        token_store: RuntimeTokenStore,
         startup_timeout: Duration,
         stop_timeout: Duration,
     ) -> Self {
@@ -34,6 +42,9 @@ impl ChildProcessRuntimeLauncher {
             runtime_registry,
             runtime_registry_path,
             default_peer_directory_path,
+            prefer_push,
+            control_plane_url,
+            token_store,
             startup_timeout,
             stop_timeout,
             poll_interval: Duration::from_millis(100),
@@ -48,8 +59,15 @@ impl ChildProcessRuntimeLauncher {
         let deadline = tokio::time::Instant::now() + self.startup_timeout;
         loop {
             if let Some(runtime) = self.runtime_registry.get(runtime_key)? {
-                if runtime.status == RuntimeStatus::Ready {
-                    return Ok(runtime);
+                match runtime.status {
+                    RuntimeStatus::Ready => return Ok(runtime),
+                    RuntimeStatus::Broken | RuntimeStatus::Stopped => {
+                        return Err(anyhow!(
+                            "fireline runtime failed during startup with status '{:?}'",
+                            runtime.status
+                        ));
+                    }
+                    _ => {}
                 }
             }
 
@@ -92,6 +110,16 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
             .arg(&node_id)
             .arg("--runtime-registry-path")
             .arg(&self.runtime_registry_path);
+
+        if self.prefer_push {
+            let runtime_token = self
+                .token_store
+                .issue(&runtime_key, Duration::from_secs(60 * 60 * 24));
+            command
+                .arg("--control-plane-url")
+                .arg(&self.control_plane_url)
+                .env("FIRELINE_CONTROL_PLANE_TOKEN", runtime_token.token);
+        }
 
         if let Some(state_stream) = &spec.state_stream {
             command.arg("--state-stream").arg(state_stream);
@@ -136,17 +164,17 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
             }
         };
 
-        Ok(RuntimeLaunch {
-            runtime_id: descriptor.runtime_id.clone(),
-            provider_instance_id: descriptor.provider_instance_id.clone(),
-            acp: descriptor.acp.clone(),
-            state: descriptor.state.clone(),
-            helper_api_base_url: descriptor.helper_api_base_url.clone(),
-            runtime: Box::new(SpawnedRuntime {
+        Ok(RuntimeLaunch::ready(
+            descriptor.runtime_id.clone(),
+            descriptor.provider_instance_id.clone(),
+            descriptor.acp.clone(),
+            descriptor.state.clone(),
+            descriptor.helper_api_base_url.clone(),
+            Box::new(SpawnedRuntime {
                 child,
                 stop_timeout: self.stop_timeout,
             }),
-        })
+        ))
     }
 }
 
