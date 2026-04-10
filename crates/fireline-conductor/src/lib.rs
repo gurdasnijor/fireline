@@ -28,5 +28,6 @@
 
 pub mod build;
 pub mod lineage;
+pub mod session;
 pub mod trace;
 pub mod transports;

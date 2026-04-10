@@ -69,6 +69,8 @@ async fn hosted_runtime_serves_acp_and_emits_state_events() -> Result<()> {
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
         name: "hosted-test".to_string(),
+        runtime_key: None,
+        node_id: None,
         agent_command: vec![testy_bin()],
         state_stream: None,
         peer_directory_path: None,
@@ -122,6 +124,10 @@ async fn hosted_runtime_serves_acp_and_emits_state_events() -> Result<()> {
     assert!(
         body.contains("\"type\":\"prompt_turn\""),
         "state stream should contain prompt turns: {body}"
+    );
+    assert!(
+        body.contains("\"type\":\"session\""),
+        "state stream should contain session rows: {body}"
     );
 
     handle.shutdown().await?;

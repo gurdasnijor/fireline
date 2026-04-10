@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use axum::Router;
-use durable_streams::{Client as DurableStreamsClient, DurableStream, Producer};
+use durable_streams::{Client as DurableStreamsClient, CreateOptions, DurableStream, Producer};
 use fireline_peer::Directory;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -30,10 +30,13 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct AppState {
     pub conductor_name: String,
+    pub runtime_key: String,
     pub agent_command: Vec<String>,
+    pub node_id: String,
     pub runtime_id: String,
     pub state_producer: Producer,
     pub peer_directory_path: PathBuf,
+    pub session_index: crate::session_index::SessionIndex,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +44,8 @@ pub struct BootstrapConfig {
     pub host: IpAddr,
     pub port: u16,
     pub name: String,
+    pub runtime_key: Option<String>,
+    pub node_id: Option<String>,
     pub agent_command: Vec<String>,
     pub state_stream: Option<String>,
     pub peer_directory_path: Option<PathBuf>,
@@ -55,6 +60,7 @@ pub struct BootstrapHandle {
     runtime_created_at: i64,
     state_producer: Producer,
     peer_directory_path: PathBuf,
+    session_index_task: crate::session_index::SessionIndexTask,
     shutdown_tx: Option<oneshot::Sender<()>>,
     server_task: JoinHandle<Result<()>>,
 }
@@ -72,6 +78,8 @@ impl BootstrapHandle {
             self.runtime_created_at,
         );
 
+        self.session_index_task.abort();
+
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -85,6 +93,9 @@ impl BootstrapHandle {
 
 pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     let runtime_uuid = Uuid::new_v4();
+    let runtime_key = config
+        .runtime_key
+        .unwrap_or_else(|| format!("runtime:{runtime_uuid}"));
     let runtime_id = format!("fireline:{}:{runtime_uuid}", config.name);
     let runtime_created_at = chrono_like_now_ms();
     let state_stream = config
@@ -95,30 +106,39 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     let local_addr = listener
         .local_addr()
         .context("resolve bound listener address")?;
-    let connect_host = connect_host(local_addr.ip());
-    let acp_url = format!("ws://{connect_host}:{}/acp", local_addr.port());
+    let connect_host_name = connect_host(local_addr.ip());
+    let acp_url = format!("ws://{connect_host_name}:{}/acp", local_addr.port());
     let state_stream_url = format!(
-        "http://{connect_host}:{}/v1/stream/{state_stream}",
+        "http://{connect_host_name}:{}/v1/stream/{state_stream}",
         local_addr.port()
     );
     let runtime_name = config.name.clone();
 
     let stream_client = DurableStreamsClient::new();
-    let state_stream_handle = stream_client.stream(&state_stream_url);
+    let mut state_stream_handle = stream_client.stream(&state_stream_url);
+    state_stream_handle.set_content_type("application/json");
     let state_producer = state_stream_handle
         .producer(format!("state-writer-{runtime_uuid}"))
+        .content_type("application/json")
         .build();
+    let node_id = config
+        .node_id
+        .unwrap_or_else(|| format!("node:{}", connect_host(local_addr.ip())));
     let peer_directory_path = config
         .peer_directory_path
         .unwrap_or(Directory::default_path()?);
     let directory = Directory::load(&peer_directory_path)?;
+    let session_index = crate::session_index::SessionIndex::new();
 
     let app_state = AppState {
         conductor_name: runtime_name.clone(),
+        runtime_key: runtime_key.clone(),
         agent_command: config.agent_command,
+        node_id: node_id.clone(),
         runtime_id: runtime_id.clone(),
         state_producer: state_producer.clone(),
         peer_directory_path: peer_directory_path.clone(),
+        session_index: session_index.clone(),
     };
 
     let app = Router::new()
@@ -136,6 +156,8 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     });
 
     ensure_stream_exists(&state_stream_handle).await?;
+    let session_index_task = session_index.connect(state_stream_url.clone());
+    session_index_task.preload().await?;
     fireline_conductor::trace::emit_runtime_instance_started(
         &state_producer,
         &runtime_id,
@@ -159,6 +181,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         runtime_created_at,
         state_producer,
         peer_directory_path,
+        session_index_task,
         shutdown_tx: Some(shutdown_tx),
         server_task,
     })
@@ -178,7 +201,10 @@ fn connect_host(ip: IpAddr) -> String {
 async fn ensure_stream_exists(stream: &DurableStream) -> Result<()> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        match stream.create().await {
+        match stream
+            .create_with(CreateOptions::new().content_type("application/json"))
+            .await
+        {
             Ok(_) => return Ok(()),
             Err(err) => {
                 if tokio::time::Instant::now() >= deadline {

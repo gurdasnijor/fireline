@@ -88,6 +88,21 @@ export const runtimeInstanceSchema = z.object({
   updatedAt: z.number(),
 })
 
+export const sessionSchema = z.object({
+  sessionId: z.string(),
+  runtimeKey: z.string(),
+  runtimeId: z.string(),
+  nodeId: z.string(),
+  logicalConnectionId: z.string(),
+  state: z.enum(['active', 'broken', 'closed']),
+  supportsLoadSession: z.boolean(),
+  traceId: z.string().optional(),
+  parentPromptTurnId: z.string().optional(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  lastSeenAt: z.number(),
+})
+
 export const chunkSchema = z.object({
   chunkId: z.string(),
   promptTurnId: z.string(),
@@ -105,6 +120,7 @@ export type PermissionOptionRow = z.infer<typeof permissionOptionSchema>
 export type PermissionRow = z.infer<typeof permissionSchema>
 export type TerminalRow = z.infer<typeof terminalSchema>
 export type RuntimeInstanceRow = z.infer<typeof runtimeInstanceSchema>
+export type SessionRow = z.infer<typeof sessionSchema>
 export type ChunkRow = z.infer<typeof chunkSchema>
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
 
@@ -143,6 +159,12 @@ export const firelineState = createStateSchema({
     schema: runtimeInstanceSchema,
     type: 'runtime_instance',
     primaryKey: 'instanceId',
+  },
+
+  sessions: {
+    schema: sessionSchema,
+    type: 'session',
+    primaryKey: 'sessionId',
   },
 
   chunks: {

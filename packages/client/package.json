@@ -2,7 +2,7 @@
   "name": "@fireline/client",
   "version": "0.0.1",
   "private": true,
-  "description": "Fireline programmatic client API — FirelineClient, Session, transport constructors",
+  "description": "Primitive-first TypeScript client for Fireline runtime host, state, and ACP surfaces",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -18,13 +18,16 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@iarna/toml": "^2.2.5",
     "@agentclientprotocol/sdk": "^0.18.1",
     "@durable-streams/state": "^0.2.3",
     "@fireline/state": "workspace:*",
-    "@tanstack/db": "^0.6.4"
+    "@tanstack/db": "^0.6.4",
+    "ws": "^8.18.3"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
   }

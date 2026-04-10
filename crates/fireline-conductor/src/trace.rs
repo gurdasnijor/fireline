@@ -14,7 +14,7 @@
 //! - the durable stream carries normalized state rows, not raw `TraceEvent`
 //!   envelopes
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 
 use durable_streams::Producer;
@@ -25,6 +25,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::lineage::LineageTracker;
+use crate::session::{SessionRecord, SessionStatus};
 
 #[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
@@ -181,6 +182,7 @@ struct StateEnvelope<T> {
 
 #[derive(Debug, Default)]
 struct TraceCorrelationState {
+    pending_initialize: HashSet<String>,
     prompt_request_to_turn: HashMap<String, String>,
     prompt_turns: HashMap<String, PromptTurnRow>,
     pending_session_new: HashMap<String, PendingSessionNew>,
@@ -221,13 +223,16 @@ enum TraceEndpoint {
 }
 
 pub struct DurableStreamTracer {
+    runtime_key: String,
     producer: Producer,
     runtime_id: String,
+    node_id: String,
     logical_connection_id: String,
     connection: ConnectionRow,
     correlation: TraceCorrelationState,
     inherited_lineage: InheritedLineage,
     lineage_tracker: LineageTracker,
+    supports_load_session: bool,
 }
 
 impl DurableStreamTracer {
@@ -236,9 +241,12 @@ impl DurableStreamTracer {
         runtime_id: impl Into<String>,
         logical_connection_id: impl Into<String>,
     ) -> Self {
-        Self::new_with_tracker(
+        let runtime_id = runtime_id.into();
+        Self::new_with_runtime_context(
             producer,
+            runtime_id.clone(),
             runtime_id,
+            "node:unknown",
             logical_connection_id,
             LineageTracker::default(),
         )
@@ -251,6 +259,27 @@ impl DurableStreamTracer {
         lineage_tracker: LineageTracker,
     ) -> Self {
         let runtime_id = runtime_id.into();
+        Self::new_with_runtime_context(
+            producer,
+            runtime_id.clone(),
+            runtime_id,
+            "node:unknown",
+            logical_connection_id,
+            lineage_tracker,
+        )
+    }
+
+    pub fn new_with_runtime_context(
+        producer: Producer,
+        runtime_key: impl Into<String>,
+        runtime_id: impl Into<String>,
+        node_id: impl Into<String>,
+        logical_connection_id: impl Into<String>,
+        lineage_tracker: LineageTracker,
+    ) -> Self {
+        let runtime_key = runtime_key.into();
+        let runtime_id = runtime_id.into();
+        let node_id = node_id.into();
         let logical_connection_id = logical_connection_id.into();
         let now = now_ms();
         let connection = ConnectionRow {
@@ -272,13 +301,16 @@ impl DurableStreamTracer {
         );
 
         Self {
+            runtime_key,
             producer,
             runtime_id,
+            node_id,
             logical_connection_id,
             connection,
             correlation: TraceCorrelationState::default(),
             inherited_lineage: InheritedLineage::default(),
             lineage_tracker,
+            supports_load_session: false,
         }
     }
 }
@@ -303,6 +335,9 @@ impl DurableStreamTracer {
                 if !is_canonical_client_request(req) {
                     return;
                 }
+                self.correlation
+                    .pending_initialize
+                    .insert(req.id.to_string());
                 self.inherited_lineage = parse_fireline_lineage(&req.params);
             }
             "session/new" => {
@@ -453,6 +488,16 @@ impl DurableStreamTracer {
     fn handle_response(&mut self, resp: &ResponseEvent) {
         let request_id = resp.id.to_string();
 
+        if self.correlation.pending_initialize.remove(&request_id) {
+            self.supports_load_session = resp
+                .payload
+                .get("agentCapabilities")
+                .or_else(|| resp.payload.get("agent_capabilities"))
+                .and_then(|caps| caps.get("loadSession").or_else(|| caps.get("load_session")))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        }
+
         if let Some(pending_session_new) = self.correlation.pending_session_new.remove(&request_id)
         {
             self.correlation
@@ -480,6 +525,29 @@ impl DurableStreamTracer {
                 .or_else(|| resp.payload.get("session_id"))
                 .and_then(Value::as_str)
             {
+                let now = now_ms();
+                let session = SessionRecord {
+                    session_id: session_id.to_string(),
+                    runtime_key: self.runtime_key.clone(),
+                    runtime_id: self.runtime_id.clone(),
+                    node_id: self.node_id.clone(),
+                    logical_connection_id: self.logical_connection_id.clone(),
+                    state: SessionStatus::Active,
+                    supports_load_session: self.supports_load_session,
+                    trace_id: self.inherited_lineage.trace_id.clone(),
+                    parent_prompt_turn_id: self.inherited_lineage.parent_prompt_turn_id.clone(),
+                    created_at: now,
+                    updated_at: now,
+                    last_seen_at: now,
+                };
+                append_state(
+                    &self.producer,
+                    "session",
+                    session_id,
+                    "insert",
+                    Some(&session),
+                );
+
                 self.connection.state = ConnectionState::Attached;
                 self.connection.latest_session_id = Some(session_id.to_string());
                 self.connection.last_error = None;

@@ -84,6 +84,10 @@ async fn minimal_vertical_slice_prompts_and_emits_state_events() -> Result<()> {
         body.contains("\"type\":\"pending_request\""),
         "state stream should contain pending request rows: {body}"
     );
+    assert!(
+        body.contains("\"type\":\"session\""),
+        "state stream should contain session rows: {body}"
+    );
 
     conductor_task.abort();
     stream_server.abort();

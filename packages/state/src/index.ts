@@ -15,6 +15,7 @@ export type {
   PermissionRow,
   TerminalRow,
   RuntimeInstanceRow,
+  SessionRow,
   ChunkRow,
   ConnectionStatus,
 } from './schema.js'
@@ -23,4 +24,12 @@ export {
   createQueuedTurnsCollection,
   createActiveTurnsCollection,
   createPendingPermissionsCollection,
+  createSessionTurnsCollection,
+  createConnectionTurnsCollection,
+  createTurnChunksCollection,
+  createSessionPermissionsCollection,
+  type SessionTurnsOptions,
+  type ConnectionTurnsOptions,
+  type TurnChunksOptions,
+  type SessionPermissionsOptions,
 } from './collections/index.js'

@@ -39,9 +39,11 @@ pub async fn acp_websocket_handler(
             lineage_tracker.clone(),
         ))];
 
-        let trace_writer = DurableStreamTracer::new_with_tracker(
+        let trace_writer = DurableStreamTracer::new_with_runtime_context(
             app.state_producer.clone(),
+            app.runtime_key.clone(),
             app.runtime_id.clone(),
+            app.node_id.clone(),
             logical_connection_id,
             lineage_tracker,
         );

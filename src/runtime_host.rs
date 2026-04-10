@@ -202,6 +202,8 @@ async fn start_local_runtime(spec: CreateRuntimeSpec) -> Result<BootstrapHandle>
         host: spec.host,
         port: spec.port,
         name: spec.name,
+        runtime_key: None,
+        node_id: None,
         agent_command: spec.agent_command,
         state_stream: spec.state_stream,
         peer_directory_path: spec.peer_directory_path,

@@ -11,6 +11,7 @@ describe('firelineState schema', () => {
       'permissions',
       'promptTurns',
       'runtimeInstances',
+      'sessions',
       'terminals',
     ])
   })

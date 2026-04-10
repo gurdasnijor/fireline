@@ -11,6 +11,7 @@
 use anyhow::Result;
 use clap::Parser;
 use std::net::IpAddr;
+use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -35,6 +36,14 @@ struct Cli {
     #[arg(long)]
     state_stream: Option<String>,
 
+    /// Optional explicit path for the runtime registry file.
+    #[arg(long)]
+    runtime_registry_path: Option<PathBuf>,
+
+    /// Optional explicit path for the peer directory file.
+    #[arg(long)]
+    peer_directory_path: Option<PathBuf>,
+
     /// The agent command to run, e.g. `npx -y @zed-industries/claude-code-acp`.
     #[arg(trailing_var_arg = true, required = true)]
     agent_command: Vec<String>,
@@ -49,7 +58,13 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let host: IpAddr = cli.host.parse()?;
-    let runtime_host = fireline::runtime_host::RuntimeHost::with_default_registry()?;
+    let registry = match cli.runtime_registry_path {
+        Some(path) => fireline::runtime_registry::RuntimeRegistry::load(path)?,
+        None => fireline::runtime_registry::RuntimeRegistry::load(
+            fireline::runtime_registry::RuntimeRegistry::default_path()?,
+        )?,
+    };
+    let runtime_host = fireline::runtime_host::RuntimeHost::new(registry);
     let descriptor = runtime_host
         .create(fireline::runtime_host::CreateRuntimeSpec {
             provider: fireline::runtime_host::RuntimeProviderRequest::Local,
@@ -58,7 +73,7 @@ async fn main() -> Result<()> {
             name: cli.name,
             agent_command: cli.agent_command,
             state_stream: cli.state_stream,
-            peer_directory_path: None,
+            peer_directory_path: cli.peer_directory_path,
         })
         .await?;
 

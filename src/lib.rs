@@ -12,6 +12,8 @@
 //!   filesystem helper API
 //! - [`connections`] — connection lookup file management (the
 //!   `{id}.toml` files written at session creation)
+//! - [`session_index`] — in-memory materialization of durable `session`
+//!   rows used for session lookup and future `session/load` coordination
 //! - [`webhook`] — outbound state-derived sink that subscribes to
 //!   the durable stream via `durable-streams` client-rust and
 //!   dispatches HTTP webhooks on transitions
@@ -26,5 +28,6 @@ pub mod connections;
 pub mod routes;
 pub mod runtime_host;
 pub mod runtime_registry;
+pub mod session_index;
 pub mod stream_host;
 pub mod webhook;

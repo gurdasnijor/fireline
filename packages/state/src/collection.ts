@@ -9,6 +9,7 @@ import type {
   PermissionRow,
   PromptTurnRow,
   RuntimeInstanceRow,
+  SessionRow,
   TerminalRow,
 } from './schema.js'
 
@@ -19,6 +20,7 @@ export interface FirelineCollections {
   permissions: Collection<PermissionRow>
   terminals: Collection<TerminalRow>
   runtimeInstances: Collection<RuntimeInstanceRow>
+  sessions: Collection<SessionRow>
   chunks: Collection<ChunkRow>
 }
 
@@ -40,6 +42,7 @@ export function createFirelineDB(config: FirelineDBConfig): FirelineDB {
   const rawDb: RawFirelineDB = createStreamDB({
     streamOptions: {
       url: stateStreamUrl,
+      contentType: 'application/json',
       headers,
       signal,
     },

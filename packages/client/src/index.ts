@@ -1,38 +1,89 @@
-/**
- * @fireline/client
- *
- * Programmatic client API for Fireline.
- *
- * Provides:
- * - `FirelineClient` — the main entry point that holds a transport,
- *   a connection to the durable stream (via `@fireline/state`'s
- *   `createFirelineDB`), and a session manager
- * - `Session` — wraps an ACP `ClientSideConnection` and exposes
- *   `prompt()`, `onUpdate()`, `cancel()`, `close()`, etc.
- * - Transport constructors: `WebSocketTransport.connect(url)`,
- *   `StdioTransport.spawn(cmd, args)`, `InMemoryTransport.connect(...)`
- *
- * The transport is a parameter, not a URL — same pattern agent-os
- * uses with `AcpClient(process, stdoutLines)`. Any duplex byte
- * channel can become a transport.
- */
+import { createFirelineDB, type FirelineDB, type FirelineDBConfig } from '@fireline/state'
 
-// TODO: implement FirelineClient, Session, transports
-//
-// Target shape:
-//
-// ```ts
-// import { FirelineClient, WebSocketTransport } from '@fireline/client'
-//
-// const client = new FirelineClient({
-//   streamUrl: 'http://localhost:4437/streams/fireline-main',
-//   transport: WebSocketTransport.connect('ws://localhost:4438/acp'),
-// })
-//
-// await client.connect()
-// const session = await client.sessions.create({ cwd: '/' })
-// session.onUpdate((update) => { /* ... */ })
-// await session.prompt('Write a hello world script')
-// ```
+import {
+  connectAcp,
+  type AcpConnectOptions,
+  type AcpInitializeOptions,
+  type OpenAcpConnection,
+} from './acp.js'
+import {
+  createHostClient,
+  defaultRuntimeRegistryPath,
+  type CreateRuntimeSpec,
+  type HostClient,
+  type HostClientOptions,
+  type RuntimeDescriptor,
+  type RuntimeProviderKind,
+  type RuntimeProviderRequest,
+  type RuntimeStatus,
+} from './host.js'
+import {
+  createPeerClient,
+  defaultPeerDirectoryPath,
+  type PeerCallRequest,
+  type PeerCallResult,
+  type PeerClient,
+  type PeerClientOptions,
+  type PeerDescriptor,
+  type PeerParentLineage,
+} from './peer.js'
 
-export const firelineClientPlaceholder = 'TODO: implement FirelineClient'
+export type {
+  AcpConnectOptions,
+  AcpInitializeOptions,
+  CreateRuntimeSpec,
+  HostClient,
+  HostClientOptions,
+  OpenAcpConnection,
+  PeerCallRequest,
+  PeerCallResult,
+  PeerClient,
+  PeerClientOptions,
+  PeerDescriptor,
+  PeerParentLineage,
+  RuntimeDescriptor,
+  RuntimeProviderKind,
+  RuntimeProviderRequest,
+  RuntimeStatus,
+}
+
+export interface FirelineClient {
+  acp: {
+    connect(options: AcpConnectOptions): Promise<OpenAcpConnection>
+  }
+  host: HostClient
+  peer: PeerClient
+  state: {
+    open(config: FirelineDBConfig): FirelineDB
+  }
+  close(): Promise<void>
+}
+
+export interface FirelineClientOptions {
+  host?: HostClientOptions
+  peer?: PeerClientOptions
+}
+
+export function createFirelineClient(options: FirelineClientOptions = {}): FirelineClient {
+  const host = createHostClient(options.host)
+  const peer = createPeerClient(options.peer)
+  return {
+    acp: {
+      connect(options) {
+        return connectAcp(options)
+      },
+    },
+    host,
+    peer,
+    state: {
+      open(config) {
+        return createFirelineDB(config)
+      },
+    },
+    close() {
+      return host.close()
+    },
+  }
+}
+
+export { connectAcp, createHostClient, createPeerClient, defaultPeerDirectoryPath, defaultRuntimeRegistryPath }

@@ -80,6 +80,8 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
         name: "agent-b".to_string(),
+        runtime_key: None,
+        node_id: None,
         agent_command: vec![testy_bin()],
         state_stream: None,
         peer_directory_path: Some(peer_directory_path.clone()),
@@ -90,6 +92,8 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
         name: "agent-a".to_string(),
+        runtime_key: None,
+        node_id: None,
         agent_command: vec![testy_bin()],
         state_stream: None,
         peer_directory_path: Some(peer_directory_path.clone()),
@@ -231,9 +235,7 @@ struct PromptTurnEvent {
 }
 
 fn find_prompt_turn(body: &str, predicate: impl Fn(&str) -> bool) -> Option<PromptTurnEvent> {
-    let mut stream = serde_json::Deserializer::from_str(body).into_iter::<Value>();
-    std::iter::from_fn(move || stream.next()).find_map(|result| {
-        let event = result.ok()?;
+    parse_state_events(body).into_iter().find_map(|event| {
         if event.get("type")?.as_str()? != "prompt_turn" {
             return None;
         }
@@ -256,4 +258,17 @@ fn find_prompt_turn(body: &str, predicate: impl Fn(&str) -> bool) -> Option<Prom
                 .map(str::to_string),
         })
     })
+}
+
+fn parse_state_events(body: &str) -> Vec<Value> {
+    match serde_json::from_str::<Value>(body) {
+        Ok(Value::Array(events)) => events,
+        Ok(value) => vec![value],
+        Err(_) => {
+            let mut stream = serde_json::Deserializer::from_str(body).into_iter::<Value>();
+            std::iter::from_fn(move || stream.next())
+                .filter_map(|result| result.ok())
+                .collect()
+        }
+    }
 }

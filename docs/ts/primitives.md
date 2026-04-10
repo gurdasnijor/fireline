@@ -122,13 +122,10 @@ type AcpAttachOptions =
   | { process: ManagedProcess; stdoutLines: AsyncIterable<string> }
   | { transport: AcpTransport };
 
-type AcpClientConnection = {
+type OpenAcpConnection = {
+  connection: ClientSideConnection;
   initialize(req?: { meta?: Record<string, unknown> }): Promise<unknown>;
-  newSession(req?: { cwd?: string }): Promise<{ sessionId: string }>;
-  loadSession(sessionId: string, opts?: { observerOnly?: boolean }): Promise<void>;
-  prompt(req: { sessionId: string; text: string }): Promise<unknown>;
   updates(): AsyncIterable<unknown>;
-  cancel?(req: { sessionId: string }): Promise<void>;
   close(): Promise<void>;
 };
 ```
@@ -136,9 +133,18 @@ type AcpClientConnection = {
 Entry points:
 
 ```ts
-client.acp.connect(options: AcpConnectOptions): Promise<AcpClientConnection>
-client.acp.attach(options: AcpAttachOptions): Promise<AcpClientConnection>
+client.acp.connect(options: AcpConnectOptions): Promise<OpenAcpConnection>
+client.acp.attach(options: AcpAttachOptions): Promise<OpenAcpConnection>
 ```
+
+Current implementation note:
+
+- `client.acp.connect({ url, headers? })` is real for hosted Fireline runtimes
+- it is a thin wrapper over the official ACP TypeScript SDK
+- the SDK-native `ClientSideConnection` is exposed as `.connection`
+- `client.acp.attach(...)` is still deferred
+- unsupported inbound client capabilities like file system and terminal methods
+  currently fail fast rather than pretending to be implemented
 
 Examples:
 
@@ -212,15 +218,16 @@ Runtime lifecycle lives here.
 ```ts
 type RuntimeDescriptor = {
   runtimeKey: string;
+  runtimeId: string;
   nodeId: string;
-  provider: "local" | "docker" | "e2b" | "daytona";
+  provider: "local";
+  providerInstanceId: string;
   status: "starting" | "ready" | "busy" | "idle" | "stale" | "broken" | "stopped";
-  acpUrl?: string;
-  stateStreamUrl?: string;
+  acpUrl: string;
+  stateStreamUrl: string;
   helperApiBaseUrl?: string;
-  acpTransport?: AcpTransport;
-  createdAt: string;
-  updatedAt: string;
+  createdAtMs: number;
+  updatedAtMs: number;
 };
 ```
 
@@ -236,6 +243,13 @@ client.host.delete(runtimeKey)
 
 The important rule is that `client.host` owns runtime creation and discovery;
 `client.acp` only speaks ACP over what `client.host` returns.
+
+Current implementation note:
+
+- `create`, `get`, and `list` are real
+- local `stop` / `delete` work for runtimes owned by the current host client
+- there is not yet a separate control-plane path for stopping an arbitrary
+  running runtime discovered only through the registry
 
 ## `client.raw`
 
