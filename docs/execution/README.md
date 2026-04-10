@@ -22,3 +22,5 @@ Current slices:
 - [`08-runtime-owned-terminal-sessions.md`](./08-runtime-owned-terminal-sessions.md) — complete
 - [`09-multi-node-child-session-topology.md`](./09-multi-node-child-session-topology.md) — complete
 - [`10-acp-shared-session-bridge.md`](./10-acp-shared-session-bridge.md) — deferred
+- [`11-agent-catalog-and-runtime-launch.md`](./11-agent-catalog-and-runtime-launch.md) — complete
+- [`12-programmable-topology-first-mover.md`](./12-programmable-topology-first-mover.md) — planned

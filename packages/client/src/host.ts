@@ -7,6 +7,11 @@ import type { Readable } from 'node:stream'
 import { setTimeout as delay } from 'node:timers/promises'
 
 import { parse, stringify } from '@iarna/toml'
+import {
+  createCatalogClient,
+  type CatalogClientOptions,
+  type RuntimeAgentSpec,
+} from './catalog.js'
 
 export type RuntimeProviderRequest = 'auto' | 'local'
 export type RuntimeProviderKind = 'local'
@@ -40,17 +45,28 @@ export interface HostClientOptions {
   pollIntervalMs?: number
   startupTimeoutMs?: number
   stopTimeoutMs?: number
+  catalog?: CatalogClientOptions
 }
 
-export interface CreateRuntimeSpec {
+interface CreateRuntimeSpecBase {
   provider?: RuntimeProviderRequest
   host?: string
   port?: number
   name?: string
   stateStream?: string
-  agentCommand: string[]
   peerDirectoryPath?: string
 }
+
+export type CreateRuntimeSpec =
+  | (CreateRuntimeSpecBase & {
+      agentCommand: string[]
+      agent?: never
+    })
+  | (CreateRuntimeSpecBase & {
+      agent: RuntimeAgentSpec
+      agentCommand?: never
+    })
+
 
 export interface HostClient {
   create(spec: CreateRuntimeSpec): Promise<RuntimeDescriptor>
@@ -84,11 +100,13 @@ export function createHostClient(options: HostClientOptions = {}): HostClient {
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS
   const startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS
   const stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS
+  const catalog = createCatalogClient(options.catalog)
   const owned = new Map<string, OwnedRuntime>()
 
   const hostClient: HostClient = {
     async create(spec) {
       const runtimeName = spec.name ?? `fireline-ts-${randomUUID()}`
+      const agentCommand = await resolveCreateRuntimeAgentCommand(spec, catalog)
       const beforeKeys = new Set((await listRuntimes(runtimeRegistryPath)).map((runtime) => runtime.runtimeKey))
       const startedAt = Date.now()
       const child = spawnFireline({
@@ -98,7 +116,7 @@ export function createHostClient(options: HostClientOptions = {}): HostClient {
         port: spec.port ?? 0,
         name: runtimeName,
         stateStream: spec.stateStream,
-        agentCommand: spec.agentCommand,
+        agentCommand,
         peerDirectoryPath: spec.peerDirectoryPath,
       })
 
@@ -188,6 +206,29 @@ export function createHostClient(options: HostClientOptions = {}): HostClient {
   }
 
   return hostClient
+}
+
+async function resolveCreateRuntimeAgentCommand(
+  spec: CreateRuntimeSpec,
+  catalog: ReturnType<typeof createCatalogClient>,
+): Promise<string[]> {
+  if ('agentCommand' in spec && Array.isArray(spec.agentCommand)) {
+    return [...spec.agentCommand]
+  }
+
+  const agent = spec.agent
+  if (!agent) {
+    throw new Error('runtime create spec must include either agentCommand or agent')
+  }
+
+  if (agent.source === 'manual') {
+    return [...agent.command]
+  }
+
+  const resolved = await catalog.resolveAgent(agent.agentId, {
+    preferredKinds: agent.preferredKinds,
+  })
+  return resolved.command
 }
 
 export function defaultRuntimeRegistryPath(): string {

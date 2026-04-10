@@ -18,6 +18,16 @@ control plane above it.
   capabilities.
 - [`runtime/provider-lifecycle.md`](./runtime/provider-lifecycle.md)
   How runtimes are created, addressed, and pinned to providers.
+- [`runtime/lightweight-runtime-provider.md`](./runtime/lightweight-runtime-provider.md)
+  How Fireline can borrow agentOS-style orchestration patterns for lightweight
+  runtimes without adopting an in-process kernel.
+- [`runtime/agent-catalog-and-launch.md`](./runtime/agent-catalog-and-launch.md)
+  How Fireline discovers ACP agents, resolves launchable distributions, and
+  launches chosen agents into runtimes.
+- [`runtime/alchemy-docker-provisioning.md`](./runtime/alchemy-docker-provisioning.md)
+  How a remote Docker-backed runtime provider could delegate substrate
+  provisioning to Alchemy without moving runtime identity or discovery out of
+  Fireline.
 - [`mesh/peering-and-lineage.md`](./mesh/peering-and-lineage.md)
   How Fireline nodes call each other over ACP while preserving durable lineage.
 - [`state/consumer-surface.md`](./state/consumer-surface.md)

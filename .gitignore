@@ -16,3 +16,4 @@ dist/
 # Local config
 .env
 .env.local
+.tmp/

@@ -32,6 +32,7 @@ client.acp
 client.state
 client.peer
 client.host
+client.topology
 client.raw
 ```
 
@@ -258,6 +259,56 @@ Current implementation note:
 - local `stop` / `delete` work for runtimes owned by the current host client
 - there is not yet a separate control-plane path for stopping an arbitrary
   running runtime discovered only through the registry
+
+## `client.topology`
+
+Topology is the runtime-composition surface for optional ACP middleware.
+
+This does not replace runtime bootstrap or ACP transport. It describes the
+named components that Fireline should compose into the runtime when that
+runtime is created.
+
+Minimal v1 shape:
+
+```ts
+type TopologyComponentSpec = {
+  name: string;
+  config?: Record<string, unknown>;
+};
+
+type TopologySpec = {
+  components: TopologyComponentSpec[];
+};
+```
+
+Entry points:
+
+```ts
+client.topology.builder(): TopologyBuilder
+client.host.create({ provider, agent, topology })
+```
+
+Design rules:
+
+- topology is decided at runtime creation time first
+- topology config applies runtime-wide in v1
+- fixed system components remain outside the user topology surface
+- unknown component names must fail explicitly
+- ordering errors must fail explicitly
+
+Important boundary:
+
+- `client.topology` describes optional ACP component composition
+- `client.host` still owns runtime creation and returns the descriptor
+- `client.acp` still only speaks ACP over the returned endpoint
+
+Current implementation note:
+
+- `client.topology` is the planned primitive for slice 12
+- the initial runtime keeps `LoadCoordinatorComponent` as a fixed system
+  component rather than a user-selectable topology entry
+- per-session topology overrides and initialize-time topology negotiation are
+  deferred
 
 ## `client.raw`
 

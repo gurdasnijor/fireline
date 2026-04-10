@@ -1,0 +1,32 @@
+{
+  "name": "@fireline/browser-harness",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "predev": "pnpm dev:clean && pnpm --filter @fireline/client build && cargo build -q --manifest-path ../../Cargo.toml --bin fireline --bin fireline-testy-load",
+    "dev": "concurrently -k --kill-signal SIGTERM -n control,vite -c cyan,magenta \"pnpm dev:server\" \"pnpm dev:vite\"",
+    "dev:server": "node ./dev-server.mjs",
+    "dev:vite": "vite --host --strictPort",
+    "dev:clean": "rm -rf ./.tmp && for p in 4437 5173; do lsof -ti tcp:$p 2>/dev/null | xargs kill 2>/dev/null; done; true",
+    "build": "vite build",
+    "test": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.18.1",
+    "@fireline/client": "workspace:*",
+    "@fireline/state": "workspace:*",
+    "@tanstack/react-db": "^0.1.82",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "concurrently": "^9.1.2",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0"
+  }
+}

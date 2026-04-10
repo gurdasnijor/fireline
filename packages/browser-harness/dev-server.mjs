@@ -1,0 +1,184 @@
+import { createServer } from 'node:http'
+import { mkdir } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+import { createFirelineClient } from '@fireline/client'
+
+const packageDir = dirname(fileURLToPath(import.meta.url))
+const repoRoot = dirname(dirname(packageDir))
+const tmpDir = join(packageDir, '.tmp')
+const runtimeRegistryPath = join(tmpDir, 'runtimes.toml')
+const peerDirectoryPath = join(tmpDir, 'peers.toml')
+const firelineBin = join(repoRoot, 'target', 'debug', 'fireline')
+const firelineTestyLoadBin = join(repoRoot, 'target', 'debug', 'fireline-testy-load')
+
+const client = createFirelineClient({
+  host: {
+    firelineBin,
+    runtimeRegistryPath,
+    startupTimeoutMs: 20_000,
+    stopTimeoutMs: 10_000,
+  },
+  catalog: {
+    localEntries: [
+      {
+        source: 'local',
+        id: 'fireline-testy-load',
+        name: 'Fireline Testy Load',
+        version: 'local',
+        description: 'Local Fireline proof agent with loadSession support',
+        distributions: [
+          {
+            kind: 'command',
+            command: [firelineTestyLoadBin],
+          },
+        ],
+      },
+    ],
+  },
+})
+
+let currentRuntime = null
+
+await mkdir(tmpDir, { recursive: true })
+
+const server = createServer(async (req, res) => {
+  try {
+    if (!req.url) {
+      sendJson(res, 400, { error: 'missing_url' })
+      return
+    }
+
+    const url = new URL(req.url, 'http://127.0.0.1:4436')
+
+    if (req.method === 'GET' && url.pathname === '/api/agents') {
+      const agents = await client.catalog.listAgents()
+      const items = await Promise.all(
+        agents.map(async (agent) => {
+          try {
+            const launch = await client.catalog.resolveAgent(agent.id)
+            return {
+              ...agent,
+              launchable: true,
+              distributionKind: launch.distributionKind,
+            }
+          } catch (error) {
+            return {
+              ...agent,
+              launchable: false,
+              unavailableReason: toErrorMessage(error),
+            }
+          }
+        }),
+      )
+      sendJson(res, 200, { agents: items })
+      return
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/runtime') {
+      if (!currentRuntime) {
+        sendJson(res, 200, { runtime: null })
+        return
+      }
+      const runtime = await client.host.get(currentRuntime.runtimeKey)
+      currentRuntime = runtime
+      sendJson(res, 200, { runtime })
+      return
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/runtime') {
+      const body = await readJson(req)
+      const agentId = typeof body?.agentId === 'string' ? body.agentId : null
+      if (!agentId) {
+        sendJson(res, 400, { error: 'missing_agent_id' })
+        return
+      }
+
+      await stopCurrentRuntime()
+
+      currentRuntime = await client.host.create({
+        provider: 'local',
+        host: '127.0.0.1',
+        port: 4437,
+        name: 'browser-harness',
+        stateStream: 'fireline-harness-state',
+        peerDirectoryPath,
+        agent: {
+          source: 'catalog',
+          agentId,
+        },
+      })
+
+      sendJson(res, 200, { runtime: currentRuntime })
+      return
+    }
+
+    if (req.method === 'DELETE' && url.pathname === '/api/runtime') {
+      await stopCurrentRuntime()
+      sendJson(res, 200, { runtime: null })
+      return
+    }
+
+    sendJson(res, 404, { error: 'not_found' })
+  } catch (error) {
+    sendJson(res, 500, { error: toErrorMessage(error) })
+  }
+})
+
+server.listen(4436, '127.0.0.1', () => {
+  console.log('browser harness control server ready on http://127.0.0.1:4436')
+})
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, async () => {
+    await shutdown()
+    process.exit(0)
+  })
+}
+
+async function stopCurrentRuntime() {
+  if (!currentRuntime) {
+    return
+  }
+
+  try {
+    await client.host.delete(currentRuntime.runtimeKey)
+  } finally {
+    currentRuntime = null
+  }
+}
+
+async function shutdown() {
+  server.close()
+  await stopCurrentRuntime()
+  await client.close()
+}
+
+function sendJson(res, statusCode, payload) {
+  const body = JSON.stringify(payload)
+  res.writeHead(statusCode, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+    'cache-control': 'no-store',
+  })
+  res.end(body)
+}
+
+async function readJson(req) {
+  const chunks = []
+  for await (const chunk of req) {
+    chunks.push(chunk)
+  }
+  if (chunks.length === 0) {
+    return null
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+}
+
+function toErrorMessage(error) {
+  if (error instanceof Error) {
+    return error.message
+  }
+  return String(error)
+}

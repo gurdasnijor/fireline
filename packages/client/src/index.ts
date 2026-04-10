@@ -17,18 +17,59 @@ import {
   type RuntimeProviderRequest,
   type RuntimeStatus,
 } from './host.js'
+import {
+  ACP_AGENT_REGISTRY_URL,
+  createCatalogClient,
+  resolveAgentLaunch,
+  type AgentCatalogEntry,
+  type AgentCatalogSource,
+  type AgentDistribution,
+  type AgentDistributionKind,
+  type BinaryDistribution,
+  type BinaryTarget,
+  type CatalogAgentLaunchSpec,
+  type CatalogArch,
+  type CatalogClient,
+  type CatalogClientOptions,
+  type CatalogPlatform,
+  type CommandDistribution,
+  type ManualAgentLaunchSpec,
+  type NpxDistribution,
+  type ResolveAgentOptions,
+  type ResolvedAgentLaunch,
+  type RuntimeAgentSpec,
+  type UvxDistribution,
+} from './catalog.js'
 
 export type {
   AcpConnectOptions,
   AcpInitializeOptions,
   CreateRuntimeSpec,
+  AgentCatalogEntry,
+  AgentCatalogSource,
+  AgentDistribution,
+  AgentDistributionKind,
   HostClient,
   HostClientOptions,
   OpenAcpConnection,
+  BinaryDistribution,
+  BinaryTarget,
+  CatalogAgentLaunchSpec,
+  CatalogArch,
+  CatalogClient,
+  CatalogClientOptions,
+  CatalogPlatform,
+  CommandDistribution,
+  ManualAgentLaunchSpec,
+  NpxDistribution,
+  ResolveAgentOptions,
+  ResolvedAgentLaunch,
   RuntimeDescriptor,
+  RuntimeAgentSpec,
   RuntimeProviderKind,
   RuntimeProviderRequest,
   RuntimeStatus,
+  UvxDistribution,
 }
 
 export interface FirelineClient {
@@ -36,6 +77,7 @@ export interface FirelineClient {
     connect(options: AcpConnectOptions): Promise<OpenAcpConnection>
   }
   host: HostClient
+  catalog: CatalogClient
   state: {
     open(config: FirelineDBConfig): FirelineDB
   }
@@ -44,10 +86,15 @@ export interface FirelineClient {
 
 export interface FirelineClientOptions {
   host?: HostClientOptions
+  catalog?: CatalogClientOptions
 }
 
 export function createFirelineClient(options: FirelineClientOptions = {}): FirelineClient {
-  const host = createHostClient(options.host)
+  const host = createHostClient({
+    ...options.host,
+    catalog: options.catalog ?? options.host?.catalog,
+  })
+  const catalog = createCatalogClient(options.catalog)
   return {
     acp: {
       connect(options) {
@@ -55,6 +102,7 @@ export function createFirelineClient(options: FirelineClientOptions = {}): Firel
       },
     },
     host,
+    catalog,
     state: {
       open(config) {
         return createFirelineDB(config)
@@ -66,4 +114,11 @@ export function createFirelineClient(options: FirelineClientOptions = {}): Firel
   }
 }
 
-export { connectAcp, createHostClient, defaultRuntimeRegistryPath }
+export {
+  ACP_AGENT_REGISTRY_URL,
+  connectAcp,
+  createCatalogClient,
+  createHostClient,
+  defaultRuntimeRegistryPath,
+  resolveAgentLaunch,
+}
