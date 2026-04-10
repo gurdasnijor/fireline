@@ -11,10 +11,6 @@ control plane above it.
 - [`architecture.md`](./architecture.md)
   The canonical statement of what Fireline is, what it owns, and what it does
   not own.
-- [`durable-agent-fabric.md`](./durable-agent-fabric.md)
-  Product framing for Fireline as a durable agent fabric built around
-  sessions, workspaces, capability profiles, and reusable conductor
-  extensions.
 - [`packages.md`](./packages.md)
   The intended Rust crate and TypeScript package boundaries.
 - [`ts/primitives.md`](./ts/primitives.md)
@@ -41,6 +37,28 @@ control plane above it.
   stream without reviving a Rust-side consumer DB.
 - [`state/session-load.md`](./state/session-load.md)
   How reconnect and `session/load` fit into the model.
+
+## Product
+
+- [`product/index.md`](./product/index.md)
+  High-level product vision and reading order for product-facing docs.
+- [`product/vision.md`](./product/vision.md)
+  The durable-agent-fabric thesis and why Fireline is well positioned.
+- [`product/object-model.md`](./product/object-model.md)
+  Sessions, workspaces, capability profiles, runtimes, and runs.
+- [`product/user-surfaces.md`](./product/user-surfaces.md)
+  How end users and host products should actually interact with the system.
+- [`product/ecosystem-story.md`](./product/ecosystem-story.md)
+  How Fireline maps to ACP proxy chains, managed agents, `agent.pw`, and
+  weaker harnesses.
+- [`product/roadmap-alignment.md`](./product/roadmap-alignment.md)
+  How the execution slices map to the product vision and how future slices
+  should be chosen.
+- [`product/backlog.md`](./product/backlog.md)
+  Candidate spikes and slices that turn the product vision into a delivery
+  backlog.
+- [`product/priorities.md`](./product/priorities.md)
+  What exists today, what is missing, and where product effort should go next.
 
 ## Research
 

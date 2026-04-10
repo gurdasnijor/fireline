@@ -6,6 +6,9 @@ Related:
 
 - [`../runtime/control-and-data-plane.md`](../runtime/control-and-data-plane.md)
 - [`../ts/primitives.md`](../ts/primitives.md)
+- [`../product/vision.md`](../product/vision.md)
+- [`../product/object-model.md`](../product/object-model.md)
+- [`../product/roadmap-alignment.md`](../product/roadmap-alignment.md)
 - [`12-programmable-topology-first-mover.md`](./12-programmable-topology-first-mover.md)
 
 ## Objective
@@ -26,6 +29,16 @@ topology such as:
 
 The goal is not "multi-host in the abstract." The goal is to make that concrete
 topology look like one coherent Fireline fabric.
+
+## Product Pillar
+
+Provider-neutral runtime fabric.
+
+## User Workflow Unlocked
+
+Start, discover, and observe one logical fleet of Fireline runtimes across
+local and Docker-backed placements while preserving durable sessions and
+ACP-native peer behavior.
 
 ## Example topology this slice is meant to unlock
 

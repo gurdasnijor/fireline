@@ -2,6 +2,12 @@
 
 Status: planned
 
+Related:
+
+- [`../product/vision.md`](../product/vision.md)
+- [`../product/ecosystem-story.md`](../product/ecosystem-story.md)
+- [`../product/roadmap-alignment.md`](../product/roadmap-alignment.md)
+
 ## Objective
 
 Prove that Fireline can build its optional ACP component chain from an explicit
@@ -12,6 +18,16 @@ This slice is intentionally narrow. It does not try to solve every possible
 proxy or dynamic per-session override. It only needs to prove the architecture
 with one observer, one inbound transformer, and the existing peer MCP tool
 injector.
+
+## Product Pillar
+
+Reusable conductor extensions.
+
+## User Workflow Unlocked
+
+Let a run gain reusable capabilities such as audit, context injection, and peer
+delegation without forking the underlying harness or baking those concerns into
+one agent implementation.
 
 ## Why this slice comes next
 
