@@ -1,0 +1,130 @@
+[workspace]
+members = [
+    ".",
+    "crates/fireline-conductor",
+    "crates/fireline-peer",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/fireline/fireline"
+
+[workspace.dependencies]
+# Internal workspace crates
+fireline-conductor = { path = "crates/fireline-conductor" }
+fireline-peer = { path = "crates/fireline-peer" }
+
+# Async runtime + utility
+anyhow = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP / WebSocket
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Tracing / logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Filesystem / config
+dirs = "6"
+toml = "0.8"
+
+# IDs
+uuid = { version = "1", features = ["serde", "v4"] }
+
+# JSON Schema validation (used by conformance test)
+jsonschema = "0.30"
+
+# Durable streams ecosystem
+durable-streams = { git = "https://github.com/durable-streams/durable-streams", package = "durable-streams" }
+durable-streams-server = "0.1.3"
+
+# ACP SDK crates (all from one repo, one commit)
+agent-client-protocol = { git = "https://github.com/agentclientprotocol/rust-sdk", features = ["unstable_session_usage"] }
+sacp = { git = "https://github.com/agentclientprotocol/rust-sdk", package = "agent-client-protocol-core" }
+sacp-conductor = { git = "https://github.com/agentclientprotocol/rust-sdk", package = "agent-client-protocol-conductor" }
+sacp-tokio = { git = "https://github.com/agentclientprotocol/rust-sdk", package = "agent-client-protocol-tokio" }
+
+# ============================================================================
+# Top-level binary package
+# ============================================================================
+
+[package]
+name = "fireline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fireline runtime substrate for ACP-compatible agents"
+
+[dependencies]
+# Workspace crates
+fireline-conductor.workspace = true
+fireline-peer.workspace = true
+
+# Async runtime
+tokio.workspace = true
+anyhow.workspace = true
+
+# CLI
+clap.workspace = true
+
+# Tracing
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# HTTP server
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+
+# Serde (for connection lookup TOML, agent catalog, etc.)
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+
+# Reqwest (for the agent catalog client + webhook subscriber)
+reqwest.workspace = true
+
+# Filesystem
+dirs.workspace = true
+
+# IDs
+uuid.workspace = true
+
+# Durable streams (for webhook subscriber + dashboard binary)
+durable-streams.workspace = true
+durable-streams-server.workspace = true
+
+[[bin]]
+name = "fireline"
+path = "src/main.rs"
+
+[[bin]]
+name = "fireline-dashboard"
+path = "src/bin/dashboard.rs"
+
+[[bin]]
+name = "fireline-agents"
+path = "src/bin/agents.rs"
+
+[[bin]]
+name = "fireline-testy"
+path = "src/bin/testy.rs"

@@ -1,0 +1,46 @@
+[package]
+name = "fireline-conductor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ACP conductor wiring + transport adapters + durable trace observer for Fireline"
+
+[dependencies]
+# Async runtime
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+
+# Serde (for the trace writer's JSON construction)
+serde.workspace = true
+serde_json.workspace = true
+
+# Tracing
+tracing.workspace = true
+
+# ACP SDK
+agent-client-protocol.workspace = true
+sacp.workspace = true
+sacp-conductor.workspace = true
+sacp-tokio.workspace = true
+
+# Durable streams (the trace writer's Producer)
+durable-streams.workspace = true
+
+# WebSocket transport adapter (feature-gated to keep stdio-only consumers light)
+axum = { workspace = true, optional = true }
+
+[features]
+default = ["transport-stdio", "transport-websocket", "transport-duplex"]
+
+# Each transport is feature-gated so consumers can opt in to what they need.
+transport-stdio = []
+transport-websocket = ["dep:axum"]
+transport-duplex = []
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+jsonschema.workspace = true

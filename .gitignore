@@ -1,0 +1,18 @@
+# Rust
+target/
+Cargo.lock
+
+# TypeScript
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local config
+.env
+.env.local
