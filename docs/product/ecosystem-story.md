@@ -170,12 +170,14 @@ This matters for:
 - gated actions such as production deploys or financial operations
 - agents that continue after the original interactive session is gone
 
-## Strong Story For Weaker Harnesses
+## Strong Story For ACP-Native And Simpler Harnesses
 
-There is also a strong "upgrade layer" story for less-capable harnesses.
+There is also a strong "upgrade layer" story for ACP-native or ACP-adapted
+agents that do not want to rebuild orchestration, durability, and policy
+themselves.
 
-If a harness can speak ACP directly, or can be wrapped by a thin ACP adapter,
-Fireline can add capabilities around it without requiring that harness to build
+If an agent already speaks ACP directly, or already has an ACP adapter,
+Fireline can add capabilities around it without requiring that agent to build
 them natively.
 
 That includes capabilities such as:
@@ -188,9 +190,10 @@ That includes capabilities such as:
 - peer delegation
 - lineage-aware multi-agent coordination
 
-This is particularly relevant for simpler or more tool-limited harnesses,
-including OpenClaw-style systems or internal harnesses that are useful but do
-not yet have rich extension, persistence, or policy layers.
+This is particularly relevant for simpler or more tool-limited agents,
+including ACP-adapted systems such as Pi-style agents or internal harnesses
+that are useful but do not yet have rich extension, persistence, or policy
+layers.
 
 The story is not "replace the harness."
 

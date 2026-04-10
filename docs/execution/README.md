@@ -24,4 +24,7 @@ Current slices:
 - [`10-acp-shared-session-bridge.md`](./10-acp-shared-session-bridge.md) — deferred
 - [`11-agent-catalog-and-runtime-launch.md`](./11-agent-catalog-and-runtime-launch.md) — complete
 - [`12-programmable-topology-first-mover.md`](./12-programmable-topology-first-mover.md) — planned
-- [`13-distributed-runtime-fabric-foundation.md`](./13-distributed-runtime-fabric-foundation.md) — planned
+- [`13-distributed-runtime-fabric/README.md`](./13-distributed-runtime-fabric/README.md) — planned umbrella
+  - [`13-distributed-runtime-fabric/phase-0-runtime-host-and-peer-registry-refactor.md`](./13-distributed-runtime-fabric/phase-0-runtime-host-and-peer-registry-refactor.md) — planned prerequisite refactor
+  - [`13-distributed-runtime-fabric/13a-control-plane-runtime-api-and-external-durable-stream-bootstrap.md`](./13-distributed-runtime-fabric/13a-control-plane-runtime-api-and-external-durable-stream-bootstrap.md) — planned first implementation slice
+  - [`13-distributed-runtime-fabric/13b-docker-provider-and-mixed-topology.md`](./13-distributed-runtime-fabric/13b-docker-provider-and-mixed-topology.md) — planned mixed-topology expansion

@@ -33,6 +33,11 @@ Fireline should become a **durable agent fabric**:
 - [`object-model.md`](./object-model.md)
   The main product objects: sessions, workspaces, capability profiles, runtimes,
   and runs.
+- [`runs-and-sessions.md`](./runs-and-sessions.md)
+  The boundary between the live run object and the durable session record.
+- [`workspaces.md`](./workspaces.md)
+  The portable working-context model for local folders, git sources, and
+  snapshots.
 - [`product-api-surfaces.md`](./product-api-surfaces.md)
   The higher-level API surfaces that should sit above the existing systems
   primitives.
@@ -64,7 +69,7 @@ These product docs sit above:
 - [`../architecture.md`](../architecture.md)
 - [`../ts/primitives.md`](../ts/primitives.md)
 - [`../runtime/control-and-data-plane.md`](../runtime/control-and-data-plane.md)
-- [`../execution/13-distributed-runtime-fabric-foundation.md`](../execution/13-distributed-runtime-fabric-foundation.md)
+- [`../execution/13-distributed-runtime-fabric/README.md`](../execution/13-distributed-runtime-fabric/README.md)
 
 Those documents define how the system is built.
 

@@ -2,11 +2,15 @@
 
 > Related:
 > - [`index.md`](./index.md)
+> - [`runs-and-sessions.md`](./runs-and-sessions.md)
+> - [`workspaces.md`](./workspaces.md)
+> - [`capability-profiles.md`](./capability-profiles.md)
+> - [`out-of-band-approvals.md`](./out-of-band-approvals.md)
 > - [`priorities.md`](./priorities.md)
 > - [`backlog.md`](./backlog.md)
 > - [`../execution/README.md`](../execution/README.md)
 > - [`../execution/12-programmable-topology-first-mover.md`](../execution/12-programmable-topology-first-mover.md)
-> - [`../execution/13-distributed-runtime-fabric-foundation.md`](../execution/13-distributed-runtime-fabric-foundation.md)
+> - [`../execution/13-distributed-runtime-fabric/README.md`](../execution/13-distributed-runtime-fabric/README.md)
 
 ## Purpose
 
@@ -240,7 +244,7 @@ Examples:
 - future control plane
 - `agent.pw`
 - GitHub/Slack workflow backend
-- a weaker ACP harness that Fireline can wrap
+- an ACP-native or ACP-adapted agent that Fireline can augment
 
 If it cannot be consumed anywhere, it should have a stronger reason to exist.
 
@@ -248,19 +252,33 @@ If it cannot be consumed anywhere, it should have a stronger reason to exist.
 
 Assuming slice `12` is finishing now, the strongest sequence is:
 
+### Phase 0 prerequisite refactor
+
+Strengthens:
+
+- runtime fabric implementation seam
+
+Unlocks:
+
+- a reviewable path for the later control-plane and Docker work without mixing
+  mechanical extraction into feature delivery
+
+This is not a product slice by itself. It is a prerequisite refactor.
+
 ### `13a` control-plane runtime API and external durable-stream bootstrap
 
 Strengthens:
 
 - runtime fabric
-- durable sessions across many runtimes
+- durable sessions across environment-level runtime boundaries
 
 Unlocks:
 
-- one coherent local + Docker fabric
-- browser/control-plane visibility into many runtimes
+- one coherent control-plane-backed local runtime fabric
+- browser/control-plane visibility into runtimes whose durable state may live
+  outside the runtime process
 
-### `13b` provider trait extraction and Docker provider
+### `13b` Docker provider and mixed topology
 
 Strengthens:
 
@@ -269,6 +287,7 @@ Strengthens:
 
 Unlocks:
 
+- one coherent local + Docker runtime fabric
 - "move this run off the local machine" as a real product direction
 
 ### `14` session product surface
@@ -319,17 +338,16 @@ Unlocks:
 - local path, git ref, or snapshot as first-class run inputs
 - a cleaner story for remote execution and later resume
 
-### `18` external-harness adapter story
+### `18` ACP agent augmentation story
 
 Strengthens:
 
-- Fireline as an upgrade layer for weaker harnesses
+- Fireline as an upgrade layer around ACP-native or ACP-adapted agents
 
 Unlocks:
 
-- wrap ACP-capable or ACP-adapted harnesses with audit, context injection,
-  approvals, and durable sessions without requiring those harnesses to build
-  those features natively
+- add audit, context injection, approvals, lineage, and durable sessions around
+  ACP agents without requiring those agents to build those features natively
 
 ## What To Avoid
 

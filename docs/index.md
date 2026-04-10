@@ -28,6 +28,8 @@ control plane above it.
   How a remote Docker-backed runtime provider could delegate substrate
   provisioning to Alchemy without moving runtime identity or discovery out of
   Fireline.
+- [`execution/13-distributed-runtime-fabric/README.md`](./execution/13-distributed-runtime-fabric/README.md)
+  The split execution plan for control-plane-backed runtime fabric work.
 - [`mesh/peering-and-lineage.md`](./mesh/peering-and-lineage.md)
   How Fireline nodes call each other over ACP while preserving durable lineage.
 - [`state/consumer-surface.md`](./state/consumer-surface.md)
@@ -46,6 +48,11 @@ control plane above it.
   The durable-agent-fabric thesis and why Fireline is well positioned.
 - [`product/object-model.md`](./product/object-model.md)
   Sessions, workspaces, capability profiles, runtimes, and runs.
+- [`product/runs-and-sessions.md`](./product/runs-and-sessions.md)
+  The difference between the managed run object and the durable session record.
+- [`product/workspaces.md`](./product/workspaces.md)
+  The portable working-context model for local paths, git sources, and
+  snapshots.
 - [`product/user-surfaces.md`](./product/user-surfaces.md)
   How end users and host products should actually interact with the system.
 - [`product/ecosystem-story.md`](./product/ecosystem-story.md)

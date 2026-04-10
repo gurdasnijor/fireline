@@ -2,6 +2,8 @@
 
 > Related:
 > - [`vision.md`](./vision.md)
+> - [`runs-and-sessions.md`](./runs-and-sessions.md)
+> - [`workspaces.md`](./workspaces.md)
 > - [`user-surfaces.md`](./user-surfaces.md)
 > - [`../state/session-load.md`](../state/session-load.md)
 > - [`../ts/primitives.md`](../ts/primitives.md)
