@@ -8,7 +8,7 @@ use crate::runtime_registry::RuntimeRegistry;
 
 pub use fireline_conductor::runtime::{
     CreateRuntimeSpec, Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeProviderRequest,
-    RuntimeStatus, StreamStorageConfig, StreamStorageMode,
+    RuntimeRegistration, RuntimeStatus, StreamStorageConfig, StreamStorageMode,
 };
 
 #[derive(Clone)]
@@ -33,7 +33,23 @@ impl RuntimeHost {
     }
 
     pub async fn create(&self, spec: CreateRuntimeSpec) -> Result<RuntimeDescriptor> {
-        self.inner.create(spec).await
+        let descriptor = self.inner.create(spec).await?;
+        if descriptor.status != RuntimeStatus::Starting {
+            return Ok(descriptor);
+        }
+
+        self.inner.register(
+            &descriptor.runtime_key,
+            RuntimeRegistration {
+                runtime_id: descriptor.runtime_id.clone(),
+                node_id: descriptor.node_id.clone(),
+                provider: descriptor.provider,
+                provider_instance_id: descriptor.provider_instance_id.clone(),
+                advertised_acp_url: descriptor.acp.url.clone(),
+                advertised_state_stream_url: descriptor.state.url.clone(),
+                helper_api_base_url: descriptor.helper_api_base_url.clone(),
+            },
+        )
     }
 
     pub fn get(&self, runtime_key: &str) -> Result<Option<RuntimeDescriptor>> {

@@ -6,8 +6,9 @@ mod registry;
 pub use self::local::{LocalProvider, LocalRuntimeLauncher};
 pub use self::manager::RuntimeManager;
 pub use self::provider::{
-    CreateRuntimeSpec, Endpoint, ManagedRuntime, RuntimeDescriptor, RuntimeLaunch, RuntimeProvider,
-    RuntimeProviderKind, RuntimeProviderRequest, RuntimeStatus, StreamStorageConfig,
+    CreateRuntimeSpec, Endpoint, HeartbeatMetrics, HeartbeatReport, ManagedRuntime,
+    RuntimeDescriptor, RuntimeLaunch, RuntimeProvider, RuntimeProviderKind,
+    RuntimeProviderRequest, RuntimeRegistration, RuntimeStatus, StreamStorageConfig,
     StreamStorageMode,
 };
 pub use self::registry::RuntimeRegistry;
@@ -79,27 +80,38 @@ impl RuntimeHost {
                 return Err(error);
             }
         };
+        let launch_runtime_id = launch.runtime_id.clone();
+        let launch_provider_instance_id = launch.provider_instance_id.clone();
+        let launch_acp = launch.acp.clone();
+        let launch_state = launch.state.clone();
+        let launch_helper_api_base_url = launch.helper_api_base_url.clone();
 
-        let descriptor = RuntimeDescriptor {
-            runtime_key: runtime_key.clone(),
-            runtime_id: launch.runtime_id.clone(),
-            node_id,
-            provider,
-            provider_instance_id: launch.provider_instance_id.clone(),
-            status: RuntimeStatus::Ready,
-            acp: launch.acp.clone(),
-            state: launch.state.clone(),
-            helper_api_base_url: launch.helper_api_base_url.clone(),
-            created_at_ms,
-            updated_at_ms: now_ms(),
-        };
-
-        self.inner.registry.upsert(descriptor.clone())?;
         self.inner
             .live_handles
             .lock()
             .await
-            .insert(runtime_key, launch);
+            .insert(runtime_key.clone(), launch);
+
+        if let Some(descriptor) = self.inner.registry.get(&runtime_key)? {
+            if descriptor.status != RuntimeStatus::Starting || !descriptor.runtime_id.is_empty() {
+                return Ok(descriptor);
+            }
+        }
+
+        let descriptor = RuntimeDescriptor {
+            runtime_key: runtime_key.clone(),
+            runtime_id: launch_runtime_id,
+            node_id,
+            provider,
+            provider_instance_id: launch_provider_instance_id,
+            status: RuntimeStatus::Starting,
+            acp: launch_acp,
+            state: launch_state,
+            helper_api_base_url: launch_helper_api_base_url,
+            created_at_ms,
+            updated_at_ms: now_ms(),
+        };
+        self.inner.registry.upsert(descriptor.clone())?;
 
         Ok(descriptor)
     }
@@ -146,6 +158,66 @@ impl RuntimeHost {
         }
 
         self.inner.registry.remove(runtime_key)
+    }
+
+    pub fn register(
+        &self,
+        runtime_key: &str,
+        registration: RuntimeRegistration,
+    ) -> Result<RuntimeDescriptor> {
+        let mut descriptor = self
+            .inner
+            .registry
+            .get(runtime_key)?
+            .ok_or_else(|| anyhow!("runtime '{runtime_key}' not found"))?;
+
+        if descriptor.status == RuntimeStatus::Stopped {
+            return Err(anyhow!(
+                "runtime '{runtime_key}' is stopped and cannot re-register"
+            ));
+        }
+
+        let next_status = match descriptor.status {
+            RuntimeStatus::Starting | RuntimeStatus::Stale => RuntimeStatus::Ready,
+            RuntimeStatus::Ready => RuntimeStatus::Ready,
+            RuntimeStatus::Busy => RuntimeStatus::Busy,
+            RuntimeStatus::Idle => RuntimeStatus::Idle,
+            RuntimeStatus::Broken => RuntimeStatus::Broken,
+            RuntimeStatus::Stopped => unreachable!("stopped runtimes already returned above"),
+        };
+
+        descriptor.runtime_id = registration.runtime_id;
+        descriptor.node_id = registration.node_id;
+        descriptor.provider = registration.provider;
+        descriptor.provider_instance_id = registration.provider_instance_id;
+        descriptor.status = next_status;
+        descriptor.acp = Endpoint::new(registration.advertised_acp_url);
+        descriptor.state = Endpoint::new(registration.advertised_state_stream_url);
+        descriptor.helper_api_base_url = registration.helper_api_base_url;
+        descriptor.updated_at_ms = now_ms();
+        self.inner.registry.upsert(descriptor.clone())?;
+        Ok(descriptor)
+    }
+
+    pub fn heartbeat(&self, runtime_key: &str, report: HeartbeatReport) -> Result<RuntimeDescriptor> {
+        let mut descriptor = self
+            .inner
+            .registry
+            .get(runtime_key)?
+            .ok_or_else(|| anyhow!("runtime '{runtime_key}' not found"))?;
+
+        if descriptor.status == RuntimeStatus::Stopped {
+            return Err(anyhow!(
+                "runtime '{runtime_key}' is stopped and cannot heartbeat"
+            ));
+        }
+
+        if descriptor.status == RuntimeStatus::Stale {
+            descriptor.status = RuntimeStatus::Ready;
+        }
+        descriptor.updated_at_ms = report.ts_ms;
+        self.inner.registry.upsert(descriptor.clone())?;
+        Ok(descriptor)
     }
 }
 

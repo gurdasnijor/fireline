@@ -67,6 +67,34 @@ pub struct RuntimeDescriptor {
     pub updated_at_ms: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeRegistration {
+    pub runtime_id: String,
+    pub node_id: String,
+    pub provider: RuntimeProviderKind,
+    pub provider_instance_id: String,
+    pub advertised_acp_url: String,
+    pub advertised_state_stream_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helper_api_base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HeartbeatMetrics {
+    pub active_sessions: u32,
+    pub queue_depth: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeartbeatReport {
+    pub ts_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<HeartbeatMetrics>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamStorageMode {
@@ -111,12 +139,46 @@ pub struct CreateRuntimeSpec {
 }
 
 pub struct RuntimeLaunch {
+    pub status: RuntimeStatus,
     pub runtime_id: String,
     pub provider_instance_id: String,
     pub acp: Endpoint,
     pub state: Endpoint,
     pub helper_api_base_url: Option<String>,
     pub runtime: Box<dyn ManagedRuntime>,
+}
+
+impl RuntimeLaunch {
+    pub fn ready(
+        runtime_id: String,
+        provider_instance_id: String,
+        acp: Endpoint,
+        state: Endpoint,
+        helper_api_base_url: Option<String>,
+        runtime: Box<dyn ManagedRuntime>,
+    ) -> Self {
+        Self {
+            status: RuntimeStatus::Ready,
+            runtime_id,
+            provider_instance_id,
+            acp,
+            state,
+            helper_api_base_url,
+            runtime,
+        }
+    }
+
+    pub fn starting(runtime: Box<dyn ManagedRuntime>) -> Self {
+        Self {
+            status: RuntimeStatus::Starting,
+            runtime_id: String::new(),
+            provider_instance_id: String::new(),
+            acp: Endpoint::new(""),
+            state: Endpoint::new(""),
+            helper_api_base_url: None,
+            runtime,
+        }
+    }
 }
 
 #[async_trait]
