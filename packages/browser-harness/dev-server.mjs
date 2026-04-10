@@ -15,6 +15,7 @@ const firelineBin = join(repoRoot, 'target', 'debug', 'fireline')
 const firelineControlPlaneBin = join(repoRoot, 'target', 'debug', 'fireline-control-plane')
 const firelineTestyLoadBin = join(repoRoot, 'target', 'debug', 'fireline-testy-load')
 const controlPlaneUrl = 'http://127.0.0.1:4440'
+const preferPush = process.env.PREFER_PUSH === 'true'
 
 const client = createFirelineClient({
   host: {
@@ -187,6 +188,10 @@ function toErrorMessage(error) {
 }
 
 async function startControlPlane() {
+  console.log(
+    `starting fireline-control-plane with prefer_push=${preferPush ? 'true' : 'false'}`,
+  )
+
   controlPlaneProcess = spawn(
     firelineControlPlaneBin,
     [
@@ -207,7 +212,10 @@ async function startControlPlane() {
     ],
     {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: process.env,
+      env: {
+        ...process.env,
+        FIRELINE_CONTROL_PLANE_PREFER_PUSH: preferPush ? 'true' : 'false',
+      },
     },
   )
 
