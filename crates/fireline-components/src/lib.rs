@@ -31,6 +31,7 @@ pub mod audit;
 pub mod budget;
 pub mod context;
 pub mod fs_backend;
+pub mod sandbox;
 pub mod smithery;
 pub mod tools;
 
