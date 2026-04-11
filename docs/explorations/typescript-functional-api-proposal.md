@@ -10,7 +10,7 @@
 
 ## Why this doc exists
 
-The current TypeScript surface proposal in `low-level-api-surface.md` is organized around **namespaces** (`client.host`, `client.acp`, `client.state`, `client.stream`, `client.topology`, `client.orchestration`). That's a familiar shape and matches how most TS SDKs are structured.
+The current TypeScript surface proposal in `low-level-api-surface.md` is organized around **namespaces** (`client.host`, `client.acp`, `client.state`, `client.stream`, `client.topology`) plus a small number of helpers such as `resume(sessionId)`. That's a familiar shape and matches how most TS SDKs are structured.
 
 But the algebraic decomposition in `managed-agents-mapping.md` showed that everything Fireline does above the six primitives is **functional composition over seven combinators**. Topology is `compose(component, component, component, ...)`. Tools are init-time `mapEffect`. Resources are init-time Components with a single-fire constraint. Materializers are folds over the Session event log.
 
@@ -48,6 +48,7 @@ export {
   approvalGate,
   peer,
   smithery,
+  fsBackend,
   durableTrace,
 
   // Sandbox lifecycle (Sandbox primitive — provision side)
@@ -70,9 +71,8 @@ export {
   materialize,
   openStream,
 
-  // Orchestration (the wake primitive)
-  wake,
-  listWakes,
+  // Orchestration by composition
+  resume,
 
   // Types — values, not interfaces hidden behind methods
   type Component,
@@ -80,10 +80,9 @@ export {
   type RuntimeSpec,
   type RuntimeDescriptor,
   type ResourceRef,
+  type FileBackend,
   type CapabilityRef,
   type Endpoint,
-  type WakeReason,
-  type WakeReceipt,
   type Materializer,
 } from '@fireline/client'
 ```
@@ -122,7 +121,7 @@ declare const filter: (
 // 5. substitute — rewrite one Effect into a different Effect
 declare const substitute: (rewrite: (e: Effect) => Effect) => Component
 
-// 6. suspend — pause Effect, write a wait record, resume on wake
+// 6. suspend — pause Effect, write a wait record, resume after a later Session event
 declare const suspend: (reason: (e: Effect) => SuspendReason | null) => Component
 
 // 7. fanout — turn one Effect into many, collect results
@@ -242,6 +241,14 @@ export const smithery = (opts: SmitheryOpts): Component =>
 // durableTrace — sugar for appendToSession on both directions
 export const durableTrace = (): Component =>
   appendToSession((e, r) => ({ kind: 'trace', effect: e, result: r }))
+
+// fsBackend — sugar for compose(substitute, appendToSession)
+export const fsBackend = (backend: FileBackend): Component =>
+  compose(
+    substitute(e => isFsOp(e) ? routeFsOp(e, backend) : e),
+    appendToSession((e, r) =>
+      isFsOp(e) ? { kind: 'fs_op', path: fsPath(e), result: r } : null),
+  )
 ```
 
 Reading the source of any built-in tells you exactly what it does in terms of the seven combinators. There's no hidden behavior. If you want to write your own, copy the pattern.
@@ -460,32 +467,29 @@ for await (const event of replay) {
 
 `openStream` returns an async iterator. No methods, no classes. The stream is a value that yields events.
 
-## Orchestration — wake
+## Orchestration — `resume(sessionId)`
 
-`wake` is a single free function:
-
-```typescript
-import { wake, type WakeReason } from '@fireline/client'
-
-const reason: WakeReason = {
-  kind: 'webhook',
-  webhookId: req.body.eventId,
-  payload: req.body,
-}
-
-const receipt = await wake('runtime:slack-bot', reason)
-console.log(receipt.wakeId, receipt.willInstantiate)
-```
-
-That's the entire Orchestration namespace. One function. The receipt is a plain data value.
-
-For listing past wakes (for debugging or operator visibility):
+Orchestration is satisfied by composition rather than a dedicated primitive.
+The helper shape is:
 
 ```typescript
-import { listWakes } from '@fireline/client'
+import { resume } from '@fireline/client'
 
-const recent = await listWakes({ runtimeKey: 'runtime:slack-bot', since: Date.now() - 60_000 })
+const runtime = await resume('session:slack-bot')
+console.log(runtime.runtimeKey, runtime.acp.url)
 ```
+
+Conceptually `resume(sessionId)` is:
+
+- `sessionStore.get(sessionId)`
+- `getRuntime(session.runtimeKey)`
+- `provision(session.runtimeSpec)` if dormant
+- `connectAcp(runtime.acp)`
+- `loadSession(sessionId)`
+
+That is the entire Orchestration story in the functional surface: a helper over
+Session, Sandbox, and Harness surfaces, not a standalone orchestration
+primitive.
 
 ## End-to-end happy path
 
@@ -501,8 +505,8 @@ import {
   connectAcp,
   // Session reads
   sessionStore, materialize,
-  // Orchestration
-  wake,
+  // Orchestration by composition
+  resume,
 } from '@fireline/client'
 
 // 1. Build the topology — pure value, no side effects yet
@@ -532,12 +536,8 @@ await session.prompt('Review the PR at https://...')
 const sessions = materialize(runtime.state, sessionStore)
 console.log(sessions.list())
 
-// 5. Later, from a webhook handler — wake the runtime
-await wake(runtime.runtimeKey, {
-  kind: 'webhook',
-  webhookId: 'evt-123',
-  payload: { /* ... */ },
-})
+// 5. Later, from a subscriber loop — resume the session
+await resume(session.id)
 ```
 
 Every value in this example is plain data or a composable function. There is no `client` god-object. There are no classes with hidden state. Each step is a free function call returning a value you can pass around.
@@ -557,7 +557,7 @@ Compared to the current `low-level-api-surface.md` namespace-based proposal:
 | `client.stream.open(endpoint)` | `openStream(endpoint)` |
 | `client.topology.builder().attach('audit')...` | `compose(audit(), ...)` |
 | `client.topology.attachTool({...})` | `mapEffect(e => addTool(e, tool))` |
-| `client.orchestration.wake(key, reason)` | `wake(key, reason)` |
+| Orchestration by composition (`resume(sessionId)`) | `resume(sessionId)` |
 
 The functional shape removes the `client.` prefix, removes the namespace nesting, and replaces builder chains with `compose`. Same operations, fewer concepts.
 
@@ -566,7 +566,9 @@ The functional shape removes the `client.` prefix, removes the namespace nesting
 - **Six primitives + seven combinators** as the underlying contract
 - **No `client.runs` / `client.workspaces` / `client.profiles`** — those are product objects, not substrate
 - **Endpoint, RuntimeDescriptor, SessionDescriptor** as the core data types
-- **The control plane / data plane split** — `provision` and `wake` go to the control plane; `connectAcp`, `openStream`, `materialize` go to the data plane
+- **The control plane / data plane split** — `provision` goes to the control
+  plane; `connectAcp`, `openStream`, `materialize`, and `resume` compose
+  across the data/control boundary without inventing a new orchestration API
 - **Symmetry between server-side proxy chains and client-side ACP middleware**
 - **Tools and Resources as Components**, not separate concepts
 
