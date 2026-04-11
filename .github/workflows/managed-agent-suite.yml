@@ -44,7 +44,7 @@ jobs:
 
       - name: Run managed-agent Rust suite
         run: |
-          cargo test --locked \
+          cargo test \
             --test managed_agent_session \
             --test managed_agent_sandbox \
             --test managed_agent_harness \
