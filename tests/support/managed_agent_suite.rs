@@ -445,7 +445,10 @@ impl ControlPlaneHarness {
         };
 
         for runtime in runtimes {
-            if matches!(runtime.status, RuntimeStatus::Stopped | RuntimeStatus::Broken) {
+            if matches!(
+                runtime.status,
+                RuntimeStatus::Stopped | RuntimeStatus::Broken
+            ) {
                 continue;
             }
             let _ = self.stop_runtime(&runtime.runtime_key).await;
@@ -609,6 +612,55 @@ pub(crate) async fn load_session(acp_url: &str, session_id: &str) -> Result<()> 
 }
 
 #[instrument(skip(text), fields(acp_url, session_id))]
+pub(crate) async fn load_session_then_prompt(
+    acp_url: &str,
+    session_id: &str,
+    text: &str,
+) -> Result<()> {
+    let session_id = session_id.to_string();
+    let text = text.to_string();
+    sacp::Client
+        .builder()
+        .connect_with(
+            WebSocketTransport {
+                url: acp_url.to_string(),
+            },
+            move |cx: sacp::ConnectionTo<sacp::Agent>| {
+                let session_id = session_id.clone();
+                let text = text.clone();
+                async move {
+                    let _ = cx
+                        .send_request(agent_client_protocol::InitializeRequest::new(
+                            agent_client_protocol::ProtocolVersion::LATEST,
+                        ))
+                        .block_task()
+                        .await?;
+
+                    let _ = cx
+                        .send_request(agent_client_protocol::LoadSessionRequest::new(
+                            session_id.clone(),
+                            repo_root(),
+                        ))
+                        .block_task()
+                        .await?;
+
+                    let _ = cx
+                        .send_request(agent_client_protocol::PromptRequest::new(
+                            session_id,
+                            vec![text.into()],
+                        ))
+                        .block_task()
+                        .await?;
+
+                    Ok::<(), sacp::Error>(())
+                }
+            },
+        )
+        .await
+        .map_err(anyhow::Error::from)
+}
+
+#[instrument(skip(text), fields(acp_url, session_id))]
 pub(crate) async fn prompt_session(acp_url: &str, session_id: &str, text: &str) -> Result<()> {
     let session_id = session_id.to_string();
     let text = text.to_string();
@@ -692,7 +744,12 @@ impl sacp::ConnectTo<sacp::Client> for WebSocketTransport {
     }
 }
 
-#[instrument(fields(shared_stream_base_url, prefer_push, heartbeat_scan_interval_ms, stale_timeout_ms))]
+#[instrument(fields(
+    shared_stream_base_url,
+    prefer_push,
+    heartbeat_scan_interval_ms,
+    stale_timeout_ms
+))]
 async fn spawn_control_plane(
     runtime_registry_path: &PathBuf,
     peer_directory_path: &PathBuf,
@@ -842,7 +899,10 @@ pub(crate) enum StreamMode {
     /// server's base URL; the stream name is the logical stream the runtime
     /// appends to. Both produced by `SharedStreamServer::spawn` or
     /// `ControlPlaneHarness::spawn`.
-    SharedExternal { base_url: String, stream_name: String },
+    SharedExternal {
+        base_url: String,
+        stream_name: String,
+    },
 }
 
 /// Builder-style spec for provisioning a managed-agent test runtime. Both
@@ -924,9 +984,16 @@ impl LocalRuntimeHarness {
         init_test_tracing();
         let (state_stream, external_state_stream_url) = match &spec.stream_mode {
             StreamMode::Embedded => (None, None),
-            StreamMode::SharedExternal { base_url, stream_name } => (
+            StreamMode::SharedExternal {
+                base_url,
+                stream_name,
+            } => (
                 Some(stream_name.clone()),
-                Some(format!("{}/{}", base_url.trim_end_matches('/'), stream_name)),
+                Some(format!(
+                    "{}/{}",
+                    base_url.trim_end_matches('/'),
+                    stream_name
+                )),
             ),
         };
 
@@ -1098,10 +1165,7 @@ pub(crate) async fn read_all_events(state_stream_url: &str) -> Result<Vec<StateE
         .await
         .context("read stream chunk for parsed events")?
     {
-        body.push_str(
-            std::str::from_utf8(&chunk.data)
-                .context("stream chunk is not valid UTF-8")?,
-        );
+        body.push_str(std::str::from_utf8(&chunk.data).context("stream chunk is not valid UTF-8")?);
         if chunk.up_to_date {
             break;
         }

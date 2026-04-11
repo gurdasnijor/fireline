@@ -36,11 +36,12 @@ mod managed_agent_suite;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use fireline::runtime_host::RuntimeStatus;
 use fireline_conductor::topology::{TopologyComponentSpec, TopologySpec};
 use managed_agent_suite::{
-    DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec, append_approval_resolved,
-    count_events, create_session, pending_contract, prompt_session, read_all_events,
-    wait_for_event_count, wait_for_permission_request,
+    ControlPlaneHarness, DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec,
+    append_approval_resolved, count_events, create_session, load_session_then_prompt,
+    prompt_session, read_all_events, wait_for_event_count, wait_for_permission_request,
 };
 
 /// Precondition: a local runtime has been provisioned with the default
@@ -93,7 +94,10 @@ async fn harness_every_effect_is_appended_to_session_log() -> Result<()> {
             connection_count >= 1,
             "connection envelope count = {connection_count}"
         );
-        assert!(session_count >= 1, "session envelope count = {session_count}");
+        assert!(
+            session_count >= 1,
+            "session envelope count = {session_count}"
+        );
         assert!(
             prompt_turn_count >= 1,
             "prompt_turn envelope count = {prompt_turn_count}"
@@ -193,8 +197,7 @@ async fn harness_append_order_is_stable_under_continued_writes() -> Result<()> {
             t2_sequence.len()
         );
 
-        for (index, (t1_kind, t2_kind)) in t1_sequence.iter().zip(t2_sequence.iter()).enumerate()
-        {
+        for (index, (t1_kind, t2_kind)) in t1_sequence.iter().zip(t2_sequence.iter()).enumerate() {
             assert_eq!(
                 t1_kind, t2_kind,
                 "INVARIANT (Harness): T1 must be an exact prefix of T2 (no reordering, \
@@ -203,8 +206,8 @@ async fn harness_append_order_is_stable_under_continued_writes() -> Result<()> {
         }
 
         // Sanity-check via the count_events helper.
-        let final_prompt_turn_count = count_events(runtime.state_stream_url(), "prompt_turn")
-            .await?;
+        let final_prompt_turn_count =
+            count_events(runtime.state_stream_url(), "prompt_turn").await?;
         assert!(
             final_prompt_turn_count >= t1_prompt_turn_count + 1,
             "INVARIANT (Harness): final prompt_turn count must be strictly greater than \
@@ -268,7 +271,12 @@ async fn harness_approval_gate_blocks_prompt_until_resolved_via_stream_event() -
         let state_url = runtime.state_stream_url().to_string();
         let session_id_prompt = session_id.clone();
         let prompt_task = tokio::spawn(async move {
-            prompt_session(&acp_url, &session_id_prompt, "please pause_here for approval").await
+            prompt_session(
+                &acp_url,
+                &session_id_prompt,
+                "please pause_here for approval",
+            )
+            .await
         });
 
         let request_id = wait_for_permission_request(&state_url, &session_id, DEFAULT_TIMEOUT)
@@ -283,9 +291,9 @@ async fn harness_approval_gate_blocks_prompt_until_resolved_via_stream_event() -
         let prompt_result = tokio::time::timeout(Duration::from_secs(15), prompt_task)
             .await
             .context("prompt task did not complete within the post-approval window")?;
-        prompt_result
-            .context("prompt task panicked")?
-            .context("INVARIANT (Harness): blocked prompt must succeed once approval_resolved is appended")?;
+        prompt_result.context("prompt task panicked")?.context(
+            "INVARIANT (Harness): blocked prompt must succeed once approval_resolved is appended",
+        )?;
 
         let permission_envelopes = count_events(&state_url, "permission").await?;
         assert!(
@@ -322,20 +330,130 @@ async fn harness_approval_gate_blocks_prompt_until_resolved_via_stream_event() -
 /// without losing the client connection that originated the prompt, or
 /// once a scripted agent can emit the pre-pause effects on cold start.
 #[tokio::test]
-#[ignore = "pending: needs a control-plane round-trip that can abandon the blocked prompt, \
-            re-provision a fresh runtime from the durable spec, and resume via a fresh \
-            session/load. The block-until-resolved half is now covered by \
-            harness_approval_gate_blocks_prompt_until_resolved_via_stream_event."]
 async fn harness_durable_suspend_resume_round_trip() -> Result<()> {
-    pending_contract(
-        "harness.durable_suspend_resume",
-        "The 'gate actually blocks and releases on an external event' half is covered by \
-         harness_approval_gate_blocks_prompt_until_resolved_via_stream_event. What still \
-         blocks this test: a runtime-death-mid-prompt flow that preserves the original \
-         client's view long enough to observe a post-death load_session rebuild of the \
-         approval state. The approval.rs rebuild_from_log helper exists; the missing piece \
-         is the cross-runtime client shim.",
-    )
+    let topology = TopologySpec {
+        components: vec![TopologyComponentSpec {
+            name: "approval_gate".to_string(),
+            config: Some(serde_json::json!({
+                "timeoutMs": 15000,
+                "policies": [
+                    {
+                        "match": { "kind": "promptContains", "needle": "pause_here" },
+                        "action": "requireApproval",
+                        "reason": "test policy: durable suspend/resume"
+                    }
+                ]
+            })),
+        }],
+    };
+    let control_plane = ControlPlaneHarness::spawn(true).await?;
+
+    let result = async {
+        let spec = ManagedAgentHarnessSpec::new("harness-durable-suspend-resume")
+            .with_testy_load_agent()
+            .with_topology(topology);
+        let runtime = control_plane.create_runtime_from_spec(spec).await?;
+        let shared_state_url = control_plane.shared_state_url();
+
+        let session_id = create_session(&runtime.acp.url).await?;
+        let blocked_acp_url = runtime.acp.url.clone();
+        let blocked_session_id = session_id.clone();
+        let blocked_prompt = tokio::spawn(async move {
+            prompt_session(
+                &blocked_acp_url,
+                &blocked_session_id,
+                "please pause_here across runtime death",
+            )
+            .await
+        });
+        let blocked_prompt_abort = blocked_prompt.abort_handle();
+
+        let request_id = wait_for_permission_request(&shared_state_url, &session_id, DEFAULT_TIMEOUT)
+            .await
+            .context(
+                "INVARIANT (Harness): approval gate must emit permission_request before runtime death",
+            )?;
+
+        let stopped = control_plane.stop_runtime(&runtime.runtime_key).await?;
+        assert_eq!(
+            stopped.status,
+            RuntimeStatus::Stopped,
+            "INVARIANT (Harness): stop_runtime must transition the original runtime to Stopped"
+        );
+
+        match tokio::time::timeout(Duration::from_secs(5), blocked_prompt).await {
+            Ok(joined) => match joined {
+                Ok(Ok(())) => {
+                    anyhow::bail!(
+                        "INVARIANT (Harness): blocked prompt must not complete successfully after runtime death"
+                    );
+                }
+                Ok(Err(_)) | Err(_) => {}
+            },
+            Err(_) => {
+                blocked_prompt_abort.abort();
+            }
+        }
+
+        append_approval_resolved(&shared_state_url, &session_id, &request_id, true).await?;
+        let permission_events =
+            wait_for_event_count(&shared_state_url, "permission", 2, DEFAULT_TIMEOUT).await?;
+        assert!(
+            permission_events.len() >= 2,
+            "INVARIANT (Harness): durable log must contain both permission_request and approval_resolved before session/load"
+        );
+
+        let resumed = fireline::orchestration::resume(
+            &control_plane.http,
+            &control_plane.base_url,
+            &shared_state_url,
+            &session_id,
+        )
+        .await
+        .context("resume suspended session after runtime death")?;
+        assert_eq!(
+            resumed.runtime_key, runtime.runtime_key,
+            "INVARIANT (Harness): resume must recreate the same logical runtime"
+        );
+        assert_ne!(
+            resumed.runtime_id, runtime.runtime_id,
+            "INVARIANT (Harness): resume after stop must cold-start a fresh runtime process"
+        );
+
+        let permission_count_before = count_events(&shared_state_url, "permission").await?;
+        assert_eq!(
+            permission_count_before, 2,
+            "INVARIANT (Harness): exactly the original permission_request and approval_resolved should exist before the resumed prompt"
+        );
+
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            load_session_then_prompt(
+                &resumed.acp.url,
+                &session_id,
+                "please pause_here after reload",
+            ),
+        )
+        .await
+        .context(
+            "INVARIANT (Harness): resumed load_session+prompt should not re-block once approval state is rebuilt",
+        )?
+        .context(
+            "INVARIANT (Harness): resumed load_session+prompt should succeed through the approval gate after session/load rebuild",
+        )?;
+
+        let permission_count_after = count_events(&shared_state_url, "permission").await?;
+        assert_eq!(
+            permission_count_after, permission_count_before,
+            "INVARIANT (Harness): rebuilt approved_sessions must short-circuit the gate; saw new permission events after resumed prompt"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    control_plane.shutdown().await;
+    result
 }
 
 /// Precondition: a topology is constructed with a representative instance of
