@@ -28,13 +28,13 @@
 #[path = "support/managed_agent_suite.rs"]
 mod managed_agent_suite;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use fireline_components::fs_backend::{FileBackend, LocalFileBackend};
+use fireline_components::fs_backend::{FileBackend, LocalFileBackend, RuntimeStreamFileBackend};
 use fireline_conductor::runtime::{LocalPathMounter, MountedResource, ResourceMounter, ResourceRef};
-use managed_agent_suite::{pending_contract, temp_path};
+use managed_agent_suite::{LocalRuntimeHarness, pending_contract, temp_path};
 
 /// Precondition: a source directory on the host filesystem containing a
 /// known file (`hello.txt` → "hello from resources").
@@ -199,36 +199,68 @@ async fn resources_fs_backend_captures_write_as_durable_event() -> Result<()> {
     )
 }
 
-/// Precondition: two runtimes have been provisioned that share the **same**
-/// Session stream (either both pointed at a single control-plane stream, or
-/// both reading the same stream URL), and runtime A has written a file via
-/// its `FsBackendComponent` + `SessionLogFileBackend`.
+/// Precondition: a durable state stream is live (backed by a
+/// `LocalRuntimeHarness` here; in production it would be any shared
+/// durable-streams deployment).
 ///
-/// Action: call `backend.read` from runtime B's test-side against the same
-/// path runtime A wrote, with runtime B's backend pointing at the shared
-/// stream URL.
+/// Action: construct two independent `RuntimeStreamFileBackend`
+/// instances that both point at the same stream URL — simulating two
+/// separate runtime processes attaching the same `SessionLogFileBackend`
+/// to the same stream. Write via backend A, then read via backend B.
 ///
-/// Observable evidence: runtime B's read returns the content runtime A wrote,
-/// without any coordination between the runtimes.
+/// Observable evidence: backend B's read returns the bytes backend A
+/// wrote, with no coordination between the two backend instances other
+/// than sharing the stream URL.
 ///
-/// Invariant proven: **Resources cross-runtime virtual filesystem** — the
-/// `SessionLogFileBackend` special case in the mapping doc §5: a file written
-/// via the backend becomes a Session event, and any other consumer reading
-/// the same stream can project the same file content. The stream IS the
-/// filesystem, cross-runtime for free.
+/// Invariant proven: **Resources cross-runtime virtual filesystem** —
+/// the `SessionLogFileBackend` special case in the mapping doc §5: a
+/// file written via the backend is a Session event, and any consumer
+/// reading the same stream can project the same file content. The
+/// stream IS the filesystem, cross-runtime for free.
+///
+/// Scope note: this test proves the backend-level invariant (same
+/// stream URL ⇒ same file surface). The "agent A emits
+/// fs/write_text_file through its topology" end-to-end path still
+/// requires a scripted agent and is covered by
+/// `resources_fs_backend_captures_write_as_durable_event` (still
+/// pending on scripted testy).
 #[tokio::test]
-#[ignore = "pending: ControlPlaneHarness support for launching two runtimes against the \
-            same shared stream, plus scripted testy, plus the SessionLogFileBackend \
-            configured as the backend for the FsBackendComponent in each runtime's topology"]
 async fn resources_session_log_backend_supports_cross_runtime_reads() -> Result<()> {
-    pending_contract(
-        "resources.cross_runtime_virtual_fs",
-        "The elegant special case from mapping doc §5. Blocks on ControlPlaneHarness \
-         launching two runtimes against the same shared durable-streams deployment + \
-         scripted testy emitting fs/write_text_file from the first runtime. Once both \
-         land this is a small test: write from runtime A, read from runtime B's backend \
-         pointed at the same stream, assert identical content.",
-    )
+    let runtime = LocalRuntimeHarness::spawn("resources-cross-runtime-virtual-fs").await?;
+
+    let result = async {
+        let stream_url = runtime.state_stream_url().to_string();
+        let backend_a = RuntimeStreamFileBackend::new(stream_url.clone());
+        let backend_b = RuntimeStreamFileBackend::new(stream_url);
+
+        let path = Path::new("/scratch/cross-runtime.txt");
+        let payload = b"hello from backend A, visible to backend B via the shared stream";
+
+        backend_a
+            .write(path, payload)
+            .await
+            .context("backend A must accept an fs write to the shared stream")?;
+
+        let bytes = backend_b
+            .read(path)
+            .await
+            .context(
+                "INVARIANT (Resources): backend B pointed at the same stream URL must project \
+                 the file written by backend A without any additional coordination",
+            )?;
+
+        assert_eq!(
+            bytes,
+            payload,
+            "INVARIANT (Resources): cross-runtime read returns the bytes the other runtime wrote"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    runtime.shutdown().await?;
+    result
 }
 
 // Suppress unused-import warnings for items we reference only in the
