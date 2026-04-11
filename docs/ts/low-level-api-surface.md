@@ -33,7 +33,7 @@ Fireline's TypeScript surface is anchored against the six managed-agent primitiv
 | # | Primitive | Anthropic interface | Fireline TS namespace(s) | Fireline TS noun(s) |
 |---|---|---|---|---|
 | 1 | **Session** | `getSession(id) → (Session, Event[])`; `getEvents(id) → PendingEvent[]`; `emitEvent(id, event)` | `client.state` (read) + `client.stream` (raw replay) | `SessionDescriptor`, `StreamEndpoint`, materialized rows |
-| 2 | **Orchestration** | `wake(session_id) → void` | `client.orchestration` (NEW) | `WakeReason`, `WakeReceipt` |
+| 2 | **Orchestration** | `wake(session_id) → void` | no dedicated namespace; satisfied by composition across `client.state`, `client.host`, and `client.acp` | `resume(sessionId)` helper, subscriber loop |
 | 3 | **Harness** | `yield Effect<T> → EffectResult<T>` | `client.topology` (composition surface) + `client.acp` (effect transport) | `TopologySpec`, conductor components |
 | 4 | **Sandbox** | `provision({resources}) → execute(name, input) → String` | `client.host` (provision/lifecycle) + `client.acp` (execute channel) | `RuntimeDescriptor`, `Endpoint` |
 | 5 | **Resources** | `[{source_ref, mount_path}]` | spec field on `client.host.create` (no top-level namespace) | `ResourceRef` |
@@ -45,7 +45,7 @@ Key implications:
 - **Session is split across two namespaces.** `client.state` is the materialized read side that downstream products use; `client.stream` is the raw replayable durable log that consumers can subscribe to directly. Together they cover `getSession`, `getEvents`, and durable replay.
 - **Tools and Harness share `client.topology`.** Conductor components are the implementation of both: components ARE the proxy chain that intercepts the harness's effects (Harness primitive), and tools are a kind of component that injects an MCP-shaped capability into the chain (Tools primitive). See [§Conductor and Proxy Chain](#conductor-and-proxy-chain) below.
 - **Resources doesn't get its own top-level namespace.** It's a launch-spec field — `resources: ResourceRef[]` on `client.host.create()`. Top-level namespace would be over-engineering for what is essentially `[{source_ref, mount_path}]` plus pluggable mounters on the runtime side.
-- **Orchestration is the only entirely new namespace.** It introduces `client.orchestration.wake(runtimeKey, reason)` and currently has no Rust counterpart — see slice 18 in the build order.
+- **Orchestration does not get its own namespace.** It is satisfied by composition — Session reads, provision/cold-start, ACP reconnect, and `session/load` — with `resume(sessionId)` as the helper surface. See [`managed-agents-mapping.md`](../explorations/managed-agents-mapping.md) §2.
 
 ## Conductor and Proxy Chain
 
@@ -112,7 +112,7 @@ Each component can:
 - **block** the effect (BudgetComponent rejects calls over budget)
 - **persist** the effect (DurableStreamTracer writes every step to the durable Session log)
 
-This composition is what gives Fireline the Harness primitive's flexibility, plus the suspend/resume capability that becomes meaningful once Orchestration / `wake()` lands.
+This composition is what gives Fireline the Harness primitive's flexibility, plus the suspend/resume capability that becomes meaningful once the `resume(sessionId)` composition is wired up.
 
 ### How Tools layers on top
 
@@ -253,7 +253,9 @@ That keeps the API:
 
 ## Top-Level Namespaces
 
-The low-level TypeScript layer is constrained to six namespaces, each anchored on a managed-agent primitive:
+The low-level TypeScript layer is constrained to five namespaces, each anchored
+on a managed-agent primitive, plus a small number of composition helpers such
+as `resume(sessionId)`:
 
 ```ts
 client.host           // Sandbox primitive — provision/list/stop runtimes
@@ -261,12 +263,19 @@ client.acp            // Sandbox.execute + Harness I/O — ACP wire protocol
 client.state          // Session primitive (read side) — materialized rows
 client.stream         // Session primitive (raw) — replayable durable stream
 client.topology       // Harness + Tools primitives — conductor composition
-client.orchestration  // Orchestration primitive — wake(runtimeKey, reason)
 ```
 
-The `client.orchestration` namespace is **NEW** and currently has no Rust implementation — it ships with slice 18 in the build order.
+There is intentionally **no** `client.orchestration` namespace. Orchestration is
+satisfied by composition — read Session state, provision if dormant, reconnect
+ACP, and `loadSession(sessionId)` — with `resume(sessionId)` as the helper.
+See [`managed-agents-mapping.md`](../explorations/managed-agents-mapping.md)
+§2.
 
-`client.approvals` is intentionally not a top-level namespace. Out-of-band approvals are a *consumer* of `client.orchestration.wake()` plus a durable wait record on the Session stream — they don't need their own namespace at the low level. A future ergonomic wrapper at a higher layer may expose `client.approvals.*`, but the primitive contract lives in orchestration + session.
+`client.approvals` is intentionally not a top-level namespace. Out-of-band
+approvals are a consumer of Session events plus the `resume(sessionId)` helper
+— they don't need their own namespace at the low level. A future ergonomic
+wrapper at a higher layer may expose `client.approvals.*`, but the primitive
+contract lives in Session evidence plus composition.
 
 Intentionally not low-level namespaces, even later:
 
@@ -558,92 +567,67 @@ Important rule:
 
 This is the seam for systems like `agent.pw`, not a replacement for them. `agent.pw` (or any external credential broker) is what `credential_ref` resolves against.
 
-## `WakeReason` and `client.orchestration`
+## Orchestration by Composition and `resume(sessionId)`
 
-This is the **Orchestration** primitive in TypeScript form. The substrate exposes a single trigger method — `wake(runtimeKey, reason)` — that hands off to a control-plane scheduler. The scheduler is responsible for instantiating the runtime if dormant, calling `RuntimeProvider::start()`, waiting for register, and delivering the wake reason to the runtime.
+Per [`managed-agents-mapping.md`](../explorations/managed-agents-mapping.md)
+§2, Orchestration does not get a dedicated TS namespace. The primitive is
+satisfied by composition of existing surfaces:
+
+- read Session metadata from `client.state`
+- check or provision runtime compute via `client.host`
+- reconnect ACP via `client.acp`
+- rebuild session state via `loadSession(sessionId)`
+
+The helper shape is:
 
 ```ts
-type WakeReason =
-  | { kind: "approval_resolved"; approvalId: string; decision: "approved" | "denied" }
-  | { kind: "webhook"; webhookId: string; payload: unknown }
-  | { kind: "timer"; scheduledAt: number }
-  | { kind: "peer_call"; fromRuntimeKey: string; promptTurnId?: string }
-  | { kind: "manual"; note?: string }
+resume(sessionId: string): Promise<RuntimeDescriptor>
+```
 
-type WakeReceipt = {
-  runtimeKey: string
-  wakeId: string
-  acceptedAt: number
-  // Whether the wake will trigger a fresh runtime instantiation,
-  // or if a live runtime already exists for this key.
-  willInstantiate: boolean
+Conceptually:
+
+```ts
+async function resume(sessionId: string) {
+  const session = await client.state.session.get(sessionId)
+
+  let runtime = await client.host.get(session.runtimeKey)
+  if (!runtime || runtime.status !== 'ready') {
+    runtime = await client.host.create(session.runtimeSpec)
+  }
+
+  const acp = await client.acp.connect(runtime.acp)
+  await acp.loadSession(sessionId)
+  return runtime
 }
-
-// Operations
-client.orchestration.wake(runtimeKey: string, reason: WakeReason): Promise<WakeReceipt>
-client.orchestration.list({ runtimeKey?: string, since?: number }): Promise<WakeReceipt[]>
 ```
 
-Ownership:
-
-- owned by `client.orchestration`
-- backed by an in-process scheduler in the control plane (slice 18)
-- retried by the scheduler with exponential backoff per the Anthropic contract: *"any scheduler that can call a function with an ID and retry on failure"*
-
-Caller pattern (typical webhook handler):
-
-```ts
-app.post('/webhook/slack', async (req, res) => {
-  // 1. Acknowledge externally — webhooks have short timeout windows
-  res.status(200).send()
-
-  // 2. Trigger wake — fire-and-forget from the caller's perspective,
-  //    the scheduler holds the retry policy
-  await client.orchestration.wake('runtime:slack-bot', {
-    kind: 'webhook',
-    webhookId: req.body.eventId,
-    payload: req.body,
-  })
-})
-```
-
-Caller pattern (approval resolver):
-
-```ts
-app.post('/approvals/:id/resolve', async (req, res) => {
-  // Persist the decision into the durable wait record
-  await persistApprovalResolution(req.params.id, req.body.decision)
-
-  // Wake the runtime that's waiting on it
-  const runtimeKey = await lookupApprovalRuntimeKey(req.params.id)
-  await client.orchestration.wake(runtimeKey, {
-    kind: 'approval_resolved',
-    approvalId: req.params.id,
-    decision: req.body.decision,
-  })
-
-  res.status(200).send()
-})
-```
+This helper is not a new primitive. It is the documented composition surface
+for the Anthropic `wake(session_id)` idea. The "scheduler" is any subscriber
+loop that watches Session events and calls `resume(sessionId)` with normal
+offset-based retry semantics.
 
 Important rules:
 
-- `wake` is fire-and-forget from the caller's perspective; the scheduler retries on failure
-- `wake` is idempotent on `(runtimeKey, wakeId)` — the same wake call delivered twice produces one effect
-- the runtime, on `start()`, must be able to **catch up to its durable state on start** rather than starting empty (slice 18 contract)
-- there is no `client.orchestration.sleep()` — runtimes go dormant naturally when their session has no pending work; sleep is implicit
+- no dedicated `client.orchestration` namespace
+- no dedicated `WakeReason` or `WakeReceipt` types
+- no wake-specific control-plane endpoint in the TS contract
+- `resume(sessionId)` depends on slice `14` persisting `runtimeSpec` as Session
+  evidence at provision time
+- retry semantics live in the subscriber loop and stream offset handling, not
+  in a separate scheduler API
 
-This is the **load-bearing primitive** for background agents. Before `wake` ships, Fireline is "managed runtime hosting." After `wake` ships, Fireline is "managed agent substrate."
+## `ApprovalRequest` (consumer of Orchestration composition)
 
-## `ApprovalRequest` (consumer of Orchestration)
-
-`ApprovalRequest` is a *consumer* of the Orchestration primitive, not a primitive in its own right. It's a durable wait record that lives on the Session stream and triggers `client.orchestration.wake()` when resolved.
+`ApprovalRequest` is a consumer of the Orchestration composition, not a
+primitive in its own right. It's a durable wait record that lives on the
+Session stream and is resolved by appending a decision event plus calling
+`resume(sessionId)` from a subscriber loop.
 
 ```ts
 type ApprovalRequest = {
   requestId: string
   sessionId: string
-  runtimeKey: string         // for the wake() trigger
+  runtimeKey: string
   promptTurnId?: string
   kind: string
   title?: string
@@ -656,17 +640,26 @@ type ApprovalRequest = {
 
 Ownership:
 
-- written durably by the `ApprovalGateComponent` conductor component on the runtime side (the durable record lives on the Session stream)
-- read by any consumer subscribing to the Session stream (`client.state` materializes a `pending_approvals` view)
-- serviced by an external resolver that calls `client.orchestration.wake(runtimeKey, { kind: 'approval_resolved', approvalId, decision })`
+- written durably by the `ApprovalGateComponent` conductor component on the
+  runtime side
+- read by any consumer subscribing to the Session stream (`client.state`
+  materializes a `pending_approvals` view)
+- serviced by an external resolver that appends an approval resolution event
+  and then calls `resume(sessionId)` through a subscriber loop
 
 Important rules:
 
-- `ApprovalRequest` does not need its own namespace at the low level — it's served by `client.state` on the read side and `client.orchestration.wake` on the resolution side
-- a future ergonomic `client.approvals` wrapper at a higher layer is fine, but the primitive contract lives in Session + Orchestration
-- the `ApprovalGateComponent` is what makes a paused harness durable: it writes the pending record on suspend and consumes the wake reason on resume
+- `ApprovalRequest` does not need its own namespace at the low level — it's
+  served by `client.state` on the read side and `resume(sessionId)` on the
+  resolution side
+- a future ergonomic `client.approvals` wrapper at a higher layer is fine, but
+  the primitive contract lives in Session + composition
+- the `ApprovalGateComponent` is what makes a paused harness durable: it writes
+  the pending record on suspend and rebuilds from the log on resume
 
-This concretely demonstrates the layering: a primitive consumer (approvals) is built from two primitives (Session for the durable wait record, Orchestration for the resume trigger) plus one conductor component (ApprovalGateComponent for the proxy chain integration).
+This concretely demonstrates the layering: a primitive consumer (approvals) is
+built from Session evidence, the `resume(sessionId)` composition, and one
+conductor component (`ApprovalGateComponent` for the proxy-chain integration).
 
 ## Namespace Responsibilities
 
@@ -767,25 +760,20 @@ Important rule:
 - topology is the public face of the conductor proxy chain — see [§Conductor and Proxy Chain](#conductor-and-proxy-chain)
 - it is not a separate execution surface; it configures how the runtime composes around the harness's effects
 
-### `client.orchestration` — Orchestration primitive (NEW, slice 18)
+### Orchestration — no dedicated namespace
 
-Owns:
+Orchestration is intentionally not a namespace in the low-level TS surface.
 
-- the `wake(runtimeKey, reason)` trigger
-- the wake receipt and idempotency contract
-- listing recent wakes by runtime key
+It is satisfied by composition:
 
-Does not own:
+- `client.state` provides the durable Session reads
+- `client.host` provides provision and runtime lookup
+- `client.acp` provides reconnect plus `loadSession(sessionId)`
+- `resume(sessionId)` ties those surfaces together
 
-- the scheduler implementation (that lives in the control plane)
-- the runtime-side "catch up to durable state on start" contract (that's runtime-side code)
-- direct invocation of the harness loop (the substrate doesn't call the harness; see [§Conductor and Proxy Chain](#conductor-and-proxy-chain))
-
-Important rule:
-
-- `wake` is fire-and-forget from the caller's perspective; the scheduler in the control plane holds the retry policy
-- there is no `sleep()` — runtimes go dormant naturally when their session has no pending work
-- this namespace currently has no Rust implementation; it ships with slice 18 in the build order
+This keeps Orchestration aligned with the managed-agents reduction: the
+"scheduler" is any subscriber loop that watches Session events and calls
+`resume(sessionId)`.
 
 ## Reads vs Mutations
 
@@ -796,7 +784,6 @@ The low-level API should make read and mutation ownership obvious. Each operatio
 - `client.host.create/stop/delete` — **Sandbox** (provision lifecycle)
 - `client.acp.initialize` — **Sandbox** (execute channel setup)
 - `client.acp.newSession/loadSession/prompt/...` — **Sandbox** (execute) + **Harness** (effect transport)
-- `client.orchestration.wake(runtimeKey, reason)` — **Orchestration** (the only mutation in this namespace)
 - later `client.topology.attach/detach` if dynamic topology becomes a thing — **Harness** + **Tools**
 
 ### Reads
@@ -804,10 +791,12 @@ The low-level API should make read and mutation ownership obvious. Each operatio
 - `client.host.get/list` — **Sandbox** (discovery)
 - `client.state.open/...` — **Session** (read side)
 - `client.stream.open/replay/live` — **Session** (raw stream access)
-- `client.orchestration.list({ runtimeKey?, since? })` — **Orchestration** (wake history)
 - later `client.topology.listComponents/describeComponent` — **Tools** (catalog introspection)
 
-This split matters because reads increasingly come from durable evidence (the Session primitive) while mutations increasingly go to control-plane or ACP surfaces (Sandbox, Orchestration, Harness composition).
+This split matters because reads increasingly come from durable evidence (the
+Session primitive) while mutations increasingly go to control-plane or ACP
+surfaces (Sandbox and Harness composition). Orchestration is composition across
+those existing surfaces, not a separate mutation namespace.
 
 The Anthropic primitive `emitEvent(id, event)` from the Session interface is **server-side only** in this contract. TypeScript clients consume events via reads; only the runtime side and conductor components emit them. This is the right asymmetry — clients should never bypass the conductor and write directly to a session log.
 
@@ -859,14 +848,10 @@ const db = client.state.open({ endpoint: runtime.state })
 const sessionRecord = await db.session.get(session.id)
 const events = await db.session.events(session.id, { since: 0 })
 
-// 4. WAKE the runtime later from a webhook handler (Orchestration primitive)
-//    The runtime can be dormant — the scheduler instantiates it on demand
-//    and delivers the wake reason.
-await client.orchestration.wake(runtime.runtimeKey, {
-  kind: 'webhook',
-  webhookId: req.body.eventId,
-  payload: req.body,
-})
+// 4. RESUME later from a subscriber loop (Orchestration by composition)
+//    The helper reads Session state, provisions if dormant, reconnects ACP,
+//    and reloads the session.
+await resume(session.id)
 ```
 
 What matters is not the exact call syntax. What matters is the **primitive flow**:
@@ -874,7 +859,8 @@ What matters is not the exact call syntax. What matters is the **primitive flow*
 1. **Sandbox.provision** — `client.host.create()` returns a `RuntimeDescriptor` carrying `acp` and `state` endpoint refs
 2. **Sandbox.execute + Harness I/O** — `client.acp` opens an ACP connection against the descriptor's `acp` endpoint; every prompt is one effect the harness yields
 3. **Session.getSession + getEvents** — `client.state` materializes durable rows from the descriptor's `state` endpoint
-4. **Orchestration.wake** — `client.orchestration.wake()` triggers the scheduler to advance the session, instantiating the runtime if dormant
+4. **Orchestration by composition** — `resume(sessionId)` composes Session
+   reads, provision, ACP reconnect, and `loadSession`
 5. **Tools + Harness composition** — `client.topology` is configured at provision time and shapes how the proxy chain handles every effect
 
 Resources and Tools are not separate steps in this flow — they're inputs to step 1 (provision) that the runtime side resolves. They don't appear as first-class API calls because they're configuration, not actions.
@@ -884,20 +870,28 @@ Resources and Tools are not separate steps in this flow — they're inputs to st
 If Fireline wants the low-level TS API to stay coherent, it should freeze on these principles:
 
 - **Anchor every namespace on a managed-agent primitive.** If a proposed namespace doesn't fit one of the six primitives, it belongs in a higher product layer.
-- **Keep the public nouns small.** Six namespaces, one new primitive (Orchestration), and a tight set of nouns (Endpoint, RuntimeDescriptor, SessionDescriptor, StreamEndpoint, TopologySpec, ResourceRef, CapabilityRef, WakeReason).
+- **Keep the public nouns small.** Five namespaces and a tight set of nouns
+  (Endpoint, RuntimeDescriptor, SessionDescriptor, StreamEndpoint,
+  TopologySpec, ResourceRef, CapabilityRef) plus a small number of helpers such
+  as `resume(sessionId)`.
 - **Make runtime descriptors the portability seam.** All endpoint discovery flows through `RuntimeDescriptor`.
 - **Keep topology as the public proxy-chain primitive.** Conductor components are the implementation, topology is the configuration surface, and that surface implements both Harness composition and Tools registration.
 - **Keep ACP and durable state as separate low-level surfaces.** Mutation flows through `client.acp`; reads flow through `client.state` and `client.stream`. Don't merge them into a single "session" namespace.
-- **Add `client.orchestration` when slice 18 lands.** Until then, the wake primitive is documented in this doc and `managed-agents-mapping.md` but has no implementation.
+- **Do not add `client.orchestration`.** Orchestration is satisfied by
+  composition; document and ship `resume(sessionId)` instead.
 - **Introduce higher-level nouns only after these substrate contracts are stable.** `run`, `workload`, `profile`, `workspace object`, `extension preset` are all things downstream products should compose on top — not things Fireline should ship at the low level.
 
 That gives higher layers like Flamecast room to build richer product APIs without forcing the Fireline systems layer to guess the wrong abstraction too early.
 
 ## Open questions
 
-These are deliberately not pinned by this doc — they will be decided when slice 18 (Orchestration) is drafted, when slice 15 (Resources) is rewritten, or when the first end-to-end consumer (Flamecast) tries to integrate.
+These are deliberately not pinned by this doc — they will be decided as slice
+14, slice 15, and the first end-to-end consumer land.
 
-1. **Does `client.orchestration.wake` carry a payload, or does the runtime read the durable wait record on its own?** The current shape passes the `WakeReason` through the call. An alternative is "wake delivers nothing; the runtime reads pending state from the durable Session log on start." The first is faster, the second is more durable. Open until slice 18 implementation.
+1. **Where should `resume(sessionId)` live?** As a top-level helper export, a
+   method under `client.state`, or a small utility module alongside ACP/state.
+   The important rule is that it remains a helper over existing namespaces, not
+   a new orchestration namespace.
 
 2. **Should `client.topology` expose dynamic attach/detach, or is topology immutable per runtime?** Today topology is set at provision time only. Dynamic topology would require runtime-side reconfiguration of the proxy chain mid-session. Defer until a real consumer needs it.
 
@@ -905,4 +899,7 @@ These are deliberately not pinned by this doc — they will be decided when slic
 
 4. **Is `Endpoint.headers` enough for auth, or do we need a separate auth primitive?** Today every endpoint carries its own bearer token in headers. A future model with rotating tokens, refresh, or mTLS will need richer shape. Open.
 
-5. **How does `client.acp` handle reconnect?** The current shape assumes a long-lived WebSocket. With Orchestration and dormant runtimes, reconnect after wake becomes a more common path. Probably needs explicit `connectionState` and a reconnect strategy hook.
+5. **How does `client.acp` handle reconnect?** The current shape assumes a
+   long-lived WebSocket. With `resume(sessionId)` and dormant runtimes,
+   reconnect becomes a more common path. Probably needs explicit
+   `connectionState` and a reconnect strategy hook.
