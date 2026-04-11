@@ -21,6 +21,11 @@ use fireline_semantics::{
         ApprovalPhase as PromptPhase, ApprovalRequestId as RequestId,
         ApprovalState as ApprovalProtocolState, Decision as ApprovalResolution,
     },
+    liveness::{
+        apply as apply_liveness, HeartbeatFreshness, ObservableRuntimeStatus,
+        RegistryLivenessAction as LivenessProtocolAction,
+        RegistryLivenessState as LivenessProtocolState, RuntimeKey,
+    },
     resume::{
         apply as apply_resume, Caller, CallerPhase, ResumeAction as ResumeProtocolAction,
         ResumeScenario, ResumeState as ResumeProtocolState, RuntimeStatus,
@@ -262,10 +267,9 @@ impl Model for SessionProtocolModel {
             Property::always(
                 "SessionReplayFromOffsetIsSuffix",
                 |_, state: &SessionProtocolState| {
-                    state
-                        .last_replay
-                        .as_ref()
-                        .is_none_or(|obs| obs.suffix == replay_suffix(&obs.captured_log, obs.offset))
+                    state.last_replay.as_ref().is_none_or(|obs| {
+                        obs.suffix == replay_suffix(&obs.captured_log, obs.offset)
+                    })
                 },
             ),
             Property::always(
@@ -516,11 +520,109 @@ impl Model for ApprovalProtocolModel {
     }
 }
 
+#[derive(Clone, Default)]
+struct RegistryLivenessModel;
+
+impl RegistryLivenessModel {
+    fn unified_liveness_consistent(state: &LivenessProtocolState) -> bool {
+        RuntimeKey::ALL.into_iter().all(|runtime| {
+            let freshness = state.heartbeat_freshness(runtime);
+            let status = state.observable_status(runtime);
+            match (status, freshness) {
+                (ObservableRuntimeStatus::Ready, HeartbeatFreshness::Stale) => false,
+                (ObservableRuntimeStatus::Stale, HeartbeatFreshness::Stale) => true,
+                (ObservableRuntimeStatus::Stopped, HeartbeatFreshness::Unknown) => true,
+                (ObservableRuntimeStatus::Stopped, _) => true,
+                (ObservableRuntimeStatus::Ready, HeartbeatFreshness::Fresh) => true,
+                (ObservableRuntimeStatus::Ready, HeartbeatFreshness::Unknown) => true,
+                (ObservableRuntimeStatus::Stale, _) => false,
+            }
+        })
+    }
+}
+
+impl Model for RegistryLivenessModel {
+    type State = LivenessProtocolState;
+    type Action = LivenessProtocolAction;
+
+    fn init_states(&self) -> Vec<Self::State> {
+        vec![LivenessProtocolState::default()]
+    }
+
+    fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
+        if state
+            .runtimes
+            .iter()
+            .filter(|record| record.last_seen_at.is_some())
+            .count()
+            < 2
+        {
+            for runtime in RuntimeKey::ALL {
+                if state.record(runtime).last_seen_at.is_none() {
+                    actions.push(LivenessProtocolAction::Register { runtime });
+                }
+            }
+        }
+
+        let heartbeat_budget_used = state
+            .runtimes
+            .iter()
+            .filter_map(|record| record.last_seen_at)
+            .map(|seen| state.now.saturating_sub(seen))
+            .sum::<u64>();
+        if heartbeat_budget_used <= 3 {
+            for runtime in RuntimeKey::ALL {
+                if state.record(runtime).last_seen_at.is_some() {
+                    actions.push(LivenessProtocolAction::Heartbeat { runtime });
+                }
+            }
+        }
+
+        if state.now < 5 {
+            actions.push(LivenessProtocolAction::AdvanceTime);
+        }
+
+        if state.last_scan_at.is_none() {
+            actions.push(LivenessProtocolAction::StaleScan);
+        }
+    }
+
+    fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
+        apply_liveness(state, action).map(|(next, _)| next)
+    }
+
+    fn properties(&self) -> Vec<Property<Self>> {
+        vec![
+            Property::always(
+                "UnifiedLivenessSingleSource",
+                |_, state: &LivenessProtocolState| Self::unified_liveness_consistent(state),
+            ),
+            Property::sometimes(
+                "StaleScanThenHeartbeatRestoresReady",
+                |_, state: &LivenessProtocolState| {
+                    RuntimeKey::ALL.into_iter().any(|runtime| {
+                        state.last_scan_at.is_some()
+                            && state.heartbeat_freshness(runtime) == HeartbeatFreshness::Fresh
+                            && state.observable_status(runtime) == ObservableRuntimeStatus::Ready
+                            && state.record(runtime).last_seen_at == Some(state.now)
+                    })
+                },
+            ),
+        ]
+    }
+
+    fn within_boundary(&self, state: &Self::State) -> bool {
+        state.now <= 6 && state.last_scan_at.is_none_or(|scan| scan <= state.now)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use stateright::{Checker, Model};
 
-    use super::{ApprovalProtocolModel, ResumeProtocolModel, SessionProtocolModel};
+    use super::{
+        ApprovalProtocolModel, RegistryLivenessModel, ResumeProtocolModel, SessionProtocolModel,
+    };
 
     #[test]
     fn session_protocol_model_checks_core_session_invariants() {
@@ -543,6 +645,15 @@ mod tests {
     #[test]
     fn approval_protocol_model_checks_release_race_properties() {
         let checker = ApprovalProtocolModel::default()
+            .checker()
+            .spawn_bfs()
+            .join();
+        checker.assert_properties();
+    }
+
+    #[test]
+    fn registry_liveness_model_checks_unified_liveness_invariant() {
+        let checker = RegistryLivenessModel::default()
             .checker()
             .spawn_bfs()
             .join();

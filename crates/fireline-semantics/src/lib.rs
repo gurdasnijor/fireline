@@ -1,5 +1,244 @@
 pub mod conductor;
 
+pub mod liveness {
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum RuntimeKey {
+        A,
+        B,
+    }
+
+    impl RuntimeKey {
+        pub const ALL: [RuntimeKey; 2] = [RuntimeKey::A, RuntimeKey::B];
+
+        pub const fn index(self) -> usize {
+            match self {
+                RuntimeKey::A => 0,
+                RuntimeKey::B => 1,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum BaseRuntimeStatus {
+        Ready,
+        Stopped,
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum HeartbeatFreshness {
+        Unknown,
+        Fresh,
+        Stale,
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum ObservableRuntimeStatus {
+        Ready,
+        Stale,
+        Stopped,
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub struct RuntimeLivenessRecord {
+        pub base_status: BaseRuntimeStatus,
+        pub last_seen_at: Option<u64>,
+    }
+
+    impl Default for RuntimeLivenessRecord {
+        fn default() -> Self {
+            Self {
+                base_status: BaseRuntimeStatus::Stopped,
+                last_seen_at: None,
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+    pub struct RegistryLivenessState {
+        pub now: u64,
+        pub stale_timeout: u64,
+        pub runtimes: [RuntimeLivenessRecord; 2],
+        pub last_scan_at: Option<u64>,
+    }
+
+    impl Default for RegistryLivenessState {
+        fn default() -> Self {
+            Self {
+                now: 0,
+                stale_timeout: 1,
+                runtimes: [
+                    RuntimeLivenessRecord::default(),
+                    RuntimeLivenessRecord::default(),
+                ],
+                last_scan_at: None,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum RegistryLivenessAction {
+        Register { runtime: RuntimeKey },
+        Heartbeat { runtime: RuntimeKey },
+        AdvanceTime,
+        StaleScan,
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum RegistryLivenessTransition {
+        Registered { runtime: RuntimeKey, at: u64 },
+        HeartbeatRecorded { runtime: RuntimeKey, at: u64 },
+        TimeAdvanced { now: u64 },
+        Scanned { at: u64 },
+    }
+
+    impl RegistryLivenessState {
+        pub fn record(&self, runtime: RuntimeKey) -> RuntimeLivenessRecord {
+            self.runtimes[runtime.index()]
+        }
+
+        pub fn heartbeat_freshness(&self, runtime: RuntimeKey) -> HeartbeatFreshness {
+            let record = self.record(runtime);
+            match (record.base_status, record.last_seen_at) {
+                (BaseRuntimeStatus::Stopped, _) => HeartbeatFreshness::Unknown,
+                (_, None) => HeartbeatFreshness::Unknown,
+                (_, Some(last_seen_at)) => {
+                    if self.now.saturating_sub(last_seen_at) > self.stale_timeout {
+                        HeartbeatFreshness::Stale
+                    } else {
+                        HeartbeatFreshness::Fresh
+                    }
+                }
+            }
+        }
+
+        pub fn observable_status(&self, runtime: RuntimeKey) -> ObservableRuntimeStatus {
+            let record = self.record(runtime);
+            match record.base_status {
+                BaseRuntimeStatus::Stopped => ObservableRuntimeStatus::Stopped,
+                BaseRuntimeStatus::Ready => match self.heartbeat_freshness(runtime) {
+                    HeartbeatFreshness::Unknown | HeartbeatFreshness::Fresh => {
+                        ObservableRuntimeStatus::Ready
+                    }
+                    HeartbeatFreshness::Stale => ObservableRuntimeStatus::Stale,
+                },
+            }
+        }
+    }
+
+    pub fn apply(
+        state: &RegistryLivenessState,
+        action: RegistryLivenessAction,
+    ) -> Option<(RegistryLivenessState, RegistryLivenessTransition)> {
+        let mut next = state.clone();
+        match action {
+            RegistryLivenessAction::Register { runtime } => {
+                next.now += 1;
+                next.runtimes[runtime.index()] = RuntimeLivenessRecord {
+                    base_status: BaseRuntimeStatus::Ready,
+                    last_seen_at: Some(next.now),
+                };
+                Some((
+                    next,
+                    RegistryLivenessTransition::Registered {
+                        runtime,
+                        at: state.now + 1,
+                    },
+                ))
+            }
+            RegistryLivenessAction::Heartbeat { runtime } => {
+                let mut record = next.runtimes[runtime.index()];
+                if record.base_status == BaseRuntimeStatus::Stopped {
+                    return None;
+                }
+                next.now += 1;
+                record.last_seen_at = Some(next.now);
+                next.runtimes[runtime.index()] = record;
+                Some((
+                    next,
+                    RegistryLivenessTransition::HeartbeatRecorded {
+                        runtime,
+                        at: state.now + 1,
+                    },
+                ))
+            }
+            RegistryLivenessAction::AdvanceTime => {
+                next.now += 1;
+                let now = next.now;
+                Some((next, RegistryLivenessTransition::TimeAdvanced { now }))
+            }
+            RegistryLivenessAction::StaleScan => {
+                next.now += 1;
+                next.last_scan_at = Some(next.now);
+                let at = next.now;
+                Some((next, RegistryLivenessTransition::Scanned { at }))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{
+            apply, HeartbeatFreshness, ObservableRuntimeStatus, RegistryLivenessAction,
+            RegistryLivenessState, RuntimeKey,
+        };
+
+        #[test]
+        fn stale_scan_then_heartbeat_restores_ready_from_single_registry_state() {
+            let state = RegistryLivenessState::default();
+
+            let (state, _) = apply(
+                &state,
+                RegistryLivenessAction::Register {
+                    runtime: RuntimeKey::A,
+                },
+            )
+            .expect("register");
+            let (state, _) = apply(
+                &state,
+                RegistryLivenessAction::Heartbeat {
+                    runtime: RuntimeKey::A,
+                },
+            )
+            .expect("heartbeat 1");
+            let (state, _) = apply(
+                &state,
+                RegistryLivenessAction::Heartbeat {
+                    runtime: RuntimeKey::A,
+                },
+            )
+            .expect("heartbeat 2");
+            let (state, _) = apply(&state, RegistryLivenessAction::AdvanceTime).expect("tick 1");
+            let (state, _) = apply(&state, RegistryLivenessAction::AdvanceTime).expect("tick 2");
+            let (state, _) = apply(&state, RegistryLivenessAction::StaleScan).expect("scan");
+
+            assert_eq!(
+                state.heartbeat_freshness(RuntimeKey::A),
+                HeartbeatFreshness::Stale
+            );
+            assert_eq!(
+                state.observable_status(RuntimeKey::A),
+                ObservableRuntimeStatus::Stale
+            );
+
+            let (state, _) = apply(
+                &state,
+                RegistryLivenessAction::Heartbeat {
+                    runtime: RuntimeKey::A,
+                },
+            )
+            .expect("heartbeat after stale");
+            assert_eq!(
+                state.heartbeat_freshness(RuntimeKey::A),
+                HeartbeatFreshness::Fresh
+            );
+            assert_eq!(
+                state.observable_status(RuntimeKey::A),
+                ObservableRuntimeStatus::Ready
+            );
+        }
+    }
+}
+
 pub mod session {
     use std::collections::BTreeSet;
 
