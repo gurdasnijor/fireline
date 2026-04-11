@@ -27,7 +27,10 @@
 mod managed_agent_suite;
 
 use anyhow::{Context, Result};
-use managed_agent_suite::{DEFAULT_TIMEOUT, LocalRuntimeHarness, pending_contract};
+use managed_agent_suite::{
+    ControlPlaneHarness, DEFAULT_TIMEOUT, LocalRuntimeHarness, count_events, pending_contract,
+    prompt_session, read_session_records, wait_for_event_count, wait_for_session_record,
+};
 
 /// Precondition: a local runtime has been spawned and has emitted at least the
 /// baseline `session`, `prompt_turn`, and `chunk` envelopes in response to one
@@ -96,45 +99,92 @@ async fn session_stream_is_append_only_and_replayable_from_beginning() -> Result
     result
 }
 
-/// Precondition: a control-plane-backed runtime (using a shared external
-/// durable-streams deployment, not an embedded one) has written events to its
-/// durable state stream and has then been shut down cleanly.
+/// Precondition: a control-plane-backed runtime using a shared external
+/// durable-streams deployment (not an embedded one) has written events to
+/// its durable state stream and has then been shut down cleanly via
+/// `POST /v1/runtimes/{key}/stop`.
 ///
-/// Action: after the runtime process is gone, open a fresh durable-streams
-/// reader against the same shared state stream URL and replay from
-/// `Offset::Beginning`.
+/// Action: after the runtime's process is gone, open a fresh
+/// durable-streams reader against the same shared state stream URL and
+/// read every event. This replays from `Offset::Beginning` through a
+/// completely different process than the one that wrote them.
 ///
-/// Observable evidence: the replay still contains the envelopes emitted by the
-/// now-dead runtime, including the `prompt_turn` and `chunk` events from the
-/// prompt that was sent before shutdown.
+/// Observable evidence: the replay contains typed session records (via
+/// the `DecodedStateEntity::Session` decoder path) for the session that
+/// was created before shutdown. The stream server itself is still alive
+/// because it was spawned by `ControlPlaneHarness`, not by the runtime.
 ///
-/// Invariant proven: **Session durability across runtime death** — the log is
-/// not tied to the lifetime of the runtime that wrote it. Any authenticated
-/// reader can still consume past events after the runtime is gone, which is the
-/// foundational property that makes `resume(sessionId)` cold-start possible.
-///
-/// Known blocker: `LocalRuntimeHarness::spawn` currently brings up an EMBEDDED
-/// durable-streams server per runtime, which dies with the runtime — running
-/// this test against that harness would produce a false negative (the test
-/// would fail not because the Session contract is broken, but because the
-/// embedded stream server went away). The faithful test needs a
-/// `ControlPlaneHarness` variant that stands up a shared stream outside the
-/// runtime's lifetime and lets the test prompt the runtime via the control
-/// plane's advertised ACP endpoint.
+/// Invariant proven: **Session durability across runtime death** — the
+/// log is not tied to the lifetime of the runtime that wrote it. Any
+/// authenticated reader can still consume past events after the runtime
+/// is gone, which is the foundational property that makes
+/// `resume(sessionId)` cold-start possible.
 #[tokio::test]
-#[ignore = "pending: needs ControlPlaneHarness + prompt helper to separate stream \
-            lifecycle from runtime lifecycle; LocalRuntimeHarness's embedded stream \
-            dies with the runtime and produces a false negative"]
 async fn session_durable_stream_survives_runtime_death() -> Result<()> {
-    pending_contract(
-        "session.durable_stream_survives_runtime_death",
-        "Extend ControlPlaneHarness with an ACP prompt helper (or add a \
-         LocalRuntimeHarness::spawn_with_shared_stream variant), then: prompt the runtime, \
-         shut it down via POST /v1/runtimes/{key}/stop, open a fresh DsClient against the \
-         shared stream URL, and assert the session/prompt_turn envelopes are still present. \
-         The current LocalRuntimeHarness embeds the durable-streams server in the runtime \
-         process so this test cannot run faithfully against it.",
-    )
+    let control_plane = ControlPlaneHarness::spawn(false).await?;
+
+    let result = async {
+        // Provision a runtime through the control plane. The control plane's
+        // harness already points runtimes at its shared durable-streams
+        // server, so the stream URL will outlive any individual runtime.
+        let runtime = control_plane
+            .create_runtime("session-durable-after-death")
+            .await?;
+
+        // Create a session and drive a prompt so the stream has something
+        // to verify against after shutdown.
+        let session_id = managed_agent_suite::create_session(&runtime.acp.url).await?;
+        prompt_session(
+            &runtime.acp.url,
+            &session_id,
+            "hello before the runtime dies",
+        )
+        .await?;
+
+        // Wait until the session record is typed-decodable from the stream.
+        // This proves the session catalog write landed durably.
+        let _record =
+            wait_for_session_record(&runtime.state.url, &session_id, DEFAULT_TIMEOUT).await?;
+
+        // Also wait until at least one prompt_turn envelope is visible before
+        // shutdown. Without this, the prompt_turn write can still be in flight
+        // when the runtime is stopped, and the post-death assertion becomes a
+        // flake about timing instead of a durability check.
+        let _prompt_turns =
+            wait_for_event_count(&runtime.state.url, "prompt_turn", 1, DEFAULT_TIMEOUT).await?;
+
+        // Kill the runtime through the control plane. The runtime process
+        // goes away; the stream server does not.
+        control_plane.stop_runtime(&runtime.runtime_key).await?;
+
+        // NOW verify the stream still has the session record, read by a
+        // completely fresh reader against the shared stream URL.
+        let records_after_death = read_session_records(&runtime.state.url).await?;
+        assert!(
+            records_after_death
+                .iter()
+                .any(|r| r.session_id == session_id),
+            "INVARIANT (Session): shared stream must retain session record after \
+             runtime process exit; found {} records total",
+            records_after_death.len()
+        );
+
+        // Also verify that at least one prompt_turn envelope survived — this
+        // is the "progress was recorded before death" half of the contract.
+        let prompt_turns_after_death =
+            count_events(&runtime.state.url, "prompt_turn").await?;
+        assert!(
+            prompt_turns_after_death >= 1,
+            "INVARIANT (Session): prompt_turn envelopes must survive runtime death, \
+             saw {prompt_turns_after_death}"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    control_plane.shutdown().await;
+    result
 }
 
 /// Precondition: a local runtime has emitted a normal set of events to its

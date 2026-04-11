@@ -39,6 +39,12 @@ struct Cli {
     #[arg(long, default_value_t = 4440)]
     port: u16,
 
+    /// Optional path to write the actual bound `host:port` to after the
+    /// listener is up. Used by tests that pass `--port 0` and need to learn
+    /// the OS-assigned port without a TOCTOU reservation race.
+    #[arg(long)]
+    listen_addr_file: Option<PathBuf>,
+
     #[arg(long)]
     fireline_bin: PathBuf,
 
@@ -92,6 +98,36 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let host: std::net::IpAddr = cli.host.parse().context("parse control-plane host")?;
+
+    // Bind the listener first so we know the actual port before constructing
+    // anything that needs the base URL. This closes the TOCTOU race the test
+    // harness used to hit when it would reserve-and-drop a port and then pass
+    // the integer to this subprocess, which might lose the race to another
+    // test binary starting in parallel.
+    let bind_addr = SocketAddr::new(host, cli.port);
+    let listener = tokio::net::TcpListener::bind(bind_addr)
+        .await
+        .with_context(|| format!("bind control plane listener on {bind_addr}"))?;
+    let bound_addr = listener
+        .local_addr()
+        .context("resolve control plane bound address")?;
+    let bound_port = bound_addr.port();
+    let base_url = control_plane_base_url(host, bound_port);
+
+    if let Some(listen_addr_file) = cli.listen_addr_file.as_ref() {
+        if let Some(parent) = listen_addr_file.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("create listen-addr-file parent {}", parent.display())
+            })?;
+        }
+        std::fs::write(listen_addr_file, bound_addr.to_string()).with_context(|| {
+            format!(
+                "write control plane listen addr to {}",
+                listen_addr_file.display()
+            )
+        })?;
+    }
+
     let runtime_registry_path = match cli.runtime_registry_path {
         Some(path) => path,
         None => RuntimeRegistry::default_path()?,
@@ -105,7 +141,7 @@ async fn main() -> Result<()> {
         runtime_registry_path,
         cli.peer_directory_path,
         cli.prefer_push,
-        control_plane_base_url(host, cli.port),
+        base_url.clone(),
         cli.shared_stream_base_url.clone(),
         token_store.clone(),
         Duration::from_millis(cli.startup_timeout_ms),
@@ -113,10 +149,13 @@ async fn main() -> Result<()> {
     ));
     let mut runtime_manager = RuntimeManager::new(Arc::new(LocalProvider::new(launcher)));
     if matches!(cli.provider, ProviderMode::Docker) {
-        let build_context = cli.docker_build_context.clone().unwrap_or(default_repo_root()?);
+        let build_context = cli
+            .docker_build_context
+            .clone()
+            .unwrap_or(default_repo_root()?);
         let docker_provider = Arc::new(DockerProvider::new(
             DockerProviderConfig {
-                control_plane_url: control_plane_base_url(host, cli.port),
+                control_plane_url: base_url.clone(),
                 shared_stream_base_url: cli.shared_stream_base_url.clone(),
                 image: cli.docker_image.clone(),
                 build_context,
@@ -142,12 +181,7 @@ async fn main() -> Result<()> {
         token_store,
     });
 
-    let addr = SocketAddr::new(host, cli.port);
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("bind control plane listener on {addr}"))?;
-
-    tracing::info!(addr = %addr, "fireline control plane listening");
+    tracing::info!(addr = %bound_addr, "fireline control plane listening");
     axum::serve(listener, app)
         .await
         .context("serve control plane")

@@ -421,20 +421,20 @@ struct StateEnvelope<T> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RuntimeStreamFileRecord {
-    path: String,
-    content: String,
-    ts_ms: i64,
+pub struct RuntimeStreamFileRecord {
+    pub path: String,
+    pub content: String,
+    pub ts_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct FsOpRecord {
-    session_id: String,
-    path: String,
-    op: String,
-    content: String,
-    ts_ms: i64,
+pub struct FsOpRecord {
+    pub session_id: String,
+    pub path: String,
+    pub op: String,
+    pub content: String,
+    pub ts_ms: i64,
 }
 
 #[cfg(test)]

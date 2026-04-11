@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::{Command as StdCommand, Stdio};
 use std::time::Duration;
@@ -11,7 +11,11 @@ use axum::Router;
 use durable_streams::{Client as DsClient, Offset};
 use fireline::bootstrap::{BootstrapConfig, BootstrapHandle, start};
 use fireline::runtime_host::{RuntimeDescriptor, RuntimeStatus};
-use fireline_conductor::runtime::{LocalPathMounter, ResourceMounter, ResourceRef};
+use fireline_components::fs_backend::{FsOpRecord, RuntimeStreamFileRecord};
+use fireline_conductor::runtime::{
+    LocalPathMounter, PersistedRuntimeSpec, ResourceMounter, ResourceRef,
+};
+use fireline_conductor::session::SessionRecord;
 use fireline_conductor::topology::TopologySpec;
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value as JsonValue, json};
@@ -266,10 +270,8 @@ impl ControlPlaneHarness {
         let runtime_registry_path = temp_path("fireline-managed-agent-runtimes");
         let peer_directory_path = temp_path("fireline-managed-agent-peers");
         let shared_state_stream_name = format!("fireline-managed-agent-suite-{}", Uuid::new_v4());
-        let base_url = format!("http://127.0.0.1:{}", reserve_port()?);
         let shared_stream_server = SharedStreamServer::spawn().await?;
-        let child = spawn_control_plane(
-            &base_url,
+        let (child, base_url) = spawn_control_plane(
             &runtime_registry_path,
             &peer_directory_path,
             &shared_stream_server.base_url,
@@ -615,24 +617,26 @@ impl sacp::ConnectTo<sacp::Client> for WebSocketTransport {
 }
 
 async fn spawn_control_plane(
-    base_url: &str,
     runtime_registry_path: &PathBuf,
     peer_directory_path: &PathBuf,
     shared_stream_base_url: &str,
     prefer_push: bool,
     heartbeat_scan_interval_ms: u64,
     stale_timeout_ms: u64,
-) -> Result<Child> {
-    let port = base_url
-        .rsplit(':')
-        .next()
-        .ok_or_else(|| anyhow!("missing control-plane port"))?;
+) -> Result<(Child, String)> {
+    let listen_addr_file = temp_path("fireline-control-plane-listen-addr");
+    // The control plane binds on --port 0 and writes its actual bound address
+    // into this file. That closes the old TOCTOU race where the harness used
+    // to reserve-and-drop a port and then hand the integer to the subprocess,
+    // only to have another parallel test binary grab the same port first.
     let mut command = TokioCommand::new(control_plane_bin());
     command
         .arg("--host")
         .arg("127.0.0.1")
         .arg("--port")
-        .arg(port)
+        .arg("0")
+        .arg("--listen-addr-file")
+        .arg(&listen_addr_file)
         .arg("--fireline-bin")
         .arg(fireline_bin())
         .arg("--runtime-registry-path")
@@ -656,8 +660,46 @@ async fn spawn_control_plane(
     }
 
     let mut child = command.spawn().context("spawn fireline-control-plane")?;
+    let bound_addr = wait_for_listen_addr_file(&listen_addr_file, &mut child).await?;
+    let base_url = format!("http://{bound_addr}");
     wait_for_http_ok(&format!("{base_url}/healthz"), &mut child).await?;
-    Ok(child)
+    let _ = std::fs::remove_file(&listen_addr_file);
+    Ok((child, base_url))
+}
+
+async fn wait_for_listen_addr_file(path: &PathBuf, child: &mut Child) -> Result<String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Err(anyhow!(
+                "control plane exited before reporting its bound address: {status}"
+            ));
+        }
+
+        match std::fs::read_to_string(path) {
+            Ok(contents) => {
+                let trimmed = contents.trim();
+                if !trimmed.is_empty() {
+                    return Ok(trimmed.to_string());
+                }
+            }
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                return Err(anyhow::Error::from(err).context(format!(
+                    "read control-plane listen-addr file {}",
+                    path.display()
+                )));
+            }
+            Err(_) => {}
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "timed out waiting for control plane listen-addr file at {}",
+                path.display()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 async fn wait_for_http_ok(url: &str, child: &mut Child) -> Result<()> {
@@ -688,12 +730,6 @@ async fn shutdown_process(child: &mut Child) {
 
     let _ = child.start_kill();
     let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
-}
-
-fn reserve_port() -> Result<u16> {
-    let listener = std::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
-        .context("bind ephemeral port")?;
-    Ok(listener.local_addr()?.port())
 }
 
 // =============================================================================
@@ -1050,6 +1086,188 @@ where
         if tokio::time::Instant::now() >= deadline {
             return Err(anyhow!(
                 "timed out waiting for matching event in stream {state_stream_url}"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+// =============================================================================
+// Typed state entity decoding
+// =============================================================================
+//
+// Substring matching is adequate for smoke checks but wrong for semantic
+// assertions. `StateEnvelope::decode()` tries to parse the envelope into one
+// of the known entity types from production code:
+//
+// - `SessionRecord` — from `fireline_conductor::session`
+// - `PersistedRuntimeSpec` — from `fireline_conductor::runtime`
+// - `FsOpRecord` — from `fireline_components::fs_backend`
+// - `RuntimeStreamFileRecord` — same
+//
+// Tests get typed access to every load-bearing state entity without
+// reimplementing the projector, which is exactly what the second-round
+// review asked for ("stop making tests scrape strings").
+
+/// Decoded durable state entity. One of the known typed variants from
+/// production code, or `Unknown` if the entity type isn't recognized (or
+/// isn't yet typed in this module).
+#[derive(Debug, Clone)]
+pub(crate) enum DecodedStateEntity {
+    Session(SessionRecord),
+    RuntimeSpec(PersistedRuntimeSpec),
+    FsOp(FsOpRecord),
+    RuntimeStreamFile(RuntimeStreamFileRecord),
+    /// Entity type was recognized as a string but no typed decoder exists,
+    /// or the envelope was an operation (delete/insert) without a full
+    /// value. Holds the raw value for custom decoding in the test.
+    Unknown {
+        entity_type: String,
+        value: Option<JsonValue>,
+    },
+}
+
+impl StateEnvelope {
+    /// Attempt to decode this envelope into a typed `DecodedStateEntity`.
+    /// Returns `None` if the envelope has no recognizable `type` field.
+    pub(crate) fn decode(&self) -> Option<DecodedStateEntity> {
+        let entity_type = self.envelope_type()?;
+        let value = self.value().cloned();
+
+        match entity_type {
+            "session" => value
+                .as_ref()
+                .and_then(|v| serde_json::from_value::<SessionRecord>(v.clone()).ok())
+                .map(DecodedStateEntity::Session)
+                .or_else(|| {
+                    Some(DecodedStateEntity::Unknown {
+                        entity_type: entity_type.to_string(),
+                        value,
+                    })
+                }),
+            "runtime_spec" => value
+                .as_ref()
+                .and_then(|v| serde_json::from_value::<PersistedRuntimeSpec>(v.clone()).ok())
+                .map(DecodedStateEntity::RuntimeSpec)
+                .or_else(|| {
+                    Some(DecodedStateEntity::Unknown {
+                        entity_type: entity_type.to_string(),
+                        value,
+                    })
+                }),
+            "fs_op" => value
+                .as_ref()
+                .and_then(|v| serde_json::from_value::<FsOpRecord>(v.clone()).ok())
+                .map(DecodedStateEntity::FsOp)
+                .or_else(|| {
+                    Some(DecodedStateEntity::Unknown {
+                        entity_type: entity_type.to_string(),
+                        value,
+                    })
+                }),
+            "runtime_stream_file" => value
+                .as_ref()
+                .and_then(|v| serde_json::from_value::<RuntimeStreamFileRecord>(v.clone()).ok())
+                .map(DecodedStateEntity::RuntimeStreamFile)
+                .or_else(|| {
+                    Some(DecodedStateEntity::Unknown {
+                        entity_type: entity_type.to_string(),
+                        value,
+                    })
+                }),
+            other => Some(DecodedStateEntity::Unknown {
+                entity_type: other.to_string(),
+                value,
+            }),
+        }
+    }
+
+    /// Convenience: decode into `SessionRecord` if this envelope is a
+    /// session entity with a full value. Returns `None` otherwise.
+    pub(crate) fn as_session_record(&self) -> Option<SessionRecord> {
+        match self.decode()? {
+            DecodedStateEntity::Session(record) => Some(record),
+            _ => None,
+        }
+    }
+
+    /// Convenience: decode into `FsOpRecord`.
+    pub(crate) fn as_fs_op(&self) -> Option<FsOpRecord> {
+        match self.decode()? {
+            DecodedStateEntity::FsOp(record) => Some(record),
+            _ => None,
+        }
+    }
+
+    /// Convenience: decode into `RuntimeStreamFileRecord`.
+    pub(crate) fn as_runtime_stream_file(&self) -> Option<RuntimeStreamFileRecord> {
+        match self.decode()? {
+            DecodedStateEntity::RuntimeStreamFile(record) => Some(record),
+            _ => None,
+        }
+    }
+
+    /// Convenience: decode into `PersistedRuntimeSpec`.
+    pub(crate) fn as_runtime_spec(&self) -> Option<PersistedRuntimeSpec> {
+        match self.decode()? {
+            DecodedStateEntity::RuntimeSpec(record) => Some(record),
+            _ => None,
+        }
+    }
+}
+
+/// Read every envelope currently on the stream and return the typed
+/// session records among them.
+pub(crate) async fn read_session_records(state_stream_url: &str) -> Result<Vec<SessionRecord>> {
+    let envelopes = read_all_events(state_stream_url).await?;
+    Ok(envelopes
+        .iter()
+        .filter_map(StateEnvelope::as_session_record)
+        .collect())
+}
+
+/// Read every envelope currently on the stream and return the typed
+/// fs_op records for the given session id.
+pub(crate) async fn read_fs_ops_for_session(
+    state_stream_url: &str,
+    session_id: &str,
+) -> Result<Vec<FsOpRecord>> {
+    let envelopes = read_all_events(state_stream_url).await?;
+    Ok(envelopes
+        .iter()
+        .filter_map(StateEnvelope::as_fs_op)
+        .filter(|record| record.session_id == session_id)
+        .collect())
+}
+
+/// Read every envelope and return the typed persisted runtime specs.
+/// There is usually exactly one per runtime_key.
+pub(crate) async fn read_persisted_runtime_specs(
+    state_stream_url: &str,
+) -> Result<Vec<PersistedRuntimeSpec>> {
+    let envelopes = read_all_events(state_stream_url).await?;
+    Ok(envelopes
+        .iter()
+        .filter_map(StateEnvelope::as_runtime_spec)
+        .collect())
+}
+
+/// Poll until a session record for the given session id appears on the
+/// stream, or the timeout fires. Returns the decoded record.
+pub(crate) async fn wait_for_session_record(
+    state_stream_url: &str,
+    session_id: &str,
+    timeout: Duration,
+) -> Result<SessionRecord> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let records = read_session_records(state_stream_url).await?;
+        if let Some(found) = records.into_iter().find(|r| r.session_id == session_id) {
+            return Ok(found);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "timed out waiting for session record '{session_id}' in stream {state_stream_url}"
             ));
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

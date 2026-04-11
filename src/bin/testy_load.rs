@@ -4,12 +4,23 @@
 //! behavior, but it advertises and implements `session/load` so Fireline can
 //! prove runtime-owned terminal reattach without waiting on an upstream test
 //! agent change.
+//!
+//! When `FIRELINE_ADVERTISED_STATE_STREAM_URL` is set in the environment,
+//! `session/load` falls back to a durable-stream lookup against fireline's
+//! session envelope history. This lets a cold-started testy_load rebuild its
+//! session knowledge from the log and satisfy Anthropic's orchestration
+//! `resume(sessionId)` contract without holding semantic agent state across
+//! restarts. When the env var is unset, testy_load stays in memory-only
+//! mode, which is the shape `tests/session_load_local.rs` pins for local
+//! bootstrap restarts.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol_test::testy::TestyCommand;
 use anyhow::Result;
+use durable_streams::{Client as DurableStreamsClient, LiveMode, Offset};
+use fireline_conductor::session::SessionRecord;
 use sacp::schema::{
     AgentCapabilities, ContentBlock, ContentChunk, InitializeRequest, InitializeResponse,
     LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionRequest, NewSessionResponse,
@@ -21,6 +32,7 @@ use serde_json::json;
 
 const SESSION_NOT_FOUND_CODE: i32 = -32061;
 const SESSION_NOT_FOUND: &str = "session_not_found";
+const STATE_STREAM_URL_ENV: &str = "FIRELINE_ADVERTISED_STATE_STREAM_URL";
 
 #[derive(Clone, Debug)]
 struct SessionData {
@@ -31,11 +43,15 @@ struct SessionData {
 #[derive(Clone, Debug, Default)]
 struct ResumableTesty {
     sessions: Arc<Mutex<HashMap<SessionId, SessionData>>>,
+    state_stream_url: Option<String>,
 }
 
 impl ResumableTesty {
     fn new() -> Self {
-        Self::default()
+        Self {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            state_stream_url: std::env::var(STATE_STREAM_URL_ENV).ok(),
+        }
     }
 
     fn create_session(&self, session_id: &SessionId, mcp_servers: Vec<McpServer>) {
@@ -45,6 +61,43 @@ impl ResumableTesty {
 
     fn has_session(&self, session_id: &SessionId) -> bool {
         self.sessions.lock().unwrap().contains_key(session_id)
+    }
+
+    async fn rebuild_session_from_stream(&self, session_id: &SessionId) -> Result<bool> {
+        let Some(state_stream_url) = self.state_stream_url.as_deref() else {
+            return Ok(false);
+        };
+        let target = session_id.to_string();
+        let client = DurableStreamsClient::new();
+        let stream = client.stream(state_stream_url);
+        let mut reader = stream
+            .read()
+            .offset(Offset::Beginning)
+            .live(LiveMode::Off)
+            .build()?;
+        while let Some(chunk) = reader.next_chunk().await? {
+            if !chunk.data.is_empty() {
+                let events: Vec<serde_json::Value> = serde_json::from_slice(&chunk.data)?;
+                for event in events {
+                    if event.get("type").and_then(|v| v.as_str()) != Some("session") {
+                        continue;
+                    }
+                    let Some(value) = event.get("value") else {
+                        continue;
+                    };
+                    if let Ok(record) = serde_json::from_value::<SessionRecord>(value.clone())
+                        && record.session_id == target
+                    {
+                        self.create_session(session_id, Vec::new());
+                        return Ok(true);
+                    }
+                }
+            }
+            if chunk.up_to_date {
+                break;
+            }
+        }
+        Ok(false)
     }
 
     async fn process_prompt(
@@ -112,10 +165,12 @@ impl ConnectTo<Client> for ResumableTesty {
                     let agent = self.clone();
                     async move |request: LoadSessionRequest, responder, _cx| {
                         if agent.has_session(&request.session_id) {
-                            responder.respond(LoadSessionResponse::new())
-                        } else {
-                            responder
-                                .respond_with_error(session_not_found_error(&request.session_id))
+                            return responder.respond(LoadSessionResponse::new());
+                        }
+                        match agent.rebuild_session_from_stream(&request.session_id).await {
+                            Ok(true) => responder.respond(LoadSessionResponse::new()),
+                            Ok(false) | Err(_) => responder
+                                .respond_with_error(session_not_found_error(&request.session_id)),
                         }
                     }
                 },

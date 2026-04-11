@@ -33,8 +33,13 @@
 #[path = "support/managed_agent_suite.rs"]
 mod managed_agent_suite;
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
-use managed_agent_suite::{DEFAULT_TIMEOUT, LocalRuntimeHarness, pending_contract};
+use managed_agent_suite::{
+    DEFAULT_TIMEOUT, LocalRuntimeHarness, count_events, pending_contract, read_all_events,
+    wait_for_event_count,
+};
 
 /// Precondition: a local runtime has been provisioned with the default
 /// topology (whatever the baseline harness sets up).
@@ -105,33 +110,111 @@ async fn harness_every_effect_is_appended_to_session_log() -> Result<()> {
 }
 
 /// Precondition: a runtime has been provisioned and has run at least one
-/// full prompt → response cycle.
+/// full prompt → response cycle, producing a set of events in its
+/// durable state stream.
 ///
-/// Action: snapshot the durable stream at time T1, record the observed
-/// effect sequence. Send another prompt. Snapshot the stream at time T2.
+/// Action: (1) snapshot the durable stream at time T1 via
+/// `read_all_events` and extract the ordered sequence of envelope type
+/// strings; (2) send another prompt; (3) wait for the event count to
+/// increase via `wait_for_event_count` on prompt_turn; (4) snapshot again
+/// at time T2 and extract the new ordered sequence.
 ///
-/// Observable evidence: the sequence of event kinds at T2 is a **strict
-/// superset** of the sequence at T1, and the T1 subset appears in the same
-/// order it appeared live. The new events from the second prompt extend the
-/// tail.
+/// Observable evidence: the T1 sequence is an exact prefix of the T2
+/// sequence. Every element at every index matches. This proves no
+/// reordering and no loss of past events when the runtime continues to
+/// write new ones. Done with parsed event types via `StateEnvelope`, not
+/// substring matching.
 ///
-/// Invariant proven: **Harness append-order stability under live writes** —
-/// the durable log does not reorder or lose past events when the runtime
-/// continues to write new ones. Materializers that cache a last-seen offset
-/// and drain forward can rely on this contract.
+/// Invariant proven: **Harness append-order stability under live writes**
+/// — the durable log does not reorder or lose past events when the
+/// runtime continues to write new ones. Materializers that cache a
+/// last-seen offset and drain forward can rely on this contract.
 #[tokio::test]
-#[ignore = "pending: needs a second-prompt-then-diff helper against the stream, and a \
-            parser that extracts ordered event-kind sequences so the superset assertion \
-            is exact rather than substring-based"]
 async fn harness_append_order_is_stable_under_continued_writes() -> Result<()> {
-    pending_contract(
-        "harness.append_order_stable_under_continued_writes",
-        "Add a helper that snapshots the state stream at a point in time, parses out \
-         the ordered sequence of event `type` fields, and lets the test assert \
-         (T1_sequence is a prefix of T2_sequence) after a second prompt. Requires \
-         either a dedicated parser in the support module or a lightweight serde_json \
-         walk in the test body.",
-    )
+    let runtime = LocalRuntimeHarness::spawn("harness-append-order-stable").await?;
+
+    let result = async {
+        // First prompt — seed the stream.
+        let _ = runtime.prompt("first prompt to seed the log").await?;
+        let _ = wait_for_event_count(
+            runtime.state_stream_url(),
+            "prompt_turn",
+            1,
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .context("first prompt's prompt_turn must land in the log")?;
+
+        // T1 snapshot: extract the ordered type sequence.
+        let t1_events = read_all_events(runtime.state_stream_url()).await?;
+        let t1_sequence: Vec<String> = t1_events
+            .iter()
+            .filter_map(|env| env.envelope_type().map(str::to_string))
+            .collect();
+        assert!(
+            !t1_sequence.is_empty(),
+            "T1 sequence must contain at least the initial envelopes"
+        );
+
+        // Second prompt — continue writing to the live stream.
+        let _ = runtime.prompt("second prompt after T1 snapshot").await?;
+
+        // Wait until the prompt_turn count is strictly greater than the T1
+        // count — confirms the second prompt landed.
+        let t1_prompt_turn_count = t1_sequence
+            .iter()
+            .filter(|kind| *kind == "prompt_turn")
+            .count();
+        let _ = wait_for_event_count(
+            runtime.state_stream_url(),
+            "prompt_turn",
+            t1_prompt_turn_count + 1,
+            Duration::from_secs(10),
+        )
+        .await
+        .context("second prompt's prompt_turn must land in the log")?;
+
+        // T2 snapshot.
+        let t2_events = read_all_events(runtime.state_stream_url()).await?;
+        let t2_sequence: Vec<String> = t2_events
+            .iter()
+            .filter_map(|env| env.envelope_type().map(str::to_string))
+            .collect();
+
+        // The critical assertion: T1 is a strict prefix of T2. Every
+        // element at every index matches, and T2 is strictly longer.
+        assert!(
+            t2_sequence.len() > t1_sequence.len(),
+            "INVARIANT (Harness): T2 sequence must be strictly longer than T1 after a \
+             second prompt; T1 len = {}, T2 len = {}",
+            t1_sequence.len(),
+            t2_sequence.len()
+        );
+
+        for (index, (t1_kind, t2_kind)) in t1_sequence.iter().zip(t2_sequence.iter()).enumerate()
+        {
+            assert_eq!(
+                t1_kind, t2_kind,
+                "INVARIANT (Harness): T1 must be an exact prefix of T2 (no reordering, \
+                 no loss). Mismatch at index {index}: T1 = '{t1_kind}', T2 = '{t2_kind}'"
+            );
+        }
+
+        // Sanity-check via the count_events helper.
+        let final_prompt_turn_count = count_events(runtime.state_stream_url(), "prompt_turn")
+            .await?;
+        assert!(
+            final_prompt_turn_count >= t1_prompt_turn_count + 1,
+            "INVARIANT (Harness): final prompt_turn count must be strictly greater than \
+             the T1 count"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    runtime.shutdown().await?;
+    result
 }
 
 /// Precondition: a runtime has been provisioned with an `ApprovalGateComponent`
