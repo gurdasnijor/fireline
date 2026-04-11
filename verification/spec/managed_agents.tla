@@ -5,7 +5,7 @@ EXTENDS Naturals, Sequences, FiniteSets, TLC
 \*
 \* Scope:
 \* - Session as an append-only event log with offset replay and producer-tuple dedupe
-\* - Orchestration as resume-by-composition over Session + Sandbox state
+\* - Orchestration as wake-by-composition over Session + Host state
 \* - Harness as "every visible effect lands in Session"
 \* - Sandbox as provision/reuse/stop/reprovision of reachable runtimes
 \* - Resources as requested {source_ref, mount_path} pairs copied into a runtime
@@ -41,7 +41,7 @@ EventKinds ==
     "tool_descriptor_emitted",
     "fs_op_captured",
     "runtime_stopped",
-    "runtime_resumed",
+    "runtime_woken",
     "session_loaded"
   }
 
@@ -109,10 +109,10 @@ VARIABLES
   reachable,
   lastReplay,
   stopSnapshot,
-  resumeEpoch,
+  wakeEpoch,
   responseEpochs,
-  lastResume,
-  resumeResponses,
+  lastWake,
+  wakeResponses,
   logSnapshots
 
 Vars ==
@@ -131,10 +131,10 @@ Vars ==
      reachable,
      lastReplay,
      stopSnapshot,
-     resumeEpoch,
+     wakeEpoch,
      responseEpochs,
-     lastResume,
-     resumeResponses,
+     lastWake,
+     wakeResponses,
      logSnapshots >>
 
 Init ==
@@ -171,9 +171,9 @@ Init ==
         ]
       ]
   /\ stopSnapshot = [rk \in RuntimeKeys |-> [s \in Sessions |-> <<>>]]
-  /\ resumeEpoch = 0
+  /\ wakeEpoch = 0
   /\ responseEpochs = [c \in Callers |-> 0]
-  /\ lastResume =
+  /\ lastWake =
       [ valid |-> FALSE,
         caller |-> CHOOSE c \in Callers : TRUE,
         sessionId |-> DefaultSession,
@@ -183,7 +183,7 @@ Init ==
         afterRuntimeId |-> DefaultRuntimeId,
         createdNew |-> FALSE
       ]
-  /\ resumeResponses = [c \in Callers |-> NoRuntimeId]
+  /\ wakeResponses = [c \in Callers |-> NoRuntimeId]
   /\ logSnapshots = << [s \in Sessions |-> <<>>] >>
 
 AppendSnapshot(nextLog) ==
@@ -214,10 +214,10 @@ ProvisionRuntime(rk, rid, s, source, mount) ==
          releasedRequests,
          lastReplay,
          stopSnapshot,
-         resumeEpoch,
+         wakeEpoch,
          responseEpochs,
-         lastResume,
-         resumeResponses >>
+         lastWake,
+         wakeResponses >>
   /\ AppendSnapshot(sessionLog)
 
 HarnessEmit(s, rk, logicalId, kind, producerId, epoch, seq) ==
@@ -253,10 +253,10 @@ HarnessEmit(s, rk, logicalId, kind, producerId, epoch, seq) ==
          reachable,
          lastReplay,
          stopSnapshot,
-         resumeEpoch,
+         wakeEpoch,
          responseEpochs,
-         lastResume,
-         resumeResponses >>
+         lastWake,
+         wakeResponses >>
   /\ AppendSnapshot(sessionLog')
 
 RetryAppend(s, producerId, epoch, seq) ==
@@ -277,10 +277,10 @@ RetryAppend(s, producerId, epoch, seq) ==
          reachable,
          lastReplay,
          stopSnapshot,
-         resumeEpoch,
+         wakeEpoch,
          responseEpochs,
-         lastResume,
-         resumeResponses >>
+         lastWake,
+         wakeResponses >>
   /\ AppendSnapshot(sessionLog)
 
 ReplayFromOffset(s, offset) ==
@@ -307,10 +307,10 @@ ReplayFromOffset(s, offset) ==
          releasedRequests,
          reachable,
          stopSnapshot,
-         resumeEpoch,
+         wakeEpoch,
          responseEpochs,
-         lastResume,
-         resumeResponses >>
+         lastWake,
+         wakeResponses >>
   /\ AppendSnapshot(sessionLog)
 
 RequestApproval(s, req, logicalId, producerId, epoch, seq) ==
@@ -344,10 +344,10 @@ RequestApproval(s, req, logicalId, producerId, epoch, seq) ==
          reachable,
          lastReplay,
          stopSnapshot,
-         resumeEpoch,
+         wakeEpoch,
          responseEpochs,
-         lastResume,
-         resumeResponses >>
+         lastWake,
+         wakeResponses >>
   /\ AppendSnapshot(sessionLog')
 
 ResolveApproval(req, logicalId, producerId, epoch, seq, allow) ==
@@ -385,10 +385,10 @@ ResolveApproval(req, logicalId, producerId, epoch, seq, allow) ==
          reachable,
          lastReplay,
          stopSnapshot,
-         resumeEpoch,
+         wakeEpoch,
          responseEpochs,
-         lastResume,
-         resumeResponses >>
+         lastWake,
+         wakeResponses >>
   /\ AppendSnapshot(sessionLog')
 
 AdvanceBlockedRequest(s, req) ==
@@ -410,10 +410,10 @@ AdvanceBlockedRequest(s, req) ==
          reachable,
          lastReplay,
          stopSnapshot,
-         resumeEpoch,
+         wakeEpoch,
          responseEpochs,
-         lastResume,
-         resumeResponses >>
+         lastWake,
+         wakeResponses >>
   /\ AppendSnapshot(sessionLog)
 
 StopRuntime(rk) ==
@@ -434,26 +434,26 @@ StopRuntime(rk) ==
          blockedRequests,
          releasedRequests,
          lastReplay,
-         resumeEpoch,
+         wakeEpoch,
          responseEpochs,
-         lastResume,
-         resumeResponses >>
+         lastWake,
+         wakeResponses >>
   /\ AppendSnapshot(sessionLog)
 
-ResumeLive(caller, s, rk) ==
+WakeReady(caller, s, rk) ==
   LET sameEpisode ==
-        /\ lastResume.valid
-        /\ lastResume.sessionId = s
-        /\ lastResume.runtimeKey = rk
-        /\ lastResume.beforeStatus = "ready"
-        /\ lastResume.afterRuntimeId = runtimeIndex[rk].runtimeId
-        /\ lastResume.createdNew = FALSE
+        /\ lastWake.valid
+        /\ lastWake.sessionId = s
+        /\ lastWake.runtimeKey = rk
+        /\ lastWake.beforeStatus = "ready"
+        /\ lastWake.afterRuntimeId = runtimeIndex[rk].runtimeId
+        /\ lastWake.createdNew = FALSE
       newEpoch ==
-        IF sameEpisode THEN resumeEpoch ELSE resumeEpoch + 1
+        IF sameEpisode THEN wakeEpoch ELSE wakeEpoch + 1
   IN
   /\ runtimeIndex[rk].status = "ready"
   /\ s \in runtimeIndex[rk].boundSessions
-  /\ resumeEpoch' = newEpoch
+  /\ wakeEpoch' = newEpoch
   /\ responseEpochs' =
       [ c \in Callers |->
           IF sameEpisode THEN
@@ -461,7 +461,7 @@ ResumeLive(caller, s, rk) ==
           ELSE
             IF c = caller THEN newEpoch ELSE 0
       ]
-  /\ lastResume' =
+  /\ lastWake' =
       [ valid |-> TRUE,
         caller |-> caller,
         sessionId |-> s,
@@ -471,10 +471,10 @@ ResumeLive(caller, s, rk) ==
         afterRuntimeId |-> runtimeIndex[rk].runtimeId,
         createdNew |-> FALSE
       ]
-  /\ resumeResponses' =
+  /\ wakeResponses' =
       [ c \in Callers |->
           IF sameEpisode THEN
-            IF c = caller THEN runtimeIndex[rk].runtimeId ELSE resumeResponses[c]
+            IF c = caller THEN runtimeIndex[rk].runtimeId ELSE wakeResponses[c]
           ELSE
             IF c = caller THEN runtimeIndex[rk].runtimeId ELSE NoRuntimeId
       ]
@@ -496,22 +496,22 @@ ResumeLive(caller, s, rk) ==
          stopSnapshot >>
   /\ AppendSnapshot(sessionLog)
 
-ResumeCold(caller, s, rk, newRid) ==
+WakeStopped(caller, s, rk, newRid) ==
   LET sameEpisode ==
-        /\ lastResume.valid
-        /\ lastResume.sessionId = s
-        /\ lastResume.runtimeKey = rk
-        /\ lastResume.beforeStatus = "stopped"
-        /\ lastResume.afterRuntimeId = newRid
-        /\ lastResume.createdNew = TRUE
+        /\ lastWake.valid
+        /\ lastWake.sessionId = s
+        /\ lastWake.runtimeKey = rk
+        /\ lastWake.beforeStatus = "stopped"
+        /\ lastWake.afterRuntimeId = newRid
+        /\ lastWake.createdNew = TRUE
       newEpoch ==
-        IF sameEpisode THEN resumeEpoch ELSE resumeEpoch + 1
+        IF sameEpisode THEN wakeEpoch ELSE wakeEpoch + 1
   IN
   /\ runtimeIndex[rk].status = "stopped"
   /\ runtimeIndex[rk].specPresent
   /\ s \in runtimeIndex[rk].boundSessions
   /\ newRid # runtimeIndex[rk].runtimeId
-  /\ resumeEpoch' = newEpoch
+  /\ wakeEpoch' = newEpoch
   /\ responseEpochs' =
       [ c \in Callers |->
           IF sameEpisode THEN
@@ -525,7 +525,7 @@ ResumeCold(caller, s, rk, newRid) ==
       ]
   /\ mountedResources' = [mountedResources EXCEPT ![newRid] = requestedResources[rk]]
   /\ reachable' = [reachable EXCEPT ![rk] = TRUE]
-  /\ lastResume' =
+  /\ lastWake' =
       [ valid |-> TRUE,
         caller |-> caller,
         sessionId |-> s,
@@ -535,10 +535,10 @@ ResumeCold(caller, s, rk, newRid) ==
         afterRuntimeId |-> newRid,
         createdNew |-> TRUE
       ]
-  /\ resumeResponses' =
+  /\ wakeResponses' =
       [ c \in Callers |->
           IF sameEpisode THEN
-            IF c = caller THEN newRid ELSE resumeResponses[c]
+            IF c = caller THEN newRid ELSE wakeResponses[c]
           ELSE
             IF c = caller THEN newRid ELSE NoRuntimeId
       ]
@@ -557,11 +557,11 @@ ResumeCold(caller, s, rk, newRid) ==
          stopSnapshot >>
   /\ AppendSnapshot(sessionLog)
 
-CurrentResumeResponses ==
-  { resumeResponses[c] :
+CurrentWakeResponses ==
+  { wakeResponses[c] :
       c \in { d \in Callers :
-                /\ responseEpochs[d] = resumeEpoch
-                /\ resumeResponses[d] # NoRuntimeId
+                /\ responseEpochs[d] = wakeEpoch
+                /\ wakeResponses[d] # NoRuntimeId
              }
   }
 
@@ -590,9 +590,9 @@ Next ==
   \/ \E rk \in RuntimeKeys :
        StopRuntime(rk)
   \/ \E caller \in Callers, s \in Sessions, rk \in RuntimeKeys :
-       ResumeLive(caller, s, rk)
+       WakeReady(caller, s, rk)
   \/ \E caller \in Callers, s \in Sessions, rk \in RuntimeKeys, newRid \in RuntimeIds :
-       ResumeCold(caller, s, rk, newRid)
+       WakeStopped(caller, s, rk, newRid)
 
 Spec == Init /\ [][Next]_Vars
 
@@ -632,43 +632,43 @@ HarnessSuspendReleasedOnlyByMatchingApproval ==
   \A req \in releasedRequests :
     FirstMatchingResolution(approvalHistory[req]) = "allow"
 
-ResumeOnLiveRuntimeIsNoop ==
-  lastResume.valid /\ lastResume.beforeStatus = "ready" =>
-    /\ lastResume.createdNew = FALSE
-    /\ lastResume.afterRuntimeId = lastResume.beforeRuntimeId
+WakeOnReadyIsNoop ==
+  lastWake.valid /\ lastWake.beforeStatus = "ready" =>
+    /\ lastWake.createdNew = FALSE
+    /\ lastWake.afterRuntimeId = lastWake.beforeRuntimeId
 
-ConcurrentResumeSingleWinner ==
-  /\ Cardinality(CurrentResumeResponses) <= 1
-  /\ lastResume.valid =>
+ConcurrentWakeSingleWinner ==
+  /\ Cardinality(CurrentWakeResponses) <= 1
+  /\ lastWake.valid =>
       \A c \in Callers :
-        /\ responseEpochs[c] = resumeEpoch
-        /\ resumeResponses[c] # NoRuntimeId
-        => resumeResponses[c] = lastResume.afterRuntimeId
+        /\ responseEpochs[c] = wakeEpoch
+        /\ wakeResponses[c] # NoRuntimeId
+        => wakeResponses[c] = lastWake.afterRuntimeId
 
-ColdResumePreservesRuntimeKeyChangesRuntimeId ==
-  lastResume.valid /\ lastResume.createdNew =>
-    /\ lastResume.beforeStatus = "stopped"
-    /\ lastResume.afterRuntimeId # lastResume.beforeRuntimeId
-    /\ runtimeIndex[lastResume.runtimeKey].runtimeId = lastResume.afterRuntimeId
+WakeOnStoppedChangesRuntimeId ==
+  lastWake.valid /\ lastWake.createdNew =>
+    /\ lastWake.beforeStatus = "stopped"
+    /\ lastWake.afterRuntimeId # lastWake.beforeRuntimeId
+    /\ runtimeIndex[lastWake.runtimeKey].runtimeId = lastWake.afterRuntimeId
 
 \* Design property, not a checked invariant:
-\* resume is derived from Session + Sandbox state.
+\* wake is derived from Session + Host state.
 \* The spec intentionally carries no separate orchestration queue or
-\* scheduler-owned state. Everything needed to decide resume lives in
-\* `sessionLog`, `runtimeIndex`, `resumeEpoch`, and `resumeResponses`.
+\* scheduler-owned state. Everything needed to decide wake lives in
+\* `sessionLog`, `runtimeIndex`, `wakeEpoch`, and `wakeResponses`.
 
 ProvisionReturnsReachableRuntime ==
   \A rk \in RuntimeKeys :
     runtimeIndex[rk].status = "ready" => reachable[rk]
 
 ProvisionedRuntimeReusable ==
-  ResumeOnLiveRuntimeIsNoop
+  WakeOnReadyIsNoop
 
-ReprovisionPreservesLoadSessionSemantics ==
-  lastResume.valid /\ lastResume.createdNew =>
-    /\ runtimeIndex[lastResume.runtimeKey].runtimeId = lastResume.afterRuntimeId
-    /\ runtimeIndex[lastResume.runtimeKey].specPresent
-    /\ lastResume.sessionId \in runtimeIndex[lastResume.runtimeKey].boundSessions
+WakeOnStoppedPreservesSessionBinding ==
+  lastWake.valid /\ lastWake.createdNew =>
+    /\ runtimeIndex[lastWake.runtimeKey].runtimeId = lastWake.afterRuntimeId
+    /\ runtimeIndex[lastWake.runtimeKey].specPresent
+    /\ lastWake.sessionId \in runtimeIndex[lastWake.runtimeKey].boundSessions
 
 ResourceMountMappingCorrect ==
   \A rk \in RuntimeKeys :

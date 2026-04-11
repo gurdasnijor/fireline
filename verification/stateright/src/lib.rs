@@ -365,7 +365,7 @@ impl Model for ResumeProtocolModel {
     fn properties(&self) -> Vec<Property<Self>> {
         vec![
             Property::always(
-                "ResumeOnLiveRuntimeIsNoop",
+                "WakeOnReadyIsNoop",
                 |_, state: &ResumeProtocolState| {
                     if state.scenario != ResumeScenario::Live {
                         return true;
@@ -379,14 +379,14 @@ impl Model for ResumeProtocolModel {
                 },
             ),
             Property::always(
-                "ConcurrentResumeSingleWinner",
+                "ConcurrentWakeSingleWinner",
                 |_, state: &ResumeProtocolState| {
                     let unique_ids = state.observed_ids();
                     unique_ids.len() <= 1 && state.reprovision_count <= 1
                 },
             ),
             Property::always(
-                "ColdResumePreservesRuntimeKeyChangesRuntimeId",
+                "WakeOnStoppedChangesRuntimeId",
                 |_, state: &ResumeProtocolState| {
                     if state.scenario != ResumeScenario::Cold
                         || !state
