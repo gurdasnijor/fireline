@@ -79,6 +79,21 @@ const server = createServer(async (req, res) => {
       return
     }
 
+    if (req.method === 'GET' && url.pathname === '/api/resolve') {
+      const agentId = url.searchParams.get('agentId')
+      if (!agentId) {
+        sendJson(res, 400, { error: 'missing_agent_id' })
+        return
+      }
+      try {
+        const resolved = await client.catalog.resolveAgent(agentId)
+        sendJson(res, 200, { agentCommand: resolved.command })
+      } catch (error) {
+        sendJson(res, 400, { error: toErrorMessage(error) })
+      }
+      return
+    }
+
     if (req.method === 'GET' && url.pathname === '/api/runtime') {
       if (!currentRuntime) {
         sendJson(res, 200, { runtime: null })

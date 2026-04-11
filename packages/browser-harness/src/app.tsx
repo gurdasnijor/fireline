@@ -18,12 +18,15 @@ import {
 } from '@agentclientprotocol/sdk'
 import { useLiveQuery } from '@tanstack/react-db'
 import { createFirelineDB, type FirelineDB } from '@fireline/state'
+import { createFirelineHost } from '@fireline/client/host-fireline'
+import type { Host, SessionHandle, SessionStatus } from '@fireline/client/host'
 
 const STATE_STREAM_NAME =
   import.meta.env.VITE_FIRELINE_STATE_STREAM ?? 'fireline-harness-state'
 const ACP_PROXY_URL = `ws://${window.location.host}/acp`
 const STATE_PROXY_URL = `${window.location.origin}/v1/stream/${STATE_STREAM_NAME}`
 const HARNESS_API_BASE = `${window.location.origin}/api`
+const CONTROL_PLANE_URL = `${window.location.origin}/cp`
 
 type HarnessStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
 
@@ -43,20 +46,6 @@ type CatalogAgent = {
   launchable: boolean
   distributionKind?: string
   unavailableReason?: string
-}
-
-type HarnessRuntime = {
-  runtimeKey: string
-  runtimeId: string
-  status: string
-  acp: {
-    url: string
-    headers?: Record<string, string>
-  }
-  state: {
-    url: string
-    headers?: Record<string, string>
-  }
 }
 
 const DbContext = createContext<FirelineDB | null>(null)
@@ -133,8 +122,8 @@ export function App() {
             dbActive={dbEnabled}
             dbReady={dbReady}
             dbError={dbError}
-            onRuntimeChanged={(runtime) => {
-              setDbEnabled(runtime?.status === 'ready')
+            onHandleChanged={(_, status) => {
+              setDbEnabled(status?.kind === 'running' || status?.kind === 'idle')
               setDbEpoch((current) => current + 1)
             }}
           />
@@ -179,13 +168,21 @@ function SessionHarness({
   dbActive,
   dbReady,
   dbError,
-  onRuntimeChanged,
+  onHandleChanged,
 }: {
   dbActive: boolean
   dbReady: boolean
   dbError: string | null
-  onRuntimeChanged(runtime: HarnessRuntime | null): void
+  onHandleChanged(handle: SessionHandle | null, status: SessionStatus | null): void
 }) {
+  const host = useMemo<Host>(
+    () =>
+      createFirelineHost({
+        controlPlaneUrl: CONTROL_PLANE_URL,
+        sharedStateUrl: STATE_PROXY_URL,
+      }),
+    [],
+  )
   const [status, setStatus] = useState<HarnessStatus>('disconnected')
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [input, setInput] = useState('')
@@ -194,18 +191,19 @@ function SessionHarness({
   const [pendingPermission, setPendingPermission] = useState<RequestPermissionRequest | null>(null)
   const [agents, setAgents] = useState<CatalogAgent[]>([])
   const [selectedAgentId, setSelectedAgentId] = useState<string>('')
-  const [runtime, setRuntime] = useState<HarnessRuntime | null>(null)
+  const [handle, setHandle] = useState<SessionHandle | null>(null)
+  const [sessionStatus, setSessionStatus] = useState<SessionStatus | null>(null)
   const [runtimePending, setRuntimePending] = useState(false)
   const connectionRef = useRef<ClientSideConnection | null>(null)
   const websocketRef = useRef<WebSocket | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const permissionResolverRef = useRef<PermissionResolver | null>(null)
   const bottomRef = useRef<HTMLDivElement | null>(null)
-  const runtimeReady = runtime?.status === 'ready'
+  const runtimeReady =
+    sessionStatus?.kind === 'running' || sessionStatus?.kind === 'idle'
 
   useEffect(() => {
     void refreshAgents()
-    void refreshRuntime()
 
     return () => {
       void disconnect()
@@ -218,8 +216,10 @@ function SessionHarness({
 
   async function openConnection(mode: 'new' | 'load') {
     if (!runtimeReady) {
-      if (runtime) {
-        setLastError(`Runtime is not ready yet (${runtime.status})`)
+      if (handle) {
+        setLastError(
+          `Runtime is not ready yet (${sessionStatus?.kind ?? 'unknown'})`,
+        )
         setStatus('error')
         return
       }
@@ -403,13 +403,15 @@ function SessionHarness({
     }
   }
 
-  async function refreshRuntime() {
+  async function refreshStatus(currentHandle: SessionHandle): Promise<SessionStatus | null> {
     try {
-      const response = await fetchJson<{ runtime: HarnessRuntime | null }>(`${HARNESS_API_BASE}/runtime`)
-      setRuntime(response.runtime)
-      onRuntimeChanged(response.runtime)
+      const next = await host.status(currentHandle)
+      setSessionStatus(next)
+      onHandleChanged(currentHandle, next)
+      return next
     } catch (error) {
       setLastError(toErrorMessage(error))
+      return null
     }
   }
 
@@ -425,15 +427,24 @@ function SessionHarness({
       await disconnect({ preserveSessionId: false, clearError: true })
       setEvents([])
 
-      const response = await fetchJson<{ runtime: HarnessRuntime }>(`${HARNESS_API_BASE}/runtime`, {
-        method: 'POST',
-        body: JSON.stringify({ agentId: selectedAgentId }),
+      const resolved = await fetchJson<{ agentCommand: readonly string[] }>(
+        `${HARNESS_API_BASE}/resolve?agentId=${encodeURIComponent(selectedAgentId)}`,
+      )
+
+      const next = await host.createSession({
+        agentCommand: resolved.agentCommand,
+        metadata: {
+          name: 'browser-harness',
+          stateStream: STATE_STREAM_NAME,
+        },
       })
-      setRuntime(response.runtime)
-      onRuntimeChanged(response.runtime)
+
+      setHandle(next)
+      const status = await refreshStatus(next)
       pushEvent('runtime_launch', {
         agentId: selectedAgentId,
-        runtimeId: response.runtime.runtimeId,
+        handle: next,
+        status,
       })
       return true
     } catch (error) {
@@ -451,11 +462,13 @@ function SessionHarness({
     try {
       await disconnect({ preserveSessionId: false, clearError: true })
       setEvents([])
-      await fetchJson<{ runtime: null }>(`${HARNESS_API_BASE}/runtime`, {
-        method: 'DELETE',
-      })
-      setRuntime(null)
-      onRuntimeChanged(null)
+      const current = handle
+      if (current) {
+        await host.stopSession(current)
+      }
+      setHandle(null)
+      setSessionStatus(null)
+      onHandleChanged(null, null)
       pushEvent('runtime_stop', {})
     } catch (error) {
       const message = toErrorMessage(error)
@@ -463,6 +476,21 @@ function SessionHarness({
       pushEvent('error', { message })
     } finally {
       setRuntimePending(false)
+    }
+  }
+
+  async function wakeSession() {
+    if (!handle) {
+      return
+    }
+    try {
+      const outcome = await host.wake(handle)
+      pushEvent('wake', outcome)
+      await refreshStatus(handle)
+    } catch (error) {
+      const message = toErrorMessage(error)
+      setLastError(message)
+      pushEvent('error', { message })
     }
   }
 
@@ -512,11 +540,11 @@ function SessionHarness({
           disabled={!selectedAgentId || runtimePending}
           onClick={() => void launchRuntime()}
         >
-          {runtime ? 'Relaunch Agent' : 'Launch Agent'}
+          {handle ? 'Relaunch Agent' : 'Launch Agent'}
         </button>
         <button
           style={buttonStyle('#2563eb')}
-          disabled={runtimePending || Boolean(runtime && !runtimeReady)}
+          disabled={runtimePending || Boolean(handle && !runtimeReady)}
           onClick={() => void openConnection('new')}
         >
           New Session
@@ -536,8 +564,15 @@ function SessionHarness({
           Disconnect
         </button>
         <button
+          style={buttonStyle('#0e7490')}
+          disabled={!handle || runtimePending}
+          onClick={() => void wakeSession()}
+        >
+          Wake
+        </button>
+        <button
           style={buttonStyle('#6b7280')}
-          disabled={!runtime || runtimePending}
+          disabled={!handle || runtimePending}
           onClick={() => void stopRuntime()}
         >
           Stop Runtime
@@ -651,14 +686,17 @@ function SessionHarness({
           <InspectorCard title="Current Session">
             <KeyValueRow label="status" value={status} />
             <KeyValueRow label="sessionId" value={sessionId ?? 'none'} mono />
-            <KeyValueRow label="runtimeStatus" value={runtime?.status ?? 'not running'} />
+            <KeyValueRow
+              label="sessionStatus"
+              value={sessionStatus?.kind ?? 'not running'}
+            />
             <KeyValueRow
               label="lastError"
               value={lastError ?? 'none'}
             />
             <KeyValueRow
-              label="runtime"
-              value={runtime?.runtimeId ?? 'not running'}
+              label="handleId"
+              value={handle?.id ?? 'not running'}
               mono
             />
             {dbActive ? (

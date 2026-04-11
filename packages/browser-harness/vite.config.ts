@@ -9,6 +9,10 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:4436',
       },
+      '/cp': {
+        target: 'http://127.0.0.1:4440',
+        rewrite: (path) => path.replace(/^\/cp/, ''),
+      },
       '/acp': {
         target: 'http://127.0.0.1:4437',
         ws: true,
