@@ -191,3 +191,104 @@ Each commit is individually revertable. Tests touching `RuntimeHost::create/stop
 | Façade (if option (i)) | `crates/fireline-conductor/src/runtime/mod.rs` | (thinned from ~318 lines to ~80) |
 
 No callers in `fireline-control-plane`, `fireline-components`, or `src/` need to change until **Commit 4** — and then only if option (ii) is chosen.
+
+---
+
+## 6. Interaction with stream-as-truth (post-decision)
+
+> **Status:** this section supersedes parts of §3, §4, and §5 in light of a directional decision made after the original proposal was written. The prior sections are preserved unedited for history; read §6 as the currently-authoritative overlay.
+
+### 6.1 The decision
+
+gnijor validated a **stream-as-truth** direction in conversation on **2026-04-11** during the debt-paydown session. Commits **A + B** from workspace:4 landing shortly will implement it. The substance:
+
+- **Delete the in-memory `RuntimeRegistry` entirely.** The TOML-backed `crates/fireline-conductor/src/runtime/registry.rs` store stops being canonical.
+- **Runtime existence is derived from the durable stream.** Envelopes like `runtime_spec_persisted`, `runtime_stopped`, and the existing registration-state envelopes are the only source of truth for "does this runtime exist, and what is its current status?"
+- **Heartbeats become optional liveness hints**, not state. A missed heartbeat downgrades a derived status; it does not mutate a stored row.
+- **The control plane becomes a stateless reader** that materializes a `RuntimeIndex` projection from the stream — structurally identical to how `SessionIndex` / `ActiveTurnIndex` already work today (`src/session_index.rs`, `src/active_turn_index.rs`), driven by `RuntimeMaterializer` (`src/runtime_materializer.rs`).
+
+This is **simplifying** to the split proposal, not competing. Every concern §3 extracted is still a concern — but two of the three shrink, and the hardest open question dissolves.
+
+### 6.2 Updates to §3 — what each extracted concern becomes
+
+#### §3a `RuntimeLauncher` — *survives cleanly (unchanged)*
+
+**After stream-as-truth:** `RuntimeLauncher` is about owning a `Box<dyn ManagedRuntime>` and calling `shutdown()` on it. That is **subprocess fate**, which is orthogonal to "what is a runtime." The launcher still:
+
+- Dispatches to `RuntimeManager` (Local | Docker).
+- Parks the live handle under `runtime_key` in an in-process map.
+- Exposes `launch`, `shutdown`, `is_live`.
+
+The only adjustment: after a successful `launch()`, the launcher (or its caller) appends a `runtime_spec_persisted` envelope to the stream directly. Today `create()` does this as step 7; after the split + stream-as-truth, it is a single unconditional append — no pending cache, no race, no branching on a registry row.
+
+**Unit-testability is unchanged:** the launcher can still be exercised with a fake `RuntimeManager`.
+
+#### §3b `RuntimeSpecJournal` — *dissolves*
+
+**After stream-as-truth:** there is nothing to reconcile. The `pending_runtime_specs` cache exists **only** because the original code raced the act of "learning `state.url` from a registering child" against the act of "emitting `runtime_spec_persisted` to that same `state.url`." Stream-as-truth collapses both into a single write: the launcher knows the `state.url` at the moment `manager.start()` returns (via `RuntimeLaunch.state.url`, see `mod.rs:108`), and there is no separate registry row to race against.
+
+The proposed `runtime/spec_journal.rs` file is **not created**. The `emit_runtime_spec_persisted` helper at `crates/fireline-conductor/src/trace.rs:134` either stays in `trace.rs` or migrates onto `RuntimeLauncher` as a private method — neither placement needs the concept of "pending emission."
+
+The invariant "every create emits exactly one `runtime_spec_persisted`" moves from "unit-testable on the journal" to "unconditional linear code on the launcher," which is strictly cheaper to reason about.
+
+#### §3c `RuntimeLifecycle` — *shrinks from state-machine owner to stream writer*
+
+**After stream-as-truth:** the `Starting → Ready`, `Stale → Ready`, and `Stopped ⇒ reject` transitions currently in `mod.rs:232–239` and `:295–297` are **no longer in-memory state transitions**. They become:
+
+- **Stream writes** — "append a `runtime_registration` or `runtime_status_change` envelope describing the intended transition."
+- **Projection reads** — the control plane's `RuntimeIndex` projection applies those envelopes deterministically on replay to produce the current `RuntimeStatus`.
+
+What remains of `RuntimeLifecycle` is thin enough that it may not deserve its own file:
+
+- A small module of stream-write helpers: `write_registration(...)`, `write_heartbeat(...)`, `write_stopped(...)`. Each is one `append_json(...)` call plus a `timestamp_ms`.
+- A `RuntimeIndex` projection type in `src/runtime_index.rs` (new, mirroring `session_index.rs` in layout and traits), implementing `StateProjection` (`src/runtime_materializer.rs:56`) and exposing `get(key)`, `list()`.
+
+The state machine's validity is enforced by **projection logic**, not by `Mutex` + early-return. Tests become property-style: "feed this envelope sequence into the projection, assert the resulting status is X" — the same pattern already in use for session/approval semantics in `fireline-semantics`.
+
+### 6.3 Closing open question §5.3 — re-emission semantics
+
+**Resolved.** The question asked where re-emission should live if the stream is truncated or reset. Under stream-as-truth, "re-emit" is the wrong verb. The stream is the primary record; recovery semantics are **replay**, which is already implemented by `RuntimeMaterializer` (`src/runtime_materializer.rs:91`, `offset: Beginning`, `live: Sse`).
+
+If a `snapshot-start`/`reset` control message arrives (handoff-2026-04-11-managed-agent-suite.md:98–108), every projection including the new `RuntimeIndex` calls `StateProjection::reset` and rebuilds from the subsequent snapshot — identically to `SessionIndex` and `ActiveTurnIndex` today.
+
+**There is no runtime-spec re-emission code to write.** The open question is not "postponed" — it ceases to exist.
+
+### 6.4 Reframed §4 transition plan
+
+The §4 sequence is premised on a world where `RuntimeRegistry` still owns canonical state. Stream-as-truth changes the starting baseline. The revised sequence:
+
+**Commits A + B (workspace:4, landing first — not part of this split).** Introduce the `RuntimeIndex` projection + `runtime_spec_persisted` / `runtime_status_change` envelope schema; switch the control plane to read from the projection; deprecate writes to `RuntimeRegistry` behind a feature flag. After these land, `RuntimeHost` still exists but its `registry.upsert(...)` calls are dead weight — the control plane ignores them.
+
+**Commit 1 (was §4 Commit 3) — Extract `RuntimeLauncher`.** Move `live_handles`, `manager.start`, and `shutdown()` into `crates/fireline-conductor/src/runtime/launcher.rs`. `RuntimeHost::create` is thinned to: allocate key/node → `launcher.launch(...)` → append `runtime_spec_persisted`. `stop`/`delete` become two-liners over `launcher.shutdown` + a stream append.
+
+**Commit 2 (new) — Delete the in-memory state machine.** Remove `register`, `heartbeat`, and the `Starting`/`Stale`/`Ready` branching from `mod.rs:215–301`. Replace with thin stream-write helpers (§6.2 §3c). The control plane's `/register` and `/heartbeat` handlers start calling these helpers directly.
+
+**Commit 3 (new) — Delete `RuntimeRegistry` and `RuntimeHostInner.live_handles` duplication.** With the registry gone and the launcher owning handles, `RuntimeHost` is either a one-field façade (`launcher`) or can be deleted entirely in favor of direct composition in `fireline-control-plane::AppState`.
+
+**Commit 4 (optional, unchanged) — Add race-regression tests.** Same as original §4 Commit 5, but the test now asserts that a single `runtime_spec_persisted` envelope lands per `create()`, full stop — no Mutex, no pending cache, no branching.
+
+**What drops out of the original plan:** the §4 Commit 1 (RuntimeSpecJournal extraction) is deleted — the journal doesn't exist under §6.2. The §4 Commit 2 (RuntimeLifecycle extraction) is replaced by Commit 2 above, which is a **delete** rather than an extraction.
+
+Net: the split becomes smaller, not larger, because stream-as-truth removes concerns instead of relocating them.
+
+### 6.5 New open question §5.6
+
+**6. Do we need `RuntimeLifecycle` at all, or does it collapse into a projection plus the launcher's subprocess fate?** If every registration / heartbeat / stop becomes a stream append, and every status read becomes a projection lookup, then `RuntimeLifecycle` as a named type has no behavior worth naming — it's a folder of free functions. Two options:
+
+- **(a) Keep the name.** A `RuntimeLifecycle` module holds the stream-write helpers as a discoverable API surface; the `RuntimeIndex` projection lives beside it. Low cost, mild ceremony.
+- **(b) Drop the name.** Stream-write helpers become private functions in `fireline-control-plane::router` (where they are called from); `RuntimeIndex` lives in `src/runtime_index.rs` next to the other projections. Maximum honesty about what has survived.
+
+Leaning (b) but flagging for review — the decision affects the appendix file list and whether "`RuntimeLifecycle`" appears anywhere in the codebase after the split lands.
+
+### 6.6 Revised appendix — files touched after stream-as-truth
+
+| Concern | File | Status |
+|---|---|---|
+| Launch + live handles | `crates/fireline-conductor/src/runtime/launcher.rs` | **New** (unchanged from original proposal) |
+| Spec journal | ~~`crates/fireline-conductor/src/runtime/spec_journal.rs`~~ | **Dissolved** — not created |
+| Lifecycle state machine | ~~`crates/fireline-conductor/src/runtime/lifecycle.rs`~~ | **Dissolved or demoted** — see §6.5 |
+| Runtime index projection | `src/runtime_index.rs` | **New** (mirrors `session_index.rs`) |
+| `RuntimeRegistry` TOML store | `crates/fireline-conductor/src/runtime/registry.rs` | **Deleted** after commits A + B |
+| `RuntimeHost` façade | `crates/fireline-conductor/src/runtime/mod.rs` | **Thinned to near-zero or deleted** (§6.5 option (b)) |
+
+The §5.1 façade-vs-collapse question tilts toward **collapse**: once the registry and the state machine are both gone, the only thing `RuntimeHost` wraps is `RuntimeLauncher`, and a one-field wrapper is not worth a type.
