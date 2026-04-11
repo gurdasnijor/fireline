@@ -148,7 +148,6 @@ agent-client-protocol-test.workspace = true
 sacp.workspace = true
 sacp-conductor.workspace = true
 sacp-tokio.workspace = true
-microsandbox = "0.3.12"
 
 [dev-dependencies]
 yopo.workspace = true
