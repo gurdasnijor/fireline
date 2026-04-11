@@ -35,6 +35,11 @@ use fireline_semantics::{
         ReplayObservation, SessionAction, SessionEventId, SessionEventKind,
         SessionState as SemanticSessionState, SessionTransition,
     },
+    stream_truth::{
+        apply as apply_stream_truth, project_runtime_index,
+        StreamTruthAction as StreamTruthProtocolAction,
+        StreamTruthState as StreamTruthProtocolState,
+    },
 };
 use stateright::{Model, Property};
 
@@ -616,12 +621,70 @@ impl Model for RegistryLivenessModel {
     }
 }
 
+#[derive(Clone, Default)]
+struct StreamTruthModel;
+
+impl Model for StreamTruthModel {
+    type State = StreamTruthProtocolState;
+    type Action = StreamTruthProtocolAction;
+
+    fn init_states(&self) -> Vec<Self::State> {
+        vec![StreamTruthProtocolState::default()]
+    }
+
+    fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
+        if state.log.len() >= 4 {
+            return;
+        }
+
+        for runtime in RuntimeKey::ALL {
+            actions.push(StreamTruthProtocolAction::PersistRuntimeSpec { runtime });
+            let record = state.runtime_index[runtime.index()];
+            if record.spec_present
+                && record.status != fireline_semantics::liveness::BaseRuntimeStatus::Stopped
+            {
+                actions.push(StreamTruthProtocolAction::StopRuntime { runtime });
+            }
+        }
+    }
+
+    fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
+        apply_stream_truth(state, action).map(|(next, _)| next)
+    }
+
+    fn properties(&self) -> Vec<Property<Self>> {
+        vec![
+            Property::always(
+                "RuntimeIndexIsPureProjectionOfStream",
+                |_, state: &StreamTruthProtocolState| {
+                    project_runtime_index(&state.log) == state.runtime_index
+                },
+            ),
+            Property::sometimes(
+                "ReprovisionChangesProjectedRuntimeId",
+                |_, state: &StreamTruthProtocolState| {
+                    RuntimeKey::ALL.into_iter().any(|runtime| {
+                        let record = state.runtime_index[runtime.index()];
+                        record.spec_present
+                            && record.runtime_id.is_some_and(|runtime_id| runtime_id >= 2)
+                    })
+                },
+            ),
+        ]
+    }
+
+    fn within_boundary(&self, state: &Self::State) -> bool {
+        state.log.len() <= 4 && state.next_runtime_id <= 5
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use stateright::{Checker, Model};
 
     use super::{
         ApprovalProtocolModel, RegistryLivenessModel, ResumeProtocolModel, SessionProtocolModel,
+        StreamTruthModel,
     };
 
     #[test]
@@ -657,6 +720,12 @@ mod tests {
             .checker()
             .spawn_bfs()
             .join();
+        checker.assert_properties();
+    }
+
+    #[test]
+    fn stream_truth_model_checks_runtime_index_projection_invariant() {
+        let checker = StreamTruthModel::default().checker().spawn_bfs().join();
         checker.assert_properties();
     }
 }

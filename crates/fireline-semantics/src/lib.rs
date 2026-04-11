@@ -239,6 +239,192 @@ pub mod liveness {
     }
 }
 
+pub mod stream_truth {
+    use super::liveness::{BaseRuntimeStatus, RuntimeKey};
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub struct RuntimeProjectionRecord {
+        pub status: BaseRuntimeStatus,
+        pub runtime_id: Option<u64>,
+        pub spec_present: bool,
+        pub bound_session: bool,
+    }
+
+    impl Default for RuntimeProjectionRecord {
+        fn default() -> Self {
+            Self {
+                status: BaseRuntimeStatus::Stopped,
+                runtime_id: None,
+                spec_present: false,
+                bound_session: false,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum RuntimeEnvelope {
+        RuntimeSpecPersisted {
+            runtime: RuntimeKey,
+            runtime_id: u64,
+            bound_session: bool,
+        },
+        RuntimeStopped {
+            runtime: RuntimeKey,
+        },
+    }
+
+    #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+    pub struct StreamTruthState {
+        pub log: Vec<RuntimeEnvelope>,
+        pub runtime_index: [RuntimeProjectionRecord; 2],
+        pub next_runtime_id: u64,
+    }
+
+    impl Default for StreamTruthState {
+        fn default() -> Self {
+            Self {
+                log: Vec::new(),
+                runtime_index: [
+                    RuntimeProjectionRecord::default(),
+                    RuntimeProjectionRecord::default(),
+                ],
+                next_runtime_id: 1,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum StreamTruthAction {
+        PersistRuntimeSpec { runtime: RuntimeKey },
+        StopRuntime { runtime: RuntimeKey },
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum StreamTruthTransition {
+        RuntimeSpecPersisted {
+            runtime: RuntimeKey,
+            runtime_id: u64,
+        },
+        RuntimeStopped {
+            runtime: RuntimeKey,
+        },
+    }
+
+    pub fn project_runtime_index(log: &[RuntimeEnvelope]) -> [RuntimeProjectionRecord; 2] {
+        let mut projected = [
+            RuntimeProjectionRecord::default(),
+            RuntimeProjectionRecord::default(),
+        ];
+
+        for envelope in log {
+            match *envelope {
+                RuntimeEnvelope::RuntimeSpecPersisted {
+                    runtime,
+                    runtime_id,
+                    bound_session,
+                } => {
+                    projected[runtime.index()] = RuntimeProjectionRecord {
+                        status: BaseRuntimeStatus::Ready,
+                        runtime_id: Some(runtime_id),
+                        spec_present: true,
+                        bound_session,
+                    };
+                }
+                RuntimeEnvelope::RuntimeStopped { runtime } => {
+                    let mut record = projected[runtime.index()];
+                    record.status = BaseRuntimeStatus::Stopped;
+                    projected[runtime.index()] = record;
+                }
+            }
+        }
+
+        projected
+    }
+
+    pub fn apply(
+        state: &StreamTruthState,
+        action: StreamTruthAction,
+    ) -> Option<(StreamTruthState, StreamTruthTransition)> {
+        let mut next = state.clone();
+        match action {
+            StreamTruthAction::PersistRuntimeSpec { runtime } => {
+                let runtime_id = next.next_runtime_id;
+                next.next_runtime_id += 1;
+                next.log.push(RuntimeEnvelope::RuntimeSpecPersisted {
+                    runtime,
+                    runtime_id,
+                    bound_session: true,
+                });
+                next.runtime_index[runtime.index()] = RuntimeProjectionRecord {
+                    status: BaseRuntimeStatus::Ready,
+                    runtime_id: Some(runtime_id),
+                    spec_present: true,
+                    bound_session: true,
+                };
+                Some((
+                    next,
+                    StreamTruthTransition::RuntimeSpecPersisted {
+                        runtime,
+                        runtime_id,
+                    },
+                ))
+            }
+            StreamTruthAction::StopRuntime { runtime } => {
+                let record = next.runtime_index[runtime.index()];
+                if !record.spec_present || record.status == BaseRuntimeStatus::Stopped {
+                    return None;
+                }
+                next.log.push(RuntimeEnvelope::RuntimeStopped { runtime });
+                let mut updated = record;
+                updated.status = BaseRuntimeStatus::Stopped;
+                next.runtime_index[runtime.index()] = updated;
+                Some((next, StreamTruthTransition::RuntimeStopped { runtime }))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{apply, project_runtime_index, StreamTruthAction, StreamTruthState};
+        use crate::liveness::RuntimeKey;
+
+        #[test]
+        fn projected_runtime_index_matches_incremental_materialization() {
+            let state = StreamTruthState::default();
+            let (state, _) = apply(
+                &state,
+                StreamTruthAction::PersistRuntimeSpec {
+                    runtime: RuntimeKey::A,
+                },
+            )
+            .expect("persist A");
+            let (state, _) = apply(
+                &state,
+                StreamTruthAction::PersistRuntimeSpec {
+                    runtime: RuntimeKey::B,
+                },
+            )
+            .expect("persist B");
+            let (state, _) = apply(
+                &state,
+                StreamTruthAction::StopRuntime {
+                    runtime: RuntimeKey::A,
+                },
+            )
+            .expect("stop A");
+            let (state, _) = apply(
+                &state,
+                StreamTruthAction::PersistRuntimeSpec {
+                    runtime: RuntimeKey::A,
+                },
+            )
+            .expect("re-provision A");
+
+            assert_eq!(project_runtime_index(&state.log), state.runtime_index);
+        }
+    }
+}
+
 pub mod session {
     use std::collections::BTreeSet;
 
