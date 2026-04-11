@@ -8,6 +8,7 @@ on:
       - src/**
       - crates/**
       - tests/**
+      - docker/**
       - .github/workflows/managed-agent-suite.yml
   push:
     branches:
@@ -18,6 +19,7 @@ on:
       - src/**
       - crates/**
       - tests/**
+      - docker/**
       - .github/workflows/managed-agent-suite.yml
   workflow_dispatch:
 
@@ -52,4 +54,11 @@ jobs:
             --test managed_agent_tools \
             --test managed_agent_orchestration \
             --test managed_agent_primitives_suite \
+            --test runtime_index_agreement \
+            -- --nocapture --test-threads=1
+
+      - name: Run control-plane Docker integration
+        run: |
+          cargo test \
+            --test control_plane_docker \
             -- --nocapture --test-threads=1
