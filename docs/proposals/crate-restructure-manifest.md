@@ -1,5 +1,28 @@
 # Crate Restructure Manifest (Option A — 9 primitive-aligned crates)
 
+## Execution status (live — updated 2026-04-11)
+
+| Phase | Description | Status | Commit |
+|---|---|---|---|
+| 1 | Primitive crate skeletons | ✅ done | `faf8a76` |
+| 2 | Register crates in workspace | ✅ done | `3e06b86` |
+| 3 | Move tools + resources | ✅ done | `abd5a29` |
+| 4 | Move session + sandbox | ✅ done | `283a903`, `a2b8227` |
+| 5 | Move harness + orchestration | ✅ done | `5db71e7` |
+| 6 | Move runtime + thin root crate | 🔄 in progress | — |
+| 7 | Delete dissolved crates (`fireline-conductor`, `fireline-components`) | ⏳ pending | — |
+| 8 | Rewrite test imports + `cargo check --workspace` green | ⏳ pending | — |
+
+**Notes on the landed phases:**
+
+- **Phase 4** landed as two commits (`283a903 Move session and sandbox primitives` plus `a2b8227 Drop moved microsandbox source`); the second is the follow-up cleanup of the now-orphaned source files after the sandbox content migrated out of `fireline-components`.
+- **Phases 6–8 are serialized.** Phase 6 (moving runtime + thinning the root crate) has to land before Phase 7's delete pass can happen cleanly, and Phase 7 has to land before Phase 8's test-import fixup can be green against a workspace that contains only the new primitive-aligned crates.
+- The demo runbook (`../demo-runbook.md`) §"State 0 — restructure not green" documents how to pin to the last restructure-stable commit if Phase 6–8 work leaves `origin/main` mid-move at demo time.
+
+The existing plan below is unchanged — this status block is an overlay to help readers locate where the in-flight work is relative to the committed manifest.
+
+---
+
 Executable manifest for splitting the current Rust workspace into 9
 primitive-aligned crates. Each section defines the target crate, which
 existing files move into it, and the dependency edges it is allowed to
