@@ -39,6 +39,10 @@
       "types": "./dist/host-claude/index.d.ts",
       "default": "./dist/host-claude/index.js"
     },
+    "./host-hosted-api": {
+      "types": "./dist/host-hosted-api/index.d.ts",
+      "default": "./dist/host-hosted-api/index.js"
+    },
     "./browser": {
       "types": "./dist/browser.d.ts",
       "default": "./dist/browser.js"
