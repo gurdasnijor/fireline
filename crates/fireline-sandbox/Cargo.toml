@@ -7,3 +7,15 @@ repository.workspace = true
 description = "Tool execution sandbox primitives for Fireline"
 
 [dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+fireline-resources.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+microsandbox = { version = "0.3.12", optional = true }
+
+[features]
+default = []
+microsandbox-provider = ["dep:microsandbox"]

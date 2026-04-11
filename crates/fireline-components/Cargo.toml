@@ -9,6 +9,7 @@ description = "Prebuilt topology components for Fireline (peer calls, audit, con
 [dependencies]
 fireline-conductor.workspace = true
 fireline-resources.workspace = true
+fireline-sandbox.workspace = true
 fireline-tools.workspace = true
 
 # Async runtime
@@ -54,16 +55,9 @@ reqwest.workspace = true
 # Neither is available on default GitHub Actions runners, so the
 # default build excludes it and CI only compiles the feature when
 # explicitly asked.
-microsandbox = { version = "0.3.12", optional = true }
-
 [features]
 default = []
-# Enables the real microVM backend via the `microsandbox` crate —
-# requires libdbus-1-dev at build time on Linux, and KVM (Linux) /
-# Apple Silicon (macOS) at runtime. Off in CI because neither is
-# available on standard GitHub Actions runners. Enable locally with
-# `cargo check --features fireline-components/microsandbox-provider`.
-microsandbox-provider = ["dep:microsandbox"]
+microsandbox-provider = ["fireline-sandbox/microsandbox-provider"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
