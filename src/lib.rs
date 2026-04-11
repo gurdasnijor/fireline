@@ -36,6 +36,7 @@ pub mod control_plane_client;
 pub mod control_plane_peer_registry;
 pub mod error_codes;
 pub mod load_coordinator;
+pub mod orchestration;
 pub mod routes;
 pub mod runtime_host;
 pub mod runtime_materializer;
