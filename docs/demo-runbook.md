@@ -143,7 +143,7 @@ curl -sS http://127.0.0.1:4440/healthz            # control plane
 curl -sS http://127.0.0.1:4437/healthz            # fireline runtime (only works if a runtime is live)
 ```
 
-**Why port 4437 is dynamic-ish:** `dev-server.mjs:121` hardcodes `port: 4437` when creating a runtime, so the runtime always binds there in the demo environment. In non-demo usage the control plane can assign any port via `port: 0`. If you see a runtime start on a different port, the dev-server has been modified.
+**Why port 4437 is pinned:** the vite proxy config hardcodes `/acp`, `/v1`, and `/healthz` to `http://127.0.0.1:4437` (see `packages/browser-harness/vite.config.ts:16-25`). The browser has no dynamic routing — whatever runtime answers on 4437 is *the* runtime for the demo. The Tier 5 `createFirelineHost.createSession` path actually POSTs `port: 0` to the control plane (see the Tier 5 smoke test at `packages/browser-harness/test/tier5-smoke.browser.test.ts:79-88`), so the spawned runtime gets an OS-assigned ephemeral port — and the demo works because in a clean dev environment 4437 happens to be the port the child binds to. If that assumption breaks (another process squats on 4437 before the runtime binds, or the control plane's port-assignment behavior changes), the ACP WebSocket will fail to connect even though the runtime itself is healthy. See §5c "state explorer never populates" for the diagnosis ladder. The legacy `dev-server.mjs:121 POST /api/runtime` path does hardcode `port: 4437`, but that handler is **no longer called by the Tier 5 browser-harness** — it's still wired for backward compatibility only.
 
 **Why port 4436 is the dev-server API:** the dev-server.mjs was written before the `Host` primitive existed and originally fronted the entire runtime lifecycle. After Tier 5 (`52c31af`), the browser creates runtimes directly through the control plane via `createFirelineHost`, and the 4436 API is mostly reduced to the **agent catalog endpoints** (`/api/agents` and `/api/resolve?agentId=...`). The legacy `/api/runtime` CRUD is still wired, but the browser-harness app doesn't use it post-Tier 5 — see `packages/browser-harness/src/app.tsx:434-458` where `launchRuntime()` calls `host.createSession` directly.
 
@@ -297,7 +297,7 @@ If the direct probe works but the vite-proxied one doesn't, the vite config got 
 
 **Cause most likely:**
 - The runtime hasn't written anything to the stream yet — this is normal for the first ~100ms after runtime launch. **Wait 2–3 seconds and try again.**
-- The `fireline-harness-state` stream name is mismatched. The browser uses `VITE_FIRELINE_STATE_STREAM` (defaulting to `fireline-harness-state` per `app.tsx:24`), and the runtime is started by `dev-server.mjs:120` with `stateStream: 'fireline-harness-state'`. If either has been edited, they need to match.
+- The `fireline-harness-state` stream name is mismatched. The browser uses `VITE_FIRELINE_STATE_STREAM` (defaulting to `fireline-harness-state` per `app.tsx:24`), and the runtime is started by `dev-server.mjs:123` with `stateStream: 'fireline-harness-state'`. If either has been edited, they need to match.
 - `@fireline/state`'s `createFirelineDB.preload()` threw. Browser console will have the error.
 
 **Recovery:**
