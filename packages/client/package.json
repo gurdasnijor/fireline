@@ -27,6 +27,10 @@
       "types": "./dist/host-fireline/index.d.ts",
       "default": "./dist/host-fireline/index.js"
     },
+    "./host-claude": {
+      "types": "./dist/host-claude/index.d.ts",
+      "default": "./dist/host-claude/index.js"
+    },
     "./browser": {
       "types": "./dist/browser.d.ts",
       "default": "./dist/browser.js"
