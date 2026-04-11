@@ -158,5 +158,9 @@ name = "fireline-testy-load"
 path = "src/bin/testy_load.rs"
 
 [[bin]]
+name = "fireline-testy-fs"
+path = "src/bin/testy_fs.rs"
+
+[[bin]]
 name = "fireline-testy-prompt"
 path = "src/bin/testy_prompt.rs"

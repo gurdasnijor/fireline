@@ -25,8 +25,10 @@ use anyhow::Result;
 use durable_streams::Client as DsClient;
 use fireline_components::fs_backend::{FsBackendComponent, LocalFileBackend};
 use fireline_conductor::runtime::{LocalPathMounter, ResourceMounter, ResourceRef};
+use fireline_conductor::topology::{TopologyComponentSpec, TopologySpec};
 use managed_agent_suite::{
-    ControlPlaneHarness, create_session, load_session, prompt_session, testy_load_bin,
+    ControlPlaneHarness, ManagedAgentHarnessSpec, count_events, create_session, load_session,
+    prompt_session, testy_fs_bin, testy_load_bin, wait_for_event_count,
 };
 use managed_agent_suite::{
     DEFAULT_TIMEOUT, LocalRuntimeHarness, Primitive, SurfaceOwner, contract_inventory,
@@ -243,12 +245,64 @@ async fn managed_agent_resources_physical_mount_shell_visibility_contract() -> R
 }
 
 #[tokio::test]
-#[ignore = "pending prompt-driven ACP fs emission from a test agent"]
 async fn managed_agent_resources_fs_backend_acceptance_contract() -> Result<()> {
-    pending_contract(
-        "resources.fs_backend",
-        "Blocked on testy fs-op emission, covered at component layer via managed_agent_resources_fs_backend_component_test.",
-    )
+    let topology = TopologySpec {
+        components: vec![TopologyComponentSpec {
+            name: "fs_backend".to_string(),
+            config: Some(serde_json::json!({ "backend": "runtime_stream" })),
+        }],
+    };
+    let spec = ManagedAgentHarnessSpec::new("primitives-fs-backend-acceptance")
+        .with_agent_command(vec![testy_fs_bin().display().to_string()])
+        .with_topology(topology);
+    let runtime = LocalRuntimeHarness::spawn_with(spec).await?;
+
+    let result = async {
+        let session_id = create_session(runtime.acp_url()).await?;
+
+        // Drive a full write → read round trip through the scripted
+        // fs testy. The agent emits fs/write_text_file, Fireline's
+        // FsBackendComponent intercepts and captures an fs_op
+        // envelope on the stream. A follow-up read via the same agent
+        // should return the same bytes through the RuntimeStreamFile
+        // projection.
+        let write_prompt = serde_json::json!({
+            "command": "write_file",
+            "path": "/scratch/primitive.md",
+            "content": "primitives-suite acceptance content",
+        })
+        .to_string();
+        prompt_session(runtime.acp_url(), &session_id, &write_prompt).await?;
+
+        let fs_ops = wait_for_event_count(
+            runtime.state_stream_url(),
+            "fs_op",
+            1,
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        assert!(
+            fs_ops.iter().any(|env| env
+                .value()
+                .and_then(|v| v.get("content"))
+                .and_then(|v| v.as_str())
+                == Some("primitives-suite acceptance content")),
+            "INVARIANT (Resources): fs_backend must capture the scripted agent's write \
+             as an fs_op envelope on the state stream"
+        );
+
+        let total_fs_ops = count_events(runtime.state_stream_url(), "fs_op").await?;
+        assert!(
+            total_fs_ops >= 1,
+            "INVARIANT (Resources): at least one fs_op envelope must be durable"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    runtime.shutdown().await?;
+    result
 }
 
 #[tokio::test]

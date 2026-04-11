@@ -34,7 +34,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use fireline_components::fs_backend::{FileBackend, LocalFileBackend, RuntimeStreamFileBackend};
 use fireline_conductor::runtime::{LocalPathMounter, MountedResource, ResourceMounter, ResourceRef};
-use managed_agent_suite::{LocalRuntimeHarness, pending_contract, temp_path};
+use fireline_conductor::topology::{TopologyComponentSpec, TopologySpec};
+use managed_agent_suite::{
+    DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec, create_session,
+    pending_contract, prompt_session, temp_path, testy_fs_bin, wait_for_event_count,
+};
 
 /// Precondition: a source directory on the host filesystem containing a
 /// known file (`hello.txt` → "hello from resources").
@@ -165,38 +169,94 @@ async fn resources_physical_mount_is_shell_visible_inside_runtime() -> Result<()
     )
 }
 
-/// Precondition: a runtime has been provisioned with an `FsBackendComponent`
-/// in its topology backed by a `SessionLogFileBackend`, and an agent
-/// (scripted) that will emit `fs/write_text_file` as an ACP effect.
+/// Precondition: a runtime has been provisioned with an
+/// `FsBackendComponent` in its topology backed by the
+/// `runtime_stream` backend, running the scripted `fireline-testy-fs`
+/// agent that deterministically emits `fs/write_text_file` on
+/// command.
 ///
-/// Action: spawn the runtime, wait for provision, send a prompt that the
-/// scripted agent interprets as "write /scratch/out.md with content X",
-/// observe the state stream.
+/// Action: spawn the runtime, create a session, and prompt the agent
+/// with the JSON command `{"command":"write_file","path":"/scratch/out.md","content":"..."}`.
+/// The scripted agent parses the command and issues an ACP
+/// `fs/write_text_file` request against its client connection.
+/// Fireline's `FsBackendComponent` intercepts the request, writes
+/// through the `RuntimeStreamFileBackend`, and emits an `fs_op`
+/// envelope to the durable state stream.
 ///
-/// Observable evidence: an `fs_op` event for path `/scratch/out.md` appears
-/// on the state stream with the expected content, and a subsequent
-/// `fs/read_text_file` against the same path returns the same content —
-/// proving the ACP fs interception routes both read and write through the
-/// backend and captures the write as a Session event via
-/// `appendToSession`.
+/// Observable evidence: an `fs_op` envelope is visible on the stream
+/// with the expected path and content — proving the ACP fs
+/// interception routes the write through the backend and captures
+/// it as a Session event via `appendToSession`.
 ///
-/// Invariant proven: **Resources ACP fs interception + artifact capture** —
-/// the mapping doc §5 "Composable half" contract. Every `fs/write_text_file`
-/// call is both routed to a backend AND durably captured as an fs_op event,
-/// which is the foundation for materialized artifact indexes.
+/// Invariant proven: **Resources ACP fs interception + artifact
+/// capture** — the mapping doc §5 "Composable half" contract. Every
+/// `fs/write_text_file` call is both routed to a backend AND durably
+/// captured as an `fs_op` event.
 #[tokio::test]
-#[ignore = "pending: scripted testy harness (to deterministically emit fs/write_text_file) \
-            + SessionLogFileBackend wired through a runtime launch config"]
 async fn resources_fs_backend_captures_write_as_durable_event() -> Result<()> {
-    pending_contract(
-        "resources.fs_backend_captures_writes",
-        "Blocks on scripted testy for deterministic fs/write_text_file emission and on \
-         launching a runtime with an FsBackendComponent + SessionLogFileBackend attached \
-         via topology. The component-layer test \
-         (managed_agent_primitives_suite::managed_agent_resources_fs_backend_component_test) \
-         already covers the FsBackendComponent implementation; this test covers the \
-         runtime-attached end-to-end contract.",
-    )
+    let topology = TopologySpec {
+        components: vec![TopologyComponentSpec {
+            name: "fs_backend".to_string(),
+            config: Some(serde_json::json!({ "backend": "runtime_stream" })),
+        }],
+    };
+    let spec = ManagedAgentHarnessSpec::new("resources-fs-backend-end-to-end")
+        .with_agent_command(vec![testy_fs_bin().display().to_string()])
+        .with_topology(topology);
+    let runtime = LocalRuntimeHarness::spawn_with(spec).await?;
+
+    let result = async {
+        let session_id = create_session(runtime.acp_url()).await?;
+        let prompt = serde_json::json!({
+            "command": "write_file",
+            "path": "/scratch/artifact.md",
+            "content": "hello from fireline-testy-fs",
+        })
+        .to_string();
+        prompt_session(runtime.acp_url(), &session_id, &prompt)
+            .await
+            .context(
+                "INVARIANT (Resources): scripted testy-fs must accept the write_file command",
+            )?;
+
+        let fs_ops = wait_for_event_count(
+            runtime.state_stream_url(),
+            "fs_op",
+            1,
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .context(
+            "INVARIANT (Resources): the FsBackendComponent must capture fs/write_text_file \
+             as a durable fs_op envelope on the state stream",
+        )?;
+
+        let fs_op = fs_ops
+            .into_iter()
+            .find(|env| {
+                env.value()
+                    .and_then(|v| v.get("path"))
+                    .and_then(|v| v.as_str())
+                    == Some("/scratch/artifact.md")
+            })
+            .context("fs_op for /scratch/artifact.md must be present on the stream")?;
+
+        let content = fs_op
+            .value()
+            .and_then(|v| v.get("content"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert_eq!(
+            content, "hello from fireline-testy-fs",
+            "INVARIANT (Resources): captured fs_op content must match what the agent wrote"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    runtime.shutdown().await?;
+    result
 }
 
 /// Precondition: a durable state stream is live (backed by a

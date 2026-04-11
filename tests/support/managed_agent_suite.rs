@@ -155,6 +155,10 @@ pub(crate) fn testy_load_bin() -> PathBuf {
     target_bin("fireline-testy-load")
 }
 
+pub(crate) fn testy_fs_bin() -> PathBuf {
+    target_bin("fireline-testy-fs")
+}
+
 pub(crate) fn target_bin(name: &str) -> PathBuf {
     let cargo_var = format!("CARGO_BIN_EXE_{name}");
     if let Some(path) = std::env::var_os(&cargo_var) {
