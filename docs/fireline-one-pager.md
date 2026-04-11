@@ -8,14 +8,14 @@
 
 | # | Primitive | Interface | Fireline status |
 |---|---|---|---|
-| 1 | **Session** | Append-only log, idempotent appends, replayable from any offset | **Strong** — `durable-streams` + `DurableStreamTracer` + runtime/TS materializers |
-| 2 | **Orchestration** | `wake(session_id) → void` | **Composable** — satisfied by existing primitives, no new surface |
-| 3 | **Harness** | `yield Effect → EffectResult` | **Partial by design** — conductor proxy chain; durable suspend/resume via composition |
-| 4 | **Sandbox** | `provision(resources) → execute(name, input)` | **Strong** — `RuntimeProvider` trait, local + Docker providers |
-| 5 | **Resources** | `[{source_ref, mount_path}]` | **Partially composable** — ACP fs interception is pure composition; physical mounts for shell-based agents need small slice 15 work |
-| 6 | **Tools** | `{name, description, input_schema}` | **Strong** — topology components + MCP injection (`PeerComponent`, `SmitheryComponent`, etc.) |
+| 1 | **Session** | Append-only log, idempotent appends, replayable from any offset | **Strong** — `durable-streams` + `DurableStreamTracer` + runtime/TS materializers; `@fireline/state` collections as the TS read surface |
+| 2 | **Orchestration** | `wake(session_id) → void` | **Live** — `Host.wake(handle)` trait + `whileLoopOrchestrator`; see `proposals/client-primitives.md` Modules 2–3 |
+| 3 | **Harness** | `yield Effect → EffectResult` | **Partial by design** — conductor proxy chain; durable suspend/resume via the seven-combinator composition layer |
+| 4 | **Sandbox** | `provision(resources) → execute(name, input)` | **Strong** — `Sandbox` trait in `fireline-conductor::primitives`; `MicrosandboxSandbox` satisfier behind `microsandbox-provider` feature |
+| 5 | **Resources** | `[{source_ref, mount_path}]` | **Strong on ACP-fs and component-layer mounts** — `ResourceMounter` + `FsBackendComponent`; Docker-scoped physical-mount test remains as a cross-reference marker |
+| 6 | **Tools** | `{name, description, input_schema}` | **Strong** — topology components + MCP injection (`PeerComponent`, `SmitheryComponent`, etc.); portable `CapabilityRef` / `TransportRef` / `CredentialRef` live as TS types in `@fireline/client/core` |
 
-**Net status: no remaining primitive-sized gaps.** Every missing piece is a targeted small addition that folds into an existing slice.
+**Net status: no remaining primitive-sized gaps.** Every missing piece is a targeted small addition expressible as a combinator over the primitives above.
 
 ## What Fireline owns vs doesn't
 
@@ -45,44 +45,17 @@ If a proposed feature doesn't decompose into the combinator algebra, it's either
 
 ## Two "primitive-sized gaps" that collapsed into composition
 
-**Orchestration** looked like it needed a new scheduler service and a `wake(session_id)` HTTP endpoint. It doesn't. `durable-streams` accepts writes from any authenticated producer; any process that subscribes becomes a scheduler; `session/load` already rebuilds ACP session state from the durable log; `RuntimeHost::create` cold-starts runtimes. Composed via a ten-line `resume(sessionId)` helper:
+**Orchestration** looked like it needed a new scheduler service and a `wake(session_id)` HTTP endpoint. It doesn't. `durable-streams` accepts writes from any authenticated producer; any process that subscribes becomes a scheduler; `session/load` already rebuilds ACP session state from the durable log; the `Host` primitive's `wake(handle)` verb is retry-safe and idempotent. The TS surface ships this as `Host` + `Orchestrator` (see `proposals/client-primitives.md` Modules 2–3) plus a `whileLoopOrchestrator` satisfier and the `createFirelineHost` / `createClaudeHost` concrete hosts. No scheduler service. No new HTTP endpoint. No new primitive.
 
-```typescript
-async function resume(sessionId: string) {
-  const session = await sessionStore.get(sessionId)
-  let runtime = await getRuntime(session.runtimeKey)
-  if (!runtime || runtime.status !== 'ready') {
-    runtime = await provision(session.runtimeSpec)  // cold-start
-  }
-  const acp = await connectAcp(runtime.acp)
-  await acp.loadSession(sessionId)                   // rebuild from log
-}
-```
+**Resources** splits cleanly. ACP defines `fs/read_text_file` and `fs/write_text_file` as client-hosted protocol methods — they flow through the conductor proxy chain like any other effect. An `FsBackendComponent` implemented as `compose(substitute, appendToSession)` routes file ops to any backend (local disk, S3, GCS, git, or even the Session log itself, which gives a cross-runtime virtual filesystem for free). Shell-based agents (Claude Code, Codex, etc.) bypass ACP fs and use the `ResourceMounter` trait for physical mounts at provision time — landed in `fireline-conductor::runtime::mounter`.
 
-No scheduler service. No new HTTP endpoint. No new primitive.
+## Where to read more
 
-**Resources** splits cleanly. ACP defines `fs/read_text_file` and `fs/write_text_file` as client-hosted protocol methods — they flow through the conductor proxy chain like any other effect. An `FsBackendComponent` implemented as `compose(substitute, appendToSession)` routes file ops to any backend (local disk, S3, GCS, git, or even the Session log itself, which gives a cross-runtime virtual filesystem for free). Shell-based agents (Claude Code, Codex, etc.) bypass ACP fs and still need physical mounts at provision time — ~1 week of Rust work in slice 15 for the `ResourceMounter` trait.
-
-## What's actually left to build
-
-| # | Slice | Scope | Status |
-|---|---|---|---|
-| 13c | Docker provider via `bollard` | Sandbox depth | In flight |
-| 14 | Session canonical read schema + durable `runtimeSpec` persistence | Session + Orchestration composition enabler | Doc rewritten, implementation pending |
-| 15 | `ResourceMounter` + `FsBackendComponent` | Resources | Doc rewritten, implementation pending (~1.5 weeks) |
-| 16 | `ApprovalGateComponent` rebuild-from-log + `resume` worked example | First Orchestration composition consumer | Doc rewrite in progress |
-| 17 | Portable Tools references with `credential_ref` | Tools depth | Doc rewrite pending |
-| TS API | `resume` helper, `fsBackend` factory, materialize helpers | Client-side composition | Proposal in `typescript-functional-api-proposal.md` |
-| Ongoing | Richer budget, routing, delegation components | Component depth | Additive on existing topology |
-
-**Zero new primitives. Zero new control-plane endpoints. No slice 18.** Every remaining item is either composition of what exists or a targeted small extension.
-
-## Full detail
-
-- **`docs/explorations/managed-agents-mapping.md`** — the 801-line operational source of truth that drives the slice plan. Start here for deep context.
-- **`docs/explorations/typescript-functional-api-proposal.md`** — proposed TypeScript API shape grounded in the seven-combinator algebra.
+- **`docs/explorations/managed-agents-mapping.md`** — the operational source of truth that drives the substrate roadmap. Start here for deep context and the seven-combinator algebra.
+- **`docs/proposals/client-primitives.md`** — the authoritative TypeScript substrate surface: `Host`, `Sandbox`, `Orchestrator`, `Combinator`, and the module layout. This supersedes earlier TS-API exploration docs.
+- **`docs/proposals/runtime-host-split.md`** §7 — the Host / Sandbox / Orchestrator reframe on the Rust side, and how the proposed internal split reconciles with the primitive taxonomy.
+- **`docs/proposals/crate-restructure-manifest.md`** — the target Rust crate layout with 1:1 primitive alignment (`fireline-session`, `fireline-orchestration`, `fireline-harness`, `fireline-sandbox`, `fireline-resources`, `fireline-tools`).
 - **`docs/explorations/managed-agents-citations.md`** — file:line inventory of which Rust code implements each primitive today.
-- **`docs/product/priorities.md`** — substrate-first product positioning and slice ordering.
-- **`docs/runtime/control-and-data-plane.md`** — the two-plane architecture the primitives map onto.
+- **`docs/explorations/claude-agent-sdk-v2-findings.md`** — verification of the Claude Agent SDK v2 preview against the `Host` primitive, used by the `createClaudeHost` satisfier.
 
-If you're picking up new work, start from `managed-agents-mapping.md`. If you're writing a new component or slice, express it as a combinator over the primitives first; if that doesn't work, either you've found a rare new primitive or the feature belongs in Flamecast.
+If you're picking up new work, start from `managed-agents-mapping.md`. If you're writing a new component, express it as a combinator over the primitives first; if that doesn't work, either you've found a rare new primitive or the feature belongs in a downstream product layer.

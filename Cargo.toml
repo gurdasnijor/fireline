@@ -2,6 +2,13 @@
 members = [
     ".",
     "crates/fireline-semantics",
+    "crates/fireline-session",
+    "crates/fireline-orchestration",
+    "crates/fireline-harness",
+    "crates/fireline-sandbox",
+    "crates/fireline-resources",
+    "crates/fireline-tools",
+    "crates/fireline-runtime",
     "crates/fireline-conductor",
     "crates/fireline-components",
     "crates/fireline-control-plane",
@@ -20,6 +27,13 @@ repository = "https://github.com/fireline/fireline"
 fireline-conductor = { path = "crates/fireline-conductor" }
 fireline-components = { path = "crates/fireline-components" }
 fireline-semantics = { path = "crates/fireline-semantics" }
+fireline-session = { path = "crates/fireline-session" }
+fireline-orchestration = { path = "crates/fireline-orchestration" }
+fireline-harness = { path = "crates/fireline-harness" }
+fireline-sandbox = { path = "crates/fireline-sandbox" }
+fireline-resources = { path = "crates/fireline-resources" }
+fireline-tools = { path = "crates/fireline-tools" }
+fireline-runtime = { path = "crates/fireline-runtime" }
 
 # Async runtime + utility
 anyhow = "1"

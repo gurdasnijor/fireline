@@ -5,21 +5,16 @@
 > Audience: maintainers deciding what to build, in what order, against what acceptance bars
 > Source: Anthropic engineering blog, *"Managed agents: a small set of primitives for any agent harness"* (https://www.anthropic.com/engineering/managed-agents)
 > Related:
-> - [`../product/priorities.md`](../product/priorities.md) — substrate-first product positioning (derives from this doc)
-> - [`../runtime/control-and-data-plane.md`](../runtime/control-and-data-plane.md) — the two-plane architecture this doc maps onto
-> - [`../runtime/heartbeat-and-registration.md`](../runtime/heartbeat-and-registration.md) — the push lifecycle that Sandbox / Orchestration depend on
-> - [`../execution/README.md`](../execution/README.md) — slice index, organized by which primitive each slice extends
-> - [`./managed-agents-citations.md`](./managed-agents-citations.md) — the file:line inventory this doc cites against
+> - [`../proposals/client-primitives.md`](../proposals/client-primitives.md) — the authoritative TypeScript substrate surface, built on the six primitives this doc names
+> - [`../proposals/runtime-host-split.md`](../proposals/runtime-host-split.md) §7 — Host / Sandbox / Orchestrator reframe grounding the Rust-side trait layout against the same primitives
+> - [`../proposals/crate-restructure-manifest.md`](../proposals/crate-restructure-manifest.md) — target Rust crate layout aligned 1:1 with the primitive taxonomy
+> - [`./managed-agents-citations.md`](./managed-agents-citations.md) — file:line inventory of where each primitive is implemented today
 
 ## How to read this doc
 
-This is the **source of truth** for what Fireline should build, in what order, and against what acceptance bars. Three other docs derive from it:
+This is the **source of truth** for what Fireline should build, in what order, and against what acceptance bars. The substrate-shape proposals in [`../proposals/`](../proposals/) and the Rust-side trait layout all derive from the primitive framing here.
 
-- `docs/product/priorities.md` derives the "what we own / what we don't" framing and the high-level slice ordering
-- `docs/execution/README.md` derives the slice index, with each slice tagged by which primitive it extends
-- Each individual slice doc in `docs/execution/` opens with which primitive it implements and which gap it closes
-
-If you're picking up new work, start here. If you're writing a new slice doc, cite this doc by section heading and pick a primitive to anchor against. If a slice doesn't fit any primitive, that's a signal the slice is the wrong shape — it may belong in a downstream product, not in Fireline.
+If you're picking up new work, start here. If you're writing a new proposal or slice, cite this doc by section heading and pick a primitive to anchor against. If a feature doesn't fit any primitive, that's a signal the shape is wrong — it may belong in a downstream product, not in Fireline.
 
 ## Purpose
 
