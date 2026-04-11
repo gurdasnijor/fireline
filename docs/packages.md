@@ -113,12 +113,18 @@ The main rule is conceptual rather than mechanical:
 ## Things that should not become packages yet
 
 - a separate `fireline-state` Rust crate
+- a Rust port of `@durable-streams/state` / `stream-db.ts` as a general
+  consumer database package
 - a separate `fireline-contracts` Rust crate, unless Rust truly needs a shared
   type seam that is still narrower than the current architecture
 - a separate `fireline-server` crate
 - a dedicated `webhooks` crate
 
 These should remain modules until a real reuse boundary appears.
+
+The allowed exception is a very small Rust-side projection helper if multiple
+runtime-local indexes need to share replay/live-follow mechanics. That is an
+internal operational helper, not a second canonical state layer.
 
 ## Why this boundary works
 

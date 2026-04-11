@@ -132,7 +132,10 @@ async fn register_runtime(
         )));
     }
 
-    state.runtime_host.register(&runtime_key, registration)?;
+    state
+        .runtime_host
+        .register(&runtime_key, registration)
+        .await?;
     state.heartbeat_tracker.record(&runtime_key, now_ms()).await;
     Ok(StatusCode::OK)
 }

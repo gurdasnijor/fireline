@@ -1,9 +1,11 @@
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use durable_streams::{Client as DsClient, Offset};
 use fireline::runtime_host::{
     CreateRuntimeSpec, RuntimeHost, RuntimeProviderKind, RuntimeProviderRequest, RuntimeStatus,
 };
@@ -13,6 +15,7 @@ use fireline_conductor::runtime::{
     Endpoint, ManagedRuntime, RuntimeHost as ConductorRuntimeHost, RuntimeLaunch, RuntimeManager,
 };
 use fireline_conductor::topology::TopologySpec;
+use serde_json::Value;
 use uuid::Uuid;
 
 fn testy_bin() -> String {
@@ -36,11 +39,14 @@ async fn runtime_host_pins_provider_and_persists_runtime_descriptor() -> Result<
 
     let descriptor = runtime_host
         .create(CreateRuntimeSpec {
+            runtime_key: None,
+            node_id: None,
             provider: RuntimeProviderRequest::Auto,
             host: "127.0.0.1".parse::<IpAddr>()?,
             port: 0,
             name: "provider-test".to_string(),
             agent_command: vec![testy_bin()],
+            resources: Vec::new(),
             state_stream: None,
             stream_storage: None,
             peer_directory_path: Some(temp_peer_directory()),
@@ -54,6 +60,7 @@ async fn runtime_host_pins_provider_and_persists_runtime_descriptor() -> Result<
     assert!(descriptor.runtime_id.starts_with("fireline:provider-test:"));
     assert!(descriptor.acp.url.starts_with("ws://"));
     assert!(descriptor.state.url.starts_with("http://"));
+    assert_runtime_spec_event(&descriptor.state.url, &descriptor.runtime_key).await?;
 
     let listed = runtime_host.list()?;
     assert_eq!(listed.len(), 1);
@@ -91,11 +98,14 @@ async fn conductor_runtime_host_stays_starting_until_register_arrives() -> Resul
 
     let descriptor = runtime_host
         .create(CreateRuntimeSpec {
+            runtime_key: None,
+            node_id: None,
             provider: RuntimeProviderRequest::Local,
             host: "127.0.0.1".parse::<IpAddr>()?,
             port: 0,
             name: "pending-provider-test".to_string(),
             agent_command: vec![testy_bin()],
+            resources: Vec::new(),
             state_stream: None,
             stream_storage: None,
             peer_directory_path: Some(temp_peer_directory()),
@@ -114,7 +124,8 @@ async fn conductor_runtime_host_stays_starting_until_register_arrives() -> Resul
         RuntimeStatus::Starting
     );
 
-    let registered = runtime_host.register(
+    let registered = runtime_host
+        .register(
         &descriptor.runtime_key,
         fireline_conductor::runtime::RuntimeRegistration {
             runtime_id: descriptor.runtime_id.clone(),
@@ -125,7 +136,8 @@ async fn conductor_runtime_host_stays_starting_until_register_arrives() -> Resul
             advertised_state_stream_url: descriptor.state.url.clone(),
             helper_api_base_url: None,
         },
-    )?;
+    )
+        .await?;
     assert_eq!(registered.status, RuntimeStatus::Ready);
 
     Ok(())
@@ -140,6 +152,7 @@ impl fireline_conductor::runtime::LocalRuntimeLauncher for FakeRuntimeLauncher {
         spec: CreateRuntimeSpec,
         _runtime_key: String,
         _node_id: String,
+        _mounted_resources: Vec<fireline_conductor::runtime::MountedResource>,
     ) -> Result<RuntimeLaunch> {
         Ok(RuntimeLaunch::ready(
             format!("fireline:{}:fake", spec.name),
@@ -158,5 +171,50 @@ struct FakeManagedRuntime;
 impl ManagedRuntime for FakeManagedRuntime {
     async fn shutdown(self: Box<Self>) -> Result<()> {
         Ok(())
+    }
+}
+
+async fn assert_runtime_spec_event(state_stream_url: &str, runtime_key: &str) -> Result<()> {
+    let client = DsClient::new();
+    let stream = client.stream(state_stream_url);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
+    loop {
+        let mut reader = stream.read().offset(Offset::Beginning).build()?;
+        let mut found = false;
+        while let Some(chunk) = reader.next_chunk().await? {
+            for event in serde_json::from_slice::<Vec<Value>>(&chunk.data)? {
+                if event.get("type").and_then(Value::as_str) != Some("runtime_spec") {
+                    continue;
+                }
+                if event.get("key").and_then(Value::as_str) != Some(runtime_key) {
+                    continue;
+                }
+
+                let value = event
+                    .get("value")
+                    .and_then(Value::as_object)
+                    .expect("runtime_spec row should carry a value object");
+                assert_eq!(
+                    value.get("runtimeKey").and_then(Value::as_str),
+                    Some(runtime_key)
+                );
+                found = true;
+                break;
+            }
+
+            if found {
+                return Ok(());
+            }
+            if chunk.up_to_date {
+                break;
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for runtime_spec event for {runtime_key}");
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }

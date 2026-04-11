@@ -203,11 +203,14 @@ impl TestHarness {
     async fn create_runtime(&self, name: &str) -> Result<RuntimeDescriptor> {
         self.runtime_host
             .create(CreateRuntimeSpec {
+                runtime_key: None,
+                node_id: None,
                 provider: fireline_conductor::runtime::RuntimeProviderRequest::Local,
                 host: "127.0.0.1".parse::<IpAddr>()?,
                 port: 0,
                 name: name.to_string(),
                 agent_command: vec!["/bin/echo".to_string(), "ok".to_string()],
+                resources: Vec::new(),
                 state_stream: Some(format!("state-{name}")),
                 stream_storage: None,
                 peer_directory_path: None,
@@ -292,6 +295,7 @@ impl LocalRuntimeLauncher for FakeRuntimeLauncher {
         spec: CreateRuntimeSpec,
         _runtime_key: String,
         _node_id: String,
+        _mounted_resources: Vec<fireline_conductor::runtime::MountedResource>,
     ) -> Result<RuntimeLaunch> {
         Ok(RuntimeLaunch {
             status: RuntimeStatus::Starting,

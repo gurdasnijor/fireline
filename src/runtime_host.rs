@@ -38,7 +38,8 @@ impl RuntimeHost {
             return Ok(descriptor);
         }
 
-        self.inner.register(
+        self.inner
+            .register(
             &descriptor.runtime_key,
             RuntimeRegistration {
                 runtime_id: descriptor.runtime_id.clone(),
@@ -50,6 +51,7 @@ impl RuntimeHost {
                 helper_api_base_url: descriptor.helper_api_base_url.clone(),
             },
         )
+            .await
     }
 
     pub fn get(&self, runtime_key: &str) -> Result<Option<RuntimeDescriptor>> {

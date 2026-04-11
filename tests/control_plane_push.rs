@@ -92,10 +92,7 @@ async fn assert_runtime_lifecycle_round_trip(prefer_push: bool) -> Result<()> {
         assert_eq!(stopped.status, RuntimeStatus::Stopped);
 
         let deleted = client
-            .delete(format!(
-                "{base_url}/v1/runtimes/{}",
-                runtime.runtime_key
-            ))
+            .delete(format!("{base_url}/v1/runtimes/{}", runtime.runtime_key))
             .send()
             .await?
             .error_for_status()?

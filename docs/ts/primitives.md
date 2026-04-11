@@ -4,9 +4,6 @@
 >
 > Related:
 > - [`low-level-api-surface.md`](./low-level-api-surface.md)
->
-> Related:
-> - [`extensions-api.md`](./extensions-api.md)
 
 ## Purpose
 

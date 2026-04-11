@@ -85,6 +85,11 @@ That means:
 If a consumer wants state, it reads the durable state stream and materializes
 it locally in TypeScript.
 
+If Rust needs better replay / projection plumbing for runtime-local
+coordination, that should remain a narrow in-memory materializer host. It
+should not become a Rust port of `@durable-streams/state` or a second consumer
+database.
+
 Corollary:
 
 - local files may exist for bootstrap convenience in strictly local provider

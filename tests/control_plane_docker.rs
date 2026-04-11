@@ -68,8 +68,8 @@ impl sacp::ConnectTo<sacp::Client> for WebSocketTransport {
 }
 
 #[tokio::test]
-async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_state_plane(
-) -> Result<()> {
+async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_state_plane()
+-> Result<()> {
     if !docker_available()? {
         eprintln!("skipping docker control-plane integration test: docker daemon unavailable");
         return Ok(());
@@ -117,10 +117,13 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
             docker_runtimes.push(runtime);
         }
 
-        let local_ready = wait_for_status(&base_url, &local.runtime_key, RuntimeStatus::Ready).await?;
+        let local_ready =
+            wait_for_status(&base_url, &local.runtime_key, RuntimeStatus::Ready).await?;
         let mut docker_ready = Vec::new();
         for runtime in &docker_runtimes {
-            docker_ready.push(wait_for_status(&base_url, &runtime.runtime_key, RuntimeStatus::Ready).await?);
+            docker_ready.push(
+                wait_for_status(&base_url, &runtime.runtime_key, RuntimeStatus::Ready).await?,
+            );
         }
 
         let listed = client
@@ -157,7 +160,8 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
             );
         }
 
-        let token_for_local = issue_runtime_token(&client, &base_url, &local_ready.runtime_key).await?;
+        let token_for_local =
+            issue_runtime_token(&client, &base_url, &local_ready.runtime_key).await?;
         let cross_runtime_heartbeat = client
             .post(format!(
                 "{base_url}/v1/runtimes/{}/heartbeat",
@@ -230,10 +234,12 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
             let local_body = read_state_stream(&local_ready.state.url).await?;
             let docker_body = read_state_stream(&docker_ready[0].state.url).await?;
 
-            let parent =
-                find_prompt_turn(&local_body, |text| text.contains("\"tool\":\"prompt_peer\""));
-            let child =
-                find_prompt_turn(&docker_body, |text| text.contains("hello across docker mesh"));
+            let parent = find_prompt_turn(&local_body, |text| {
+                text.contains("\"tool\":\"prompt_peer\"")
+            });
+            let child = find_prompt_turn(&docker_body, |text| {
+                text.contains("hello across docker mesh")
+            });
             let edge = find_child_session_edge(&local_body);
 
             if let (Some(parent), Some(child), Some(edge)) = (parent, child, edge) {
@@ -252,7 +258,9 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
             }
 
             if tokio::time::Instant::now() >= deadline {
-                return Err(anyhow!("timed out waiting for cross-runtime lineage in shared streams"));
+                return Err(anyhow!(
+                    "timed out waiting for cross-runtime lineage in shared streams"
+                ));
             }
 
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -402,7 +410,9 @@ impl SharedStreamServer {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .context("bind shared durable-streams test listener")?;
-        let addr = listener.local_addr().context("resolve shared streams address")?;
+        let addr = listener
+            .local_addr()
+            .context("resolve shared streams address")?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, router)

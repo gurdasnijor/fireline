@@ -33,6 +33,7 @@ struct RuntimeHostInner {
     registry: RuntimeRegistry,
     manager: RuntimeManager,
     live_handles: Mutex<HashMap<String, RuntimeLaunch>>,
+    pending_runtime_specs: Mutex<HashMap<String, PersistedRuntimeSpec>>,
 }
 
 impl RuntimeHost {
@@ -42,6 +43,7 @@ impl RuntimeHost {
                 registry,
                 manager,
                 live_handles: Mutex::new(HashMap::new()),
+                pending_runtime_specs: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -64,6 +66,7 @@ impl RuntimeHost {
             .clone()
             .unwrap_or_else(|| node_id_for(spec.host));
         let provider = self.inner.manager.resolve_kind(spec.provider)?;
+        let persisted_spec = PersistedRuntimeSpec::new(runtime_key.clone(), node_id.clone(), spec.clone());
 
         self.inner.registry.upsert(RuntimeDescriptor {
             runtime_key: runtime_key.clone(),
@@ -87,10 +90,16 @@ impl RuntimeHost {
         {
             Ok(started) => started,
             Err(error) => {
+                self.inner.pending_runtime_specs.lock().await.remove(&runtime_key);
                 let _ = self.inner.registry.remove(&runtime_key);
                 return Err(error);
             }
         };
+        self.inner
+            .pending_runtime_specs
+            .lock()
+            .await
+            .insert(runtime_key.clone(), persisted_spec.clone());
         let launch_runtime_id = launch.runtime_id.clone();
         let launch_provider_instance_id = launch.provider_instance_id.clone();
         let launch_acp = launch.acp.clone();
@@ -106,6 +115,23 @@ impl RuntimeHost {
         if let Some(descriptor) = self.inner.registry.get(&runtime_key)?
             && (descriptor.status != RuntimeStatus::Starting || !descriptor.runtime_id.is_empty())
         {
+            let pending_spec = self
+                .inner
+                .pending_runtime_specs
+                .lock()
+                .await
+                .get(&runtime_key)
+                .cloned();
+            if let Some(spec) = pending_spec
+                && !descriptor.state.url.is_empty()
+            {
+                crate::trace::emit_runtime_spec_persisted(&descriptor.state.url, &spec).await?;
+                self.inner
+                    .pending_runtime_specs
+                    .lock()
+                    .await
+                    .remove(&runtime_key);
+            }
             return Ok(descriptor);
         }
 
@@ -123,11 +149,14 @@ impl RuntimeHost {
             updated_at_ms: now_ms(),
         };
         self.inner.registry.upsert(descriptor.clone())?;
-        crate::trace::emit_runtime_spec_persisted(
-            &descriptor.state.url,
-            &PersistedRuntimeSpec::new(runtime_key, descriptor.node_id.clone(), spec),
-        )
-        .await?;
+        if !descriptor.state.url.is_empty() {
+            crate::trace::emit_runtime_spec_persisted(&descriptor.state.url, &persisted_spec).await?;
+            self.inner
+                .pending_runtime_specs
+                .lock()
+                .await
+                .remove(&runtime_key);
+        }
 
         Ok(descriptor)
     }
@@ -176,7 +205,7 @@ impl RuntimeHost {
         self.inner.registry.remove(runtime_key)
     }
 
-    pub fn register(
+    pub async fn register(
         &self,
         runtime_key: &str,
         registration: RuntimeRegistration,
@@ -211,6 +240,24 @@ impl RuntimeHost {
         descriptor.state = Endpoint::new(registration.advertised_state_stream_url);
         descriptor.helper_api_base_url = registration.helper_api_base_url;
         descriptor.updated_at_ms = now_ms();
+
+        let pending_spec = self
+            .inner
+            .pending_runtime_specs
+            .lock()
+            .await
+            .get(runtime_key)
+            .cloned();
+        if let Some(spec) = pending_spec
+            && !descriptor.state.url.is_empty()
+        {
+            crate::trace::emit_runtime_spec_persisted(&descriptor.state.url, &spec).await?;
+            self.inner
+                .pending_runtime_specs
+                .lock()
+                .await
+                .remove(runtime_key);
+        }
         self.inner.registry.upsert(descriptor.clone())?;
         Ok(descriptor)
     }

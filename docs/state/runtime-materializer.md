@@ -21,6 +21,24 @@ The wrong pattern is:
 - one ad hoc SSE reader per index
 - or a revived Rust `StreamDb` that becomes a second canonical read model
 
+Concretely, this means Fireline should **not** port
+`@durable-streams/state` / `stream-db.ts` into Rust as-is.
+
+What is allowed:
+
+- a small Rust-side replay/live-follow host
+- reusable batch / preload / control-event handling
+- projection hooks such as `begin`, `apply`, `commit`, `truncate`, and
+  `mark_ready`
+- optional operational helpers like `await_txid`
+
+What is not allowed:
+
+- TanStack-style collections in Rust
+- a Rust-owned canonical entity schema
+- a general Rust query/database layer parallel to `@fireline/state`
+- optimistic action helpers as a new product-facing Rust API
+
 ## Why this exists
 
 Without a shared materializer, Fireline will keep copy-pasting:
@@ -71,6 +89,10 @@ TypeScript still owns the consumer schema and read model.
 
 Rust only materializes the narrow operational views it needs to run the
 runtime correctly.
+
+If Rust grows better reusable projection plumbing, it should land as a small
+runtime-local materializer kernel. It should not become a general-purpose Rust
+consumer state package.
 
 ## Proposed shape
 
