@@ -31,10 +31,14 @@
 //! eventual use once the SDK supports tool-call interception;
 //! the pattern matcher already handles them in tests.
 
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
+use durable_streams::{Client as DurableStreamsClient, Producer};
 use sacp::schema::{ContentBlock, PromptRequest};
 use sacp::{Agent, Client, ConnectTo, Proxy};
+use serde::Serialize;
+use serde_json::Value;
 
 #[derive(Clone, Default)]
 pub struct ApprovalConfig {
@@ -112,12 +116,28 @@ impl ApprovalConfig {
 #[derive(Clone)]
 pub struct ApprovalGateComponent {
     config: Arc<ApprovalConfig>,
+    state_stream_url: Option<String>,
+    state_producer: Option<Producer>,
+    approved_sessions: Arc<Mutex<HashSet<String>>>,
+    pending_sessions: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl ApprovalGateComponent {
     pub fn new(config: ApprovalConfig) -> Self {
+        Self::with_stream(config, None, None)
+    }
+
+    pub fn with_stream(
+        config: ApprovalConfig,
+        state_stream_url: Option<String>,
+        state_producer: Option<Producer>,
+    ) -> Self {
         Self {
             config: Arc::new(config),
+            state_stream_url,
+            state_producer,
+            approved_sessions: Arc::new(Mutex::new(HashSet::new())),
+            pending_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -139,21 +159,160 @@ impl ApprovalGateComponent {
             .collect::<Vec<_>>()
             .join(" ")
     }
+
+    async fn rebuild_from_log(&self, session_id: &str) -> Result<(), sacp::Error> {
+        let Some(state_stream_url) = &self.state_stream_url else {
+            return Ok(());
+        };
+
+        let client = DurableStreamsClient::new();
+        let stream = client.stream(state_stream_url);
+        let mut reader = stream
+            .read()
+            .offset(durable_streams::Offset::Beginning)
+            .build()
+            .map_err(|error| sacp::util::internal_error(format!("approval log rebuild: {error}")))?;
+
+        let mut pending_reason = None;
+        let mut approved = false;
+        while let Some(chunk) = reader
+            .next_chunk()
+            .await
+            .map_err(|error| sacp::util::internal_error(format!("approval log rebuild: {error}")))?
+        {
+            if chunk.data.is_empty() {
+                if chunk.up_to_date {
+                    break;
+                }
+                continue;
+            }
+
+            let events: Vec<Value> = serde_json::from_slice(&chunk.data)
+                .map_err(|error| sacp::util::internal_error(format!("approval log parse: {error}")))?;
+            for event in events {
+                let Some(value) = event.get("value") else {
+                    continue;
+                };
+                if value.get("sessionId").and_then(Value::as_str) != Some(session_id) {
+                    continue;
+                }
+
+                match value.get("kind").and_then(Value::as_str) {
+                    Some("permission_request") => {
+                        pending_reason = value
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                    }
+                    Some("approval_resolved") => {
+                        approved = value.get("allow").and_then(Value::as_bool).unwrap_or(false);
+                    }
+                    _ => {}
+                }
+            }
+
+            if chunk.up_to_date {
+                break;
+            }
+        }
+
+        if approved {
+            self.approved_sessions
+                .lock()
+                .expect("approval state poisoned")
+                .insert(session_id.to_string());
+            self.pending_sessions
+                .lock()
+                .expect("approval state poisoned")
+                .remove(session_id);
+        } else if let Some(reason) = pending_reason {
+            self.pending_sessions
+                .lock()
+                .expect("approval state poisoned")
+                .insert(session_id.to_string(), reason);
+        }
+
+        Ok(())
+    }
+
+    fn emit_permission_request(&self, session_id: &str, reason: &str) {
+        let Some(producer) = self.state_producer.as_ref() else {
+            return;
+        };
+
+        producer.append_json(&StateEnvelope {
+            entity_type: "permission",
+            key: format!("{session_id}:{}", now_ms()),
+            headers: StateHeaders {
+                operation: "insert",
+            },
+            value: PermissionEvent {
+                kind: "permission_request",
+                session_id: session_id.to_string(),
+                allow: None,
+                resolved_by: None,
+                reason: Some(reason.to_string()),
+                created_at_ms: now_ms(),
+            },
+        });
+    }
+
+    fn is_session_approved(&self, session_id: &str) -> bool {
+        self.approved_sessions
+            .lock()
+            .expect("approval state poisoned")
+            .contains(session_id)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionEvent {
+    kind: &'static str,
+    session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allow: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StateHeaders {
+    operation: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StateEnvelope<T> {
+    #[serde(rename = "type")]
+    entity_type: &'static str,
+    key: String,
+    headers: StateHeaders,
+    value: T,
 }
 
 impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
     async fn connect_to(self, client: impl ConnectTo<Proxy>) -> Result<(), sacp::Error> {
-        let config = self.config.clone();
+        let this = self.clone();
         sacp::Proxy
             .builder()
             .name("fireline-approval")
             .on_receive_request_from(
                 Client,
                 {
-                    let config = config.clone();
+                    let this = this.clone();
                     async move |request: PromptRequest, responder, cx| {
+                        let session_id = request.session_id.to_string();
                         let prompt_text = ApprovalGateComponent::join_prompt_text(&request);
-                        if let Some(policy) = config.policy_for_prompt(&prompt_text) {
+                        if this.is_session_approved(&session_id) {
+                            return cx
+                                .send_request_to(Agent, request)
+                                .forward_response_to(responder);
+                        }
+
+                        if let Some(policy) = this.config.policy_for_prompt(&prompt_text) {
                             match policy.action {
                                 ApprovalAction::Deny => {
                                     return Err(sacp::util::internal_error(format!(
@@ -162,14 +321,15 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                                     )));
                                 }
                                 ApprovalAction::RequireApproval => {
-                                    // TODO: issue `session/request_permission`
-                                    // back toward the client via
-                                    // `cx.send_request_to(Client, RequestPermissionRequest::new(...))`,
-                                    // await the human's choice, then either forward or
-                                    // reject based on the outcome. Until that path is
-                                    // pinned, fall through to forwarding so the gate
-                                    // behaves as "log-and-allow."
-                                    let _ = policy;
+                                    let result = cx
+                                        .send_request_to(Agent, request)
+                                        .forward_response_to(responder);
+                                    this.emit_permission_request(&session_id, &policy.reason);
+                                    this.pending_sessions
+                                        .lock()
+                                        .expect("approval state poisoned")
+                                        .insert(session_id, policy.reason.clone());
+                                    return result;
                                 }
                             }
                         }
@@ -179,9 +339,28 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                 },
                 sacp::on_receive_request!(),
             )
+            .on_receive_request_from(
+                Client,
+                {
+                    let this = this.clone();
+                    async move |request: sacp::schema::LoadSessionRequest, responder, cx| {
+                        this.rebuild_from_log(&request.session_id.to_string()).await?;
+                        cx.send_request_to(Agent, request)
+                            .forward_response_to(responder)
+                    }
+                },
+                sacp::on_receive_request!(),
+            )
             .connect_to(client)
             .await
     }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
