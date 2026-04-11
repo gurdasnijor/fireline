@@ -17,6 +17,15 @@ import type { TopologySpec } from './topology.js'
 export type RuntimeProviderRequest = 'auto' | 'local'
 export type RuntimeProviderKind = 'local'
 
+// Mirrors Rust `ResourceRef` in crates/fireline-conductor/src/runtime/provider.rs.
+// Tag field is `kind` with camelCase variants; inner fields stay snake_case to
+// match the current Rust wire format (no `rename_all_fields` on the enum).
+export type ResourceRef =
+  | { kind: 'localPath'; path: string; mount_path: string }
+  | { kind: 'gitRemote'; repo_url: string; reference?: string; mount_path: string }
+  | { kind: 's3'; bucket: string; prefix: string; mount_path: string }
+  | { kind: 'gcs'; bucket: string; prefix: string; mount_path: string }
+
 export type RuntimeStatus =
   | 'starting'
   | 'ready'
@@ -64,6 +73,7 @@ interface CreateRuntimeSpecBase {
   stateStream?: string
   peerDirectoryPath?: string
   topology?: TopologySpec
+  resources?: ResourceRef[]
 }
 
 export type CreateRuntimeSpec =
@@ -118,6 +128,11 @@ export function createHostClient(options: HostClientOptions = {}): HostClient {
 
   const hostClient: HostClient = {
     async create(spec) {
+      if (spec.resources && spec.resources.length > 0) {
+        throw new Error(
+          'resources are only supported via control-plane mode; pass controlPlaneUrl to createHostClient',
+        )
+      }
       const runtimeName = spec.name ?? `fireline-ts-${randomUUID()}`
       const agentCommand = await resolveCreateRuntimeAgentCommand(spec, catalog)
       const beforeKeys = new Set((await listRuntimes(runtimeRegistryPath)).map((runtime) => runtime.runtimeKey))
@@ -247,6 +262,7 @@ function createControlPlaneHostClient(options: HostClientOptions): HostClient {
           stateStream: spec.stateStream,
           peerDirectoryPath: spec.peerDirectoryPath,
           topology: spec.topology ?? { components: [] },
+          resources: spec.resources ?? [],
         }),
       })
     },
