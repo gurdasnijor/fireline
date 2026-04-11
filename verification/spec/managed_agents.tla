@@ -7,7 +7,8 @@ EXTENDS Naturals, Sequences, FiniteSets, TLC
 \* - Session as an append-only event log with offset replay and producer-tuple dedupe
 \* - Orchestration as wake-by-composition over Session + Host state
 \* - Harness as "every visible effect lands in Session"
-\* - Sandbox as provision/reuse/stop/reprovision of reachable runtimes
+\* - Host as provision/reuse/stop/reprovision of reachable runtimes
+\* - Sandbox as provision/execute/stop of isolated tool-call executors
 \* - Resources as requested {source_ref, mount_path} pairs copied into a runtime
 \* - Tools as schema-only projections of portable capability attachments
 \*
@@ -21,6 +22,7 @@ CONSTANTS
   Sessions,
   RuntimeKeys,
   RuntimeIds,
+  SandboxIds,
   RequestIds,
   ToolNames,
   Sources,
@@ -48,8 +50,28 @@ EventKinds ==
 DefaultSession == CHOOSE s \in Sessions : TRUE
 DefaultRuntimeKey == CHOOSE rk \in RuntimeKeys : TRUE
 DefaultRuntimeId == CHOOSE rid \in RuntimeIds : TRUE
+DefaultProducerEpoch == CHOOSE epoch \in ProducerEpochs : TRUE
 NoRequest == "no_request"
 NoRuntimeId == "no_runtime"
+
+InitialSessionLog ==
+  [s \in Sessions |-> <<>>]
+
+InitialRuntimeIndex ==
+  [ rk \in RuntimeKeys |->
+      [ status |-> "stopped",
+        runtimeId |-> DefaultRuntimeId,
+        specPresent |-> FALSE,
+        boundSessions |-> {}
+      ]
+  ]
+
+InitialSandboxIndex ==
+  [ sb \in SandboxIds |->
+      [ status |-> "stopped",
+        runtimeKey |-> DefaultRuntimeKey
+      ]
+  ]
 
 ToolDescriptor(name) ==
   [ name |-> name,
@@ -93,14 +115,24 @@ Occurrences(log, producerId, epoch, seq) ==
 FirstMatchingResolution(history) ==
   IF Len(history) = 0 THEN "none" ELSE history[1]
 
+RecordedTools(history) ==
+  { history[i] : i \in 1..Len(history) }
+
+NextWakeEpoch(epoch) ==
+  IF \E next \in ProducerEpochs : next # epoch
+  THEN CHOOSE next \in ProducerEpochs : next # epoch
+  ELSE epoch
+
 VARIABLES
   sessionLog,
   runtimeIndex,
+  sandboxIndex,
   pendingApprovals,
   toolRegistry,
   capabilityRefs,
   requestedResources,
   mountedResources,
+  sandboxToolHistory,
   seenCommits,
   approvalHistory,
   visibleEffects,
@@ -113,16 +145,20 @@ VARIABLES
   responseEpochs,
   lastWake,
   wakeResponses,
-  logSnapshots
+  previousSessionLog,
+  previousRuntimeIndex,
+  lastAction
 
 Vars ==
   << sessionLog,
      runtimeIndex,
+     sandboxIndex,
      pendingApprovals,
      toolRegistry,
      capabilityRefs,
      requestedResources,
      mountedResources,
+     sandboxToolHistory,
      seenCommits,
      approvalHistory,
      visibleEffects,
@@ -135,18 +171,14 @@ Vars ==
      responseEpochs,
      lastWake,
      wakeResponses,
-     logSnapshots >>
+     previousSessionLog,
+     previousRuntimeIndex,
+     lastAction >>
 
 Init ==
-  /\ sessionLog = [s \in Sessions |-> <<>>]
-  /\ runtimeIndex =
-      [ rk \in RuntimeKeys |->
-          [ status |-> "stopped",
-            runtimeId |-> DefaultRuntimeId,
-            specPresent |-> FALSE,
-            boundSessions |-> {}
-          ]
-      ]
+  /\ sessionLog = InitialSessionLog
+  /\ runtimeIndex = InitialRuntimeIndex
+  /\ sandboxIndex = InitialSandboxIndex
   /\ pendingApprovals =
       [ req \in RequestIds |->
           [ sessionId |-> DefaultSession,
@@ -157,6 +189,7 @@ Init ==
   /\ capabilityRefs = [t \in ToolNames |-> CapabilityRef(t)]
   /\ requestedResources = [rk \in RuntimeKeys |-> {}]
   /\ mountedResources = [rid \in RuntimeIds |-> {}]
+  /\ sandboxToolHistory = [sb \in SandboxIds |-> <<>>]
   /\ seenCommits = [s \in Sessions |-> {}]
   /\ approvalHistory = [req \in RequestIds |-> <<>>]
   /\ visibleEffects = [s \in Sessions |-> <<>>]
@@ -171,8 +204,8 @@ Init ==
         ]
       ]
   /\ stopSnapshot = [rk \in RuntimeKeys |-> [s \in Sessions |-> <<>>]]
-  /\ wakeEpoch = 0
-  /\ responseEpochs = [c \in Callers |-> 0]
+  /\ wakeEpoch = DefaultProducerEpoch
+  /\ responseEpochs = [c \in Callers |-> DefaultProducerEpoch]
   /\ lastWake =
       [ valid |-> FALSE,
         caller |-> CHOOSE c \in Callers : TRUE,
@@ -184,10 +217,14 @@ Init ==
         createdNew |-> FALSE
       ]
   /\ wakeResponses = [c \in Callers |-> NoRuntimeId]
-  /\ logSnapshots = << [s \in Sessions |-> <<>>] >>
+  /\ previousSessionLog = InitialSessionLog
+  /\ previousRuntimeIndex = InitialRuntimeIndex
+  /\ lastAction = "init"
 
-AppendSnapshot(nextLog) ==
-  logSnapshots' = Append(logSnapshots, nextLog)
+RecordStep(actionName) ==
+  /\ previousSessionLog' = sessionLog
+  /\ previousRuntimeIndex' = runtimeIndex
+  /\ lastAction' = actionName
 
 ProvisionRuntime(rk, rid, s, source, mount) ==
   /\ runtimeIndex[rk].status = "stopped"
@@ -202,11 +239,14 @@ ProvisionRuntime(rk, rid, s, source, mount) ==
   /\ requestedResources' = [requestedResources EXCEPT ![rk] = {ResourcePair(source, mount)}]
   /\ mountedResources' = [mountedResources EXCEPT ![rid] = {ResourcePair(source, mount)}]
   /\ reachable' = [reachable EXCEPT ![rk] = TRUE]
+  /\ RecordStep("provision_runtime")
   /\ UNCHANGED
       << sessionLog,
+         sandboxIndex,
          pendingApprovals,
          toolRegistry,
          capabilityRefs,
+         sandboxToolHistory,
          seenCommits,
          approvalHistory,
          visibleEffects,
@@ -218,7 +258,6 @@ ProvisionRuntime(rk, rid, s, source, mount) ==
          responseEpochs,
          lastWake,
          wakeResponses >>
-  /\ AppendSnapshot(sessionLog)
 
 HarnessEmit(s, rk, logicalId, kind, producerId, epoch, seq) ==
   /\ runtimeIndex[rk].status = "ready"
@@ -240,13 +279,16 @@ HarnessEmit(s, rk, logicalId, kind, producerId, epoch, seq) ==
   /\ visibleEffects' =
       [visibleEffects EXCEPT ![s] = Append(@, [logicalId |-> logicalId, kind |-> kind])]
   /\ seenCommits' = [seenCommits EXCEPT ![s] = @ \cup {CommitTuple(producerId, epoch, seq)}]
+  /\ RecordStep("harness_emit")
   /\ UNCHANGED
       << runtimeIndex,
+         sandboxIndex,
          pendingApprovals,
          toolRegistry,
          capabilityRefs,
          requestedResources,
          mountedResources,
+         sandboxToolHistory,
          approvalHistory,
          blockedRequests,
          releasedRequests,
@@ -257,18 +299,20 @@ HarnessEmit(s, rk, logicalId, kind, producerId, epoch, seq) ==
          responseEpochs,
          lastWake,
          wakeResponses >>
-  /\ AppendSnapshot(sessionLog')
 
 RetryAppend(s, producerId, epoch, seq) ==
   /\ CommitTuple(producerId, epoch, seq) \in seenCommits[s]
+  /\ RecordStep("retry_append")
   /\ UNCHANGED
       << sessionLog,
          runtimeIndex,
+         sandboxIndex,
          pendingApprovals,
          toolRegistry,
          capabilityRefs,
          requestedResources,
          mountedResources,
+         sandboxToolHistory,
          seenCommits,
          approvalHistory,
          visibleEffects,
@@ -281,7 +325,6 @@ RetryAppend(s, producerId, epoch, seq) ==
          responseEpochs,
          lastWake,
          wakeResponses >>
-  /\ AppendSnapshot(sessionLog)
 
 ReplayFromOffset(s, offset) ==
   /\ offset \in 0..Len(sessionLog[s])
@@ -292,14 +335,17 @@ ReplayFromOffset(s, offset) ==
           suffix |-> ReplaySuffix(sessionLog[s], offset)
         ]
       ]
+  /\ RecordStep("replay_from_offset")
   /\ UNCHANGED
       << sessionLog,
          runtimeIndex,
+         sandboxIndex,
          pendingApprovals,
          toolRegistry,
          capabilityRefs,
          requestedResources,
          mountedResources,
+         sandboxToolHistory,
          seenCommits,
          approvalHistory,
          visibleEffects,
@@ -311,7 +357,6 @@ ReplayFromOffset(s, offset) ==
          responseEpochs,
          lastWake,
          wakeResponses >>
-  /\ AppendSnapshot(sessionLog)
 
 RequestApproval(s, req, logicalId, producerId, epoch, seq) ==
   /\ blockedRequests[s] = NoRequest
@@ -332,12 +377,15 @@ RequestApproval(s, req, logicalId, producerId, epoch, seq) ==
       [pendingApprovals EXCEPT ![req] = [sessionId |-> s, state |-> "pending"]]
   /\ blockedRequests' = [blockedRequests EXCEPT ![s] = req]
   /\ seenCommits' = [seenCommits EXCEPT ![s] = @ \cup {CommitTuple(producerId, epoch, seq)}]
+  /\ RecordStep("request_approval")
   /\ UNCHANGED
       << runtimeIndex,
+         sandboxIndex,
          toolRegistry,
          capabilityRefs,
          requestedResources,
          mountedResources,
+         sandboxToolHistory,
          approvalHistory,
          visibleEffects,
          releasedRequests,
@@ -348,7 +396,6 @@ RequestApproval(s, req, logicalId, producerId, epoch, seq) ==
          responseEpochs,
          lastWake,
          wakeResponses >>
-  /\ AppendSnapshot(sessionLog')
 
 ResolveApproval(req, logicalId, producerId, epoch, seq, allow) ==
   LET s == pendingApprovals[req].sessionId IN
@@ -373,12 +420,15 @@ ResolveApproval(req, logicalId, producerId, epoch, seq, allow) ==
   /\ approvalHistory' =
       [approvalHistory EXCEPT ![req] = Append(@, IF allow THEN "allow" ELSE "deny")]
   /\ seenCommits' = [seenCommits EXCEPT ![s] = @ \cup {CommitTuple(producerId, epoch, seq)}]
+  /\ RecordStep("resolve_approval")
   /\ UNCHANGED
       << runtimeIndex,
+         sandboxIndex,
          toolRegistry,
          capabilityRefs,
          requestedResources,
          mountedResources,
+         sandboxToolHistory,
          visibleEffects,
          blockedRequests,
          releasedRequests,
@@ -389,13 +439,72 @@ ResolveApproval(req, logicalId, producerId, epoch, seq, allow) ==
          responseEpochs,
          lastWake,
          wakeResponses >>
-  /\ AppendSnapshot(sessionLog')
 
 AdvanceBlockedRequest(s, req) ==
   /\ blockedRequests[s] = req
   /\ FirstMatchingResolution(approvalHistory[req]) = "allow"
   /\ blockedRequests' = [blockedRequests EXCEPT ![s] = NoRequest]
   /\ releasedRequests' = releasedRequests \cup {req}
+  /\ RecordStep("advance_blocked_request")
+  /\ UNCHANGED
+      << sessionLog,
+         runtimeIndex,
+         sandboxIndex,
+         pendingApprovals,
+         toolRegistry,
+         capabilityRefs,
+         requestedResources,
+         mountedResources,
+         sandboxToolHistory,
+         seenCommits,
+         approvalHistory,
+         visibleEffects,
+         reachable,
+         lastReplay,
+         stopSnapshot,
+         wakeEpoch,
+         responseEpochs,
+         lastWake,
+         wakeResponses >>
+
+StopRuntime(rk) ==
+  /\ runtimeIndex[rk].status = "ready"
+  /\ runtimeIndex' = [runtimeIndex EXCEPT ![rk].status = "stopped"]
+  /\ reachable' = [reachable EXCEPT ![rk] = FALSE]
+  /\ stopSnapshot' = [stopSnapshot EXCEPT ![rk] = sessionLog]
+  /\ RecordStep("stop_runtime")
+  /\ UNCHANGED
+      << sessionLog,
+         sandboxIndex,
+         pendingApprovals,
+         toolRegistry,
+         capabilityRefs,
+         requestedResources,
+         mountedResources,
+         sandboxToolHistory,
+         seenCommits,
+         approvalHistory,
+         visibleEffects,
+         blockedRequests,
+         releasedRequests,
+         lastReplay,
+         wakeEpoch,
+         responseEpochs,
+         lastWake,
+         wakeResponses >>
+
+SandboxProvision(sb, rk) ==
+  /\ sandboxIndex[sb].status = "stopped"
+  /\ runtimeIndex[rk].status = "ready"
+  /\ reachable[rk]
+  /\ sandboxIndex' =
+      [sandboxIndex EXCEPT ![sb] =
+        [ status |-> "ready",
+          runtimeKey |-> rk
+        ]
+      ]
+  /\ sandboxToolHistory' = [sandboxToolHistory EXCEPT ![sb] = <<>>]
+  /\ RecordStep("sandbox_provision")
   /\ UNCHANGED
       << sessionLog,
          runtimeIndex,
@@ -407,6 +516,8 @@ AdvanceBlockedRequest(s, req) ==
          seenCommits,
          approvalHistory,
          visibleEffects,
+         blockedRequests,
+         releasedRequests,
          reachable,
          lastReplay,
          stopSnapshot,
@@ -414,15 +525,18 @@ AdvanceBlockedRequest(s, req) ==
          responseEpochs,
          lastWake,
          wakeResponses >>
-  /\ AppendSnapshot(sessionLog)
 
-StopRuntime(rk) ==
-  /\ runtimeIndex[rk].status = "ready"
-  /\ runtimeIndex' = [runtimeIndex EXCEPT ![rk].status = "stopped"]
-  /\ reachable' = [reachable EXCEPT ![rk] = FALSE]
-  /\ stopSnapshot' = [stopSnapshot EXCEPT ![rk] = sessionLog]
+SandboxExecute(sb, tool) ==
+  /\ sandboxIndex[sb].status = "ready"
+  /\ runtimeIndex[sandboxIndex[sb].runtimeKey].status = "ready"
+  /\ tool \in ToolNames
+  /\ tool \notin RecordedTools(sandboxToolHistory[sb])
+  /\ sandboxToolHistory' = [sandboxToolHistory EXCEPT ![sb] = Append(@, tool)]
+  /\ RecordStep("sandbox_execute")
   /\ UNCHANGED
       << sessionLog,
+         runtimeIndex,
+         sandboxIndex,
          pendingApprovals,
          toolRegistry,
          capabilityRefs,
@@ -433,12 +547,44 @@ StopRuntime(rk) ==
          visibleEffects,
          blockedRequests,
          releasedRequests,
+         reachable,
          lastReplay,
+         stopSnapshot,
          wakeEpoch,
          responseEpochs,
          lastWake,
          wakeResponses >>
-  /\ AppendSnapshot(sessionLog)
+
+SandboxStop(sb) ==
+  /\ sandboxIndex[sb].status = "ready"
+  /\ sandboxIndex' =
+      [sandboxIndex EXCEPT ![sb] =
+        [ status |-> "stopped",
+          runtimeKey |-> DefaultRuntimeKey
+        ]
+      ]
+  /\ sandboxToolHistory' = [sandboxToolHistory EXCEPT ![sb] = <<>>]
+  /\ RecordStep("sandbox_stop")
+  /\ UNCHANGED
+      << sessionLog,
+         runtimeIndex,
+         pendingApprovals,
+         toolRegistry,
+         capabilityRefs,
+         requestedResources,
+         mountedResources,
+         seenCommits,
+         approvalHistory,
+         visibleEffects,
+         blockedRequests,
+         releasedRequests,
+         reachable,
+         lastReplay,
+         stopSnapshot,
+         wakeEpoch,
+         responseEpochs,
+         lastWake,
+         wakeResponses >>
 
 WakeReady(caller, s, rk) ==
   LET sameEpisode ==
@@ -449,7 +595,7 @@ WakeReady(caller, s, rk) ==
         /\ lastWake.afterRuntimeId = runtimeIndex[rk].runtimeId
         /\ lastWake.createdNew = FALSE
       newEpoch ==
-        IF sameEpisode THEN wakeEpoch ELSE wakeEpoch + 1
+        IF sameEpisode THEN wakeEpoch ELSE NextWakeEpoch(wakeEpoch)
   IN
   /\ runtimeIndex[rk].status = "ready"
   /\ s \in runtimeIndex[rk].boundSessions
@@ -459,7 +605,7 @@ WakeReady(caller, s, rk) ==
           IF sameEpisode THEN
             IF c = caller THEN newEpoch ELSE responseEpochs[c]
           ELSE
-            IF c = caller THEN newEpoch ELSE 0
+            IF c = caller THEN newEpoch ELSE DefaultProducerEpoch
       ]
   /\ lastWake' =
       [ valid |-> TRUE,
@@ -478,14 +624,17 @@ WakeReady(caller, s, rk) ==
           ELSE
             IF c = caller THEN runtimeIndex[rk].runtimeId ELSE NoRuntimeId
       ]
+  /\ RecordStep("wake_ready")
   /\ UNCHANGED
       << sessionLog,
          runtimeIndex,
+         sandboxIndex,
          pendingApprovals,
          toolRegistry,
          capabilityRefs,
          requestedResources,
          mountedResources,
+         sandboxToolHistory,
          seenCommits,
          approvalHistory,
          visibleEffects,
@@ -494,7 +643,6 @@ WakeReady(caller, s, rk) ==
          reachable,
          lastReplay,
          stopSnapshot >>
-  /\ AppendSnapshot(sessionLog)
 
 WakeStopped(caller, s, rk, newRid) ==
   LET sameEpisode ==
@@ -505,7 +653,7 @@ WakeStopped(caller, s, rk, newRid) ==
         /\ lastWake.afterRuntimeId = newRid
         /\ lastWake.createdNew = TRUE
       newEpoch ==
-        IF sameEpisode THEN wakeEpoch ELSE wakeEpoch + 1
+        IF sameEpisode THEN wakeEpoch ELSE NextWakeEpoch(wakeEpoch)
   IN
   /\ runtimeIndex[rk].status = "stopped"
   /\ runtimeIndex[rk].specPresent
@@ -517,7 +665,7 @@ WakeStopped(caller, s, rk, newRid) ==
           IF sameEpisode THEN
             IF c = caller THEN newEpoch ELSE responseEpochs[c]
           ELSE
-            IF c = caller THEN newEpoch ELSE 0
+            IF c = caller THEN newEpoch ELSE DefaultProducerEpoch
       ]
   /\ runtimeIndex' =
       [runtimeIndex EXCEPT ![rk] =
@@ -542,20 +690,22 @@ WakeStopped(caller, s, rk, newRid) ==
           ELSE
             IF c = caller THEN newRid ELSE NoRuntimeId
       ]
+  /\ RecordStep("wake_stopped")
   /\ UNCHANGED
       << sessionLog,
+         sandboxIndex,
          pendingApprovals,
          toolRegistry,
          capabilityRefs,
          requestedResources,
          seenCommits,
+         sandboxToolHistory,
          approvalHistory,
          visibleEffects,
          blockedRequests,
          releasedRequests,
          lastReplay,
          stopSnapshot >>
-  /\ AppendSnapshot(sessionLog)
 
 CurrentWakeResponses ==
   { wakeResponses[c] :
@@ -589,6 +739,12 @@ Next ==
        AdvanceBlockedRequest(s, req)
   \/ \E rk \in RuntimeKeys :
        StopRuntime(rk)
+  \/ \E sb \in SandboxIds, rk \in RuntimeKeys :
+       SandboxProvision(sb, rk)
+  \/ \E sb \in SandboxIds, tool \in ToolNames :
+       SandboxExecute(sb, tool)
+  \/ \E sb \in SandboxIds :
+       SandboxStop(sb)
   \/ \E caller \in Callers, s \in Sessions, rk \in RuntimeKeys :
        WakeReady(caller, s, rk)
   \/ \E caller \in Callers, s \in Sessions, rk \in RuntimeKeys, newRid \in RuntimeIds :
@@ -597,10 +753,8 @@ Next ==
 Spec == Init /\ [][Next]_Vars
 
 SessionAppendOnly ==
-  \A i, j \in 1..Len(logSnapshots) :
-    i <= j =>
-      \A s \in Sessions :
-        IsPrefix(logSnapshots[i][s], logSnapshots[j][s])
+  \A s \in Sessions :
+    IsPrefix(previousSessionLog[s], sessionLog[s])
 
 SessionReplayFromOffsetIsSuffix ==
   \A s \in Sessions :
@@ -698,5 +852,19 @@ ToolDescriptorNoCredentialLeak ==
 ToolRegistrationTransportAgnosticAtWireShape ==
   \A t \in ToolNames :
     toolRegistry[t] = capabilityRefs[t].descriptor
+
+SandboxExecuteIsIsolatedFromHostRuntime ==
+  lastAction = "sandbox_execute" =>
+    sessionLog = previousSessionLog
+
+SandboxCapabilityRefRespected ==
+  \A sb \in SandboxIds :
+    \A i \in 1..Len(sandboxToolHistory[sb]) :
+      /\ sandboxToolHistory[sb][i] \in ToolNames
+      /\ capabilityRefs[sandboxToolHistory[sb][i]].descriptor = toolRegistry[sandboxToolHistory[sb][i]]
+
+SandboxStopDoesNotAffectHostRuntime ==
+  lastAction = "sandbox_stop" =>
+    runtimeIndex = previousRuntimeIndex
 
 =============================================================================

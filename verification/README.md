@@ -2,7 +2,7 @@
 
 This directory adds a verification layer on top of Fireline's existing managed-agent contract tests. It does **not** replace the current integration suite. It gives the architecture three extra things:
 
-1. a compact abstract state machine for the six primitives,
+1. a compact abstract state machine for the seven primitives,
 2. a Rust-native model checker for the highest-value races and retry paths,
 3. a small pure semantic kernel for the highest-risk protocol and conductor decisions,
 4. a refinement matrix that maps the formal artifacts back to the executable tests already in `tests/`.
@@ -16,6 +16,10 @@ The verification layer is intentionally narrow and architecture-first.
   - replay-from-offset suffix behavior
   - durability across runtime death
   - idempotent append under retry keyed by producer commit tuple `(producer_id, epoch, seq)`
+- **Host**
+  - provisioned runtimes are reachable and reusable
+  - cold wake preserves `runtime_key` and changes `runtime_id`
+  - reprovision preserves `session/load` semantics at the abstract level
 - **Orchestration**
   - live `resume(session_id)` is a no-op
   - cold resume preserves `runtime_key` and changes `runtime_id`
@@ -25,8 +29,10 @@ The verification layer is intentionally narrow and architecture-first.
   - approval-gate release requires a matching approval resolution
   - first matching approval decision is stable under duplicate or late resolutions
 - **Sandbox**
-  - provisioned runtimes are reachable and reusable
-  - reprovision preserves `session/load` semantics at the abstract level
+  - provision / execute / stop is modeled as a distinct primitive from Host runtime lifecycle
+  - tool execution stays isolated from direct Session mutation
+  - only registered tools execute through the sandbox capability surface
+  - stopping a sandbox does not mutate Host runtime identity
 - **Resources**
   - requested `{source_ref, mount_path}` pairs map into mounted resources
   - fs-backend writes become durable session evidence
@@ -53,7 +59,7 @@ Two known gaps remain explicit:
 ## Layout
 
 - `spec/managed_agents.tla`
-  - abstract TLA+ architecture model of the six primitives
+  - abstract TLA+ architecture model of the seven primitives
 - `spec/ManagedAgents.cfg`
   - small finite configuration for TLC
 - `stateright/`
@@ -83,7 +89,7 @@ Those tests remain the source of truth for executable substrate behavior. The ve
 - the TLA+ spec states the architecture at the primitive boundary
 - the Stateright models explore race/retry interleavings that integration tests cover only by example
 - the semantic kernel captures the small pure transition rules that are most likely to drift if they stay implicit in handler code
-- the conductor algebra tests validate Fireline-specific composition laws that sit above Anthropic's six primitives but below product code
+- the conductor algebra tests validate Fireline-specific composition laws that sit above the substrate primitives but below product code
 - the refinement matrix makes it explicit which invariants are live-tested, model-checked, only specified, or still pending
 - some architectural claims, like "resume is composition rather than a separate scheduler," remain design properties documented by model structure rather than standalone checked invariants
 
