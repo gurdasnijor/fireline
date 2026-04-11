@@ -1,16 +1,19 @@
 mod docker;
 mod local;
 mod manager;
+mod mounter;
 mod provider;
 mod registry;
 
 pub use self::docker::{DockerProvider, DockerProviderConfig};
 pub use self::local::{LocalProvider, LocalRuntimeLauncher};
 pub use self::manager::RuntimeManager;
+pub use self::mounter::{LocalPathMounter, MountedResource, ResourceMounter, prepare_resources};
 pub use self::provider::{
     CreateRuntimeSpec, Endpoint, HeartbeatMetrics, HeartbeatReport, ManagedRuntime,
-    RuntimeDescriptor, RuntimeLaunch, RuntimeProvider, RuntimeProviderKind, RuntimeProviderRequest,
-    RuntimeRegistration, RuntimeStatus, RuntimeTokenIssuer, StreamStorageConfig, StreamStorageMode,
+    PersistedRuntimeSpec, ResourceRef, RuntimeDescriptor, RuntimeLaunch, RuntimeProvider,
+    RuntimeProviderKind, RuntimeProviderRequest, RuntimeRegistration, RuntimeStatus,
+    RuntimeTokenIssuer, StreamStorageConfig, StreamStorageMode,
 };
 pub use self::registry::RuntimeRegistry;
 
@@ -51,9 +54,15 @@ impl RuntimeHost {
     }
 
     pub async fn create(&self, spec: CreateRuntimeSpec) -> Result<RuntimeDescriptor> {
-        let runtime_key = format!("runtime:{}", Uuid::new_v4());
+        let runtime_key = spec
+            .runtime_key
+            .clone()
+            .unwrap_or_else(|| format!("runtime:{}", Uuid::new_v4()));
         let created_at_ms = now_ms();
-        let node_id = node_id_for(spec.host);
+        let node_id = spec
+            .node_id
+            .clone()
+            .unwrap_or_else(|| node_id_for(spec.host));
         let provider = self.inner.manager.resolve_kind(spec.provider)?;
 
         self.inner.registry.upsert(RuntimeDescriptor {
@@ -73,7 +82,7 @@ impl RuntimeHost {
         let (provider, launch) = match self
             .inner
             .manager
-            .start(spec, runtime_key.clone(), node_id.clone())
+            .start(spec.clone(), runtime_key.clone(), node_id.clone())
             .await
         {
             Ok(started) => started,
@@ -114,6 +123,11 @@ impl RuntimeHost {
             updated_at_ms: now_ms(),
         };
         self.inner.registry.upsert(descriptor.clone())?;
+        crate::trace::emit_runtime_spec_persisted(
+            &descriptor.state.url,
+            &PersistedRuntimeSpec::new(runtime_key, descriptor.node_id.clone(), spec),
+        )
+        .await?;
 
         Ok(descriptor)
     }
@@ -201,7 +215,11 @@ impl RuntimeHost {
         Ok(descriptor)
     }
 
-    pub fn heartbeat(&self, runtime_key: &str, report: HeartbeatReport) -> Result<RuntimeDescriptor> {
+    pub fn heartbeat(
+        &self,
+        runtime_key: &str,
+        report: HeartbeatReport,
+    ) -> Result<RuntimeDescriptor> {
         let mut descriptor = self
             .inner
             .registry
