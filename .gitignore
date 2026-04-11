@@ -17,3 +17,6 @@ dist/
 .env
 .env.local
 .tmp/
+
+# TLC model-checker output
+states/
