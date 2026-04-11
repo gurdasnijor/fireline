@@ -7,6 +7,7 @@ use std::process::{Command as StdCommand, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use axum::Router;
 use durable_streams::{Client as DsClient, Offset};
 use fireline::bootstrap::{BootstrapConfig, BootstrapHandle, start};
 use fireline::runtime_host::{RuntimeDescriptor, RuntimeStatus};
@@ -14,6 +15,7 @@ use fireline_conductor::topology::TopologySpec;
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio::process::{Child, Command as TokioCommand};
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -251,6 +253,7 @@ pub(crate) struct ControlPlaneHarness {
     pub base_url: String,
     pub runtime_registry_path: PathBuf,
     pub peer_directory_path: PathBuf,
+    shared_stream_server: SharedStreamServer,
     child: Child,
 }
 
@@ -261,10 +264,12 @@ impl ControlPlaneHarness {
         let runtime_registry_path = temp_path("fireline-managed-agent-runtimes");
         let peer_directory_path = temp_path("fireline-managed-agent-peers");
         let base_url = format!("http://127.0.0.1:{}", reserve_port()?);
+        let shared_stream_server = SharedStreamServer::spawn().await?;
         let child = spawn_control_plane(
             &base_url,
             &runtime_registry_path,
             &peer_directory_path,
+            &shared_stream_server.base_url,
             prefer_push,
             5_000,
             30_000,
@@ -276,6 +281,7 @@ impl ControlPlaneHarness {
             base_url,
             runtime_registry_path,
             peer_directory_path,
+            shared_stream_server,
             child,
         })
     }
@@ -369,6 +375,45 @@ impl ControlPlaneHarness {
 
     pub(crate) async fn shutdown(mut self) {
         shutdown_process(&mut self.child).await;
+        self.shared_stream_server.shutdown().await;
+    }
+}
+
+struct SharedStreamServer {
+    base_url: String,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl SharedStreamServer {
+    async fn spawn() -> Result<Self> {
+        let router: Router = fireline::stream_host::build_stream_router(None)?;
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .context("bind shared durable-streams test listener")?;
+        let addr = listener
+            .local_addr()
+            .context("resolve shared streams address")?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+        Ok(Self {
+            base_url: format!("http://127.0.0.1:{}/v1/stream", addr.port()),
+            shutdown_tx: Some(shutdown_tx),
+            task,
+        })
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        let _ = self.task.await;
     }
 }
 
@@ -568,6 +613,7 @@ async fn spawn_control_plane(
     base_url: &str,
     runtime_registry_path: &PathBuf,
     peer_directory_path: &PathBuf,
+    shared_stream_base_url: &str,
     prefer_push: bool,
     heartbeat_scan_interval_ms: u64,
     stale_timeout_ms: u64,
@@ -596,6 +642,8 @@ async fn spawn_control_plane(
         .arg(heartbeat_scan_interval_ms.to_string())
         .arg("--stale-timeout-ms")
         .arg(stale_timeout_ms.to_string())
+        .arg("--shared-stream-base-url")
+        .arg(shared_stream_base_url)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     if prefer_push {
