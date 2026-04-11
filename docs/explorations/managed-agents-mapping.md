@@ -431,6 +431,10 @@ None at the substrate level. The trait exists, two implementations work, a third
 
 ## 5. Resources — Partially composable (ACP fs interception) + small physical-mount gap
 
+> **Related eval:** [`stream-fs-resources-evaluation.md`](./stream-fs-resources-evaluation.md) — a parallel evaluation of Durable Streams' experimental `stream-fs` package as a potential Resources backend. The eval concludes that `stream-fs` is NOT the right first answer for Resources v1 and should be deferred in favor of the generic `ResourceRef + ResourceMounter + LocalPathMounter + GitRemoteMounter` path described below. `stream-fs` may become a later narrow spike as a read-only pinned snapshot mount via FUSE once the generic primitive ships.
+>
+> **Disambiguation warning:** `SessionLogFileBackend` (Fireline's single-writer artifact-log-as-filesystem described below) is a materially different design from upstream `stream-fs` (a general collaborative filesystem with many writers, metadata streams, rename semantics, and watch/SSE coordination). The names are dangerously close. The Fireline backend is scoped to a single runtime's own Session stream, supports flat path→latest content only, and uses the stream offset as its revision identity — none of the concerns the eval raises about `stream-fs` apply to it in this constrained form.
+
 ### Anthropic interface
 
 ```text
