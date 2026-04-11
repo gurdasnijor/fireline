@@ -7,6 +7,13 @@
 
 This is the third handoff in the day's sequence. Read those two first for the full arc; this one focuses on what landed *after* the post-debt-paydown point and on the two directions gnijor named for the next phase: **pushing on the runtime abstraction** and **getting closer to a full-featured demo** — with **`superradcompany/microsandbox`** currently under evaluation as a candidate provider.
 
+## Current in-flight work (as of 2026-04-11)
+
+- **Crate restructure** — dispatched (codex workspace:13); manifest at `c9a3e8e`
+- **TLA Level 2** — dispatched (codex workspace:12)
+- **Tier 4 host-claude** — landed `2348428`
+- **Tier 5 browser-harness** — in progress on workspace:4
+
 ## TL;DR — where you're picking up
 
 - **CI is green on `0af8612`.** 32 managed-agent-suite tests pass on CI (30 primary + 2 `runtime_index_agreement`). 3 tests remain intentionally ignored as Docker-scoped cross-reference markers.
