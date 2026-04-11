@@ -27,6 +27,7 @@
 mod managed_agent_suite;
 
 use anyhow::{Context, Result};
+use durable_streams::{Client as DsClient, LiveMode, Offset};
 use fireline::orchestration::materialize_session_index;
 use managed_agent_suite::{
     ControlPlaneHarness, DEFAULT_TIMEOUT, LocalRuntimeHarness, count_events, pending_contract,
@@ -189,31 +190,194 @@ async fn session_durable_stream_survives_runtime_death() -> Result<()> {
     result
 }
 
-/// Precondition: a local runtime has emitted a normal set of events to its
-/// durable state stream.
+/// Precondition: a local runtime has emitted events after a first prompt
+/// and is about to emit more events on a second prompt.
 ///
-/// Action: compute a cursor offset roughly at the mid-point of the current
-/// stream length, open a fresh reader at that offset, and collect the resulting
-/// body.
+/// Action: (1) seed the stream with one prompt; (2) open a reader, drain
+/// it to the live edge, and capture that edge's `next_offset` as
+/// `mid_cursor`; (3) drive a second prompt; (4) open a fresh reader at
+/// `Offset::At(mid_cursor)` and drain it.
 ///
-/// Observable evidence: the mid-offset replay is a strict suffix of the full
-/// replay from the beginning — everything before the cursor is absent, and
-/// everything at or after the cursor is present in the same order.
+/// Observable evidence: the suffix reader returns exactly the events that
+/// were appended AFTER the cursor was captured — none of the first
+/// prompt's events, all of the second prompt's events. A full
+/// Offset::Beginning replay after the second prompt contains the union in
+/// order, and the suffix is a byte-identical tail of that union.
 ///
-/// Invariant proven: **Session replay from any offset** — readers can open the
-/// log at any point, not just the beginning, and receive the suffix from there
-/// forward. This is the contract that makes materializer catch-up semantics
-/// possible (start from last-seen offset, drain, then live-tail).
+/// Invariant proven: **Session replay from any offset** — an offset token
+/// captured from a prior read can be used by a later fresh reader to
+/// receive only events appended after the capture point. This is the
+/// "materializer catch-up" contract: snapshot a cursor, do other work,
+/// come back with the cursor, receive the new events.
 #[tokio::test]
-#[ignore = "pending: durable-streams mid-offset replay needs byte-level offset arithmetic; \
-            capture-and-replay from a stored offset handle is the more faithful shape"]
 async fn session_replay_from_mid_offset_is_suffix_of_full_replay() -> Result<()> {
-    pending_contract(
-        "session.replay_from_mid_offset",
-        "Open a reader at an offset handle produced mid-stream and assert the result is a \
-         strict suffix of the full-offset-0 replay. Requires exercising the durable-streams \
-         Offset::Handle API rather than just Beginning.",
-    )
+    let runtime = LocalRuntimeHarness::spawn("session-replay-mid-offset").await?;
+
+    let result = async {
+        // Phase 1: seed with one prompt and wait for its prompt_turn to
+        // land so we know the stream has committed events before we
+        // capture the live edge.
+        let _ = runtime
+            .prompt("first prompt — these events precede the captured cursor")
+            .await?;
+        let _ = wait_for_event_count(
+            runtime.state_stream_url(),
+            "prompt_turn",
+            1,
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+
+        let client = DsClient::new();
+        let stream = client.stream(runtime.state_stream_url());
+
+        // Drain phase-1 events and capture the cursor at the live edge.
+        let mut phase1_reader = stream
+            .read()
+            .offset(Offset::Beginning)
+            .live(LiveMode::Off)
+            .build()
+            .context("build phase-1 replay reader")?;
+        let mut phase1_events: Vec<serde_json::Value> = Vec::new();
+        let mut mid_cursor: Option<Offset> = None;
+        while let Some(chunk) = phase1_reader
+            .next_chunk()
+            .await
+            .context("read phase-1 chunk")?
+        {
+            if !chunk.data.is_empty() {
+                let events: Vec<serde_json::Value> = serde_json::from_slice(&chunk.data)
+                    .context("parse phase-1 chunk as JSON array")?;
+                phase1_events.extend(events);
+            }
+            mid_cursor = Some(chunk.next_offset.clone());
+            if chunk.up_to_date {
+                break;
+            }
+        }
+        let mid_cursor = mid_cursor
+            .context("phase-1 replay must produce at least one chunk with a next_offset")?;
+        assert!(
+            !matches!(mid_cursor, Offset::Beginning),
+            "INVARIANT (Session): captured mid-stream cursor must not be Offset::Beginning"
+        );
+        assert!(
+            !phase1_events.is_empty(),
+            "INVARIANT (Session): phase-1 replay should have captured at least one event"
+        );
+        let phase1_len = phase1_events.len();
+
+        // Phase 2: drive a second prompt. These events land AFTER the
+        // captured cursor.
+        let _ = runtime
+            .prompt("second prompt — these events land after the captured cursor")
+            .await?;
+        let _ = wait_for_event_count(
+            runtime.state_stream_url(),
+            "prompt_turn",
+            2,
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+
+        // Suffix replay from the captured cursor. Must contain only the
+        // second-prompt events; must not contain any phase-1 events.
+        // Use LiveMode::Sse so the reader tolerates a cursor that
+        // happened to match the live edge at capture time — the server
+        // will deliver the newly-committed events once the tail catches
+        // up.
+        let mut suffix_reader = stream
+            .read()
+            .offset(mid_cursor.clone())
+            .live(LiveMode::Sse)
+            .build()
+            .context("build suffix replay reader")?;
+        let mut suffix_events: Vec<serde_json::Value> = Vec::new();
+        // LiveMode::Sse will block past up_to_date; bound the drain with
+        // a timeout so the test fails loudly rather than hangs if the
+        // cursor semantics differ from expectations.
+        let drain = async {
+            while let Some(chunk) = suffix_reader
+                .next_chunk()
+                .await
+                .context("read suffix replay chunk")?
+            {
+                if !chunk.data.is_empty() {
+                    let events: Vec<serde_json::Value> = serde_json::from_slice(&chunk.data)
+                        .context("parse suffix replay chunk as JSON array")?;
+                    suffix_events.extend(events);
+                }
+                if chunk.up_to_date && !suffix_events.is_empty() {
+                    break;
+                }
+            }
+            anyhow::Ok(())
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), drain)
+            .await
+            .context("suffix replay drain timed out waiting for post-cursor events")?
+            .context("suffix replay drain failed")?;
+        assert!(
+            !suffix_events.is_empty(),
+            "INVARIANT (Session): suffix replay after the second prompt must have events"
+        );
+
+        // Full replay from Offset::Beginning after both prompts. The
+        // suffix should be the exact tail of the full replay starting at
+        // phase1_len.
+        let mut full_reader = stream
+            .read()
+            .offset(Offset::Beginning)
+            .live(LiveMode::Off)
+            .build()
+            .context("build full replay reader")?;
+        let mut full_events: Vec<serde_json::Value> = Vec::new();
+        while let Some(chunk) = full_reader
+            .next_chunk()
+            .await
+            .context("read full replay chunk")?
+        {
+            if !chunk.data.is_empty() {
+                let events: Vec<serde_json::Value> = serde_json::from_slice(&chunk.data)
+                    .context("parse full replay chunk as JSON array")?;
+                full_events.extend(events);
+            }
+            if chunk.up_to_date {
+                break;
+            }
+        }
+
+        assert!(
+            full_events.len() > phase1_len,
+            "INVARIANT (Session): full replay after second prompt must have more events than \
+             phase-1 (phase-1 {phase1_len}, full {})",
+            full_events.len()
+        );
+        let expected_tail = &full_events[phase1_len..];
+        assert_eq!(
+            suffix_events.len(),
+            expected_tail.len(),
+            "INVARIANT (Session): suffix replay must have full.len - phase1.len events \
+             (expected {}, got {})",
+            expected_tail.len(),
+            suffix_events.len()
+        );
+        for (index, (suffix_event, expected_event)) in
+            suffix_events.iter().zip(expected_tail.iter()).enumerate()
+        {
+            assert_eq!(
+                suffix_event, expected_event,
+                "INVARIANT (Session): suffix replay event at index {index} must byte-match the \
+                 full replay tail"
+            );
+        }
+
+        Ok(())
+    }
+    .await;
+
+    runtime.shutdown().await?;
+    result
 }
 
 /// Precondition: a fresh durable-streams producer attached to a runtime-scoped
