@@ -9,6 +9,7 @@ use fireline_conductor::runtime::{
     RuntimeLaunch, RuntimeRegistry, RuntimeStatus,
 };
 use tokio::process::{Child, Command};
+use tracing::{info, instrument};
 
 use crate::auth::RuntimeTokenStore;
 
@@ -56,16 +57,22 @@ impl ChildProcessRuntimeLauncher {
         }
     }
 
+    #[instrument(skip(self, child), fields(runtime_key))]
     async fn wait_for_runtime_ready(
         &self,
         runtime_key: &str,
         child: &mut Child,
     ) -> Result<RuntimeDescriptor> {
         let deadline = tokio::time::Instant::now() + self.startup_timeout;
+        let mut polls = 0usize;
         loop {
+            polls += 1;
             if let Some(runtime) = self.runtime_registry.get(runtime_key)? {
                 match runtime.status {
-                    RuntimeStatus::Ready => return Ok(runtime),
+                    RuntimeStatus::Ready => {
+                        info!(runtime_key, polls, "child-process runtime became ready");
+                        return Ok(runtime);
+                    }
                     RuntimeStatus::Broken | RuntimeStatus::Stopped => {
                         return Err(anyhow!(
                             "fireline runtime failed during startup with status '{:?}'",
@@ -95,6 +102,7 @@ impl ChildProcessRuntimeLauncher {
 
 #[async_trait]
 impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
+    #[instrument(skip(self, spec, mounted_resources), fields(runtime_key, node_id, provider = "local"))]
     async fn start_local_runtime(
         &self,
         spec: CreateRuntimeSpec,

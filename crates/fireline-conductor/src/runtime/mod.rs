@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use tokio::sync::Mutex;
+use tracing::{info, instrument};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -55,6 +56,7 @@ impl RuntimeHost {
         ))
     }
 
+    #[instrument(skip(self, spec), fields(runtime_key = spec.runtime_key.as_deref().unwrap_or("<generated>"), provider = ?spec.provider))]
     pub async fn create(&self, spec: CreateRuntimeSpec) -> Result<RuntimeDescriptor> {
         let runtime_key = spec
             .runtime_key
@@ -132,6 +134,7 @@ impl RuntimeHost {
                     .await
                     .remove(&runtime_key);
             }
+            info!(runtime_key, status = ?descriptor.status, "runtime host create returned existing descriptor");
             return Ok(descriptor);
         }
 
@@ -158,6 +161,7 @@ impl RuntimeHost {
                 .remove(&runtime_key);
         }
 
+        info!(runtime_key, status = ?descriptor.status, "runtime host created runtime descriptor");
         Ok(descriptor)
     }
 
@@ -169,6 +173,7 @@ impl RuntimeHost {
         self.inner.registry.list()
     }
 
+    #[instrument(skip(self), fields(runtime_key))]
     pub async fn stop(&self, runtime_key: &str) -> Result<RuntimeDescriptor> {
         let launch = self
             .inner
@@ -188,6 +193,7 @@ impl RuntimeHost {
         descriptor.status = RuntimeStatus::Stopped;
         descriptor.updated_at_ms = now_ms();
         self.inner.registry.upsert(descriptor.clone())?;
+        info!(runtime_key, "runtime host stopped runtime");
         Ok(descriptor)
     }
 
@@ -205,6 +211,7 @@ impl RuntimeHost {
         self.inner.registry.remove(runtime_key)
     }
 
+    #[instrument(skip(self, registration), fields(runtime_key))]
     pub async fn register(
         &self,
         runtime_key: &str,
@@ -259,6 +266,12 @@ impl RuntimeHost {
                 .remove(runtime_key);
         }
         self.inner.registry.upsert(descriptor.clone())?;
+        info!(
+            runtime_key,
+            runtime_id = descriptor.runtime_id,
+            status = ?descriptor.status,
+            "runtime registered with host"
+        );
         Ok(descriptor)
     }
 

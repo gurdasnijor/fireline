@@ -14,6 +14,7 @@ use fireline_conductor::runtime::{
     DockerProvider, DockerProviderConfig, LocalProvider, RuntimeHost, RuntimeManager,
     RuntimeRegistry, RuntimeTokenIssuer,
 };
+use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
 use self::auth::RuntimeTokenStore;
@@ -91,8 +92,14 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let span_events = if std::env::var_os("FIRELINE_TRACE_SPANS").is_some() {
+        FmtSpan::CLOSE
+    } else {
+        FmtSpan::NONE
+    };
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
+        .with_span_events(span_events)
         .without_time()
         .init();
 

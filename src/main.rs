@@ -19,6 +19,7 @@ use fireline_conductor::topology::TopologySpec;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -98,8 +99,14 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let span_events = if std::env::var_os("FIRELINE_TRACE_SPANS").is_some() {
+        FmtSpan::CLOSE
+    } else {
+        FmtSpan::NONE
+    };
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
+        .with_span_events(span_events)
         .without_time()
         .init();
 
