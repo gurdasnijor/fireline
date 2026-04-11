@@ -7,7 +7,10 @@ use reqwest::Client as HttpClient;
 use tracing::{info, instrument};
 
 use crate::runtime_materializer::RuntimeMaterializer;
-use crate::session_index::SessionIndex;
+// Re-export SessionIndex so external callers of `materialize_session_index`
+// and `materialize_shared_session_index` can name the return type even
+// though the `session_index` module itself is crate-private.
+pub use crate::session_index::SessionIndex;
 
 /// Resume a session by session id.
 ///

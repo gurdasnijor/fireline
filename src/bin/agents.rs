@@ -1,9 +1,8 @@
 //! Fireline agents CLI — manages the local agent configuration.
 //!
 //! Subcommands:
-//! - `add <id>` — fetch agent metadata from the ACP registry
-//!   (via [`fireline::agent_catalog`]) and add it to the local
-//!   `agents.toml` config
+//! - `add <id>` — fetch agent metadata from the ACP registry and add
+//!   it to the local `agents.toml` config
 //! - `remove <name>` — remove an agent by name
 //! - `list` — show currently configured agents
 //! - `clear` — remove all configured agents
