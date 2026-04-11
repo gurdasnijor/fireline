@@ -53,6 +53,27 @@ import {
   type TopologyComponentSpec,
   type TopologySpec,
 } from './topology.js'
+import type {
+  CapabilityRef,
+  Combinator,
+  ContextSourceRef,
+  CredentialRef,
+  EffectPattern,
+  Endpoint as CoreEndpoint,
+  FanoutMergeSpec,
+  FanoutSplitSpec,
+  JsonSchema,
+  JsonValue,
+  ObserveSinkRef,
+  ProjectSpec,
+  ResourceRef as CoreResourceRef,
+  RewriteSpec,
+  SessionSpec,
+  SuspendReasonSpec,
+  ToolDescriptor,
+  Topology,
+  TransportRef,
+} from './core/index.js'
 
 export type {
   AcpConnectOptions,
@@ -87,12 +108,31 @@ export type {
   RuntimeStatus,
   UvxDistribution,
   AuditTopologyConfig,
+  CapabilityRef,
+  Combinator,
+  ContextSourceRef,
   ContextPlacement,
   ContextInjectionTopologyConfig,
   ContextSourceSpec,
+  CoreEndpoint,
+  CoreResourceRef,
+  CredentialRef,
+  EffectPattern,
+  FanoutMergeSpec,
+  FanoutSplitSpec,
+  JsonSchema,
+  JsonValue,
+  ObserveSinkRef,
+  ProjectSpec,
+  RewriteSpec,
+  SessionSpec,
+  SuspendReasonSpec,
+  ToolDescriptor,
+  Topology,
   TopologyBuilder,
   TopologyComponentSpec,
   TopologySpec,
+  TransportRef,
 }
 
 export interface FirelineClient {
@@ -154,3 +194,16 @@ export {
   resolveAgentLaunch,
   createTopologyBuilder,
 }
+
+export {
+  approvalGate,
+  approvalGateOnPattern,
+  audit,
+  budget,
+  contextInjection,
+  durableTrace,
+  observe,
+  parallelPeers,
+  peer,
+  topology,
+} from './core/index.js'
