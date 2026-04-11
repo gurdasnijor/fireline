@@ -21,6 +21,8 @@ type MockRequestRecord = {
 type FetchMockState = {
   runtime: MockRuntime | null
   requests: MockRequestRecord[]
+  launchError?: string
+  stopError?: string
 }
 
 const launchableAgent = {
@@ -41,6 +43,8 @@ beforeEach(async () => {
   fetchState = {
     runtime: null,
     requests: [],
+    launchError: undefined,
+    stopError: undefined,
   }
 
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
@@ -65,16 +69,7 @@ afterEach(() => {
 
 describe('browser harness Tier 5 smoke flow', () => {
   it('launches, wakes, and stops a mocked Fireline runtime through the harness UI', async () => {
-    const agentSelect = page.getByRole('combobox')
-    await expect.element(agentSelect).toBeInTheDocument()
-
-    await userEvent.selectOptions(await agentSelect.element(), 'fireline-testy-load')
-    expect((await agentSelect.element())?.value).toBe('fireline-testy-load')
-
-    await userEvent.click(page.getByRole('button', { name: 'Launch Agent' }))
-
-    await expect.element(page.getByText(/^runtime-1$/)).toBeInTheDocument()
-    await expect.element(page.getByText(/^running$/)).toBeInTheDocument()
+    await launchAgent()
 
     expect(fetchState.runtime?.createBody).toMatchObject({
       provider: 'local',
@@ -112,7 +107,69 @@ describe('browser harness Tier 5 smoke flow', () => {
       ]),
     )
   })
+
+  it('handles runtime launch failure', async () => {
+    fetchState.launchError = 'runtime_provision_failed'
+
+    const agentSelect = page.getByRole('combobox')
+    await expect.element(agentSelect).toBeInTheDocument()
+
+    await userEvent.selectOptions(await agentSelect.element(), 'fireline-testy-load')
+    await userEvent.click(page.getByRole('button', { name: 'Launch Agent' }))
+
+    await vi.waitFor(() => {
+      expect(document.body.textContent ?? '').toContain('runtime_provision_failed')
+    })
+    await expect.element(page.getByText(/^error$/)).toBeInTheDocument()
+
+    expectNotRunningState()
+    expect(fetchState.runtime).toBeNull()
+  })
+
+  it('handles stop failure gracefully', async () => {
+    await launchAgent()
+    fetchState.stopError = 'runtime_stop_failed'
+
+    await userEvent.click(page.getByRole('button', { name: 'Stop Runtime' }))
+
+    await vi.waitFor(() => {
+      expect(document.body.textContent ?? '').toContain('runtime_stop_failed')
+    })
+    await expect.element(page.getByText(/^error$/)).toBeInTheDocument()
+
+    const inspectorText = document.body.textContent ?? ''
+    expect(inspectorText).toContain('lastError')
+    expect(inspectorText).toContain('runtime_stop_failed')
+    expect(inspectorText).toContain('handleId')
+    expect(inspectorText).toContain('sessionStatus')
+    expect(inspectorText).toContain('runtime-1')
+    expect(inspectorText).toContain('running')
+  })
 })
+
+async function launchAgent(): Promise<void> {
+  const agentSelect = page.getByRole('combobox')
+  await expect.element(agentSelect).toBeInTheDocument()
+
+  await userEvent.selectOptions(await agentSelect.element(), 'fireline-testy-load')
+  expect((await agentSelect.element())?.value).toBe('fireline-testy-load')
+
+  await userEvent.click(page.getByRole('button', { name: 'Launch Agent' }))
+
+  await vi.waitFor(() => {
+    const text = document.body.textContent ?? ''
+    expect(text).toContain('runtime-1')
+    expect(text).toContain('running')
+  })
+}
+
+function expectNotRunningState(): void {
+  const inspectorText = document.body.textContent ?? ''
+  expect(inspectorText).toContain('sessionStatus')
+  expect(inspectorText).toContain('handleId')
+  expect((inspectorText.match(/not running/g) ?? []).length).toBeGreaterThanOrEqual(2)
+  expect(inspectorText).not.toContain('runtime-1')
+}
 
 async function handleFetch(
   input: RequestInfo | URL,
@@ -136,6 +193,10 @@ async function handleFetch(
   }
 
   if (method === 'POST' && pathname === '/cp/v1/runtimes') {
+    if (state.launchError) {
+      return jsonResponse({ error: state.launchError }, 500)
+    }
+
     const createBody = ensureObject(body)
     state.runtime = {
       runtimeKey: 'runtime-1',
@@ -166,6 +227,10 @@ async function handleFetch(
   }
 
   if (method === 'POST' && pathname === '/cp/v1/runtimes/runtime-1/stop') {
+    if (state.stopError) {
+      return jsonResponse({ error: state.stopError }, 500)
+    }
+
     if (state.runtime) {
       state.runtime.status = 'stopped'
     }
