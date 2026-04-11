@@ -51,15 +51,15 @@ importers:
       vite:
         specifier: ^6.0.0
         version: 6.4.2(@types/node@24.12.2)
-      vitest:
-        specifier: ^2.1.0
-        version: 2.1.9(@types/node@24.12.2)(@vitest/browser@2.1.9)(msw@2.13.2(@types/node@24.12.2)(typescript@5.9.3))
 
   packages/client:
     dependencies:
       '@agentclientprotocol/sdk':
         specifier: ^0.18.1
         version: 0.18.2(zod@4.3.6)
+      '@durable-streams/client':
+        specifier: ^0.2.3
+        version: 0.2.3
       '@durable-streams/state':
         specifier: ^0.2.3
         version: 0.2.3(@tanstack/db@0.6.4(typescript@5.9.3))

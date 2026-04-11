@@ -63,6 +63,16 @@ export interface HostClientOptions {
   startupTimeoutMs?: number
   stopTimeoutMs?: number
   catalog?: CatalogClientOptions
+  // Fully-qualified URL of the shared durable-streams topic that `resume`
+  // should read from (e.g. `http://host:port/v1/stream/<stream_name>`).
+  // This mirrors the explicit shared-state endpoint that the Rust
+  // `fireline::orchestration::resume` helper requires — the TS surface
+  // does not rediscover it from live runtime state.
+  sharedStateUrl?: string
+}
+
+export interface ResumeOptions {
+  timeoutMs?: number
 }
 
 interface CreateRuntimeSpecBase {
@@ -93,7 +103,40 @@ export interface HostClient {
   list(): Promise<RuntimeDescriptor[]>
   stop(runtimeKey: string): Promise<RuntimeDescriptor>
   delete(runtimeKey: string): Promise<RuntimeDescriptor | null>
+  resume(sessionId: string, options?: ResumeOptions): Promise<RuntimeDescriptor>
   close(): Promise<void>
+}
+
+interface PersistedRuntimeSpecEnvelopeValue {
+  runtimeKey: string
+  nodeId: string
+  provider: RuntimeProviderRequest
+  host: string
+  port: number
+  name: string
+  agentCommand: string[]
+  resources?: ResourceRef[]
+  stateStream?: string | null
+  streamStorage?: unknown
+  peerDirectoryPath?: string | null
+  topology?: TopologySpec
+}
+
+interface SessionEnvelopeValue {
+  sessionId: string
+  runtimeKey: string
+}
+
+interface StateEnvelope<T = unknown> {
+  type: string
+  key: string
+  headers?: { operation?: string }
+  value?: T
+}
+
+interface SharedSessionIndex {
+  sessionsToRuntime: Map<string, string>
+  runtimeSpecs: Map<string, PersistedRuntimeSpecEnvelopeValue>
 }
 
 interface RuntimeRegistryFile {
@@ -111,6 +154,9 @@ interface OwnedRuntime {
 const DEFAULT_POLL_INTERVAL_MS = 100
 const DEFAULT_STARTUP_TIMEOUT_MS = 20_000
 const DEFAULT_STOP_TIMEOUT_MS = 10_000
+const DEFAULT_RESUME_TIMEOUT_MS = 30_000
+const RESUME_READY_POLL_INTERVAL_MS = 100
+const RESUME_INDEX_POLL_INTERVAL_MS = 50
 const LOG_RING_SIZE = 32
 
 export function createHostClient(options: HostClientOptions = {}): HostClient {
@@ -222,6 +268,12 @@ export function createHostClient(options: HostClientOptions = {}): HostClient {
       return removed
     },
 
+    async resume() {
+      throw new Error(
+        'resume(sessionId) is only supported via control-plane mode; pass controlPlaneUrl and sharedStateUrl to createHostClient',
+      )
+    },
+
     async close() {
       const runtimeKeys = [...owned.keys()]
       for (const runtimeKey of runtimeKeys) {
@@ -304,6 +356,51 @@ function createControlPlaneHostClient(options: HostClientOptions): HostClient {
           method: 'DELETE',
           allowNotFound: true,
         },
+      )
+    },
+
+    async resume(sessionId, resumeOptions) {
+      const sharedStateUrl = options.sharedStateUrl
+      if (!sharedStateUrl) {
+        throw new Error(
+          'resume(sessionId) requires sharedStateUrl in HostClientOptions — the fully-qualified URL of the shared durable-streams topic carrying runtime_spec and session envelopes',
+        )
+      }
+
+      const timeoutMs = resumeOptions?.timeoutMs ?? DEFAULT_RESUME_TIMEOUT_MS
+      const deadline = Date.now() + timeoutMs
+
+      const { runtimeKey, spec } = await waitForSharedSessionIndexEntry(
+        sharedStateUrl,
+        sessionId,
+        deadline,
+      )
+
+      const current = await requestControlPlane<RuntimeDescriptor | null>(
+        baseUrl,
+        `/v1/runtimes/${encodeURIComponent(runtimeKey)}`,
+        {
+          token: options.controlPlaneToken,
+          allowNotFound: true,
+        },
+      )
+
+      if (current && current.status === 'ready') {
+        return current
+      }
+
+      const createBody = persistedSpecToCreateBody(spec)
+      await requestControlPlane<RuntimeDescriptor>(baseUrl, '/v1/runtimes', {
+        token: options.controlPlaneToken,
+        method: 'POST',
+        body: JSON.stringify(createBody),
+      })
+
+      return waitForRuntimeReadyViaControlPlane(
+        baseUrl,
+        options.controlPlaneToken,
+        runtimeKey,
+        deadline,
       )
     },
 
@@ -579,4 +676,121 @@ async function readControlPlaneError(response: Response): Promise<string> {
   } catch {
     return response.statusText
   }
+}
+
+async function readSharedSessionIndex(sharedStateUrl: string): Promise<SharedSessionIndex> {
+  const envelopes = await readStreamEnvelopes(sharedStateUrl)
+  const sessionsToRuntime = new Map<string, string>()
+  const runtimeSpecs = new Map<string, PersistedRuntimeSpecEnvelopeValue>()
+
+  for (const envelope of envelopes) {
+    const operation = envelope.headers?.operation
+    if (envelope.type === 'session') {
+      if (operation === 'insert' || operation === 'update') {
+        const value = envelope.value as SessionEnvelopeValue | undefined
+        if (value?.sessionId && value.runtimeKey) {
+          sessionsToRuntime.set(value.sessionId, value.runtimeKey)
+        }
+      } else if (operation === 'delete') {
+        sessionsToRuntime.delete(envelope.key)
+      }
+    } else if (envelope.type === 'runtime_spec') {
+      if (operation === 'insert' || operation === 'update') {
+        const value = envelope.value as PersistedRuntimeSpecEnvelopeValue | undefined
+        if (value?.runtimeKey) {
+          runtimeSpecs.set(value.runtimeKey, value)
+        }
+      } else if (operation === 'delete') {
+        runtimeSpecs.delete(envelope.key)
+      }
+    }
+  }
+
+  return { sessionsToRuntime, runtimeSpecs }
+}
+
+async function readStreamEnvelopes(url: string): Promise<Array<StateEnvelope>> {
+  const { stream } = await import('@durable-streams/client')
+  const response = await stream<StateEnvelope>({
+    url,
+    live: false,
+    offset: '-1',
+    json: true,
+  })
+  return response.json<StateEnvelope>()
+}
+
+async function waitForSharedSessionIndexEntry(
+  sharedStateUrl: string,
+  sessionId: string,
+  deadline: number,
+): Promise<{ runtimeKey: string; spec: PersistedRuntimeSpecEnvelopeValue }> {
+  let lastRuntimeKey: string | undefined
+  while (Date.now() < deadline) {
+    const index = await readSharedSessionIndex(sharedStateUrl)
+    const runtimeKey = index.sessionsToRuntime.get(sessionId)
+    if (runtimeKey) {
+      lastRuntimeKey = runtimeKey
+      const spec = index.runtimeSpecs.get(runtimeKey)
+      if (spec) {
+        return { runtimeKey, spec }
+      }
+    }
+    await delay(RESUME_INDEX_POLL_INTERVAL_MS)
+  }
+  if (lastRuntimeKey) {
+    throw new Error(
+      `timed out waiting for runtime_spec '${lastRuntimeKey}' (session '${sessionId}') in shared state stream ${sharedStateUrl}`,
+    )
+  }
+  throw new Error(
+    `timed out waiting for session '${sessionId}' in shared state stream ${sharedStateUrl}`,
+  )
+}
+
+async function waitForRuntimeReadyViaControlPlane(
+  baseUrl: string,
+  token: string | undefined,
+  runtimeKey: string,
+  deadline: number,
+): Promise<RuntimeDescriptor> {
+  while (Date.now() < deadline) {
+    const descriptor = await requestControlPlane<RuntimeDescriptor | null>(
+      baseUrl,
+      `/v1/runtimes/${encodeURIComponent(runtimeKey)}`,
+      {
+        token,
+        allowNotFound: true,
+      },
+    )
+    if (descriptor && descriptor.status === 'ready') {
+      return descriptor
+    }
+    await delay(RESUME_READY_POLL_INTERVAL_MS)
+  }
+  throw new Error(`timed out waiting for runtime '${runtimeKey}' to become ready during resume`)
+}
+
+function persistedSpecToCreateBody(spec: PersistedRuntimeSpecEnvelopeValue): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    runtimeKey: spec.runtimeKey,
+    nodeId: spec.nodeId,
+    provider: spec.provider,
+    host: spec.host,
+    port: spec.port,
+    name: spec.name,
+    agentCommand: spec.agentCommand,
+    topology: spec.topology ?? { components: [] },
+    resources: spec.resources ?? [],
+  }
+  if (spec.stateStream != null) {
+    body.stateStream = spec.stateStream
+  }
+  if (spec.streamStorage != null) {
+    body.streamStorage = spec.streamStorage
+  }
+  if (spec.peerDirectoryPath != null) {
+    body.peerDirectoryPath = spec.peerDirectoryPath
+  }
+  return body
 }

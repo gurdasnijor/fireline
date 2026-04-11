@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.18.1",
+    "@durable-streams/client": "^0.2.3",
     "@durable-streams/state": "^0.2.3",
     "@fireline/state": "workspace:*",
     "@iarna/toml": "^2.2.5",
