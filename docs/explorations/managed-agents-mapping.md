@@ -1,25 +1,36 @@
 # Fireline against Anthropic's Managed-Agent Primitives
 
-> Status: orienting anchor doc for the substrate exploration workstream
-> Type: reference + decision doc
-> Audience: maintainers deciding what Fireline should expose, and what it should not
+> Status: **operational source of truth** for Fireline's substrate roadmap
+> Type: reference + decision + execution-driving doc
+> Audience: maintainers deciding what to build, in what order, against what acceptance bars
 > Source: Anthropic engineering blog, *"Managed agents: a small set of primitives for any agent harness"* (https://www.anthropic.com/engineering/managed-agents)
 > Related:
-> - [`../product/priorities.md`](../product/priorities.md) — substrate-first product positioning
+> - [`../product/priorities.md`](../product/priorities.md) — substrate-first product positioning (derives from this doc)
 > - [`../runtime/control-and-data-plane.md`](../runtime/control-and-data-plane.md) — the two-plane architecture this doc maps onto
 > - [`../runtime/heartbeat-and-registration.md`](../runtime/heartbeat-and-registration.md) — the push lifecycle that Sandbox / Orchestration depend on
-> - [`../execution/13-distributed-runtime-fabric/README.md`](../execution/13-distributed-runtime-fabric/README.md)
+> - [`../execution/README.md`](../execution/README.md) — slice index, organized by which primitive each slice extends
 > - [`./managed-agents-citations.md`](./managed-agents-citations.md) — the file:line inventory this doc cites against
+
+## How to read this doc
+
+This is the **source of truth** for what Fireline should build, in what order, and against what acceptance bars. Three other docs derive from it:
+
+- `docs/product/priorities.md` derives the "what we own / what we don't" framing and the high-level slice ordering
+- `docs/execution/README.md` derives the slice index, with each slice tagged by which primitive it extends
+- Each individual slice doc in `docs/execution/` opens with which primitive it implements and which gap it closes
+
+If you're picking up new work, start here. If you're writing a new slice doc, cite this doc by section heading and pick a primitive to anchor against. If a slice doesn't fit any primitive, that's a signal the slice is the wrong shape — it may belong in a downstream product, not in Fireline.
 
 ## Purpose
 
 Anthropic's managed-agents post defines a minimal abstraction layer for "what makes an agent harness managed": six interfaces that any implementation must satisfy, each with trivial example implementations (Postgres, cron job, while-loop, local process, S3, MCP server).
 
-This doc maps Fireline onto those six interfaces. It answers three questions:
+This doc maps Fireline onto those six interfaces. It answers four questions:
 
 1. **Which primitives does Fireline already implement well?**
 2. **Which primitives is Fireline missing, and what would it cost to add them?**
-3. **How does the existing slice plan (13a → 17) line up against this framework?**
+3. **What is the build order and acceptance bar for each primitive?**
+4. **How does the existing slice plan line up against this framework?**
 
 The framework is valuable because it gives us shared vocabulary across three different conceptual stacks — Anthropic's managed-agents post, the Flamecast RFCs, and Rivet AgentOS — that all converge on the same underlying shape. If Fireline names its surfaces in this vocabulary, downstream consumers (Flamecast, future products) can plug into them without translation.
 
@@ -292,20 +303,161 @@ The smaller gap, but the one that simplifies the existing slice plan dramaticall
 
 **Recommended action:** demote slice 15 from "execution slice" to "small refactor." Replace `docs/execution/15-workspace-object.md` with a much shorter doc that defines `ResourceRef`, `ResourceMounter`, and the four initial implementations (LocalPath, GitRemote, S3, Gcs). Estimated cost: a week, not a slice.
 
-## What this means for the slice plan
+## Build order and slice index
 
-The existing 13a → 17 plan in `docs/execution/` doesn't need a major rewrite. Two changes:
+This is the operational plan: which slices ship in what order to close the gaps and harden the strong primitives. Each slice is tagged by which primitive it extends.
 
-1. **Add slice 18** for Orchestration / wake. Document at `docs/execution/18-orchestration-and-wake.md`. Sequenced after 14 and as a peer dependency for 16.
-2. **Demote slice 15** from execution slice to small refactor doc. The product framing was the wrong level of abstraction; the launch-spec framing is the right one.
+### Slice index, organized by primitive
 
-The other slices need their *framing* updated to use the new vocabulary, but their content is mostly correct:
+| Primitive | Status | Slices that contribute | Status of those slices |
+|---|---|---|---|
+| **Session** | Strong | `14` Session as canonical read surface | Doc planned, implementation not started |
+| **Sandbox** | Strong | `13a` control-plane runtime API; `13b` push lifecycle and auth; `13c` first remote provider (Docker via bollard) | 13a + 13b shipped on `main`; 13c in flight in workspace 7 |
+| **Tools** | Strong | `17` capability profiles as portable tool references | Doc planned, will be reframed from heavy product object to portable refs with `credential_ref` indirection |
+| **Harness** | Partial (by design) | None standalone; depends on `18` | Conductor proxy chain serves the I/O seam today; suspend/resume across runtime death is gated on `18` |
+| **Orchestration** | **Missing** | `18` orchestration and the `wake` primitive (NEW); `16` out-of-band approvals (consumer of `wake`) | `18` to be drafted; `16` to be reframed as a `wake` consumer |
+| **Resources** | **Missing** | `15` workspace object → demoted to "Resources primitive: launch-spec field with pluggable mounters" | Existing slice doc needs to be replaced with a much shorter resources refactor doc |
 
-- **Slice 14 (runs and sessions)** — reframe from "Run and Session as product objects" to "Session as a Fireline read surface that downstream products consume." Same data, different framing.
-- **Slice 16 (out-of-band approvals)** — reframe as a *consumer* of `wake` rather than a separate orchestration mechanism. The durable approval state is the trigger; `wake` is the action.
-- **Slice 17 (capability profiles)** — reframe as portable Tools references with credential_ref indirection. Same idea, sharper vocabulary.
+### Build order, with rationales
 
-The doc audit task running in parallel (workspace 6) should produce the concrete list of changes to apply.
+The order is chosen to maximize unblocking — every slice enables at least one downstream slice or primitive completion.
+
+**1. `13c` Docker provider (Sandbox depth)** — *in flight, workspace 7*
+
+First non-local provider. Forces the push lifecycle from 13b to be exercised end-to-end against a real container. Establishes the `RuntimeProvider` trait as the universal Sandbox boundary. May ship a minimal `LocalPathMounter` as a side effect (preview of slice 15).
+
+**2. `14` Session as canonical read surface** — *next, can start in parallel with 13c*
+
+Stabilizes the row schema downstream products read from the durable state stream: `runtime`, `session`, `prompt_turn`, `permission`, `terminal`, `chunks`, child-session edges. Ships the TypeScript materialization layer that downstream consumers embed. Does not depend on 13c — they're orthogonal lanes.
+
+**3. `15` Resources refactor** — *small, ~1 week, can run in parallel with 13c and 14*
+
+Rewrite slice 15 from "Workspace object" to "Resources primitive." Adds `resources: Vec<ResourceRef>` to `CreateRuntimeSpec`, defines `ResourceMounter` trait, ships `LocalPathMounter` and `GitRemoteMounter` as the first two implementations. S3 and GCS mounters land later.
+
+**4. `18` Orchestration and the `wake` primitive** — *the unblocker*
+
+The biggest single addition. Introduces `POST /v1/runtimes/{key}/wake` on the control plane plus an in-process scheduler that calls `RuntimeProvider::start()` against a stored session when no live runtime exists for the key. Includes the runtime-side "catch up to durable state on start" contract. Depends on `14` (the canonical read schema is what `wake` reads to restore state) and is best built against `13c` (so the cold-start path is exercised against a non-local provider).
+
+This is the load-bearing primitive. Before it ships, Fireline is "managed runtime hosting." After it ships, Fireline is "managed agent substrate."
+
+**5. `16` Out-of-band approvals** — *consumer of `wake`*
+
+Reframed from "approval product object" to "approval gate component that durably persists pending state and triggers `wake` when resolved." The substrate work is small once `18` is in place — a durable `pending_approval` row, a `POST /v1/approvals/{id}/resolve` endpoint that calls `wake(runtime_key)`, and the `ApprovalGateComponent` is upgraded to read durable state on resume.
+
+**6. `17` Capability profiles as portable Tools references** — *Tools depth*
+
+Reframed from heavy "CapabilityProfile product object" to "portable launch input that bundles tool refs + credential refs + topology defaults." Shipped as a launch-spec field, similar to `15`'s collapse. Adds `credential_ref` indirection so credentials resolve at call time rather than spawn time.
+
+**7. Component depth (ongoing)** — *Tools and Harness composition*
+
+After the substrate primitives are in place, deepen the conductor components: stronger `BudgetComponent`, richer `ApprovalGateComponent`, new `RoutingComponent` for service delegation, new `DelegationComponent` for cross-runtime peer dispatch with retries. These are additive on top of the existing topology and don't require new primitives.
+
+### What's NOT in the build order
+
+- A "session product object" with REST CRUD endpoints — Session is a read surface, not a product object. Downstream products build that on top.
+- A "workspace database" — Resources is a launch-spec field, not a managed database.
+- A "capability profile catalog UI" — capability profiles are a portable launch input, not a registry product.
+- A federated control plane / multi-region scheduler — out of scope until single-region works at scale.
+- A peer-to-peer ACP proxy that the control plane sits in front of — peer ACP traffic is direct compute-to-compute by design.
+
+If a proposed slice doesn't fit a primitive, that's a signal it belongs in a downstream product (Flamecast, the eventual `@fireline/*` consumer SDK), not in Fireline's substrate.
+
+## Acceptance bars per primitive
+
+These define what it means for a primitive to be "complete" enough to call itself stable. They are not gates on shipping individual slices — slices ship incrementally — but they're the bar a primitive must meet before downstream products can rely on it without escape hatches.
+
+### Session — acceptance bar
+
+- [x] Append-only durable log per runtime, replayable from any offset (durable-streams + `DurableStreamTracer`)
+- [x] Idempotent appends guaranteed by the producer protocol
+- [x] At least one runtime-local consumer (`SessionIndex`, `RuntimeMaterializer`)
+- [x] At least one external consumer (`packages/state` `StreamDB`)
+- [ ] Canonical row schema documented and stable (slice 14)
+- [ ] TypeScript materialization layer with replay/catch-up semantics that downstream products can embed (slice 14)
+- [ ] Distinction between hot ACP traffic and cold read-oriented state called out in TS surface (slice 14)
+
+**Status:** ~70% complete. Slice 14 closes the remaining items.
+
+### Sandbox — acceptance bar
+
+- [x] `RuntimeProvider` trait with `start()` returning a `RuntimeLaunch`
+- [x] `LocalProvider` ships and works in dev mode
+- [x] `ChildProcessRuntimeLauncher` ships as the control-plane-backed local provider
+- [x] Push lifecycle (`/register`, `/heartbeat`) so providers don't need shared filesystem (slice 13b)
+- [x] Bearer auth on push surface, scoped per `runtime_key` (slice 13b)
+- [ ] At least one non-local provider (slice 13c — Docker via bollard)
+- [ ] Mixed local + non-local topology proof (slice 13c)
+- [ ] Cross-runtime peer call traverses mixed topology with reconstructible lineage (slice 13c)
+
+**Status:** ~80% complete. Slice 13c closes the remaining items. Additional providers (E2B, Daytona, Cloudflare) are additive depth and don't gate completion.
+
+### Tools — acceptance bar
+
+- [x] Tools are described by `{name, description, input_schema}` (MCP-shape) at the conductor level
+- [x] Topology component model lets tools be injected per session (`PeerComponent`, `SmitheryComponent`)
+- [x] Conductor proxy chain lets host code intercept and wrap tool calls
+- [ ] Portable tool references in launch spec, with `credential_ref` indirection (slice 17)
+- [ ] Credential resolution at call time, not spawn time (slice 17)
+
+**Status:** ~70% complete. Slice 17 closes the remaining items.
+
+### Harness — acceptance bar
+
+- [x] Conductor proxy chain intercepts the harness's I/O (`PromptResponderProxy`, `PromptObserverProxy`, message observers)
+- [x] Topology composition lets components wrap, transform, observe, or substitute effects
+- [x] All harness progress is appended to the durable session log via `DurableStreamTracer`
+- [ ] Conductor components can pause mid-effect and resume from durable state across runtime death (depends on slice 18)
+- [ ] Documented contract for what conductor components can do at the suspend/resume seam (depends on slice 18)
+
+**Status:** ~60% complete. Slice 18 unlocks the remaining items because suspend/resume has nowhere to land without `wake`.
+
+### Orchestration — acceptance bar
+
+- [ ] `wake(runtime_key, reason)` primitive on the control plane (HTTP + in-process)
+- [ ] In-process scheduler that calls `RuntimeProvider::start()` against a stored session when no live runtime exists for the key
+- [ ] Retry-on-failure semantics with exponential backoff
+- [ ] Runtime-side contract for "catch up to durable state on start"
+- [ ] Documented external triggers: webhook ingress, approval resolution, peer call delivery, timer wake-ups
+- [ ] At least one consumer (slice 16 out-of-band approvals) integrated end-to-end
+
+**Status:** 0% complete. Entirely owned by slice 18 plus slice 16 as the first consumer.
+
+### Resources — acceptance bar
+
+- [ ] `resources: Vec<ResourceRef>` field on `CreateRuntimeSpec`
+- [ ] `ResourceMounter` trait
+- [ ] `LocalPathMounter` implementation (probably from slice 13c side effect)
+- [ ] At least one network-fetched mounter — `GitRemoteMounter` or `S3Mounter` (slice 15 rewrite)
+- [ ] Documented contract for how mounters interact with `RuntimeProvider::start()`
+- [ ] One end-to-end test where a runtime mounts a non-local resource and the agent reads from it
+
+**Status:** 0% complete. Owned by slice 15 rewrite, with a possible head start from slice 13c.
+
+## How to add a new slice
+
+When proposing new work, the slice doc should follow this template:
+
+1. **Which primitive does this slice extend?** Pick exactly one. If it doesn't fit, the slice is the wrong shape — propose it as a Fireline doc only if the gap is in this doc, otherwise it belongs in a downstream product.
+2. **Which acceptance-bar items does this slice close?** Reference the checkbox list above. If a slice doesn't close any acceptance-bar item, it's likely premature optimization or product-layer scope.
+3. **What does this slice depend on?** Cite by slice number and primitive name. Avoid hidden dependencies.
+4. **What does this slice unblock?** Cite the downstream slices and primitives.
+5. **Acceptance criteria** in the standard execution-doc shape.
+6. **Validation** in the standard execution-doc shape.
+
+This template lives in `docs/execution/SLICE_TEMPLATE.md` (to be created when slice 18 is drafted, since slice 18 is the first slice written under this template).
+
+## What this means for slice doc rewrites
+
+The existing 13a → 17 plan in `docs/execution/` doesn't need a rewrite of its content — only of its framing. Each slice doc gets a header section that says which primitive it extends and which acceptance-bar items it closes, and the body is updated to use the primitive vocabulary. Specific changes per slice:
+
+- **Slice 14 (runs and sessions API)** — reframe header: extends Session, closes the canonical-row-schema and TS-materialization items. Body: replace "Run and Session as product objects" with "Session as a Fireline read surface that downstream products consume."
+- **Slice 15 (workspace object)** — replace entirely with a Resources refactor doc that defines `ResourceRef`, `ResourceMounter`, and the first two mounters.
+- **Slice 16 (out-of-band approvals)** — reframe header: consumer of Orchestration, depends on slice 18. Body: replace "approval product object" with "durable approval state + `wake` trigger."
+- **Slice 17 (capability profiles)** — reframe header: extends Tools. Body: replace "CapabilityProfile product object" with "portable launch input bundling tool refs and credential refs."
+- **Slice 18 (NEW: orchestration and wake)** — write from scratch using the slice template above.
+- **Slice 13a, 13b, 13c (existing)** — add a one-line header noting they extend Sandbox. Existing doc bodies are correct, just need the framing.
+
+The doc audit running in parallel (`docs/explorations/doc-staleness-audit.md`) produces the concrete delta-by-paragraph list to apply.
 
 ## What this means for the substrate exploration
 

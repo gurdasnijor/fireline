@@ -1,16 +1,15 @@
 # Product Priorities
 
+> This doc derives from [`../explorations/managed-agents-mapping.md`](../explorations/managed-agents-mapping.md), which is the operational source of truth for what Fireline builds, in what order, and against what acceptance bars.
+>
 > Related:
-> - [`vision.md`](./vision.md)
-> - [`object-model.md`](./object-model.md)
-> - [`runs-and-sessions.md`](./runs-and-sessions.md)
-> - [`workspaces.md`](./workspaces.md)
-> - [`capability-profiles.md`](./capability-profiles.md)
-> - [`out-of-band-approvals.md`](./out-of-band-approvals.md)
-> - [`roadmap-alignment.md`](./roadmap-alignment.md)
-> - [`../execution/13-distributed-runtime-fabric/README.md`](../execution/13-distributed-runtime-fabric/README.md)
-> - [`../runtime/control-and-data-plane.md`](../runtime/control-and-data-plane.md)
-> - [`../state/session-load.md`](../state/session-load.md)
+> - [`../explorations/managed-agents-mapping.md`](../explorations/managed-agents-mapping.md) — six-primitive operational source of truth
+> - [`../explorations/managed-agents-citations.md`](../explorations/managed-agents-citations.md) — file:line inventory of current implementations
+> - [`../execution/13-distributed-runtime-fabric/README.md`](../execution/13-distributed-runtime-fabric/README.md) — runtime fabric umbrella
+> - [`../runtime/control-and-data-plane.md`](../runtime/control-and-data-plane.md) — two-plane architecture
+> - [`../runtime/heartbeat-and-registration.md`](../runtime/heartbeat-and-registration.md) — push lifecycle reference
+>
+> Several other docs in this folder (`object-model.md`, `runs-and-sessions.md`, `workspaces.md`, `capability-profiles.md`, `out-of-band-approvals.md`, `product-api-surfaces.md`) predate the substrate-first reframe and are scheduled for rewrite or archival per [`../explorations/doc-staleness-audit.md`](../explorations/doc-staleness-audit.md). Treat them as historical until that cleanup ships.
 
 ## Purpose
 
@@ -176,68 +175,70 @@ Why it matters:
 - observability, audit, transcript views, and "reopen this run" all depend on
   this being stable
 
-### 3. Pause / wait / resume surface
+### 3. Orchestration — `wake(session_id)` (currently MISSING)
 
-Fireline needs a substrate answer for long-running waits:
+This is Fireline's largest single primitive gap. The substrate needs a `wake(session_id)` entry point — a scheduler that can call a function with an ID and retry on failure — so that runtimes can be dormant between calls and the durable session log is the source of truth for "where is this run."
 
-- durable permission and authorization request records
-- explicit paused/waiting state that survives disconnects
-- a service path to resolve the wait later
-- resume semantics that do not require the original foreground client
+What it requires:
+
+- a scheduler service with a `wake(runtime_key, reason)` entry point
+- a runtime-side contract for "catch up to durable state on start"
+- documented external triggers (webhook ingest, approval resolution, peer call delivery, timer wake-up)
+- durable wait records for paused harnesses
 
 Why it matters:
 
-- this is the minimum substrate needed for background agents that can keep
-  working after a browser tab closes
-- it is the bridge from infrastructure demo to usable workflow
+- this is the difference between "agent runs in a tab" and "agent keeps working while you sleep, then notifies you on Slack when it needs approval, then resumes on its own"
+- it is the load-bearing dependency for out-of-band approvals, webhook ingestion, queue management, multiplayer driver flows, and harness suspend/resume
 
-### 4. Extension and policy surface
+See [`../explorations/managed-agents-mapping.md`](../explorations/managed-agents-mapping.md) §"Orchestration" for the full primitive analysis. Owned by slice 18 (new) and slice 16 (out-of-band approvals as the first consumer).
+
+### 4. Harness composition seam (Tools and conductor depth)
 
 Fireline needs to keep leaning into conductor composition:
 
 - topology registry with composable proxy and tracer components
 - per-session MCP injection
-- stable config surfaces for audit, context injection, approval, budget,
-  routing, and delegation
+- stable config surfaces for audit, context injection, approval, budget, routing, and delegation
 - durable evidence that those components can emit or consume
 
 Why it matters:
 
 - this is the clean path to "more agency" without forking every harness
 - it keeps Fireline aligned with the ACP SDK's native composition model
+- the conductor proxy chain is also the suspend/resume seam once Orchestration lands — components that pause mid-effect can persist their continuation through the durable log and resume on `wake`
 
-### 5. External auth and credential seam
+### 5. Tools — portable references with `credential_ref` indirection
 
-Fireline needs a clear contract for credentials it does not own:
+Fireline already has Tools as a strong primitive (MCP injection via topology, `PeerComponent`, `SmitheryComponent`, conductor proxy bridges). The remaining gap is **portable references**:
 
-- capability or topology inputs should reference credential ids, paths, or
-  scopes rather than raw secrets
-- conductor-injected MCP/tool bridges should be able to resolve fresh auth
-  headers at call time
-- runtimes should avoid becoming credential vaults
+- launch specs should reference tool bundles or individual tool refs by name, not bake them into spawn arguments
+- each tool ref carries a `credential_ref` pointer (secret store path, environment binding, per-session OAuth token)
+- credentials resolve at call time, not spawn time
+- runtimes never become credential vaults
 
 Why it matters:
 
-- this is the substrate needed for agent identity/auth stories without turning
-  Fireline into `agent.pw`
-- it keeps the security boundary compatible with the managed-agents direction:
-  session outside the harness, harness outside the sandbox, credentials outside
-  generated-code environments
+- this is the substrate needed for agent identity/auth stories without turning Fireline into `agent.pw`
+- it keeps the security boundary compatible with the managed-agents direction: session outside the harness, harness outside the sandbox, credentials outside generated-code environments
 
-### 6. Portable execution inputs
+Owned by slice 17 (capability profiles, reframed as portable Tools references).
+
+### 6. Resources — `[{source_ref, mount_path}]` (currently MISSING)
 
 Fireline needs launch inputs that survive runtime changes:
 
-- stable references for workspace source
-- stable references for capability/profile input
+- `resources: Vec<ResourceRef>` field on the launch spec
+- pluggable `ResourceMounter` implementations for local path, git remote, S3, GCS
 - topology and policy defaults that can travel with a run
-- helper file APIs and sync strategies hidden behind those references
 
 Why it matters:
 
 - the product layer needs a way to say "same logical work, different hands"
-- this is more important than prematurely making `Workspace` or
-  `CapabilityProfile` into heavy Fireline-owned product systems
+- the previous "Workspace product object" framing was the wrong level of abstraction; the Anthropic Resources primitive collapses it to a launch-spec field with pluggable mounters
+- this is dramatically smaller than a product object — a week of refactor work, not a slice
+
+See [`../explorations/managed-agents-mapping.md`](../explorations/managed-agents-mapping.md) §"Resources" for the full primitive analysis. Owned by slice 15 (rewritten as a Resources refactor) with a possible head start from slice 13c (Docker provider needs to mount *something* into containers anyway).
 
 ## What This Means For `Session`, `Workspace`, and `CapabilityProfile`
 
@@ -263,92 +264,34 @@ unlocking those product stories.
 
 ## Recommended Slice Ordering
 
-If the goal is to maximize downstream product leverage while keeping Fireline's
-scope disciplined, the next priorities should be:
+The full build order with rationales lives in [`../explorations/managed-agents-mapping.md`](../explorations/managed-agents-mapping.md) §"Build order and slice index". The summary:
 
-### 1. `13a` distributed runtime fabric first cut
+| Order | Slice | Primitive | Status |
+|---|---|---|---|
+| 1 | `13c` Docker provider via bollard | Sandbox (depth) | In flight |
+| 2 | `14` Session as canonical read surface | Session (closes the schema gap) | Doc planned, can start in parallel with 13c |
+| 3 | `15` Resources refactor (replaces "workspace object") | Resources (closes the gap) | Small refactor, can run in parallel |
+| 4 | `18` Orchestration and the `wake` primitive **(NEW)** | Orchestration (closes the gap) | The unblocker — depends on 14 |
+| 5 | `16` Out-of-band approvals as a `wake` consumer | Orchestration (first consumer) | Depends on 18 |
+| 6 | `17` Capability profiles as portable Tools references | Tools (closes the portability gap) | Independent |
+| 7+ | Component depth (richer approval, budget, routing, delegation) | Tools / Harness composition | Ongoing additive work |
 
-Why first:
+### Slice 13a/13b — already shipped
 
-- it defines the environment-level runtime contract
-- it is the prerequisite for remote, browser, and mobile product flows
+`13a` (control plane runtime API and external durable-stream bootstrap) and `13b` (push lifecycle and bearer auth) shipped in the slice 13 stack. These extend the **Sandbox** primitive and are the foundation everything else builds on.
 
-What it should prove:
+### Why slice 18 is new
 
-- thin control-plane lifecycle
-- runtime descriptors with advertised endpoints
-- registration and heartbeat
-- external durable-streams as a first-class deployment shape
-- no control-plane proxying of ACP/session payloads
+Slice 18 (Orchestration and the `wake` primitive) does not exist in the previous slice plan. It was identified by the managed-agents primitive mapping as the largest single missing primitive. It is sequenced after slice 14 because `wake` needs the canonical read schema to know how to restore a runtime to its last state, and after slice 13c so the cold-start path is exercised against a non-local provider before the scheduler has to rely on it.
 
-### 2. `13b` mixed local + Docker runtime fabric
+### Numbering note
 
-Why next:
+The execution doc filenames `16-capability-profiles.md` and `17-out-of-band-approvals.md` were created in conceptual order (capability profiles first, then approvals) but the build order above puts approvals (slice 16) before capability profiles (slice 17). Two options:
 
-- it is the first real proof that the contract survives beyond local-only mode
-- it forces readiness, registration, and shared durable-stream assumptions to
-  become real
+- **Option A: rename files** — `git mv docs/execution/17-out-of-band-approvals.md docs/execution/16-out-of-band-approvals.md` and the reverse for capability profiles. Cleanest long-term. Cost: link updates in five or six docs.
+- **Option B: keep filenames stable, document the mismatch** — leave the file names alone and have `managed-agents-mapping.md` be the canonical source of truth for the build order. Cost: ongoing low-level confusion.
 
-What it should prove:
-
-- `DockerProvider`
-- one coherent mixed-provider environment
-- shared durable-streams deployment across runtimes
-- control-plane-backed discovery that works for non-local execution
-
-### 3. `14` session product surface, reframed as a Fireline read surface
-
-Why now:
-
-- Fireline already has real durable session substrate
-- the missing piece is a stable read contract that downstream products can rely
-  on
-
-What it should prove:
-
-- sessions can be listed, inspected, and reopened from durable state
-- transcript/history/artifact views derive from stable records
-- browser/mobile control planes do not need bespoke runtime scraping
-
-### 4. `16` out-of-band approvals and serviceable waits
-
-Why now:
-
-- it is one of the strongest differentiated workflows unlocked by the substrate
-- it is the minimum needed for trustworthy background agents
-
-What it should prove:
-
-- durable pending permission state
-- resolution after the original interactive client is gone
-- resumed work from durable evidence rather than a held socket
-
-### 5. `15` and `17`, reframed as portable references before rich product objects
-
-Why after the runtime/session surfaces:
-
-- the product layer needs portable inputs
-- Fireline does not yet need to own a heavy profile/workspace database model
-
-What they should prove:
-
-- capability refs rather than raw secret injection
-- workspace refs rather than ad hoc local-path assumptions
-- topology/policy defaults that can travel with a run
-
-### 6. Only then deepen policy, auth, and routing components
-
-Why later:
-
-- these are high leverage only after the underlying runtime, state, and wait
-  surfaces are stable
-
-What this should include:
-
-- stronger approval components
-- stronger budget components
-- richer credential-resolution bridges
-- richer service/delegation routing components
+This decision is deferred until the slice doc rewrites land (so we can rename and rewrite in the same commit if we go with Option A). The doc audit at [`../explorations/doc-staleness-audit.md`](../explorations/doc-staleness-audit.md) flags this in its "numbering note" section.
 
 ## What To De-Emphasize
 
