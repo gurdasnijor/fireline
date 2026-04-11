@@ -40,14 +40,14 @@ This doc does **not** propose new primitives that aren't in the Anthropic framew
 
 | # | Primitive | Interface (pseudocode) | Satisfied by | Fireline status |
 |---|---|---|---|---|
-| 1 | **Session** | `getSession(id) → (Session, Event[])`; `getEvents(id) → PendingEvent[]`; `emitEvent(id, event)` | Any append-only log consumed in order from any event point with idempotent appends | **Mostly strong; idempotent-append clause still pending** (append order and consumer surfaces are live; the "accepts idempotent appends" contract test at `tests/managed_agent_session.rs:232` is `#[ignore]` because the durable-streams idempotency semantics have not been pinned — see §1 below) |
-| 2 | **Orchestration** | `wake(session_id) → void` | Any scheduler that can call a function with an ID and retry on failure | **Compositionally correct on the Rust side, not yet product-ready or TS-owned** (the Rust-side composition reduction is covered by the acceptance contract in `tests/managed_agent_primitives_suite.rs` line 128; the TypeScript client surface `resume(sessionId)` is not live yet and the orchestration round-trip tests in `tests/managed_agent_orchestration.rs` at lines 78, 116, 151 are still `#[ignore]`. See §2 below) |
+| 1 | **Session** | `getSession(id) → (Session, Event[])`; `getEvents(id) → PendingEvent[]`; `emitEvent(id, event)` | Any append-only log consumed in order from any event point with idempotent appends | **Strong on live Rust-side invariants; slice 14 read-surface work remains** (all five managed-agent Session clauses are live in `tests/managed_agent_session.rs:52`, `:126`, `:213`, `:415`, and `:523`; the remaining work is canonical row schema + TS read-surface hardening, not Session semantics — see §1 below) |
+| 2 | **Orchestration** | `wake(session_id) → void` | Any scheduler that can call a function with an ID and retry on failure | **Compositionally correct on the Rust side; TS/client surface still pending** (the cold-start acceptance contract is live at `tests/managed_agent_primitives_suite.rs:132`, and the live-runtime no-op / concurrent-resume / subscriber-loop proofs are live at `tests/managed_agent_orchestration.rs:84`, `:161`, and `:249`; `@fireline/client` still does not ship `resume(sessionId)` — see §2 below) |
 | 3 | **Harness** | `yield Effect<T> → EffectResult<T>` | Any loop that yields effects and appends progress to the Session | **Partial** (by design; durable suspend/resume also satisfied via composition once Orchestration is wired up) |
 | 4 | **Sandbox** | `provision({resources}) → execute(name, input) → String` | Any executor configured once and called many times as a tool | **Strong** |
-| 5 | **Resources** | `[{source_ref, mount_path}]` | Any object store the container can fetch from by reference | **Component layer green, end-to-end still pending** (ACP fs interception is pure composition and the component tests in `tests/managed_agent_primitives_suite.rs` pass; the shell-visible / ACP-fs-interception / cross-runtime end-to-end tests in `tests/managed_agent_resources.rs` at lines 150, 187, 219 are still `#[ignore]`. Physical mounts for shell-based agents also still need slice 15 — see §5) |
-| 6 | **Tools** | `{name, description, input_schema}` | Any capability describable as a name and input shape | **Component layer present, live contract not yet covered** (both Anthropic-contract tests in `tests/managed_agent_tools.rs` at lines 51 and 84 are `#[ignore]`; no live invariant proves the schema-only or transport-agnostic contracts against a running runtime) |
+| 5 | **Resources** | `[{source_ref, mount_path}]` | Any object store the container can fetch from by reference | **Strong on ACP-fs and component-layer mounts; Docker-scoped shell-mount proof stays external** (`managed_agent_resources_physical_mount_acceptance_contract`, `managed_agent_resources_fs_backend_acceptance_contract`, and `managed_agent_resources_fs_backend_component_test` are live at `tests/managed_agent_primitives_suite.rs:249`, `:308`, and `:369`; runtime-level fs-backend and cross-runtime stream-backed file tests are live at `tests/managed_agent_resources.rs:195` and `:287`; the only ignored row is the intentional Docker-scoped cross-reference marker at `tests/managed_agent_resources.rs:154` / `tests/managed_agent_primitives_suite.rs:290` — see §5) |
+| 6 | **Tools** | `{name, description, input_schema}` | Any capability describable as a name and input shape | **Strong on live Rust-side descriptor invariants; portable refs still pending** (schema-only, transport-agnostic, and deterministic first-attach-wins coverage is live at `tests/managed_agent_tools.rs:63`, `:230`, and `:389`; the remaining work is launch-spec portability and call-time credential resolution — see §6 below) |
 
-**One-line summary:** Sandbox is the strongest today — it has live `provision` + multi-execute tests (`tests/managed_agent_sandbox.rs` lines 54, 105). Session has live append-order tests but its "accepts idempotent appends" clause is still pending because the durable-streams idempotency semantics have not been pinned (`tests/managed_agent_session.rs` line 232). Harness is honestly partial: the real missing piece is the approval-gate-based durable suspend/resume round trip (`tests/managed_agent_harness.rs` line 239). Tools has a component layer but no live Anthropic-contract test (`tests/managed_agent_tools.rs` lines 51, 84 both `#[ignore]`). Orchestration is compositionally correct on the Rust side but not yet product-ready or TS-owned — the `resume(sessionId)` client surface is not live. Resources has a green component layer but end-to-end shell-visible / ACP-fs-interception / cross-runtime tests are still pending (`tests/managed_agent_resources.rs` lines 150, 187, 219), and physical mounts for shell-based agents still need slice 15. **Net result: the substrate has no remaining "primitive-sized" gaps, but several of the acceptance bars below are still open — the targeted additions fold into the existing slice plan.**
+**One-line summary:** Sandbox remains the strongest operational primitive (`tests/managed_agent_sandbox.rs:58`, `:109`, `:185`). Session is now fully green on the Rust-side managed-agent invariants (`tests/managed_agent_session.rs:52`, `:126`, `:213`, `:415`, `:523`), with slice 14 still owning canonical row schema + TS read-surface hardening. Harness is still honestly partial: the missing seam is the durable suspend/resume round trip at `tests/managed_agent_harness.rs:326`. Tools now have live schema-only / transport-agnostic / collision invariants (`tests/managed_agent_tools.rs:63`, `:230`, `:389`). Orchestration has live cold-start / no-op / race / subscriber-loop coverage on the Rust side (`tests/managed_agent_primitives_suite.rs:132`; `tests/managed_agent_orchestration.rs:84`, `:161`, `:249`), but `@fireline/client` still does not ship `resume(sessionId)`. Resources are live at the component layer and for ACP-fs / cross-runtime stream-backed file behavior (`tests/managed_agent_primitives_suite.rs:249`, `:308`, `:369`; `tests/managed_agent_resources.rs:195`, `:287`); the remaining ignored mount row is an intentional Docker-scoped cross-reference marker, not pending local-runtime work (`tests/managed_agent_resources.rs:154`; `tests/managed_agent_primitives_suite.rs:290`). **Net result: the remaining primitive-level gap is the Harness durable suspend/resume seam plus downstream TS/product-facing surfaces, not missing substrate basics.**
 
 ## Fireline as combinators over the primitives
 
@@ -214,7 +214,7 @@ When proposing a new Fireline feature, run it through this test:
 
 This is also the test for whether a feature is *too small* to belong in Fireline. If a proposed component is "just `mapEffect(addHeader)`", that's a one-liner; it's a configuration, not a component. Fireline ships components that have meaningful internal state or non-trivial composition; one-liners belong in user code.
 
-## 1. Session — Mostly strong (idempotent-append clause still pending)
+## 1. Session — Strong on live invariants; slice 14 read surface remains
 
 ### Anthropic interface
 
@@ -243,10 +243,18 @@ The pieces:
 
 No substrate-shape gap. The persistence tier exists, the replay protocol exists, the producer and at least two consumer kinds exist, the architectural role is committed.
 
-The remaining work on the acceptance side is:
+The Rust managed-agent suite now covers the five concrete Session clauses Anthropic cares about:
 
-1. **Pinning the idempotent-append contract.** Anthropic's Session primitive explicitly says "accepts idempotent appends"; Fireline has not yet pinned down whether that means producer-name+offset dedup, entity-key upsert, or at-least-once with consumer-side dedup. The contract test at `tests/managed_agent_session.rs:232` (`session_idempotent_append_under_retry`) is `#[ignore]` waiting on that decision.
-2. **Stabilizing the row schema** so that downstream products can read the same Session events without forking — that's slice 14 in the rewritten priorities, framed as "a stable read contract over durable state" rather than "session as a product object."
+1. **Append-only replay from offset 0** — `tests/managed_agent_session.rs:52`
+2. **Durability across runtime death** — `tests/managed_agent_session.rs:126`
+3. **Replay from an arbitrary captured offset** — `tests/managed_agent_session.rs:213`
+4. **Idempotent append under retry** — `tests/managed_agent_session.rs:415`
+5. **Materialized-vs-raw agreement** — `tests/managed_agent_session.rs:523`
+
+The remaining work is now about the **read surface**, not the Session primitive itself:
+
+1. **Stabilizing the canonical row schema** so downstream products can read the same Session events without forking — slice 14's main job.
+2. **Surfacing replay/catch-up semantics ergonomically in TypeScript** so downstream consumers do not have to reverse-engineer the persistence protocol from Rust internals.
 
 ### How existing slices contribute
 
@@ -534,7 +542,7 @@ Once `FsBackendComponent` ships, the `SessionLogFileBackend` special case become
 
 **A cross-runtime virtual filesystem, for free, built on the existing durable-streams infrastructure.** No new primitive, no shared storage other than the stream that's already persistent. This is the kind of composition win that makes the primitive algebra worth using — features fall out that weren't designed in.
 
-## 6. Tools — Component layer present, live contract not yet covered
+## 6. Tools — Strong on live descriptor invariants; portable refs still pending
 
 ### Anthropic interface
 
@@ -557,7 +565,14 @@ The transport is open: any MCP server, any custom Rust tool, any host-side bridg
 
 ### Gap
 
-No substrate-level gap — the topology component model is arguably Fireline's most flexible primitive because it lets components compose, transform, and observe each other's tool registrations. But the live-invariant coverage is still thin: both Anthropic-contract tests in `tests/managed_agent_tools.rs` at lines 51 and 84 are `#[ignore]`, so the "schema-only tool descriptor" and "transport-agnostic registration" contracts are not yet proven against a running runtime. The component-level code in `fireline-components/src/tools.rs` exists, but there is no live test that exercises it end-to-end via an ACP init effect. Closing this is a test-harness problem, not a substrate problem.
+No substrate-level gap. The descriptor-level invariants are now live against a running runtime:
+
+- **Schema-only descriptor surface** — `tests/managed_agent_tools.rs:63`
+- **Transport-agnostic registration without wire leakage** — `tests/managed_agent_tools.rs:230`
+- **Deterministic first-attach-wins collision rule** — `tests/managed_agent_tools.rs:389`
+- **Acceptance-level schema-only sibling in the primitives suite** — `tests/managed_agent_primitives_suite.rs:430`
+
+That means the conductor/tooling layer is already proving the Anthropic wire contract on the Rust side. The remaining work is portability and credential indirection, not descriptor correctness.
 
 The remaining work is **portable references** — letting a run carry "I want these tools mounted, fetched from these credential sources" rather than baking the tool list into the spawn arguments. That's slice 17 (capability profiles), reframed as:
 
@@ -582,16 +597,16 @@ An earlier version of this doc said Orchestration and Resources were the two rea
 
 ### What's actually missing, sorted by size
 
-**Small Rust additions (slice 15 scope, ~1.5 weeks):**
+**Small Rust additions / hardening:**
 
-- `ResourceMounter` trait + `LocalPathMounter` + `GitRemoteMounter` for physical mounts at provision time
-- `FsBackendComponent` as a built-in conductor component with `FileBackend` trait
-- `LocalFileBackend` + `SessionLogFileBackend` as first two backend implementations
+- `GitRemoteMounter` and any other non-local `ResourceMounter`s beyond the already-live `LocalPathMounter`
+- `ApprovalGateComponent` rebuild-from-log behavior to close `tests/managed_agent_harness.rs:326`
 
 **Small additions that fold into other slices:**
 
-- Durable `runtimeSpec` persistence for `resume` cold-start (slice 14, Session read surface)
-- `ApprovalGateComponent` rebuild-from-log behavior (slice 16, first worked Orchestration consumer)
+- Canonical row schema + TS replay/catch-up surface (slice 14, Session read surface)
+- `@fireline/client` `resume(sessionId)` export / TS ownership of the orchestration helper
+- Portable `CapabilityRef` / `credential_ref` launch inputs (slice 17)
 
 **TS API surface work:**
 
@@ -600,7 +615,7 @@ An earlier version of this doc said Orchestration and Resources were the two rea
 
 **Zero new primitives. Zero new slices. Zero new control-plane endpoints.**
 
-That's the whole remaining *shape* gap list — nothing the substrate is missing at the primitive level. The acceptance bars below show where the *live coverage* is still thin (pinning the durable-streams idempotency contract for Session, the schema-only init-inspection helper for Tools, the approval-gate durable suspend/resume round trip for Harness, the TS `resume(sessionId)` helper for Orchestration, the end-to-end shell-visible / fs-backend / cross-runtime tests for Resources). Once both the targeted additions above and the pending acceptance-bar items land, the substrate is complete; everything else is composition over the seven combinators plus product-layer work that belongs in Flamecast, not in the substrate.
+That's the whole remaining *shape* gap list — nothing the substrate is missing at the primitive level. The acceptance bars below show where the *live coverage* is still genuinely thin: the approval-gate durable suspend/resume round trip for Harness, the TypeScript-owned `resume(sessionId)` helper for Orchestration, and non-local mounters beyond the already-live local path story. The Docker-scoped shell-visible mount check remains intentionally external to the local-runtime managed-agent suite. Once those targeted additions land, the substrate is complete; everything else is composition over the seven combinators plus product-layer work that belongs in Flamecast, not in the substrate.
 
 ## Build order and slice index
 
@@ -610,12 +625,12 @@ This is the operational plan: which slices ship in what order to close the gaps 
 
 | Primitive | Status | Slices that contribute | Status of those slices |
 |---|---|---|---|
-| **Session** | Mostly strong; idempotent-append clause pending | `14` Session as canonical read surface (includes durable `runtimeSpec` persistence for `resume`); pin the durable-streams idempotency contract | Doc planned, implementation not started; idempotent-append semantics not yet pinned (`tests/managed_agent_session.rs:232`) |
+| **Session** | Strong on live invariants; slice 14 read surface remains | `14` Session as canonical read surface | The five Rust-side Session clauses are live at `tests/managed_agent_session.rs:52`, `:126`, `:213`, `:415`, and `:523`; slice 14 still owns canonical row schema + TS replay/catch-up surface |
 | **Sandbox** | **Strong** (today's strongest — live `provision` + multi-execute tests) | `13a` control-plane runtime API; `13b` push lifecycle and auth; `13c` first remote provider (Docker via bollard) | 13a + 13b shipped on `main`; 13c in flight in workspace 7 |
-| **Tools** | Component layer present, live contract not yet covered | `17` capability profiles as portable tool references; plus an ACP init-inspection test helper | Doc planned; both Anthropic-contract tests in `tests/managed_agent_tools.rs` (lines 51, 84) still `#[ignore]` |
-| **Harness** | Honestly partial | `16` approval component rebuild behavior | The approval-gate-based durable suspend/resume round trip is the real missing piece — `tests/managed_agent_harness.rs:239` is `#[ignore]` |
-| **Orchestration** | Compositionally correct on the Rust side, not yet product-ready or TS-owned | `16` approval component rebuild; `14` durable spec persistence; `@fireline/client` ships the `resume(sessionId)` helper | Rust-side composition contract green; TS `resume(sessionId)` not live; all three tests in `tests/managed_agent_orchestration.rs` still `#[ignore]` |
-| **Resources** | Component layer green, end-to-end still pending | `15` replaced by "Resources: physical `ResourceMounter` + `FsBackendComponent`" | Component tests in `tests/managed_agent_primitives_suite.rs` pass; end-to-end tests in `tests/managed_agent_resources.rs` at lines 150, 187, 219 still `#[ignore]` |
+| **Tools** | Strong on live descriptor invariants; portable refs still pending | `17` capability profiles as portable tool references | Schema-only / transport-agnostic / deterministic-collision invariants are live at `tests/managed_agent_tools.rs:63`, `:230`, and `:389`; slice 17 remains for launch-spec portability and call-time credential resolution |
+| **Harness** | Honestly partial | `16` approval component rebuild behavior | The approval-gate-based durable suspend/resume round trip is the real missing piece — `tests/managed_agent_harness.rs:326` is `#[ignore]` |
+| **Orchestration** | Compositionally correct on the Rust side; TS helper still pending | `16` approval component rebuild; `14` canonical read surface; `@fireline/client` ships the `resume(sessionId)` helper | The cold-start acceptance contract is live at `tests/managed_agent_primitives_suite.rs:132`; the live-runtime no-op / concurrent-resume / subscriber-loop proofs are live at `tests/managed_agent_orchestration.rs:84`, `:161`, and `:249`; TS `resume(sessionId)` is still not shipped |
+| **Resources** | Strong on ACP-fs and component-layer mounts; Docker shell-mount proof intentionally external | `15` depth work for additional mounters and documentation | Component-layer mount / fs-backend proofs are live at `tests/managed_agent_primitives_suite.rs:249`, `:308`, and `:369`; launched-runtime fs-backend + cross-runtime stream-backed file proofs are live at `tests/managed_agent_resources.rs:195` and `:287`; only the Docker-scoped shell-visible mount marker stays ignored at `tests/managed_agent_resources.rs:154` / `tests/managed_agent_primitives_suite.rs:290` |
 
 ### Build order, with rationales
 
@@ -623,15 +638,15 @@ The order is chosen to maximize unblocking — every slice enables at least one 
 
 **1. `13c` Docker provider (Sandbox depth)** — *in flight, workspace 7*
 
-First non-local provider. Forces the push lifecycle from 13b to be exercised end-to-end against a real container. Establishes the `RuntimeProvider` trait as the universal Sandbox boundary. May ship a minimal `LocalPathMounter` as a side effect (preview of slice 15).
+First non-local provider. Forces the push lifecycle from 13b to be exercised end-to-end against a real container. Establishes the `RuntimeProvider` trait as the universal Sandbox boundary. It also owns the real container-filesystem proof that the shell-visible mount invariant is cross-referenced against from the local-runtime managed-agent suite.
 
-**2. `14` Session as canonical read surface + durable runtime spec** — *next, can start in parallel with 13c*
+**2. `14` Session as canonical read surface** — *next, can start in parallel with 13c*
 
-Stabilizes the row schema downstream products read from the durable state stream: `runtime`, `session`, `prompt_turn`, `permission`, `terminal`, `chunks`, child-session edges. **Also persists the `runtimeSpec` used at provision time** as an event on the stream, so a future `resume` subscriber can cold-start the runtime without an external catalog. Ships the TypeScript materialization layer that downstream consumers embed. Does not depend on 13c — they're orthogonal lanes.
+Stabilizes the row schema downstream products read from the durable state stream: `runtime`, `session`, `prompt_turn`, `permission`, `terminal`, `chunks`, child-session edges. The `runtimeSpec` persistence needed for `resume` is already live; slice 14 now hardens the read contract and ships the TypeScript materialization layer that downstream consumers embed. Does not depend on 13c — they're orthogonal lanes.
 
-**3. `15` Resources refactor** — *small, ~1 week, can run in parallel with 13c and 14*
+**3. `15` Resources depth** — *small, can run in parallel with 13c and 14*
 
-Rewrite slice 15 from "Workspace object" to "Resources primitive." Adds `resources: Vec<ResourceRef>` to `CreateRuntimeSpec`, defines `ResourceMounter` trait, ships `LocalPathMounter` and `GitRemoteMounter` as the first two implementations. S3 and GCS mounters land later.
+Continue the Resources rewrite from "Workspace object" to "Resources primitive." `resources: Vec<ResourceRef>`, `ResourceMounter`, `LocalPathMounter`, and the fs-backend path are already live; the remaining work is `GitRemoteMounter`, additional mounters, and clearer provider/mounter contract documentation. S3 and GCS mounters land later.
 
 **4. `16` Out-of-band approvals + `resume` helper** — *first real Orchestration consumer*
 
@@ -667,14 +682,14 @@ These define what it means for a primitive to be "complete" enough to call itsel
 ### Session — acceptance bar
 
 - [x] Append-only durable log per runtime, replayable from any offset (durable-streams + `DurableStreamTracer`)
-- [ ] Idempotent appends guaranteed by the producer protocol — pending because the durable-streams idempotency semantics (producer-name+offset dedup vs. entity-key upsert vs. at-least-once with consumer dedup) have not been pinned yet; the contract test is `#[ignore]` at `tests/managed_agent_session.rs:232` (`session_idempotent_append_under_retry`)
+- [x] Idempotent append under retry is pinned to the durable-streams producer protocol and proven live at `tests/managed_agent_session.rs:415` (`session_idempotent_append_under_retry`)
 - [x] At least one runtime-local consumer (`SessionIndex`, `RuntimeMaterializer`)
 - [x] At least one external consumer (`packages/state` `StreamDB`)
 - [ ] Canonical row schema documented and stable (slice 14)
 - [ ] TypeScript materialization layer with replay/catch-up semantics that downstream products can embed (slice 14)
 - [ ] Distinction between hot ACP traffic and cold read-oriented state called out in TS surface (slice 14)
 
-**Status:** ~60% complete. Slice 14 closes most of the remaining items; the idempotent-append clause is gated on pinning the durable-streams idempotency contract first.
+**Status:** Strong on live invariants. Slice 14 still matters, but for canonical row schema and TS replay/catch-up ergonomics, not for the Session primitive's core semantics.
 
 ### Sandbox — acceptance bar
 
@@ -695,12 +710,13 @@ These define what it means for a primitive to be "complete" enough to call itsel
 - [x] Tools are described by `{name, description, input_schema}` (MCP-shape) at the conductor level
 - [x] Topology component model lets tools be injected per session (`PeerComponent`, `SmitheryComponent`)
 - [x] Conductor proxy chain lets host code intercept and wrap tool calls
-- [ ] Live invariant that the init effect surfaces tool descriptors as `{name, description, input_schema}` only, with no transport or credential leakage — pending, `tests/managed_agent_tools.rs:51` (`tools_schema_only_contract`) is `#[ignore]` waiting on an ACP init-inspection helper
-- [ ] Live invariant that same-name tools registered via different transports are collapsed to a single agent-visible entry with a deterministic resolution rule — pending, `tests/managed_agent_tools.rs:84` (`tools_transport_agnostic_registration`) is `#[ignore]` waiting on slice 17 and a documented collision rule
+- [x] Live invariant that the init effect surfaces tool descriptors as `{name, description, input_schema}` only, with no transport or credential leakage — `tests/managed_agent_tools.rs:63` (`tools_schema_only_contract`) and `tests/managed_agent_primitives_suite.rs:430` (`managed_agent_tools_schema_only_acceptance_contract`)
+- [x] Live invariant that differently transported capabilities project the same schema-only wire shape with no transport or credential leakage — `tests/managed_agent_tools.rs:230` (`tools_transport_agnostic_registration`)
+- [x] Live invariant that same-name collisions resolve deterministically via first-attach-wins — `tests/managed_agent_tools.rs:389` (`tools_first_attach_wins_on_name_collision`)
 - [ ] Portable tool references in launch spec, with `credential_ref` indirection (slice 17)
 - [ ] Credential resolution at call time, not spawn time (slice 17)
 
-**Status:** ~50% complete. Component infrastructure is in place but two live Anthropic-contract invariants are still `#[ignore]`; slice 17 and the init-inspection test helper together close the remaining items.
+**Status:** Strong on Rust-side descriptor invariants. Slice 17 still matters for portable launch inputs and call-time credential resolution, but the Anthropic wire contract is already live.
 
 ### Harness — acceptance bar
 
@@ -708,7 +724,7 @@ These define what it means for a primitive to be "complete" enough to call itsel
 - [x] Topology composition lets components wrap, transform, observe, or substitute effects
 - [x] All harness progress is appended to the durable session log via `DurableStreamTracer` (`tests/managed_agent_harness.rs:61` + line 133 cover append and stable ordering)
 - [x] `LoadCoordinatorComponent` rebuilds ACP session state from the durable log on `session/load`
-- [ ] Conductor components can pause mid-effect and resume across runtime death by writing the pause as an event and rebuilding via `session/load` — pending, `tests/managed_agent_harness.rs:239` (`harness_durable_suspend_resume_round_trip`) is `#[ignore]` waiting on slice 16's `ApprovalGateComponent` rebuild-from-log behavior and a scripted testy harness that reliably triggers the approval gate. This is the real missing piece of Harness today.
+- [ ] Conductor components can pause mid-effect and resume across runtime death by writing the pause as an event and rebuilding via `session/load` — pending, `tests/managed_agent_harness.rs:326` (`harness_durable_suspend_resume_round_trip`) is `#[ignore]` waiting on slice 16's `ApprovalGateComponent` rebuild-from-log behavior and a scripted testy harness that reliably triggers the approval gate. This is the real missing piece of Harness today.
 - [ ] Documented contract for what conductor components can do at the suspend/resume seam (closed by slice 16 worked example)
 
 **Status:** Honestly partial. The append/order and load-coordinator halves have live coverage, but the approval-gate-based suspend/resume round trip — the Anthropic contract that makes Harness meaningful for long-running work — has no live invariant yet. Slice 16 closes it.
@@ -721,32 +737,33 @@ Orchestration is satisfied by composition of existing primitives (see §2 above)
 - [x] `openStream` lets any process subscribe to a runtime's Session log
 - [x] `LoadCoordinatorComponent` rebuilds ACP session state from the durable log
 - [x] `RuntimeHost::create` cold-starts a runtime against a spec
-- [x] Rust-side composition reduction has a live acceptance contract at `tests/managed_agent_primitives_suite.rs:128` (`managed_agent_orchestration_acceptance_contract`)
-- [ ] `runtimeSpec` is durably persisted as a Session event at provision time so `resume` can read it back (closed by slice 14)
-- [ ] `resume(sessionId)` helper shipped in `@fireline/client` — not live yet; this is the "not product-ready or TS-owned" half of Orchestration. The resume-on-live-runtime and concurrent-resume tests at `tests/managed_agent_orchestration.rs:78` and `:116` are `#[ignore]` waiting on the TS API surface work tracked in `typescript-functional-api-proposal.md`.
-- [ ] At least one worked example of a "resumer" subscriber loop, with documented coordination semantics for multiple concurrent subscribers — pending, `tests/managed_agent_orchestration.rs:151` (`orchestration_subscriber_loop_drives_pause_release_cycle`) is `#[ignore]` waiting on slice 16 `ApprovalGateComponent` rebuild behavior
+- [x] Rust-side composition reduction has a live acceptance contract at `tests/managed_agent_primitives_suite.rs:132` (`managed_agent_orchestration_acceptance_contract`)
+- [x] `runtimeSpec` is durably persisted as a Session event at provision time so `resume` can read it back — exercised by `reconstruct_runtime_spec_from_log` inside `tests/managed_agent_primitives_suite.rs:132`
+- [ ] `resume(sessionId)` helper shipped in `@fireline/client` — not live yet; this is the "not product-ready or TS-owned" half of Orchestration
+- [x] Live runtime no-op / concurrent-resume safety are covered at `tests/managed_agent_orchestration.rs:84` (`orchestration_resume_on_live_runtime_is_noop`) and `tests/managed_agent_orchestration.rs:161` (`orchestration_concurrent_resume_creates_single_runtime`)
+- [x] At least one worked example of a "resumer" subscriber loop, with coordination through the durable stream — `tests/managed_agent_orchestration.rs:249` (`orchestration_subscriber_loop_drives_pause_release_cycle`)
 - [ ] At least one consumer proves the full cycle end-to-end: component suspends → event appended → subscriber sees it → calls `resume` → runtime cold-starts if needed → `session/load` rebuilds → component releases the pause → agent advances (closed by slice 16)
 
-**Status:** Compositionally correct on the Rust side (acceptance contract green), but still not product-ready or TS-owned — the `resume(sessionId)` helper and the worked subscriber-loop example have not landed, and all three end-to-end orchestration tests in `tests/managed_agent_orchestration.rs` are `#[ignore]`. The remaining items are composition glue that falls out of slices 14 and 16 plus the TS API surface.
+**Status:** Strong on the Rust-side composition story. The remaining gap is product/API ownership: `@fireline/client` still does not expose `resume(sessionId)`, and the full "pause survives runtime death" cycle still depends on the pending Harness suspend/resume seam.
 
 ### Resources — acceptance bar
 
-The primitive splits into two halves (see §5); the bar covers both, and the coverage splits further into "component layer green" vs. "end-to-end still pending".
+The primitive splits into two halves (see §5); the bar covers both, and the coverage now splits into "live in the local-runtime suite" vs. "intentionally delegated to Docker-scoped coverage".
 
 **Physical mounts (for shell-based agents):**
 
-- [x] `resources: Vec<ResourceRef>` field and `ResourceMounter`-shaped physical-mount acceptance at the component layer — `tests/managed_agent_primitives_suite.rs:194` (`managed_agent_resources_physical_mount_acceptance_contract`) passes
-- [ ] Shell-visible physical mount proven end-to-end: a runtime mounts a resource and a shell tool call inside the runtime reads from the mounted path — pending, `tests/managed_agent_resources.rs:150` (`resources_physical_mount_is_shell_visible_inside_runtime`) is `#[ignore]` waiting on scripted testy + harness launch-spec support for `ResourceRef`
+- [x] `resources: Vec<ResourceRef>` field and `ResourceMounter`-shaped physical-mount acceptance at the component layer — `tests/managed_agent_primitives_suite.rs:249` (`managed_agent_resources_physical_mount_acceptance_contract`) passes
+- [ ] Shell-visible physical mount proven end-to-end inside a container filesystem — intentionally kept as a Docker-scoped cross-reference marker at `tests/managed_agent_resources.rs:154` (`resources_physical_mount_is_shell_visible_inside_runtime`) and `tests/managed_agent_primitives_suite.rs:290` (`managed_agent_resources_physical_mount_shell_visibility_contract`). Local runtimes have no container filesystem to prove this against; do not promote these stubs.
 - [ ] `GitRemoteMounter` implementation (slice 15)
 - [ ] Documented contract for how mounters interact with `RuntimeProvider::start()`
 
 **ACP fs interception (for ACP-native file ops and artifact capture):**
 
-- [x] `FileBackend` trait, `FsBackendComponent` in `fireline-components`, and `SessionLogFileBackend` covered at the component layer — `tests/managed_agent_primitives_suite.rs:254` (`managed_agent_resources_fs_backend_component_test`) passes
-- [ ] End-to-end test where an agent `fs/write_text_file`s through a launched runtime, the event lands on the Session log, and a subsequent read returns the same content — pending, `tests/managed_agent_resources.rs:187` (`resources_fs_backend_captures_write_as_durable_event`) is `#[ignore]` waiting on scripted testy and runtime launch-config wiring of the component
-- [ ] Cross-runtime virtual filesystem via `SessionLogFileBackend` (the elegant special case from §5) — pending, `tests/managed_agent_resources.rs:219` (`resources_session_log_backend_supports_cross_runtime_reads`) is `#[ignore]` waiting on `ControlPlaneHarness` support for two runtimes against a shared stream plus scripted testy
+- [x] `FileBackend` trait, `FsBackendComponent` in `fireline-components`, and `SessionLogFileBackend` covered at the component layer — `tests/managed_agent_primitives_suite.rs:369` (`managed_agent_resources_fs_backend_component_test`) passes
+- [x] End-to-end test where an agent `fs/write_text_file`s through a launched runtime and the event lands on the Session log — `tests/managed_agent_resources.rs:195` (`resources_fs_backend_captures_write_as_durable_event`) and `tests/managed_agent_primitives_suite.rs:308` (`managed_agent_resources_fs_backend_acceptance_contract`)
+- [x] Cross-runtime virtual filesystem via the stream-backed backend — `tests/managed_agent_resources.rs:287` (`resources_session_log_backend_supports_cross_runtime_reads`)
 
-**Status:** Component layer green on both halves; end-to-end acceptance pending on both halves. The second half is pure composition via the seven combinators, so the effort is significantly smaller than the first half. Combined total: ~1.5–2 weeks, owned by slice 15 rewrite with a probable `LocalPathMounter` head start from slice 13c and blocked on the scripted testy work for the end-to-end tests.
+**Status:** Strong on ACP-fs interception and component-layer physical mounts. The only intentionally ignored acceptance row is the Docker-scoped shell-visible mount proof, which stays external to the local-runtime managed-agent suite by design. Remaining work is additive depth: more mounters and clearer provider/mounter documentation.
 
 ## How to add a new slice
 
