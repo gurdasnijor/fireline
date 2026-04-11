@@ -9,8 +9,8 @@ use agent_client_protocol::{
 use agent_client_protocol_test::testy::TestyCommand;
 use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
-use fireline::bootstrap::{BootstrapConfig, start};
-use fireline_conductor::topology::TopologySpec;
+use fireline_runtime::bootstrap::{BootstrapConfig, start};
+use fireline_harness::TopologySpec;
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::sync::Arc;
@@ -175,7 +175,7 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
         agent_command: vec![testy_bin()],
         mounted_resources: Vec::new(),
         state_stream: Some(state_stream.clone()),
-        stream_storage: Some(fireline::stream_host::StreamStorageConfig::file_durable(
+        stream_storage: Some(fireline_session::StreamStorageConfig::file_durable(
             stream_data_dir.clone(),
         )),
         peer_directory_path: peer_directory_path.clone(),
@@ -198,7 +198,7 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
         agent_command: vec![testy_bin()],
         mounted_resources: Vec::new(),
         state_stream: Some(state_stream),
-        stream_storage: Some(fireline::stream_host::StreamStorageConfig::file_durable(
+        stream_storage: Some(fireline_session::StreamStorageConfig::file_durable(
             stream_data_dir,
         )),
         peer_directory_path,
@@ -299,7 +299,7 @@ async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not
         agent_command: vec![resumable_testy_bin()],
         mounted_resources: Vec::new(),
         state_stream: Some(state_stream.clone()),
-        stream_storage: Some(fireline::stream_host::StreamStorageConfig::file_durable(
+        stream_storage: Some(fireline_session::StreamStorageConfig::file_durable(
             stream_data_dir.clone(),
         )),
         peer_directory_path: peer_directory_path.clone(),
@@ -322,7 +322,7 @@ async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not
         agent_command: vec![resumable_testy_bin()],
         mounted_resources: Vec::new(),
         state_stream: Some(state_stream),
-        stream_storage: Some(fireline::stream_host::StreamStorageConfig::file_durable(
+        stream_storage: Some(fireline_session::StreamStorageConfig::file_durable(
             stream_data_dir,
         )),
         peer_directory_path,

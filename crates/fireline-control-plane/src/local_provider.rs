@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use fireline_conductor::runtime::{
+use fireline_runtime::{
     CreateRuntimeSpec, LocalRuntimeLauncher, ManagedRuntime, MountedResource, RuntimeDescriptor,
     RuntimeLaunch, RuntimeRegistry, RuntimeStatus,
 };

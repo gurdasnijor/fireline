@@ -6,15 +6,15 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use durable_streams::{Client as DsClient, Offset};
-use fireline::runtime_host::{
+use fireline_runtime::runtime_host::{
     CreateRuntimeSpec, RuntimeHost, RuntimeProviderKind, RuntimeProviderRequest, RuntimeStatus,
 };
-use fireline::runtime_registry::RuntimeRegistry;
-use fireline_conductor::runtime::LocalProvider;
-use fireline_conductor::runtime::{
+use fireline_runtime::RuntimeRegistry;
+use fireline_runtime::LocalProvider;
+use fireline_runtime::{
     Endpoint, ManagedRuntime, RuntimeHost as ConductorRuntimeHost, RuntimeLaunch, RuntimeManager,
 };
-use fireline_conductor::topology::TopologySpec;
+use fireline_harness::TopologySpec;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -127,7 +127,7 @@ async fn conductor_runtime_host_stays_starting_until_register_arrives() -> Resul
     let registered = runtime_host
         .register(
         &descriptor.runtime_key,
-        fireline_conductor::runtime::RuntimeRegistration {
+        fireline_runtime::RuntimeRegistration {
             runtime_id: descriptor.runtime_id.clone(),
             node_id: descriptor.node_id.clone(),
             provider: RuntimeProviderKind::Local,
@@ -146,13 +146,13 @@ async fn conductor_runtime_host_stays_starting_until_register_arrives() -> Resul
 struct FakeRuntimeLauncher;
 
 #[async_trait]
-impl fireline_conductor::runtime::LocalRuntimeLauncher for FakeRuntimeLauncher {
+impl fireline_runtime::LocalRuntimeLauncher for FakeRuntimeLauncher {
     async fn start_local_runtime(
         &self,
         spec: CreateRuntimeSpec,
         _runtime_key: String,
         _node_id: String,
-        _mounted_resources: Vec<fireline_conductor::runtime::MountedResource>,
+        _mounted_resources: Vec<fireline_runtime::MountedResource>,
     ) -> Result<RuntimeLaunch> {
         Ok(RuntimeLaunch::ready(
             format!("fireline:{}:fake", spec.name),

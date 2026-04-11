@@ -4,8 +4,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use fireline::runtime_host::{Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
-use fireline::runtime_registry::RuntimeRegistry;
+use fireline_runtime::runtime_host::{Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
+use fireline_runtime::RuntimeRegistry;
 use reqwest::StatusCode;
 use serde_json::json;
 use tokio::process::{Child, Command};

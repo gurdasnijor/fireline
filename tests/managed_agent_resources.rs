@@ -32,9 +32,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use fireline_components::fs_backend::{FileBackend, LocalFileBackend, RuntimeStreamFileBackend};
-use fireline_conductor::runtime::{LocalPathMounter, MountedResource, ResourceMounter, ResourceRef};
-use fireline_conductor::topology::{TopologyComponentSpec, TopologySpec};
+use fireline_resources::{FileBackend, LocalFileBackend, RuntimeStreamFileBackend};
+use fireline_runtime::{LocalPathMounter, MountedResource, ResourceMounter, ResourceRef};
+use fireline_harness::{TopologyComponentSpec, TopologySpec};
 use managed_agent_suite::{
     DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec, create_session,
     pending_contract, prompt_session, temp_path, testy_fs_bin, wait_for_event_count,

@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
-use fireline::stream_host::build_stream_router;
-use fireline_conductor::{build::build_subprocess_conductor, trace::DurableStreamTracer};
+use fireline_session::build_stream_router;
+use fireline_runtime::{build::build_subprocess_conductor, trace::DurableStreamTracer};
 use tokio::io::duplex;
 use tokio::net::TcpListener;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -45,7 +45,7 @@ async fn minimal_vertical_slice_prompts_and_emits_state_events() -> Result<()> {
 
     let (client_stream, conductor_stream) = duplex(16 * 1024);
     let conductor_task = tokio::spawn(async move {
-        fireline_conductor::transports::duplex::handle_duplex(conductor, conductor_stream).await
+        fireline_runtime::transports::duplex::handle_duplex(conductor, conductor_stream).await
     });
 
     let (client_read, client_write) = tokio::io::split(client_stream);

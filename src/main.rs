@@ -1,6 +1,6 @@
 //! Fireline CLI entry point.
 //!
-//! Parses CLI args, calls [`fireline::bootstrap::start`], waits for
+//! Parses CLI args, calls [`fireline_runtime::bootstrap::start`], waits for
 //! the shutdown signal, and exits. Should stay under ~50 lines.
 //!
 //! All bootstrap logic — wiring the stream server, the ACP host
@@ -10,12 +10,12 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use fireline::bootstrap::{self, BootstrapConfig};
-use fireline::control_plane_client::ControlPlaneClient;
-use fireline::runtime_host::{Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
-use fireline::runtime_registry::RuntimeRegistry;
-use fireline_conductor::runtime::{HeartbeatMetrics, MountedResource, RuntimeRegistration};
-use fireline_conductor::topology::TopologySpec;
+use fireline_runtime::bootstrap::{self, BootstrapConfig};
+use fireline_runtime::control_plane_client::ControlPlaneClient;
+use fireline_runtime::runtime_host::{Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
+use fireline_runtime::RuntimeRegistry;
+use fireline_runtime::{HeartbeatMetrics, MountedResource, RuntimeRegistration};
+use fireline_harness::TopologySpec;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -144,12 +144,12 @@ async fn run_direct_host(
     _mounted_resources: Vec<MountedResource>,
     registry: RuntimeRegistry,
 ) -> Result<()> {
-    let runtime_host = fireline::runtime_host::RuntimeHost::new(registry);
+    let runtime_host = fireline_runtime::runtime_host::RuntimeHost::new(registry);
     let descriptor = runtime_host
-        .create(fireline::runtime_host::CreateRuntimeSpec {
+        .create(fireline_runtime::runtime_host::CreateRuntimeSpec {
             runtime_key: None,
             node_id: None,
-            provider: fireline::runtime_host::RuntimeProviderRequest::Local,
+            provider: fireline_runtime::runtime_host::RuntimeProviderRequest::Local,
             host,
             port: cli.port,
             name: cli.name,
@@ -177,7 +177,7 @@ async fn run_managed_runtime(
 ) -> Result<()> {
     let peer_directory_path = match cli.peer_directory_path {
         Some(path) => path,
-        None => fireline_components::LocalPeerDirectory::default_path()?,
+        None => fireline_tools::LocalPeerDirectory::default_path()?,
     };
     let started_at_ms = now_ms();
     let handle = bootstrap::start(BootstrapConfig {

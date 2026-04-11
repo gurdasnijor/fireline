@@ -24,9 +24,9 @@ use agent_client_protocol::{
 };
 use anyhow::Result;
 use durable_streams::Client as DsClient;
-use fireline_components::fs_backend::{FsBackendComponent, LocalFileBackend};
-use fireline_conductor::runtime::{LocalPathMounter, ResourceMounter, ResourceRef};
-use fireline_conductor::topology::{TopologyComponentSpec, TopologySpec};
+use fireline_resources::{FsBackendComponent, LocalFileBackend};
+use fireline_runtime::{LocalPathMounter, ResourceMounter, ResourceRef};
+use fireline_harness::{TopologyComponentSpec, TopologySpec};
 use managed_agent_suite::{
     ControlPlaneHarness, ManagedAgentHarnessSpec, count_events, create_session, load_session,
     prompt_session, testy_fs_bin, testy_load_bin, wait_for_event_count,
@@ -150,7 +150,7 @@ async fn managed_agent_orchestration_acceptance_contract() -> Result<()> {
             last_step = Instant::now();
         }
 
-        let persisted = fireline::orchestration::reconstruct_runtime_spec_from_log(
+        let persisted = fireline_orchestration::reconstruct_runtime_spec_from_log(
             &runtime.state.url,
             &runtime.runtime_key,
         )
@@ -196,7 +196,7 @@ async fn managed_agent_orchestration_acceptance_contract() -> Result<()> {
             eprintln!("[timing] stop_runtime: {} ms", last_step.elapsed().as_millis());
             last_step = Instant::now();
         }
-        let resumed = fireline::orchestration::resume(
+        let resumed = fireline_orchestration::resume(
             &control_plane.http,
             &control_plane.base_url,
             &control_plane.shared_state_url(),
@@ -209,7 +209,7 @@ async fn managed_agent_orchestration_acceptance_contract() -> Result<()> {
         }
 
         assert_eq!(resumed.runtime_key, runtime.runtime_key);
-        assert_eq!(resumed.status, fireline::runtime_host::RuntimeStatus::Ready);
+        assert_eq!(resumed.status, fireline_runtime::runtime_host::RuntimeStatus::Ready);
         assert_ne!(
             resumed.runtime_id, runtime.runtime_id,
             "cold-start resume should produce a new runtime process identity"
@@ -272,7 +272,7 @@ async fn managed_agent_resources_physical_mount_acceptance_contract() -> Result<
         );
 
         let backend = LocalFileBackend::new(vec![mounted]);
-        let bytes = fireline_components::fs_backend::FileBackend::read(
+        let bytes = fireline_resources::FileBackend::read(
             &backend,
             PathBuf::from("/workspace/hello.txt").as_path(),
         )

@@ -27,7 +27,7 @@
 mod managed_agent_suite;
 
 use anyhow::{Context, Result};
-use fireline_conductor::topology::{TopologyComponentSpec, TopologySpec};
+use fireline_harness::{TopologyComponentSpec, TopologySpec};
 use managed_agent_suite::{
     DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec, create_session,
     wait_for_event_count,

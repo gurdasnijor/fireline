@@ -10,14 +10,14 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use axum::Router;
 use durable_streams::{Client as DsClient, Offset};
-use fireline::bootstrap::{BootstrapConfig, BootstrapHandle, start};
-use fireline::runtime_host::{RuntimeDescriptor, RuntimeStatus};
-use fireline_components::fs_backend::{FsOpRecord, RuntimeStreamFileRecord};
-use fireline_conductor::runtime::{
+use fireline_runtime::bootstrap::{BootstrapConfig, BootstrapHandle, start};
+use fireline_runtime::runtime_host::{RuntimeDescriptor, RuntimeStatus};
+use fireline_resources::{FsOpRecord, RuntimeStreamFileRecord};
+use fireline_runtime::{
     LocalPathMounter, PersistedRuntimeSpec, ResourceMounter, ResourceRef,
 };
-use fireline_conductor::session::SessionRecord;
-use fireline_conductor::topology::TopologySpec;
+use fireline_session::SessionRecord;
+use fireline_harness::TopologySpec;
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value as JsonValue, json};
 use tokio::process::{Child, Command as TokioCommand};
@@ -405,7 +405,7 @@ impl ControlPlaneHarness {
     /// Return the fully-qualified shared state stream URL for this
     /// harness — the same URL the control plane passes to its spawned
     /// runtimes as `FIRELINE_ADVERTISED_STATE_STREAM_URL`. Callers of
-    /// `fireline::orchestration::resume` must pass this explicitly
+    /// `fireline_orchestration::resume` must pass this explicitly
     /// (slice: "explicit shared-state endpoint surface").
     pub(crate) fn shared_state_url(&self) -> String {
         format!(
@@ -470,7 +470,7 @@ struct SharedStreamServer {
 
 impl SharedStreamServer {
     async fn spawn() -> Result<Self> {
-        let router: Router = fireline::stream_host::build_stream_router(None)?;
+        let router: Router = fireline_session::build_stream_router(None)?;
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .context("bind shared durable-streams test listener")?;
@@ -1248,9 +1248,9 @@ where
 // assertions. `StateEnvelope::decode()` tries to parse the envelope into one
 // of the known entity types from production code:
 //
-// - `SessionRecord` — from `fireline_conductor::session`
-// - `PersistedRuntimeSpec` — from `fireline_conductor::runtime`
-// - `FsOpRecord` — from `fireline_components::fs_backend`
+// - `SessionRecord` — from `fireline_session`
+// - `PersistedRuntimeSpec` — from `fireline_runtime`
+// - `FsOpRecord` — from `fireline_resources`
 // - `RuntimeStreamFileRecord` — same
 //
 // Tests get typed access to every load-bearing state entity without

@@ -36,8 +36,8 @@ mod managed_agent_suite;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use fireline::runtime_host::RuntimeStatus;
-use fireline_conductor::topology::{TopologyComponentSpec, TopologySpec};
+use fireline_runtime::runtime_host::RuntimeStatus;
+use fireline_harness::{TopologyComponentSpec, TopologySpec};
 use managed_agent_suite::{
     ControlPlaneHarness, DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec,
     append_approval_resolved, count_events, create_session, load_session_then_prompt,
@@ -403,7 +403,7 @@ async fn harness_durable_suspend_resume_round_trip() -> Result<()> {
             "INVARIANT (Harness): durable log must contain both permission_request and approval_resolved before session/load"
         );
 
-        let resumed = fireline::orchestration::resume(
+        let resumed = fireline_orchestration::resume(
             &control_plane.http,
             &control_plane.base_url,
             &shared_state_url,

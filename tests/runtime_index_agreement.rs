@@ -30,8 +30,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use fireline::orchestration::RuntimeMaterializer;
-use fireline::runtime_index::{RuntimeIndex, RuntimeInstanceStatus};
+use fireline_session::RuntimeMaterializer;
+use fireline_runtime::runtime_index::{RuntimeIndex, RuntimeInstanceStatus};
 use managed_agent_suite::{ControlPlaneHarness, DEFAULT_TIMEOUT, ManagedAgentHarnessSpec};
 
 /// Precondition: control plane is up with its shared state stream;
@@ -229,7 +229,7 @@ async fn runtime_index_observes_stopped_runtimes_on_the_shared_stream() -> Resul
         assert!(
             matches!(
                 endpoints.status,
-                fireline_conductor::runtime::RuntimeStatus::Stopped
+                fireline_runtime::RuntimeStatus::Stopped
             ),
             "INVARIANT (stream-as-truth): runtime_endpoints.status must reflect \
              the Stopped transition after a control-plane stop (got {:?})",

@@ -4,7 +4,7 @@ use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use fireline_conductor::runtime::{
+use fireline_runtime::{
     CreateRuntimeSpec, HeartbeatReport, RuntimeDescriptor, RuntimeHost, RuntimeRegistration,
 };
 use serde::{Deserialize, Serialize};
@@ -129,7 +129,7 @@ async fn register_runtime(
             .runtime_host
             .get(&runtime_key)?
             .map(|runtime| runtime.status),
-        Some(fireline_conductor::runtime::RuntimeStatus::Stopped)
+        Some(fireline_runtime::RuntimeStatus::Stopped)
     ) {
         return Err(ControlPlaneError::conflict(format!(
             "runtime '{runtime_key}' is stopped and cannot re-register"
@@ -158,8 +158,8 @@ async fn heartbeat_runtime(
     })?;
     if matches!(
         current.status,
-        fireline_conductor::runtime::RuntimeStatus::Stopped
-            | fireline_conductor::runtime::RuntimeStatus::Broken
+        fireline_runtime::RuntimeStatus::Stopped
+            | fireline_runtime::RuntimeStatus::Broken
     ) {
         return Err(ControlPlaneError::gone(format!(
             "runtime '{runtime_key}' cannot heartbeat from status '{:?}'",

@@ -7,7 +7,7 @@ use agent_client_protocol_test::testy::TestyCommand;
 use anyhow::{Context, Result, anyhow};
 use axum::Router;
 use durable_streams::{Client as DsClient, Offset};
-use fireline::runtime_host::{RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
+use fireline_runtime::runtime_host::{RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
 use futures::{SinkExt, StreamExt};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -406,7 +406,7 @@ struct SharedStreamServer {
 
 impl SharedStreamServer {
     async fn spawn() -> Result<Self> {
-        let router: Router = fireline::stream_host::build_stream_router(None)?;
+        let router: Router = fireline_session::build_stream_router(None)?;
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .context("bind shared durable-streams test listener")?;

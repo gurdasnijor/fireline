@@ -166,7 +166,7 @@ async fn sandbox_provisioned_runtime_serves_multiple_execute_calls() -> Result<(
 /// against a shared external durable stream, served at least one prompt,
 /// and was stopped via `POST /v1/runtimes/{key}/stop`.
 ///
-/// Action: call `fireline::orchestration::resume(sessionId)`, which
+/// Action: call `fireline_orchestration::resume(sessionId)`, which
 /// re-provisions a fresh runtime against the stored spec. Then issue an
 /// ACP `session/load` for the session id that was created in the first
 /// runtime and serve a follow-up prompt.
@@ -203,7 +203,7 @@ async fn sandbox_stop_and_recreate_preserves_session_load() -> Result<()> {
 
         let _stopped = control_plane.stop_runtime(&runtime.runtime_key).await?;
 
-        let resumed = fireline::orchestration::resume(
+        let resumed = fireline_orchestration::resume(
             &control_plane.http,
             &control_plane.base_url,
             &control_plane.shared_state_url(),

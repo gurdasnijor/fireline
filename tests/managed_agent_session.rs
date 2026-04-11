@@ -28,7 +28,7 @@ mod managed_agent_suite;
 
 use anyhow::{Context, Result};
 use durable_streams::{Client as DsClient, LiveMode, Offset};
-use fireline::orchestration::materialize_session_index;
+use fireline_orchestration::materialize_session_index;
 use managed_agent_suite::{
     ControlPlaneHarness, DEFAULT_TIMEOUT, LocalRuntimeHarness, count_events, prompt_session,
     read_session_records, wait_for_event_count, wait_for_session_record,

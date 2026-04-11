@@ -6,12 +6,12 @@ use anyhow::Result;
 use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
 use axum::http::{Method, StatusCode};
-use fireline_conductor::runtime::{
+use fireline_runtime::{
     CreateRuntimeSpec, Endpoint, HeartbeatReport, LocalProvider, LocalRuntimeLauncher,
     ManagedRuntime, RuntimeDescriptor, RuntimeHost, RuntimeLaunch, RuntimeManager,
     RuntimeProviderKind, RuntimeRegistration, RuntimeRegistry, RuntimeStatus,
 };
-use fireline_conductor::topology::TopologySpec;
+use fireline_harness::TopologySpec;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -205,7 +205,7 @@ impl TestHarness {
             .create(CreateRuntimeSpec {
                 runtime_key: None,
                 node_id: None,
-                provider: fireline_conductor::runtime::RuntimeProviderRequest::Local,
+                provider: fireline_runtime::RuntimeProviderRequest::Local,
                 host: "127.0.0.1".parse::<IpAddr>()?,
                 port: 0,
                 name: name.to_string(),
@@ -295,7 +295,7 @@ impl LocalRuntimeLauncher for FakeRuntimeLauncher {
         spec: CreateRuntimeSpec,
         _runtime_key: String,
         _node_id: String,
-        _mounted_resources: Vec<fireline_conductor::runtime::MountedResource>,
+        _mounted_resources: Vec<fireline_runtime::MountedResource>,
     ) -> Result<RuntimeLaunch> {
         Ok(RuntimeLaunch {
             status: RuntimeStatus::Starting,

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use fireline_conductor::runtime::{
+use fireline_runtime::{
     DockerProvider, DockerProviderConfig, LocalProvider, RuntimeHost, RuntimeManager,
     RuntimeRegistry, RuntimeTokenIssuer,
 };
@@ -231,11 +231,11 @@ fn spawn_stale_runtime_task(
                     continue;
                 };
 
-                if descriptor.status != fireline_conductor::runtime::RuntimeStatus::Ready {
+                if descriptor.status != fireline_runtime::RuntimeStatus::Ready {
                     if matches!(
                         descriptor.status,
-                        fireline_conductor::runtime::RuntimeStatus::Stopped
-                            | fireline_conductor::runtime::RuntimeStatus::Broken
+                        fireline_runtime::RuntimeStatus::Stopped
+                            | fireline_runtime::RuntimeStatus::Broken
                     ) {
                         if let Err(error) = heartbeat_tracker.forget(&runtime_key).await {
                             tracing::warn!(
@@ -248,7 +248,7 @@ fn spawn_stale_runtime_task(
                     continue;
                 }
 
-                descriptor.status = fireline_conductor::runtime::RuntimeStatus::Stale;
+                descriptor.status = fireline_runtime::RuntimeStatus::Stale;
                 descriptor.updated_at_ms = now_ms();
                 if let Err(error) = runtime_registry.upsert(descriptor) {
                     tracing::warn!(?error, runtime_key, "mark runtime stale");

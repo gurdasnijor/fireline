@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol_test::testy::TestyCommand;
 use anyhow::Result;
 use durable_streams::{Client as DurableStreamsClient, LiveMode, Offset};
-use fireline_conductor::session::SessionRecord;
+use fireline_session::SessionRecord;
 use sacp::schema::{
     AgentCapabilities, ContentBlock, ContentChunk, InitializeRequest, InitializeResponse,
     LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionRequest, NewSessionResponse,

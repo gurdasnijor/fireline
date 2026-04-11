@@ -41,7 +41,7 @@
 mod managed_agent_suite;
 
 use anyhow::{Context, Result};
-use fireline_conductor::topology::{TopologyComponentSpec, TopologySpec};
+use fireline_harness::{TopologyComponentSpec, TopologySpec};
 use managed_agent_suite::{
     ControlPlaneHarness, DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec,
     append_approval_resolved, count_events, create_session, prompt_session,
@@ -101,7 +101,7 @@ async fn orchestration_resume_on_live_runtime_is_noop() -> Result<()> {
         .await?;
 
         let shared_state_url = control_plane.shared_state_url();
-        let resumed_once = fireline::orchestration::resume(
+        let resumed_once = fireline_orchestration::resume(
             &control_plane.http,
             &control_plane.base_url,
             &shared_state_url,
@@ -109,7 +109,7 @@ async fn orchestration_resume_on_live_runtime_is_noop() -> Result<()> {
         )
         .await
         .context("first resume against live runtime must succeed")?;
-        let resumed_twice = fireline::orchestration::resume(
+        let resumed_twice = fireline_orchestration::resume(
             &control_plane.http,
             &control_plane.base_url,
             &shared_state_url,
@@ -179,13 +179,13 @@ async fn orchestration_concurrent_resume_creates_single_runtime() -> Result<()> 
 
         let shared_state_url = control_plane.shared_state_url();
         let (first, second) = tokio::join!(
-            fireline::orchestration::resume(
+            fireline_orchestration::resume(
                 &control_plane.http,
                 &control_plane.base_url,
                 &shared_state_url,
                 &session_id,
             ),
-            fireline::orchestration::resume(
+            fireline_orchestration::resume(
                 &control_plane.http,
                 &control_plane.base_url,
                 &shared_state_url,

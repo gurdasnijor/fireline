@@ -7,7 +7,7 @@ repository.workspace = true
 description = "HTTP control plane for Fireline runtime lifecycle"
 
 [dependencies]
-fireline-conductor.workspace = true
+fireline-runtime.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true

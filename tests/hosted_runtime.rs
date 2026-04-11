@@ -5,8 +5,8 @@ use std::time::Duration;
 use agent_client_protocol::{InitializeRequest, ProtocolVersion};
 use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
-use fireline::bootstrap::{start, BootstrapConfig};
-use fireline_conductor::topology::TopologySpec;
+use fireline_runtime::bootstrap::{start, BootstrapConfig};
+use fireline_harness::TopologySpec;
 use uuid::Uuid;
 
 struct WebSocketTransport {
