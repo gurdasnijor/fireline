@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-use fireline_harness::TopologySpec;
 use fireline_resources::ResourceRef;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -48,6 +47,32 @@ impl Endpoint {
         Self {
             url: url.into(),
             headers: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopologySpec {
+    #[serde(default)]
+    pub components: Vec<TopologyComponentSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopologyComponentSpec {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+}
+
+impl Default for TopologySpec {
+    fn default() -> Self {
+        Self {
+            components: vec![TopologyComponentSpec {
+                name: "peer_mcp".to_string(),
+                config: None,
+            }],
         }
     }
 }

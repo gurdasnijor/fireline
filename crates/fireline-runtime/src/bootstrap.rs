@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use axum::Router;
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, DurableStream, Producer};
-use fireline_harness::{TopologyRegistry, TopologySpec};
+use fireline_harness::TopologySpec;
 use fireline_resources::MountedResource;
 use fireline_session::{
     ActiveTurnIndex, RuntimeMaterializer, RuntimeMaterializerTask, SessionIndex,
@@ -32,19 +32,6 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
-
-#[derive(Clone)]
-pub(crate) struct AppState {
-    pub conductor_name: String,
-    pub runtime_key: String,
-    pub node_id: String,
-    pub runtime_id: String,
-    pub state_producer: Producer,
-    pub session_index: SessionIndex,
-    pub shared_terminal: crate::shared_terminal::SharedTerminal,
-    pub topology_registry: TopologyRegistry,
-    pub topology: TopologySpec,
-}
 
 #[derive(Debug, Clone)]
 pub struct BootstrapConfig {
@@ -175,7 +162,8 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     // the `runtime_spec` envelope further down — SharedTerminal::spawn
     // consumes the original.
     let agent_command_for_spec = config.agent_command.clone();
-    let shared_terminal = crate::shared_terminal::SharedTerminal::spawn(config.agent_command).await?;
+    let shared_terminal =
+        crate::shared_terminal::SharedTerminal::spawn(config.agent_command).await?;
     let topology_registry =
         crate::topology::build_runtime_topology_registry(crate::topology::ComponentContext {
             runtime_key: runtime_key.clone(),
@@ -192,16 +180,23 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
             mounted_resources: config.mounted_resources.clone(),
         });
 
-    let app_state = AppState {
+    let app_state = crate::routes_acp::AcpRouteState {
         conductor_name: runtime_name.clone(),
         runtime_key: runtime_key.clone(),
         node_id: node_id.clone(),
         runtime_id: runtime_id.clone(),
         state_producer: state_producer.clone(),
-        session_index: session_index.clone(),
         shared_terminal: shared_terminal.clone(),
         topology_registry,
         topology: config.topology.clone(),
+        base_components_factory: std::sync::Arc::new({
+            let session_index = session_index.clone();
+            move || {
+                vec![sacp::DynConnectTo::new(
+                    crate::load_coordinator::LoadCoordinatorComponent::new(session_index.clone()),
+                )]
+            }
+        }),
     };
 
     let app = Router::new()

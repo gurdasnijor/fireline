@@ -9,10 +9,17 @@ description = "ACP harness, approval, and effect-capture primitives for Fireline
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+axum.workspace = true
 durable-streams.workspace = true
+fireline-resources.workspace = true
+fireline-session.workspace = true
+fireline-tools.workspace = true
+futures.workspace = true
 sacp.workspace = true
 sacp-conductor.workspace = true
+sacp-tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 uuid.workspace = true

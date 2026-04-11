@@ -1,20 +1,20 @@
 #![forbid(unsafe_code)]
 
 pub mod active_turn_index;
-pub mod runtime_materializer;
 pub mod runtime_identity;
+pub mod runtime_materializer;
 pub mod session_index;
 pub mod stream_host;
 
 pub use active_turn_index::{ActiveTurnIndex, ActiveTurnRecord};
-pub use runtime_materializer::{
-    RawStateEnvelope, RawStateHeaders, RuntimeMaterializer, RuntimeMaterializerTask,
-    StateProjection,
-};
 pub use runtime_identity::{
     CreateRuntimeSpec, Endpoint, HeartbeatMetrics, HeartbeatReport, PersistedRuntimeSpec,
     RuntimeDescriptor, RuntimeProviderKind, RuntimeProviderRequest, RuntimeRegistration,
-    RuntimeStatus,
+    RuntimeStatus, TopologyComponentSpec, TopologySpec,
+};
+pub use runtime_materializer::{
+    RawStateEnvelope, RawStateHeaders, RuntimeMaterializer, RuntimeMaterializerTask,
+    StateProjection,
 };
 pub use session_index::SessionIndex;
 pub use stream_host::*;

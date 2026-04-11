@@ -2,42 +2,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
+pub use fireline_session::{TopologyComponentSpec, TopologySpec};
 use sacp::{Conductor, DynConnectTo};
 use sacp_conductor::trace::WriteEvent;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+pub use crate::runtime_topology::{
+    ComponentContext, audit_stream_names, build_runtime_topology_registry, ensure_named_streams,
+};
 
 pub type ProxyComponentInstance = DynConnectTo<Conductor>;
 pub type TraceWriterInstance = Box<dyn WriteEvent + Send>;
 
 type ProxyFactory = dyn Fn(Option<&Value>) -> Result<ProxyComponentInstance> + Send + Sync;
 type TraceFactory = dyn Fn(Option<&Value>) -> Result<TraceWriterInstance> + Send + Sync;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct TopologySpec {
-    #[serde(default)]
-    pub components: Vec<TopologyComponentSpec>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct TopologyComponentSpec {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config: Option<Value>,
-}
-
-impl Default for TopologySpec {
-    fn default() -> Self {
-        Self {
-            components: vec![TopologyComponentSpec {
-                name: "peer_mcp".to_string(),
-                config: None,
-            }],
-        }
-    }
-}
 
 #[derive(Clone, Default)]
 pub struct TopologyRegistry {
