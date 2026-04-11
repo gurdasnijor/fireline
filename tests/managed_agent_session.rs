@@ -30,8 +30,8 @@ use anyhow::{Context, Result};
 use durable_streams::{Client as DsClient, LiveMode, Offset};
 use fireline::orchestration::materialize_session_index;
 use managed_agent_suite::{
-    ControlPlaneHarness, DEFAULT_TIMEOUT, LocalRuntimeHarness, count_events, pending_contract,
-    prompt_session, read_session_records, wait_for_event_count, wait_for_session_record,
+    ControlPlaneHarness, DEFAULT_TIMEOUT, LocalRuntimeHarness, count_events, prompt_session,
+    read_session_records, wait_for_event_count, wait_for_session_record,
 };
 use std::collections::HashSet;
 
@@ -380,33 +380,131 @@ async fn session_replay_from_mid_offset_is_suffix_of_full_replay() -> Result<()>
     result
 }
 
-/// Precondition: a fresh durable-streams producer attached to a runtime-scoped
-/// stream.
+/// Precondition: a fresh durable-streams stream attached to a running
+/// `LocalRuntimeHarness`, and two independent `Producer` instances
+/// constructed against that stream with the **same** `producer_id` and
+/// the **same** `epoch = 0`. Both producers therefore start at
+/// `seq = 0`, which is the client-library shape of a post-crash retry:
+/// the second producer is a fresh client object that doesn't know the
+/// first one already wrote anything.
 ///
-/// Action: append the same `StateEnvelope` with the same entity key twice,
-/// flushing between the calls. Simulates a producer retry of a write that was
-/// acknowledged but whose network round-trip got lost.
+/// Action: have producer A append a distinctive envelope with a fixed
+/// entity key and flush. Then have producer B append a byte-identical
+/// envelope (same body, same entity key) and flush. Both appends go out
+/// under the same `(producer_id, epoch, seq)` tuple — Kafka-style
+/// idempotent producer semantics as specified by durable-streams
+/// PROTOCOL.md §5.2.1.
 ///
-/// Observable evidence: reading the resulting stream yields the event exactly
-/// once, or yields both copies with a monotonic offset that a consumer can
-/// deduplicate by entity-key semantics.
+/// Observable evidence: reading the stream from `Offset::Beginning`
+/// yields exactly **one** envelope whose `key` matches our test key.
+/// The server deduplicated producer B's append because the
+/// `(producer_id, epoch, seq)` tuple had already been observed from
+/// producer A.
 ///
-/// Invariant proven: **Session idempotent append** — Anthropic's "accepts
-/// idempotent appends" contract holds under producer retry. This is the
-/// contract the external-producer cases (approval service writes, webhook
-/// ingest, Flamecast-level writes) rely on.
+/// Invariant proven: **Session idempotent append under retry, within a
+/// single producer epoch.** Anthropic's "accepts idempotent appends"
+/// clause holds against the specific contract durable-streams
+/// PROTOCOL.md §5.2.1 commits to: server-side transport-layer dedup on
+/// `(Producer-Id, Producer-Epoch, Producer-Seq)`. Fireline's external
+/// producer story (approval service writes, webhook ingest,
+/// Flamecast-level writes) can rely on retry-within-epoch being safe;
+/// cross-crash deduplication requires an epoch bump and inherits the
+/// upstream "at-least-once across crashes" caveat, which is an
+/// intentional non-goal for this test.
 #[tokio::test]
-#[ignore = "pending: need to pin down the durable-streams idempotency contract — is it \
-            producer-name+offset dedup, entity-key upsert, or at-least-once with consumer \
-            dedup? The test should match the documented guarantee, not assume one."]
 async fn session_idempotent_append_under_retry() -> Result<()> {
-    pending_contract(
-        "session.idempotent_append",
-        "Pin the durable-streams idempotency semantics first (producer-name based, \
-         entity-key upsert, or consumer-side dedup). Then add two appends of the same \
-         envelope with an intentional flush between them and assert the documented \
-         behavior. This closes Anthropic's 'accepts idempotent appends' clause.",
-    )
+    use durable_streams::Client as DsClient;
+
+    let runtime = LocalRuntimeHarness::spawn("session-idempotent-append-retry").await?;
+
+    let result = async {
+        let state_stream_url = runtime.state_stream_url().to_string();
+        let client = DsClient::new();
+        let mut stream = client.stream(&state_stream_url);
+        stream.set_content_type("application/json");
+
+        let producer_id = "fireline-test-idempotent-retry";
+        let test_key = format!("idempotent-retry-{}", uuid::Uuid::new_v4());
+
+        // Build producer A and append a distinctive envelope. Explicit
+        // epoch=0 to match the second producer exactly.
+        let producer_a = client
+            .stream(&state_stream_url)
+            .producer(producer_id)
+            .epoch(0)
+            .content_type("application/json")
+            .build();
+        let envelope = serde_json::json!({
+            "type": "idempotent_retry_probe",
+            "key": test_key,
+            "headers": { "operation": "insert" },
+            "value": {
+                "marker": "fireline-session-idempotent-append-contract",
+                "tag": test_key,
+            }
+        });
+        producer_a.append_json(&envelope);
+        producer_a
+            .flush()
+            .await
+            .context("producer A flush must succeed")?;
+
+        // Build producer B with the SAME producer_id and SAME epoch. Its
+        // internal seq restarts at 0, so its first append reuses the
+        // (producer_id, epoch=0, seq=0) tuple that producer A already
+        // used. This is the post-crash retry shape from the protocol.
+        let producer_b = client
+            .stream(&state_stream_url)
+            .producer(producer_id)
+            .epoch(0)
+            .content_type("application/json")
+            .build();
+        producer_b.append_json(&envelope);
+        producer_b
+            .flush()
+            .await
+            .context(
+                "INVARIANT (Session): producer B's duplicate append must succeed \
+                 (returns 204 No Content per PROTOCOL.md §5.2.1), not fail",
+            )?;
+
+        // Read from the stream and count envelopes matching our test
+        // key. There must be exactly one.
+        let events = managed_agent_suite::read_all_events(&state_stream_url).await?;
+        let matches: Vec<_> = events
+            .iter()
+            .filter(|env| env.key() == Some(test_key.as_str()))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "INVARIANT (Session): idempotent append under retry must yield exactly one \
+             durable envelope for the test key; saw {} (producer B's duplicate was not \
+             deduplicated by the (producer_id, epoch, seq) tuple)",
+            matches.len()
+        );
+
+        // Spot-check the one surviving envelope carries our marker —
+        // this rules out the degenerate case where producer A's append
+        // somehow got eaten and producer B's replaced it with different
+        // content.
+        let surviving = matches[0];
+        let marker = surviving
+            .value()
+            .and_then(|v| v.get("marker"))
+            .and_then(|v| v.as_str());
+        assert_eq!(
+            marker,
+            Some("fireline-session-idempotent-append-contract"),
+            "INVARIANT (Session): the single surviving envelope must carry the test marker"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    runtime.shutdown().await?;
+    result
 }
 
 /// Precondition: a local runtime has generated a normal set of events and the
