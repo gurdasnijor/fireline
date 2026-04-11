@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use std::process::{Command as StdCommand, Stdio};
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use durable_streams::{Client as DsClient, Offset};
-use fireline::bootstrap::{start, BootstrapConfig, BootstrapHandle};
+use fireline::bootstrap::{BootstrapConfig, BootstrapHandle, start};
 use fireline::runtime_host::{RuntimeDescriptor, RuntimeStatus};
 use fireline_conductor::topology::TopologySpec;
 use futures::{SinkExt, StreamExt};
@@ -109,8 +109,7 @@ const CONTRACT_INVENTORY: &[ContractCase] = &[
         id: "resources.fs_backend_artifacts",
         primitive: Primitive::Resources,
         owner: SurfaceOwner::CrossSurface,
-        summary:
-            "ACP fs interception writes artifact evidence readable via session materialization",
+        summary: "ACP fs interception writes artifact evidence readable via session materialization",
     },
 ];
 
@@ -143,6 +142,10 @@ pub(crate) fn control_plane_bin() -> PathBuf {
 
 pub(crate) fn testy_bin() -> PathBuf {
     target_bin("fireline-testy")
+}
+
+pub(crate) fn testy_load_bin() -> PathBuf {
+    target_bin("fireline-testy-load")
 }
 
 pub(crate) fn target_bin(name: &str) -> PathBuf {
@@ -278,6 +281,15 @@ impl ControlPlaneHarness {
     }
 
     pub(crate) async fn create_runtime(&self, name: &str) -> Result<RuntimeDescriptor> {
+        self.create_runtime_with_agent(name, &[testy_bin().display().to_string()])
+            .await
+    }
+
+    pub(crate) async fn create_runtime_with_agent(
+        &self,
+        name: &str,
+        agent_command: &[String],
+    ) -> Result<RuntimeDescriptor> {
         let response = self
             .http
             .post(format!("{}/v1/runtimes", self.base_url))
@@ -286,7 +298,7 @@ impl ControlPlaneHarness {
                 "host": "127.0.0.1",
                 "port": 0,
                 "name": name,
-                "agentCommand": [testy_bin()],
+                "agentCommand": agent_command,
                 "topology": { "components": [] }
             }))
             .send()
@@ -344,6 +356,17 @@ impl ControlPlaneHarness {
             .ok_or_else(|| anyhow!("missing runtime token"))
     }
 
+    pub(crate) async fn stop_runtime(&self, runtime_key: &str) -> Result<RuntimeDescriptor> {
+        self.http
+            .post(format!("{}/v1/runtimes/{runtime_key}/stop", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<RuntimeDescriptor>()
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
     pub(crate) async fn shutdown(mut self) {
         shutdown_process(&mut self.child).await;
     }
@@ -396,6 +419,101 @@ pub(crate) async fn wait_for_stream_rows(
 
 pub(crate) struct WebSocketTransport {
     url: String,
+}
+
+pub(crate) async fn create_session(acp_url: &str) -> Result<String> {
+    sacp::Client
+        .builder()
+        .connect_with(
+            WebSocketTransport {
+                url: acp_url.to_string(),
+            },
+            move |cx: sacp::ConnectionTo<sacp::Agent>| async move {
+                let _ = cx
+                    .send_request(agent_client_protocol::InitializeRequest::new(
+                        agent_client_protocol::ProtocolVersion::LATEST,
+                    ))
+                    .block_task()
+                    .await?;
+
+                let session = cx
+                    .send_request(agent_client_protocol::NewSessionRequest::new(repo_root()))
+                    .block_task()
+                    .await?;
+
+                Ok(session.session_id.to_string())
+            },
+        )
+        .await
+        .map_err(anyhow::Error::from)
+}
+
+pub(crate) async fn load_session(acp_url: &str, session_id: &str) -> Result<()> {
+    let session_id = session_id.to_string();
+    sacp::Client
+        .builder()
+        .connect_with(
+            WebSocketTransport {
+                url: acp_url.to_string(),
+            },
+            move |cx: sacp::ConnectionTo<sacp::Agent>| {
+                let session_id = session_id.clone();
+                async move {
+                    let _ = cx
+                        .send_request(agent_client_protocol::InitializeRequest::new(
+                            agent_client_protocol::ProtocolVersion::LATEST,
+                        ))
+                        .block_task()
+                        .await?;
+
+                    let _ = cx
+                        .send_request(agent_client_protocol::LoadSessionRequest::new(
+                            session_id,
+                            repo_root(),
+                        ))
+                        .block_task()
+                        .await?;
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .map_err(anyhow::Error::from)
+}
+
+pub(crate) async fn prompt_session(acp_url: &str, session_id: &str, text: &str) -> Result<()> {
+    let session_id = session_id.to_string();
+    let text = text.to_string();
+    sacp::Client
+        .builder()
+        .connect_with(
+            WebSocketTransport {
+                url: acp_url.to_string(),
+            },
+            move |cx: sacp::ConnectionTo<sacp::Agent>| {
+                let session_id = session_id.clone();
+                let text = text.clone();
+                async move {
+                    let _ = cx
+                        .send_request(agent_client_protocol::InitializeRequest::new(
+                            agent_client_protocol::ProtocolVersion::LATEST,
+                        ))
+                        .block_task()
+                        .await?;
+
+                    let _response = cx
+                        .send_request(agent_client_protocol::PromptRequest::new(
+                            session_id,
+                            vec![text.into()],
+                        ))
+                        .block_task()
+                        .await?;
+                    Ok::<(), sacp::Error>(())
+                }
+            },
+        )
+        .await
+        .map_err(anyhow::Error::from)
 }
 
 impl sacp::ConnectTo<sacp::Client> for WebSocketTransport {

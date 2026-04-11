@@ -15,11 +15,24 @@
 #[path = "support/managed_agent_suite.rs"]
 mod managed_agent_suite;
 
-use anyhow::Result;
-use managed_agent_suite::{
-    contract_inventory, covered_primitives, pending_contract, LocalRuntimeHarness, Primitive,
-    SurfaceOwner, DEFAULT_TIMEOUT,
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use agent_client_protocol::{
+    ReadTextFileRequest, ReadTextFileResponse, WriteTextFileRequest, WriteTextFileResponse,
 };
+use anyhow::Result;
+use durable_streams::Client as DsClient;
+use fireline_components::fs_backend::{FsBackendComponent, LocalFileBackend};
+use fireline_conductor::runtime::{LocalPathMounter, ResourceMounter, ResourceRef};
+use managed_agent_suite::{
+    ControlPlaneHarness, create_session, load_session, prompt_session, testy_load_bin,
+};
+use managed_agent_suite::{
+    DEFAULT_TIMEOUT, LocalRuntimeHarness, Primitive, SurfaceOwner, contract_inventory,
+    covered_primitives, pending_contract, temp_path,
+};
+use uuid::Uuid;
 
 #[test]
 fn managed_agent_contract_inventory_explicitly_spans_rust_and_typescript() {
@@ -113,30 +126,190 @@ async fn managed_agent_baseline_smoke_validates_session_harness_and_sandbox() ->
 }
 
 #[tokio::test]
-#[ignore = "pending slice 14 + slice 16 + packages/client resume(sessionId)"]
 async fn managed_agent_orchestration_acceptance_contract() -> Result<()> {
-    pending_contract(
-        "orchestration.resume",
-        "Split this into: durable runtimeSpec persistence, a resumer subscriber loop, and a packages/client end-to-end resume(sessionId) test once the TS API lands.",
-    )
+    let control_plane = ControlPlaneHarness::spawn(true).await?;
+
+    let result = async {
+        let runtime = control_plane
+            .create_runtime_with_agent(
+                "managed-agent-orchestration",
+                &[testy_load_bin().display().to_string()],
+            )
+            .await?;
+
+        let persisted = fireline::orchestration::reconstruct_runtime_spec_from_log(
+            &runtime.state.url,
+            &runtime.runtime_key,
+        )
+        .await?;
+        assert_eq!(persisted.runtime_key, runtime.runtime_key);
+        assert_eq!(
+            persisted.create_spec.runtime_key.as_deref(),
+            Some(runtime.runtime_key.as_str())
+        );
+        assert_eq!(
+            persisted.create_spec.node_id.as_deref(),
+            Some(runtime.node_id.as_str())
+        );
+
+        let session_id = create_session(&runtime.acp.url).await?;
+        let _ = prompt_session(
+            &runtime.acp.url,
+            &session_id,
+            "hello before orchestrated resume",
+        )
+        .await?;
+
+        let _stopped = control_plane.stop_runtime(&runtime.runtime_key).await?;
+        let resumed = fireline::orchestration::resume(
+            &control_plane.http,
+            &control_plane.base_url,
+            &session_id,
+        )
+        .await?;
+
+        assert_eq!(resumed.runtime_key, runtime.runtime_key);
+        assert_eq!(resumed.status, fireline::runtime_host::RuntimeStatus::Ready);
+        assert_ne!(
+            resumed.runtime_id, runtime.runtime_id,
+            "cold-start resume should produce a new runtime process identity"
+        );
+
+        load_session(&resumed.acp.url, &session_id).await?;
+        let _ = prompt_session(
+            &resumed.acp.url,
+            &session_id,
+            "hello after orchestrated resume",
+        )
+        .await?;
+
+        Ok(())
+    }
+    .await;
+
+    control_plane.shutdown().await;
+    result
 }
 
 #[tokio::test]
-#[ignore = "pending slice 15 physical ResourceMounter work"]
 async fn managed_agent_resources_physical_mount_acceptance_contract() -> Result<()> {
+    let source_dir = temp_path("managed-agent-physical-mount");
+    std::fs::create_dir_all(&source_dir)?;
+    std::fs::write(source_dir.join("hello.txt"), "hello from resources")?;
+
+    let result = async {
+        let mounter = LocalPathMounter::new();
+        let mounted = mounter
+            .mount(
+                &ResourceRef::LocalPath {
+                    path: source_dir.clone(),
+                    mount_path: PathBuf::from("/workspace"),
+                },
+                "runtime:managed-agent-physical-mount",
+            )
+            .await?
+            .expect("local path resource should mount");
+
+        assert_eq!(mounted.host_path, std::fs::canonicalize(&source_dir)?);
+        assert_eq!(mounted.mount_path, PathBuf::from("/workspace"));
+        assert!(
+            mounted.read_only,
+            "local path mounts should be read-only by default"
+        );
+
+        let backend = LocalFileBackend::new(vec![mounted]);
+        let bytes = fireline_components::fs_backend::FileBackend::read(
+            &backend,
+            PathBuf::from("/workspace/hello.txt").as_path(),
+        )
+        .await?;
+        assert_eq!(String::from_utf8(bytes)?, "hello from resources");
+
+        Ok(())
+    }
+    .await;
+
+    let _ = std::fs::remove_dir_all(&source_dir);
+    result
+}
+
+#[tokio::test]
+#[ignore = "pending shell-visible resource read end-to-end through a launched runtime"]
+async fn managed_agent_resources_physical_mount_shell_visibility_contract() -> Result<()> {
     pending_contract(
-        "resources.physical_mounts",
-        "Add a control-plane-backed runtime test that passes resources in the launch spec, mounts them before first prompt, and proves shell-visible reads inside the runtime.",
+        "resources.physical_mounts.shell_visible_read",
+        "Blocked on an end-to-end runtime/agent path that proves shell-visible reads inside the launched runtime. ResourceMounter coverage is handled by managed_agent_resources_physical_mount_acceptance_contract.",
     )
 }
 
 #[tokio::test]
-#[ignore = "pending slice 15 FsBackendComponent + artifact materialization"]
+#[ignore = "pending prompt-driven ACP fs emission from a test agent"]
 async fn managed_agent_resources_fs_backend_acceptance_contract() -> Result<()> {
     pending_contract(
         "resources.fs_backend",
-        "Cover ACP fs interception separately from physical mounts: write via fs/write_text_file, assert fs_op durable evidence, then prove cross-runtime reads or projection-backed artifact lookup.",
+        "Blocked on testy fs-op emission, covered at component layer via managed_agent_resources_fs_backend_component_test.",
     )
+}
+
+#[tokio::test]
+async fn managed_agent_resources_fs_backend_component_test() -> Result<()> {
+    let runtime = LocalRuntimeHarness::spawn("managed-agent-fs-backend-component").await?;
+    let scratch_dir = temp_path("managed-agent-fs-backend");
+    std::fs::create_dir_all(&scratch_dir)?;
+    let artifact_path = scratch_dir.join("artifact.txt");
+    let artifact_text = "artifact written through fs backend";
+    let session_id = format!("session:{}", Uuid::new_v4());
+
+    let result = async {
+        let component = FsBackendComponent::new(
+            Arc::new(LocalFileBackend::new(Vec::new())),
+            state_stream_producer(runtime.state_stream_url()),
+        );
+
+        let write = component
+            .handle_write_text_file(&WriteTextFileRequest::new(
+                session_id.clone(),
+                &artifact_path,
+                artifact_text,
+            ))
+            .await?;
+        let WriteTextFileResponse { .. } = write;
+
+        assert_eq!(std::fs::read_to_string(&artifact_path)?, artifact_text);
+
+        let read = component
+            .handle_read_text_file(&ReadTextFileRequest::new(
+                session_id.clone(),
+                &artifact_path,
+            ))
+            .await?;
+        let ReadTextFileResponse { content, .. } = read;
+        assert_eq!(content, artifact_text);
+
+        let body = runtime
+            .wait_for_state_rows(
+                &[
+                    "\"type\":\"fs_op\"",
+                    "\"op\":\"write\"",
+                    &session_id,
+                    artifact_path.to_string_lossy().as_ref(),
+                    artifact_text,
+                ],
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
+        assert!(
+            body.contains("\"type\":\"fs_op\""),
+            "fs writes should append durable fs_op evidence: {body}"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    runtime.shutdown().await?;
+    let _ = std::fs::remove_dir_all(&scratch_dir);
+    result
 }
 
 #[tokio::test]
@@ -146,4 +319,14 @@ async fn managed_agent_tools_schema_only_acceptance_contract() -> Result<()> {
         "tools.schema_only",
         "Once the init effect is easy to inspect in Rust, assert that tool registration exposes {name, description, input_schema} without transport details or credentials.",
     )
+}
+
+fn state_stream_producer(state_stream_url: &str) -> durable_streams::Producer {
+    let client = DsClient::new();
+    let mut stream = client.stream(state_stream_url);
+    stream.set_content_type("application/json");
+    stream
+        .producer(format!("managed-agent-suite-{}", Uuid::new_v4()))
+        .content_type("application/json")
+        .build()
 }

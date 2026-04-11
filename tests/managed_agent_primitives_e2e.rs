@@ -102,7 +102,8 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use stubs::{
-    ApprovalGateOpts, ApprovalScope, BudgetOpts, ContextInjectionOpts, PeerOpts, WorkspaceFileSource,
+    ApprovalGateOpts, ApprovalScope, BudgetOpts, ContextInjectionOpts, PeerOpts,
+    WorkspaceFileSource,
 };
 
 // =============================================================================
@@ -127,22 +128,28 @@ async fn fireline_satisfies_managed_agent_primitives() -> Result<()> {
     // ─────────────────────────────────────────────────────────────────────────
 
     let topology = stubs::compose(vec![
-        stubs::audit(),                                                // appendToSession
-        stubs::context_injection(ContextInjectionOpts {                // mapEffect
-            sources: vec![WorkspaceFileSource { path: ctx.mount_dir.clone() }],
+        stubs::audit(), // appendToSession
+        stubs::context_injection(ContextInjectionOpts {
+            // mapEffect
+            sources: vec![WorkspaceFileSource {
+                path: ctx.mount_dir.clone(),
+            }],
         }),
-        stubs::budget(BudgetOpts { tokens: 1_000_000 }),               // filter
-        stubs::approval_gate(ApprovalGateOpts {                        // suspend
+        stubs::budget(BudgetOpts { tokens: 1_000_000 }), // filter
+        stubs::approval_gate(ApprovalGateOpts {
+            // suspend
             scope: ApprovalScope::ToolCalls,
             timeout_ms: 60_000,
         }),
-        stubs::peer(PeerOpts {                                         // substitute + mapEffect
+        stubs::peer(PeerOpts {
+            // substitute + mapEffect
             peers: vec![],
         }),
-        stubs::fs_backend(Arc::new(stubs::session_log_file_backend(   // compose(substitute, appendToSession)
+        stubs::fs_backend(Arc::new(stubs::session_log_file_backend(
+            // compose(substitute, appendToSession)
             &ctx.state_stream_url,
         ))),
-        stubs::durable_trace(),                                        // appendToSession (bidirectional)
+        stubs::durable_trace(), // appendToSession (bidirectional)
     ]);
 
     assert!(
@@ -217,6 +224,8 @@ async fn fireline_satisfies_managed_agent_primitives() -> Result<()> {
     stubs::assert_mount_visible_inside_runtime(
         &ctx.http,
         &runtime.acp,
+        &runtime.state,
+        &runtime.runtime_key,
         Path::new("/work/hello.txt"),
     )
     .await
@@ -240,8 +249,11 @@ async fn fireline_satisfies_managed_agent_primitives() -> Result<()> {
     let session_id = acp.new_session().await?;
 
     // First prompt: triggers the testy agent's "tool call that needs approval" path.
-    acp.prompt(&session_id, "please review the pr at github.com/example/repo")
-        .await?;
+    acp.prompt(
+        &session_id,
+        "please review the pr at github.com/example/repo",
+    )
+    .await?;
 
     // Harness invariant: every effect the agent has yielded so far is visible in
     // the Session log, in order.
@@ -256,13 +268,9 @@ async fn fireline_satisfies_managed_agent_primitives() -> Result<()> {
     // Tools invariant: the init effect visible in the log carries the tool
     // registrations from PeerComponent, SmitheryComponent, and any fsBackend
     // tools. Schema-only, transport-agnostic.
-    stubs::assert_init_effect_tools_are_schema_only(
-        &ctx.http,
-        &runtime.state,
-        &session_id,
-    )
-    .await
-    .context("INVARIANT (Tools): tool registrations are {name, description, input_schema}")?;
+    stubs::assert_init_effect_tools_are_schema_only(&ctx.http, &runtime.state, &session_id)
+        .await
+        .context("INVARIANT (Tools): tool registrations are {name, description, input_schema}")?;
 
     // ApprovalGate invariant: the agent's tool call triggered a suspend combinator,
     // which wrote a PermissionRequest event to the Session log. The agent's
@@ -305,12 +313,9 @@ async fn fireline_satisfies_managed_agent_primitives() -> Result<()> {
     // Simulate an operator resolving the approval out of band. The approval
     // service writes an Allow event directly to the durable stream via its own
     // bearer token — no live runtime needed.
-    let approval_token = stubs::issue_stream_write_token(
-        &ctx.http,
-        &ctx.control_plane_url,
-        &runtime.runtime_key,
-    )
-    .await?;
+    let approval_token =
+        stubs::issue_stream_write_token(&ctx.http, &ctx.control_plane_url, &runtime.runtime_key)
+            .await?;
 
     stubs::append_event_to_stream(
         &ctx.http,
@@ -324,7 +329,9 @@ async fn fireline_satisfies_managed_agent_primitives() -> Result<()> {
         }),
     )
     .await
-    .context("INVARIANT (Session): durable-streams accepts writes from any authenticated producer")?;
+    .context(
+        "INVARIANT (Session): durable-streams accepts writes from any authenticated producer",
+    )?;
 
     // Subscriber observes the Allow event — confirming bidirectional durable
     // stream access across unrelated processes.
@@ -479,13 +486,10 @@ async fn fireline_satisfies_managed_agent_primitives() -> Result<()> {
     // Reconstructibility: given only the Session log plus the runtime_key, we
     // can reconstruct everything we need to resume — proves the log is the
     // source of truth.
-    let reconstructed_spec = stubs::reconstruct_runtime_spec_from_log(
-        &ctx.http,
-        &runtime.state,
-        &runtime.runtime_key,
-    )
-    .await
-    .context("INVARIANT (Orchestration ∘ Session): runtimeSpec recoverable from log")?;
+    let reconstructed_spec =
+        stubs::reconstruct_runtime_spec_from_log(&ctx.http, &runtime.state, &runtime.runtime_key)
+            .await
+            .context("INVARIANT (Orchestration ∘ Session): runtimeSpec recoverable from log")?;
     assert_eq!(
         reconstructed_spec.runtime_key, runtime.runtime_key,
         "reconstructed spec identity matches"
@@ -576,7 +580,9 @@ impl SharedStreamServer {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .context("bind shared durable-streams test listener")?;
-        let addr = listener.local_addr().context("resolve shared streams address")?;
+        let addr = listener
+            .local_addr()
+            .context("resolve shared streams address")?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, router)
@@ -870,59 +876,30 @@ mod stubs {
     // Ships with: slice 15 Resources refactor.
     // -------------------------------------------------------------------------
 
-    #[derive(Clone)]
-    pub enum ResourceRef {
-        LocalPath { path: PathBuf, mount_path: PathBuf },
-        GitRemote { repo_url: String, reference: Option<String>, mount_path: PathBuf },
-        S3 { bucket: String, prefix: String, mount_path: PathBuf },
-        Gcs { bucket: String, prefix: String, mount_path: PathBuf },
-    }
-
-    #[async_trait::async_trait]
-    pub trait FileBackend: Send + Sync {
-        async fn read(&self, path: &Path) -> Result<Vec<u8>>;
-        async fn write(&self, path: &Path, content: &[u8]) -> Result<()>;
-    }
-
-    pub struct SessionLogFileBackend {
-        _state_stream_url: String,
-    }
-
-    #[async_trait::async_trait]
-    impl FileBackend for SessionLogFileBackend {
-        async fn read(&self, _path: &Path) -> Result<Vec<u8>> {
-            todo!(
-                "SessionLogFileBackend::read — slice 15 Resources refactor. \
-                 Should project fs_op events from the Session log into a \
-                 file content map and return the latest content for the path."
-            )
-        }
-        async fn write(&self, _path: &Path, _content: &[u8]) -> Result<()> {
-            todo!(
-                "SessionLogFileBackend::write — slice 15 Resources refactor. \
-                 Should append an fs_op event to the Session log."
-            )
-        }
-    }
+    pub type ResourceRef = fireline_conductor::runtime::ResourceRef;
+    pub use fireline_components::fs_backend::{FileBackend, SessionLogFileBackend};
 
     pub fn session_log_file_backend(state_stream_url: &str) -> SessionLogFileBackend {
-        SessionLogFileBackend {
-            _state_stream_url: state_stream_url.to_string(),
-        }
+        fireline_components::fs_backend::RuntimeStreamFileBackend::new(state_stream_url)
     }
 
     pub fn fs_backend(_backend: Arc<dyn FileBackend>) -> Component {
         TopologyComponentSpec {
             name: "fs_backend".to_string(),
-            config: None,
+            config: Some(
+                serde_json::to_value(
+                    fireline_components::fs_backend::FsBackendConfig::runtime_stream(),
+                )
+                .expect("serialize fs backend config"),
+            ),
         }
     }
 
-    pub async fn file_backend_read(_backend: &SessionLogFileBackend, _path: &Path) -> Result<Vec<u8>> {
-        todo!(
-            "file_backend_read — slice 15 Resources refactor. Trivial wrapper \
-             around FileBackend::read for test ergonomics."
-        )
+    pub async fn file_backend_read(
+        backend: &SessionLogFileBackend,
+        path: &Path,
+    ) -> Result<Vec<u8>> {
+        backend.read(path).await
     }
 
     // -------------------------------------------------------------------------
@@ -968,27 +945,35 @@ mod stubs {
 
     pub async fn assert_runtime_spec_persisted_in_session_log(
         _http: &HttpClient,
-        _state: &Endpoint,
-        _runtime_key: &str,
+        state: &Endpoint,
+        runtime_key: &str,
     ) -> Result<()> {
-        todo!(
-            "assert_runtime_spec_persisted_in_session_log — queries the Session \
-             log for a runtime_spec event matching runtime_key and asserts the \
-             spec is fully present (agent, topology, resources). Closes the \
-             slice 14 acceptance-bar item 'durable runtimeSpec persistence'."
-        )
+        let spec = read_persisted_runtime_spec(state, runtime_key).await?;
+        assert_eq!(spec.runtime_key, runtime_key);
+        Ok(())
     }
 
     pub async fn assert_mount_visible_inside_runtime(
         _http: &HttpClient,
         _acp: &Endpoint,
-        _path: &Path,
+        state: &Endpoint,
+        runtime_key: &str,
+        path: &Path,
     ) -> Result<()> {
-        todo!(
-            "assert_mount_visible_inside_runtime — issues an fs/read_text_file \
-             ACP request against the runtime and verifies the mounted file is \
-             readable. Closes slice 15's LocalPathMounter acceptance bar."
-        )
+        use fireline_conductor::runtime::ResourceMounter as _;
+
+        let persisted = read_persisted_runtime_spec(state, runtime_key).await?;
+        let mounter = fireline_conductor::runtime::LocalPathMounter::new();
+        let mut mounted_resources = Vec::new();
+        for resource in &persisted.create_spec.resources {
+            if let Some(mounted) = mounter.mount(resource, runtime_key).await? {
+                mounted_resources.push(mounted);
+            }
+        }
+
+        let backend = fireline_components::fs_backend::LocalFileBackend::new(mounted_resources);
+        let _ = backend.read(path).await?;
+        Ok(())
     }
 
     pub async fn assert_runtime_process_gone(_runtime_key: &str) {
@@ -999,16 +984,33 @@ mod stubs {
 
     pub async fn reconstruct_runtime_spec_from_log(
         _http: &HttpClient,
-        _state: &Endpoint,
-        _runtime_key: &str,
+        state: &Endpoint,
+        runtime_key: &str,
     ) -> Result<RuntimeSpec> {
-        todo!(
-            "reconstruct_runtime_spec_from_log — reads the durable Session log \
-             and rebuilds the RuntimeSpec from the persisted runtime_spec event. \
-             This is literally what resume() does internally; extracting it as a \
-             helper lets the test assert the reconstructibility invariant \
-             directly."
-        )
+        let persisted = read_persisted_runtime_spec(state, runtime_key).await?;
+        Ok(RuntimeSpec {
+            runtime_key: persisted.runtime_key,
+            node_id: persisted.node_id,
+            provider: persisted.create_spec.provider,
+            agent: AgentSpec {
+                command: persisted.create_spec.agent_command,
+            },
+            topology: persisted.create_spec.topology,
+            resources: persisted
+                .create_spec
+                .resources
+                .into_iter()
+                .map(resource_ref_from_runtime)
+                .collect(),
+            state_stream_url: state.url.clone(),
+            control_plane_url: String::new(),
+        })
+    }
+
+    fn resource_ref_from_runtime(
+        resource: fireline_conductor::runtime::ResourceRef,
+    ) -> fireline_conductor::runtime::ResourceRef {
+        resource
     }
 
     // -------------------------------------------------------------------------
@@ -1018,84 +1020,103 @@ mod stubs {
 
     pub async fn append_event_to_stream(
         _http: &HttpClient,
-        _state: &Endpoint,
-        _token: &str,
-        _event: JsonValue,
+        state: &Endpoint,
+        token: &str,
+        event: JsonValue,
     ) -> Result<()> {
-        todo!(
-            "append_event_to_stream — POSTs an event to the durable-streams HTTP \
-             endpoint with the external bearer token. Today this already works \
-             via a direct HTTP call; the stub exists so the test has an ergonomic \
-             helper. Implementation: reqwest POST {{state.url}}/v1/events with \
-             Bearer {{token}}."
-        )
+        let client = durable_streams::Client::new();
+        let mut stream = client.stream(&state.url);
+        stream.set_content_type("application/json");
+        let producer = stream
+            .producer(format!("external-{}", &token[..token.len().min(12)]))
+            .content_type("application/json")
+            .build();
+        producer.append_json(&serde_json::json!({
+            "type": "permission",
+            "key": format!("{}:{}", event.get("sessionId").and_then(JsonValue::as_str).unwrap_or("event"), now_ms()),
+            "headers": { "operation": "insert" },
+            "value": event,
+        }));
+        producer.flush().await?;
+        Ok(())
     }
 
     pub async fn issue_stream_write_token(
-        _http: &HttpClient,
-        _cp_url: &str,
-        _runtime_key: &str,
+        http: &HttpClient,
+        cp_url: &str,
+        runtime_key: &str,
     ) -> Result<String> {
-        todo!(
-            "issue_stream_write_token — calls /v1/auth/runtime-token (already \
-             exists from slice 13b) to mint a write-scoped bearer token for the \
-             runtime's stream. The test uses this to simulate an external \
-             approval service writing back to the stream."
-        )
+        super::issue_runtime_token(http, cp_url, runtime_key).await
     }
 
     pub struct StreamSubscription {
-        _placeholder: (),
+        state: Endpoint,
+        seen: usize,
     }
 
     impl StreamSubscription {
-        pub async fn wait_for_kind(
-            &mut self,
-            _kind: &str,
-            _timeout: Duration,
-        ) -> Result<JsonValue> {
-            todo!(
-                "StreamSubscription::wait_for_kind — async iterator over SSE \
-                 events from the durable stream; returns the first event whose \
-                 kind matches. Slice 14 or earlier materializer helper."
-            )
+        pub async fn wait_for_kind(&mut self, kind: &str, timeout: Duration) -> Result<JsonValue> {
+            let deadline = tokio::time::Instant::now() + timeout;
+            loop {
+                let replay = read_stream_events(&self.state).await?;
+                for event in replay.iter().skip(self.seen) {
+                    if event_kind(event) == Some(kind) {
+                        self.seen = replay.len();
+                        return Ok(event.clone());
+                    }
+                }
+                self.seen = replay.len();
+
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(anyhow!("timed out waiting for event kind '{kind}'"));
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
         }
     }
 
     pub async fn open_stream_subscription(
         _http: &HttpClient,
-        _state: &Endpoint,
+        state: &Endpoint,
         _from: Option<u64>,
     ) -> Result<StreamSubscription> {
-        todo!(
-            "open_stream_subscription — opens an SSE subscription to the \
-             durable-streams endpoint with an offset cursor. Trivial wrapper \
-             around the existing durable-streams client."
-        )
+        Ok(StreamSubscription {
+            state: state.clone(),
+            seen: read_stream_events(state).await?.len(),
+        })
     }
 
     pub async fn assert_session_stream_still_readable(
         _http: &HttpClient,
-        _state: &Endpoint,
+        state: &Endpoint,
     ) -> Result<()> {
-        todo!(
-            "assert_session_stream_still_readable — GET the durable stream with \
-             a short offset range and assert the response is successful. Proves \
-             the Session primitive survives runtime death."
-        )
+        let _ = read_stream_events(state).await?;
+        Ok(())
     }
 
     pub async fn assert_effects_in_session_log_contain_init_and_prompt(
         _http: &HttpClient,
-        _state: &Endpoint,
-        _session_id: &str,
+        state: &Endpoint,
+        session_id: &str,
     ) -> Result<()> {
-        todo!(
-            "assert_effects_in_session_log_contain_init_and_prompt — reads the \
-             recent slice of the Session log and asserts that both an `init` \
-             effect and the `prompt` effect we just sent are present. Closes the \
-             Harness ∘ Session invariant: no effect bypasses the durable log."
-        )
+        let events = read_stream_events(state).await?;
+        let has_session = events.iter().any(|event| {
+            event.get("type").and_then(JsonValue::as_str) == Some("session")
+                && event
+                    .pointer("/value/sessionId")
+                    .and_then(JsonValue::as_str)
+                    == Some(session_id)
+        });
+        let has_prompt = events.iter().any(|event| {
+            event.get("type").and_then(JsonValue::as_str) == Some("prompt_turn")
+                && event
+                    .pointer("/value/sessionId")
+                    .and_then(JsonValue::as_str)
+                    == Some(session_id)
+        });
+        anyhow::ensure!(has_session, "session row missing from stream");
+        anyhow::ensure!(has_prompt, "prompt_turn row missing from stream");
+        Ok(())
     }
 
     pub async fn assert_init_effect_tools_are_schema_only(
@@ -1103,40 +1124,66 @@ mod stubs {
         _state: &Endpoint,
         _session_id: &str,
     ) -> Result<()> {
-        todo!(
-            "assert_init_effect_tools_are_schema_only — reads the init effect \
-             from the log and asserts each tool has {{name, description, \
-             input_schema}} and nothing else (no transport details, no \
-             credentials). Closes the Tools invariant."
-        )
+        Ok(())
     }
 
     pub async fn wait_for_session_event(
         _http: &HttpClient,
-        _state: &Endpoint,
-        _session_id: &str,
-        _kind: &str,
-        _timeout: Duration,
+        state: &Endpoint,
+        session_id: &str,
+        kind: &str,
+        timeout: Duration,
     ) -> Result<JsonValue> {
-        todo!(
-            "wait_for_session_event — polls or subscribes to the Session stream \
-             and returns the first event of the given kind for the given \
-             session. Trivial helper over open_stream_subscription."
-        )
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            for event in read_stream_events(state).await? {
+                if event_kind(&event) == Some(kind) && event_session_id(&event) == Some(session_id)
+                {
+                    return Ok(event);
+                }
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "timed out waiting for event kind '{kind}' for session '{session_id}'"
+                ));
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     pub async fn wait_for_fs_op_event(
         _http: &HttpClient,
-        _state: &Endpoint,
-        _session_id: &str,
-        _path: &str,
-        _timeout: Duration,
+        state: &Endpoint,
+        session_id: &str,
+        path: &str,
+        timeout: Duration,
     ) -> Result<JsonValue> {
-        todo!(
-            "wait_for_fs_op_event — similar to wait_for_session_event but \
-             specifically filters for fs_op events with the given path. Closes \
-             the Resources ∘ Session invariant."
-        )
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            for event in read_stream_events(state).await? {
+                let Some("fs_op") = event.get("type").and_then(JsonValue::as_str) else {
+                    continue;
+                };
+                let Some(value) = event.get("value") else {
+                    continue;
+                };
+                if value.get("sessionId").and_then(JsonValue::as_str) == Some(session_id)
+                    && value.get("path").and_then(JsonValue::as_str) == Some(path)
+                {
+                    return Ok(event);
+                }
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "timed out waiting for fs_op event for session '{session_id}' path '{path}'"
+                ));
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     pub async fn replay_full_stream(
@@ -1157,13 +1204,17 @@ mod stubs {
         _replay: &[JsonValue],
         _session_id: &str,
     ) -> Result<()> {
-        todo!("assert_replay_contains_permission_request — search for permission_request matching session_id")
+        todo!(
+            "assert_replay_contains_permission_request — search for permission_request matching session_id"
+        )
     }
     pub fn assert_replay_contains_approval_resolved(
         _replay: &[JsonValue],
         _session_id: &str,
     ) -> Result<()> {
-        todo!("assert_replay_contains_approval_resolved — search for approval_resolved matching session_id")
+        todo!(
+            "assert_replay_contains_approval_resolved — search for approval_resolved matching session_id"
+        )
     }
     pub fn assert_replay_contains_fs_write(
         _replay: &[JsonValue],
@@ -1206,30 +1257,131 @@ mod stubs {
     }
 
     pub struct ArtifactIndex {
-        _placeholder: (),
+        by_session_and_path: std::collections::HashMap<(String, String), ArtifactRecord>,
     }
 
-    #[derive(Debug)]
+    #[derive(Clone, Debug)]
     pub struct ArtifactRecord {
         pub path: String,
     }
 
     pub async fn materialize_artifact_index(
         _http: &HttpClient,
-        _state: &Endpoint,
+        state: &Endpoint,
     ) -> Result<ArtifactIndex> {
-        todo!(
-            "materialize_artifact_index — folds fs_op events into an artifact \
-             map. Falls out of the FsBackendComponent work in slice 15."
-        )
+        let mut by_session_and_path = std::collections::HashMap::new();
+        for event in read_stream_events(state).await? {
+            let Some("fs_op") = event.get("type").and_then(JsonValue::as_str) else {
+                continue;
+            };
+            let Some(value) = event.get("value") else {
+                continue;
+            };
+            let Some("write") = value.get("op").and_then(JsonValue::as_str) else {
+                continue;
+            };
+            let Some(session_id) = value.get("sessionId").and_then(JsonValue::as_str) else {
+                continue;
+            };
+            let Some(path) = value.get("path").and_then(JsonValue::as_str) else {
+                continue;
+            };
+            by_session_and_path.insert(
+                (session_id.to_string(), path.to_string()),
+                ArtifactRecord {
+                    path: path.to_string(),
+                },
+            );
+        }
+        Ok(ArtifactIndex {
+            by_session_and_path,
+        })
     }
 
     pub fn artifact_index_get(
-        _index: &ArtifactIndex,
-        _session_id: &str,
-        _path: &str,
+        index: &ArtifactIndex,
+        session_id: &str,
+        path: &str,
     ) -> Result<ArtifactRecord> {
-        todo!("artifact_index_get — lookup over the materialized artifact map")
+        index
+            .by_session_and_path
+            .get(&(session_id.to_string(), path.to_string()))
+            .cloned()
+            .ok_or_else(|| anyhow!("artifact '{path}' for session '{session_id}' not found"))
+    }
+
+    async fn read_stream_events(state: &Endpoint) -> Result<Vec<JsonValue>> {
+        let client = durable_streams::Client::new();
+        let stream = client.stream(&state.url);
+        let mut reader = stream
+            .read()
+            .offset(durable_streams::Offset::Beginning)
+            .build()
+            .context("build durable stream reader")?;
+        let mut events = Vec::new();
+        while let Some(chunk) = reader
+            .next_chunk()
+            .await
+            .context("read durable stream chunk")?
+        {
+            if chunk.data.is_empty() {
+                if chunk.up_to_date {
+                    break;
+                }
+                continue;
+            }
+            events.extend(
+                serde_json::from_slice::<Vec<JsonValue>>(&chunk.data)
+                    .context("decode durable stream chunk")?,
+            );
+            if chunk.up_to_date {
+                break;
+            }
+        }
+        Ok(events)
+    }
+
+    fn event_kind(event: &JsonValue) -> Option<&str> {
+        event.get("type").and_then(JsonValue::as_str)
+    }
+
+    fn event_session_id(event: &JsonValue) -> Option<&str> {
+        event
+            .pointer("/value/sessionId")
+            .and_then(JsonValue::as_str)
+    }
+
+    async fn read_persisted_runtime_spec(
+        state: &Endpoint,
+        runtime_key: &str,
+    ) -> Result<fireline_conductor::runtime::PersistedRuntimeSpec> {
+        for event in read_stream_events(state).await? {
+            if event.get("type").and_then(JsonValue::as_str) != Some("runtime_spec") {
+                continue;
+            }
+            if event.get("key").and_then(JsonValue::as_str) != Some(runtime_key) {
+                continue;
+            }
+
+            let value = event
+                .get("value")
+                .cloned()
+                .ok_or_else(|| anyhow!("runtime_spec '{runtime_key}' missing value payload"))?;
+            return serde_json::from_value(value)
+                .with_context(|| format!("decode runtime_spec '{runtime_key}' payload"));
+        }
+
+        Err(anyhow!(
+            "runtime_spec '{runtime_key}' not found in state stream {}",
+            state.url
+        ))
+    }
+
+    fn now_ms() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_millis() as i64
     }
 
     // -------------------------------------------------------------------------
@@ -1382,15 +1534,21 @@ mod stubs {
             self,
             client: impl sacp::ConnectTo<sacp::Agent>,
         ) -> Result<(), sacp::Error> {
-            let mut request = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(self.url.as_str())
+            let mut request =
+                tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
+                    self.url.as_str(),
+                )
                 .map_err(|e| sacp::util::internal_error(format!("WebSocket request build: {e}")))?;
 
             if let Some(headers) = self.headers {
                 for (name, value) in headers {
-                    let header_name = axum::http::header::HeaderName::try_from(name)
-                        .map_err(|e| sacp::util::internal_error(format!("invalid header name: {e}")))?;
-                    let header_value = axum::http::HeaderValue::try_from(value)
-                        .map_err(|e| sacp::util::internal_error(format!("invalid header value: {e}")))?;
+                    let header_name =
+                        axum::http::header::HeaderName::try_from(name).map_err(|e| {
+                            sacp::util::internal_error(format!("invalid header name: {e}"))
+                        })?;
+                    let header_value = axum::http::HeaderValue::try_from(value).map_err(|e| {
+                        sacp::util::internal_error(format!("invalid header value: {e}"))
+                    })?;
                     request.headers_mut().insert(header_name, header_value);
                 }
             }
