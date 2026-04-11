@@ -223,6 +223,78 @@ These are the things that surfaced this session that don't have answers yet:
 - `docs/proposals/runtime-host-split.md` — the post-stream-as-truth proposal
 - `verification/stateright/src/lib.rs` + `crates/fireline-semantics/src/stream_truth.rs` — formal layer for runtime_index agreement
 
+## Verification-layer follow-ups (logged mid-session, 2026-04-11 afternoon)
+
+These items were scoped during the Host/Sandbox/Orchestrator primitive-split dispatch and deferred behind the current code lanes. They are demo-safe to skip and architecturally load-bearing to eventually land. Pick them up after the current code lanes (Rust Tier C-D, TS Tier 1-2) stabilize.
+
+### Background
+
+The verification layer has three physical locations today:
+
+- **`crates/fireline-semantics/`** — pure Rust kernel crate (workspace member, zero deps). Encodes protocol semantics as pure functions (session, resume, approval, liveness, stream-truth modules).
+- **`verification/stateright/`** — `fireline-verification` crate (workspace member). `depends on fireline-semantics.workspace = true`. Wraps the kernel in a Stateright bounded model check.
+- **`verification/spec/managed_agents.tla`** — TLA+ spec (Java TLC, independent second formalization).
+- **`verification/docs/refinement-matrix.md`** — maps TLA+ invariants → Rust kernel functions → executable tests.
+- **`verification/README.md`** — explains the three layers.
+
+The dependency direction is correct: `verification/stateright` → `crates/fireline-semantics` → nothing. `fireline-semantics` is a pure library that could eventually be consumed by production code for runtime invariant assertions, not just verification, which is why it lives in `crates/` and not under `verification/`. Physical co-location was considered and rejected: the split is architecturally meaningful (kernel vs. verification-specific harness) and shouldn't be collapsed.
+
+### TLA+ spec drift — three levels of catch-up
+
+After the Host/Sandbox/Orchestrator reframe in `docs/proposals/client-primitives.md` + `docs/proposals/runtime-host-split.md` §7, the TLA+ spec at `verification/spec/managed_agents.tla` encodes the old vocabulary. It still models 6 of the 7 Anthropic primitives correctly (Session, Orchestration, Harness, Sandbox, Resources, Tools) and its invariants are all valid — but its action names and variable names don't match the new primitive split. Three levels of update, in order of cost:
+
+**Level 1 — vocab rename + one new invariant (~40-line diff, ~30-45 min):**
+- Top-of-file comments pointing at `docs/proposals/client-primitives.md` and `docs/proposals/runtime-host-split.md` §7 as the authoritative primitive taxonomy the spec is tracking.
+- Collapse `ResumeLive` + `ResumeCold` into a single `Wake` action with an internal branch on `beforeStatus = "ready"` vs `"stopped"`. Rename `lastResume` → `lastWake`, `resumeEpoch` → `wakeEpoch`, `resumeResponses` → `wakeResponses`.
+- Rename the existing invariants: `ResumeOnLiveRuntimeIsNoop` → `WakeOnReadyIsNoop`, `ColdResumePreservesRuntimeKeyChangesRuntimeId` → `WakeOnStoppedChangesRuntimeId`.
+- Add inline comments on `runtimeIndex`, `mountedResources`, and `ProvisionRuntime` tagging each as "Host state" / "Sandbox state" / "Host-Sandbox composition" so a future reader can see where the split would land.
+- Add one new named invariant: `WakeIsHostOnly` — all state transitions on `runtimeIndex[rk].status` come from `Wake`, `StopRuntime`, or `ProvisionRuntime`, never from a Harness action or an approval action. This is already true in the spec; we just give it a name.
+- Run TLC locally once to verify the renamed spec is still green. Java TLC is ~2 min; single run is fine (not a cargo run, not subject to the battery constraint that was applied to the Rust test suite).
+- Zero semantic change. Preserves every existing invariant. No risk to demo.
+
+**Level 2 — new invariants the reframe makes formally statable (~80-line diff, post-demo):**
+- `HostDoesNotReachIntoSandboxTools`: approval/suspend combinators never mutate `mountedResources` or `toolRegistry`.
+- `SandboxIndependentOfOrchestration`: wake episodes don't mutate `mountedResources` except via the explicit `newRid → requestedResources[rk]` propagation.
+- `CombinatorAlgebraIsClosed`: every `HarnessEmit` kind is one of the 7 combinator outputs (today it's implicit; name it).
+- Refine the `Sandbox` model to distinguish "runtime can run tools" from "runtime is reachable for ACP" — one is a reachability property, the other is a Host concern.
+
+**Level 3 — structural refactor for the full Host/Sandbox/Combinator split (200+ line diff, post-demo):**
+- Split `runtimeIndex` into `hostState` + `sandboxState` as separate variables.
+- Split `ProvisionRuntime` into `CreateSession` + `ProvisionSandbox` actions.
+- Add an explicit `Combinator` record type with 7 variants and a `Topology == Seq[Combinator]` per session.
+- Add `ApplyCombinator(s, c, e)` that dispatches on combinator kind and shows how each kind transforms the session log.
+- Verify the existing invariants survive the refactor (most should — the primitives are the same, only the decomposition changes).
+
+Level 3 is real formal-modeling work. It is the right post-demo target to make the TLA+ spec match the TS `client-primitives.md` doc 1:1, but it is a multi-hour focused slice.
+
+### CI + drift-prevention hygiene (~15-min commit, independently landable)
+
+Today the managed-agent-suite workflow (`.github/workflows/managed-agent-suite.yml`) runs the Rust integration suite. It does NOT run `crates/fireline-semantics` unit tests, does NOT run `verification/stateright` Stateright checks, and does NOT run TLC on the `.tla` spec. All three verification artifacts can silently drift from the production code they're supposed to track.
+
+Three additive items, one commit:
+
+1. **CI coverage end-to-end.** Add `fireline-semantics` unit tests + `fireline-verification` Stateright checks to a new `verification-layer` workflow filtered on `crates/fireline-semantics/**` + `verification/**`. Optional: add a TLC step using `setup-java@v4` + `wget tla2tools.jar` + `java -jar tla2tools.jar -config ...` (~15 lines of YAML).
+
+2. **Refinement matrix cross-references.** Read `verification/docs/refinement-matrix.md` and verify that every TLA+ invariant name cross-references a specific `fireline-semantics` function/type name AND a specific `tests/managed_agent_*.rs` test function. If any are missing, add them. Keeps the three formalizations in traceable lockstep.
+
+3. **Drift-prevention rule in README.** Add one sentence to `verification/README.md`: *"Any change to managed-agent primitive semantics in `crates/fireline-conductor/src/runtime/**`, `crates/fireline-conductor/src/primitives/**`, or `crates/fireline-control-plane/**` must be reflected in the same commit (or an immediately-following commit) in `crates/fireline-semantics/src/**`, `verification/stateright/src/**`, and `verification/spec/managed_agents.tla`."*
+
+### Physical unification — explicitly rejected as of this session, revisitable post-demo
+
+Considered and rejected: moving `crates/fireline-semantics/` into `verification/semantics/` to co-locate all verification artifacts. Reasoning for keeping the split: `fireline-semantics` is a pure library that could be consumed by production code for runtime invariant assertions, not just verification. Co-locating it with verification-specific artifacts would couple "reusable kernel" to "verification-only harnesses." The current dependency graph (`fireline-verification` → `fireline-semantics`) is correct and standard Rust workspace layout.
+
+If the drift-prevention hygiene items above still fail to prevent silent slippage after a few sessions of practice, revisit this as a post-demo cleanup. The rename would be ~30 lines (Cargo manifest path + one workspace member entry + a few imports). Not urgent.
+
+### Estimated total cost
+
+- Level 1 TLA+ update: 30-45 min
+- CI + drift-prevention hygiene: 15 min
+- Level 2 TLA+ update: 1-2 hours (post-demo)
+- Level 3 TLA+ structural refactor: half-day to full day (post-demo)
+- Physical unification: ~30 min if ever needed (post-demo)
+
+All items are independently landable in any order. None of them block the current code lanes (Rust primitive split, TS client core, demo UI rewrite).
+
 ## Closing notes
 
 This session's strongest architectural commitment: **the durable stream is the source of truth, not an in-memory cache.** Every cut this session reinforced that thesis — the `RuntimeIndex` projection, the agreement invariant test, the formal Stateright check, the runtime-host-split proposal's stream-as-truth update. The next phase should continue the same trajectory: if something about a runtime's existence, lifecycle, or identity needs to survive restart or be observable cross-runtime, **it belongs in the stream**.
