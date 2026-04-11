@@ -1,0 +1,55 @@
+name: Managed Agent Suite
+
+on:
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - src/**
+      - crates/**
+      - tests/**
+      - .github/workflows/managed-agent-suite.yml
+  push:
+    branches:
+      - main
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - src/**
+      - crates/**
+      - tests/**
+      - .github/workflows/managed-agent-suite.yml
+  workflow_dispatch:
+
+concurrency:
+  group: managed-agent-suite-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  managed-agent-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run managed-agent Rust suite
+        run: |
+          cargo test --locked \
+            --test managed_agent_session \
+            --test managed_agent_sandbox \
+            --test managed_agent_harness \
+            --test managed_agent_resources \
+            --test managed_agent_tools \
+            --test managed_agent_orchestration \
+            --test managed_agent_primitives_suite \
+            -- --nocapture --test-threads=1
