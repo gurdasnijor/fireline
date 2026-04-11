@@ -7,6 +7,10 @@ const browserHarnessDir = fileURLToPath(new URL('../../browser-harness/', import
 const devServerScript = fileURLToPath(new URL('../../browser-harness/dev-server.mjs', import.meta.url))
 
 export default async function browserGlobalSetup(_context: GlobalSetupContext) {
+  if (process.env.MOCK_BROWSER_HARNESS === 'true') {
+    return async () => {}
+  }
+
   const server = spawn(process.execPath, [devServerScript], {
     cwd: browserHarnessDir,
     env: process.env,
