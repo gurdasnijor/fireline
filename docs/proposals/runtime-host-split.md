@@ -292,3 +292,121 @@ Leaning (b) but flagging for review — the decision affects the appendix file l
 | `RuntimeHost` façade | `crates/fireline-conductor/src/runtime/mod.rs` | **Thinned to near-zero or deleted** (§6.5 option (b)) |
 
 The §5.1 façade-vs-collapse question tilts toward **collapse**: once the registry and the state machine are both gone, the only thing `RuntimeHost` wraps is `RuntimeLauncher`, and a one-field wrapper is not worth a type.
+
+---
+
+## 7. Host / Sandbox / Orchestrator reframe (post-stress-test)
+
+> **Status:** second directional overlay. §7 supersedes parts of §1-§6 at a layer *above* them. §1-§6 remain correct as descriptions of what's **inside** the fireline Host implementation; §7 explains what the fireline Host *is*.
+>
+> **Companion:** [`./client-primitives.md`](./client-primitives.md) is the authoritative TS-side formalization of the reframe. It defines `Host`, `Sandbox`, `Orchestrator`, the combinator algebra, and the module layout. §7 here is the Rust-workspace translation and the reconciliation with §1-§6.
+
+### 7.1 The trigger
+
+A conversational stress test on **2026-04-11** asked *"what if the Host was the Claude Agent SDK v2 preview's `query({ resume: sessionId })` instead of fireline's control plane?"*. That exercise revealed two things:
+
+1. **The proposal's whole §1-§6 is talking about the internals of one specific `Host` implementation** — the fireline-native one (conductor + control plane + stream projection). Everything named here (`RuntimeLauncher`, `RuntimeSpecJournal`, `RuntimeLifecycle`, the stream-as-truth sequence) is internal to that impl.
+2. **There is a second primitive adjacent to Host that this proposal was quietly conflating with it** — `Sandbox` in the Anthropic managed-agent sense (the tool-execution environment used *inside* a running session for bash / code / browser / fs calls), which is distinct from "the thing that runs an agent session."
+
+`client-primitives.md` formalizes the three primitives in TypeScript. This section maps them onto the Rust workspace and updates §3/§4/§6 in light of the reframe.
+
+### 7.2 The three primitives, named
+
+From `client-primitives.md`:
+
+- **`Host`** — runs an agent session. Owns session lifecycle (`createSession`, `wake`, `status`, `stopSession`). Implementations: the fireline control plane + conductor (everything §1-§6 describes) for the native satisfier; the Claude Agent SDK v2 `query({ resume })` path for a Claude satisfier; others as they come.
+- **`Sandbox`** — runs a *single tool call* in isolation inside a running session. `provision(resources) → execute(call) → release()`. Anthropic's framing: "any executor called many times as a tool." Implementations: **microsandbox** (microVM-per-sandbox), local subprocess, Docker, Bun.Sandbox, e2b, Daytona.
+- **`Orchestrator`** — substrate-agnostic wake loop over a `SessionRegistry`. Only touches `host.wake(handle)`. Indifferent to which `Host` or `Sandbox` is in use.
+
+Full TS signatures and contracts in `client-primitives.md` Modules 2, 3, and the orchestrator section. The Rust workspace will grow parallel traits (named TBD in §7.6) that satisfy the same algebra.
+
+### 7.3 What this reframes about §1-§6
+
+The three concerns §3 extracts and §6.2 further dissolves are **internals of the fireline `Host` impl**, not public substrate primitives. Re-reading §1-§6 under this lens:
+
+- **§1 Current state** — still correct. Describes what the fireline `Host` impl is doing inside `RuntimeHost::create/stop/delete/register/heartbeat`.
+- **§2 Pressure points** — still correct. The `pending_runtime_specs` cache and the §2-era race are pathologies of one specific `Host` impl's internal bookkeeping.
+- **§3 Proposed split** — §3a `RuntimeLauncher` still survives as an internal. §3b `RuntimeSpecJournal` still dissolves (per §6.2). §3c `RuntimeLifecycle` still shrinks. None of these are ever part of the fireline-as-substrate public API — they live *behind* the `Host` trait, not on it.
+- **§4 Transition plan** — its commits still happen. They are now understood as "tidy up the internals of the fireline `Host` impl," not as "architect the general split." The general split is `client-primitives.md`.
+- **§6 Stream-as-truth** — still correct. Stream-as-truth is the state substrate the fireline `Host` impl uses. Other `Host` impls have their own state stores (Claude's session state lives server-side in Anthropic's infrastructure; there is no stream for us to read). Stream-as-truth is not a requirement of the `Host` primitive — it's a property of fireline's specific satisfier.
+- **`RuntimeProvider` / `ManagedRuntime` / `LocalProvider` / `DockerProvider`** — these are the execution backends the fireline Host uses to run **its own runtime subprocess** (the `fireline` binary, hosting the conductor + the agent child process). They are **not** instances of the new `Sandbox` primitive, despite the naming collision. They're internal to fireline-the-Host; `Sandbox` is a different primitive at a different layer.
+
+### 7.4 Microsandbox, categorized
+
+The microsandbox investigation earlier in this session was evaluating it **as a `RuntimeProvider` replacement** — boot a microVM, run the `fireline` binary inside it, reach the control plane back on the host, expose the ACP WebSocket via reverse port publish, etc. That framing produced a real host-reachability investigation (the LAN-IP discovery, the `NetworkPolicy::allow_all()` requirement, the whole "guest `127.0.0.1` is the guest's own `lo0`" clarification) — all of which was correct, but was solving the wrong problem because microsandbox was in the wrong slot.
+
+**Under §7, microsandbox is a `Sandbox` impl, not a `RuntimeProvider` replacement.** The shape:
+
+```rust
+// Sketch — actual trait lives in the substrate crate (§7.6 open question).
+impl Sandbox for MicrosandboxSandbox {
+    async fn provision(&self, resources: &[ResourceRef]) -> Result<SandboxHandle> {
+        // Sandbox::builder(...).image("alpine").network(|n| n.policy(allow_all()))
+        //     .replace().create_detached().await
+        // Then sandbox.fs().copy_from_host(...) for each resource.
+    }
+    async fn execute(&self, h: &SandboxHandle, call: ToolCall) -> Result<JsonValue> {
+        // sandbox.exec_stream(call.cmd, call.args).await — collect stdout/stderr/exit.
+    }
+    async fn release(self, h: SandboxHandle) -> Result<()> {
+        // sandbox.stop_and_wait().await?; sandbox.remove_persisted().await
+    }
+}
+```
+
+Under this shape, **the entire host-reachability investigation becomes moot**. The microsandbox handle is owned by the `Host` process (fireline-native or Claude-backed), not by a fireline runtime inside the VM. The VM never needs to call back to anything on the host: tool calls enter via `execute()`, tool output leaves via the return value. The only networking a `MicrosandboxSandbox` needs is **outbound egress for tool calls themselves** (a `curl` inside `bash`, a `pip install` inside `code`), which `allow_all` already provides cleanly.
+
+The spike findings from earlier this session (373 ms cold boot, 5 ms clean stop, `copy_from_host` works, `exec_stream` works, `allow_all` opens egress) **all still apply**; they're exactly the right facts about microsandbox for this role. The integration is smaller, not larger: **no LAN-IP discovery helper, no `--host 0.0.0.0` flag-flipping on the control plane, no env-var gymnastics.** Estimate drops from half-day to **~2-3 hours** for the happy-path `MicrosandboxSandbox` impl once the `Sandbox` trait exists to implement against.
+
+### 7.5 Transition plan under the reframe (supersedes §6.4 *at a layer above*)
+
+§6.4's commit sequence still happens — it describes fireline-Host internal cleanup and is correct as such. A sibling sequence sits above it:
+
+**Tier A — `client-primitives.md` Tier 1-3 (TS substrate).** Land `@fireline/client/core`, `@fireline/client/host`, `@fireline/client/orchestration`, `@fireline/client/host-fireline`. Full scope in that doc. ~2.5 days per its build order.
+
+**Tier B — §6.4 stream-as-truth cleanup (Rust, fireline-Host internal).** Independent of Tier A; can run in parallel. Scoped entirely to `crates/fireline-conductor/src/runtime/` and adjacent control-plane code. See §6.4 for the commit-by-commit sequence.
+
+**Tier C — Introduce Rust `Host` + `Sandbox` traits.** Blocks on B (to avoid moving targets) but not on A. Names the primitives in Rust, wraps existing code behind the new traits. Mostly renaming and regrouping; zero semantic change. ~1 day.
+
+**Tier D — `MicrosandboxSandbox: Sandbox`.** Blocks on C. ~2-3 hours for a happy-path impl plus a single green test under `tests/sandbox_microsandbox.rs` (or equivalent). First non-trivial consumer of the new `Sandbox` trait.
+
+**Tier E — (optional, demo-facing) `host-claude` TS satisfier.** From `client-primitives.md` Tier 6. Blocks on Tier A only. Independent of C and D. The demo becomes *"one Orchestrator, two Hosts (fireline-native, Claude via `query({ resume })`), one `Sandbox` (microsandbox) usable by both."*
+
+Tiers A and B can run in parallel. C blocks D. E is parallel to C and D once A is in. The critical path for the **microsandbox demo story** specifically is B → C → D → E: ~3-4 days end to end if one lane at a time, faster with lane parallelism.
+
+### 7.6 New open questions
+
+Replacing / extending §5, specifically at the Rust-workspace layer:
+
+1. **Where does the Rust `Sandbox` trait live?** Options: grow `fireline-conductor` to carry it (simplest, but couples substrate to runtime wiring); add a new `fireline-substrate` crate at the bottom of the workspace that both `fireline-conductor` and downstream `Sandbox` impls depend on (cleanest, but a new crate). Leaning toward **new `fireline-substrate` crate** to mirror the TS split between `@fireline/client/core` (primitives) and `@fireline/client/host-fireline` (satisfier).
+2. **Does the Rust `Host` trait mirror the TS `Host` contract method-for-method?** The TS has `createSession`, `wake`, `status`, `stopSession`. The Rust analogue could be identical, or it could stay Rust-native (richer types). Symmetry is cheap and makes the cross-language story legible; arbitrary divergence is a future cost. Leaning symmetric unless a specific Rust-only concern surfaces.
+3. **Does `ResourceRef` hoist out of `fireline-conductor`?** Today it lives in `crates/fireline-conductor/src/runtime/provider.rs`. Under §7, both `Host` and `Sandbox` consume `ResourceRef` (Host for fireline-runtime mounts, Sandbox for tool-call workspaces). Moving it to the substrate crate makes it a shared primitive, per `client-primitives.md`'s treatment.
+4. **What is a `Sandbox` instance's lifespan within a session?** Three options with materially different cost profiles: **per-call** (create/release on every tool use — safest isolation, 373 ms × N calls is expensive even at microsandbox's cold-boot), **per-turn** (one sandbox per prompt turn, reused across N tool calls in that turn — good middle ground), **per-session** (one sandbox for the whole session — lowest latency, some cross-turn state bleed). The `Sandbox` trait itself is indifferent; the fireline `Host` has to choose a policy. Microsandbox's `.max_duration()` and `.idle_timeout()` surfaced in the earlier doc review make **per-turn** ergonomic.
+5. **Which fireline-components map to `Combinator`s vs. to `Sandbox` execution?** Per `client-primitives.md`'s seven-combinator algebra, components like `approval_gate`, `budget`, `context_injection`, `audit`, `peer_mcp` decompose into `suspend` / `filter` / `map_effect` / `observe` / `fanout` combinators — they are *not* Sandbox concerns. `fs_backend` is more ambiguous: file read/write from the agent's perspective may route through either a `Sandbox` (if it's workspace access) or a combinator (if it's projection into the session log). This wants a follow-up pass aligned with `managed-agents-mapping.md`.
+
+### 7.7 What becomes redundant in §1-§6 under the reframe
+
+Nothing is deleted, but several framings soften:
+
+- **§3's public-API framing of `RuntimeLauncher`/`RuntimeLifecycle`** — these are never exported. They live in `crates/fireline-conductor/src/runtime/` as internals of the fireline `Host` impl. No external caller sees them.
+- **§5.1 façade-vs-collapse** — tilts further toward **collapse**. `RuntimeHost` as a public type has no role once (a) its internals are tidied per §6.4 and (b) it becomes the body of `impl Host for FirelineHost { … }`. The `Host` trait is the only visible surface.
+- **§4 Commit 4 ("push the composition boundary up")** — executes *into* the new `impl Host for FirelineHost` block rather than into a fresh `RuntimeHost` struct. Lower blast radius, cleaner cut.
+- **Microsandbox-as-`MicrosandboxProvider`-replacing-`DockerProvider`** — fully deleted as a framing. Microsandbox does not touch the `RuntimeProvider` trait. That trait stays an internal of fireline's own subprocess-host strategy.
+
+### 7.8 Closing §5.6: does `RuntimeLifecycle` survive as a named type?
+
+**Resolved: no — it collapses into the fireline `Host` satisfier's internals and does not appear as a named public type.**
+
+§5.6 asked whether `RuntimeLifecycle` should survive as a named Rust type after §6.2's stream-as-truth reframe, where the state machine degenerates into a folder of stream-write helpers plus a projection. §7 resolves it:
+
+- The fireline `Host` impl owns its registration / heartbeat / stop logic as **private methods on the impl block**. These methods are never exposed across the `Host` trait boundary.
+- The Rust `Host` trait's public verbs are the TS-side four: `create_session`, `wake`, `status`, `stop_session` (plus Rust-flavored async / `Send + Sync` bounds). The trait has no `register` or `heartbeat` method — those are a satisfier-internal concern of the fireline implementation specifically, because push-mode registration is a property of fireline's subprocess/container strategy, not a property of every Host (Claude's Host does none of this).
+- The stream-write helpers (`emit_runtime_endpoints_persisted`, `emit_runtime_spec_persisted`, etc.) and the `RuntimeIndex` projection continue to exist and are still what §6.2 §3c described. They just don't live inside a type named `RuntimeLifecycle`. They live as free functions in `fireline-conductor::trace` (already where they live today) and as an `impl StateProjection for RuntimeIndex` block. §5.6 option **(b) — drop the name** — wins.
+
+This also answers the related §7.3 concern about `RuntimeProvider` / `ManagedRuntime` / `LocalProvider` / `DockerProvider`: they are also fireline-Host internals, kept under their existing names inside `crates/fireline-conductor/src/runtime/`, invisible through the `Host` trait. They are the execution backend of **fireline's** Host satisfier and do not propagate to other `Host` implementations.
+
+### 7.9 Decision record
+
+`client-primitives.md` is authoritative for the TS-side formalization and for the public substrate layout. This §7 is authoritative for the Rust-workspace manifestation and for reconciling §1-§6 with the reframe. When they disagree on the primitive layer, **`client-primitives.md` wins**; when they disagree on Rust internals, **§7 (and its §6 / §4 transitively) wins**. Both docs should be read together.
+
+If gnijor or workspace:4 signs off on §7, the next concrete proposal artifact would be a one-line update to `client-primitives.md`'s "Related" block to cross-reference §7 here, and the start of Tier A / Tier B lane work per §7.5.
