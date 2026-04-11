@@ -91,6 +91,7 @@ use fireline_conductor::runtime::{
     CreateRuntimeSpec, Endpoint, RuntimeDescriptor, RuntimeHost, RuntimeProviderKind,
     RuntimeProviderRequest, RuntimeStatus,
 };
+use fireline_conductor::topology::{TopologyComponentSpec, TopologySpec};
 use reqwest::Client as HttpClient;
 use serde_json::Value as JsonValue;
 use tokio::process::{Child, Command};
@@ -763,20 +764,11 @@ mod stubs {
     // `docs/explorations/typescript-functional-api-proposal.md` has the shape.
     // -------------------------------------------------------------------------
 
-    /// Opaque topology value — a `Vec<Component>` that provision consumes.
-    #[derive(Clone)]
-    pub struct Topology {
-        pub components: Vec<Component>,
-    }
-
-    #[derive(Clone)]
-    pub struct Component {
-        pub kind: String,
-        pub config: JsonValue,
-    }
+    pub type Topology = TopologySpec;
+    pub type Component = TopologyComponentSpec;
 
     pub fn compose(components: Vec<Component>) -> Topology {
-        Topology { components }
+        TopologySpec { components }
     }
 
     pub fn topology_component_count(t: &Topology) -> usize {
@@ -784,9 +776,11 @@ mod stubs {
     }
 
     pub fn audit() -> Component {
-        Component {
-            kind: "audit".to_string(),
-            config: serde_json::json!({}),
+        TopologyComponentSpec {
+            name: "audit".to_string(),
+            config: Some(serde_json::json!({
+                "streamName": format!("managed-agent-audit-{}", Uuid::new_v4()),
+            })),
         }
     }
 
@@ -796,20 +790,29 @@ mod stubs {
     pub struct WorkspaceFileSource {
         pub path: PathBuf,
     }
-    pub fn context_injection(_opts: ContextInjectionOpts) -> Component {
-        Component {
-            kind: "context_injection".to_string(),
-            config: serde_json::json!({}),
+    pub fn context_injection(opts: ContextInjectionOpts) -> Component {
+        TopologyComponentSpec {
+            name: "context_injection".to_string(),
+            config: Some(serde_json::json!({
+                "sources": opts.sources.into_iter().map(|source| {
+                    serde_json::json!({
+                        "kind": "workspaceFile",
+                        "path": source.path,
+                    })
+                }).collect::<Vec<_>>()
+            })),
         }
     }
 
     pub struct BudgetOpts {
         pub tokens: u64,
     }
-    pub fn budget(_opts: BudgetOpts) -> Component {
-        Component {
-            kind: "budget".to_string(),
-            config: serde_json::json!({}),
+    pub fn budget(opts: BudgetOpts) -> Component {
+        TopologyComponentSpec {
+            name: "budget".to_string(),
+            config: Some(serde_json::json!({
+                "maxTokens": opts.tokens,
+            })),
         }
     }
 
@@ -820,27 +823,35 @@ mod stubs {
         pub scope: ApprovalScope,
         pub timeout_ms: u64,
     }
-    pub fn approval_gate(_opts: ApprovalGateOpts) -> Component {
-        Component {
-            kind: "approval_gate".to_string(),
-            config: serde_json::json!({}),
+    pub fn approval_gate(opts: ApprovalGateOpts) -> Component {
+        let scope = match opts.scope {
+            ApprovalScope::ToolCalls => "tool_calls",
+        };
+        TopologyComponentSpec {
+            name: "approval_gate".to_string(),
+            config: Some(serde_json::json!({
+                "scope": scope,
+                "timeoutMs": opts.timeout_ms,
+            })),
         }
     }
 
     pub struct PeerOpts {
         pub peers: Vec<String>,
     }
-    pub fn peer(_opts: PeerOpts) -> Component {
-        Component {
-            kind: "peer".to_string(),
-            config: serde_json::json!({}),
+    pub fn peer(opts: PeerOpts) -> Component {
+        TopologyComponentSpec {
+            name: "peer_mcp".to_string(),
+            config: Some(serde_json::json!({
+                "peers": opts.peers,
+            })),
         }
     }
 
     pub fn durable_trace() -> Component {
-        Component {
-            kind: "durable_trace".to_string(),
-            config: serde_json::json!({}),
+        TopologyComponentSpec {
+            name: "durable_trace".to_string(),
+            config: None,
         }
     }
 
@@ -891,9 +902,9 @@ mod stubs {
     }
 
     pub fn fs_backend(_backend: Arc<dyn FileBackend>) -> Component {
-        Component {
-            kind: "fs_backend".to_string(),
-            config: serde_json::json!({}),
+        TopologyComponentSpec {
+            name: "fs_backend".to_string(),
+            config: None,
         }
     }
 
