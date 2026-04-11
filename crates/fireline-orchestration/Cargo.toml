@@ -7,3 +7,9 @@ repository.workspace = true
 description = "Session wake orchestration primitives for Fireline"
 
 [dependencies]
+anyhow.workspace = true
+fireline-conductor.workspace = true
+fireline-session.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+tracing.workspace = true

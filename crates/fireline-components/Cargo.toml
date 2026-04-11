@@ -8,6 +8,7 @@ description = "Prebuilt topology components for Fireline (peer calls, audit, con
 
 [dependencies]
 fireline-conductor.workspace = true
+fireline-harness.workspace = true
 fireline-resources.workspace = true
 fireline-sandbox.workspace = true
 fireline-tools.workspace = true
