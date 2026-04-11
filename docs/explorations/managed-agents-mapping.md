@@ -36,13 +36,13 @@ This doc does **not** propose new primitives that aren't in the Anthropic framew
 | # | Primitive | Interface (pseudocode) | Satisfied by | Fireline status |
 |---|---|---|---|---|
 | 1 | **Session** | `getSession(id) → (Session, Event[])`; `getEvents(id) → PendingEvent[]`; `emitEvent(id, event)` | Any append-only log consumed in order from any event point with idempotent appends | **Strong on live Rust-side invariants; slice 14 read-surface work remains** (all five managed-agent Session clauses are live in `tests/managed_agent_session.rs:52`, `:126`, `:213`, `:415`, and `:523`; the remaining work is canonical row schema + TS read-surface hardening, not Session semantics — see §1 below) |
-| 2 | **Orchestration** | `wake(session_id) → void` | Any scheduler that can call a function with an ID and retry on failure | **Compositionally correct on the Rust side; TS/client surface still pending** (the cold-start acceptance contract is live at `tests/managed_agent_primitives_suite.rs:132`, and the live-runtime no-op / concurrent-resume / subscriber-loop proofs are live at `tests/managed_agent_orchestration.rs:84`, `:161`, and `:249`; `@fireline/client` still does not ship `resume(sessionId)` — see §2 below) |
+| 2 | **Orchestration** | `wake(session_id) → void` | Any scheduler that can call a function with an ID and retry on failure | **Compositionally correct on the Rust side; TS/client surface still pending** (the cold-start acceptance contract is live at `tests/managed_agent_primitives_suite.rs:132`, and the live-runtime no-op / concurrent-wake / subscriber-loop proofs are live at `tests/managed_agent_orchestration.rs:84`, `:161`, and `:249`; `@fireline/client` still does not ship `wake(sessionId)` — see §2 below) |
 | 3 | **Harness** | `yield Effect<T> → EffectResult<T>` | Any loop that yields effects and appends progress to the Session | **Partial** (by design; durable suspend/resume also satisfied via composition once Orchestration is wired up) |
 | 4 | **Sandbox** | `provision({resources}) → execute(name, input) → String` | Any executor configured once and called many times as a tool | **Strong** |
 | 5 | **Resources** | `[{source_ref, mount_path}]` | Any object store the container can fetch from by reference | **Strong on ACP-fs and component-layer mounts; Docker-scoped shell-mount proof stays external** (`managed_agent_resources_physical_mount_acceptance_contract`, `managed_agent_resources_fs_backend_acceptance_contract`, and `managed_agent_resources_fs_backend_component_test` are live at `tests/managed_agent_primitives_suite.rs:249`, `:308`, and `:369`; runtime-level fs-backend and cross-runtime stream-backed file tests are live at `tests/managed_agent_resources.rs:195` and `:287`; the only ignored row is the intentional Docker-scoped cross-reference marker at `tests/managed_agent_resources.rs:154` / `tests/managed_agent_primitives_suite.rs:290` — see §5) |
 | 6 | **Tools** | `{name, description, input_schema}` | Any capability describable as a name and input shape | **Strong on live Rust-side descriptor invariants; portable refs still pending** (schema-only, transport-agnostic, and deterministic first-attach-wins coverage is live at `tests/managed_agent_tools.rs:63`, `:230`, and `:389`; the remaining work is launch-spec portability and call-time credential resolution — see §6 below) |
 
-**One-line summary:** Sandbox remains the strongest operational primitive (`tests/managed_agent_sandbox.rs:58`, `:109`, `:185`). Session is now fully green on the Rust-side managed-agent invariants (`tests/managed_agent_session.rs:52`, `:126`, `:213`, `:415`, `:523`), with slice 14 still owning canonical row schema + TS read-surface hardening. Harness is still honestly partial: the missing seam is the durable suspend/resume round trip at `tests/managed_agent_harness.rs:326`. Tools now have live schema-only / transport-agnostic / collision invariants (`tests/managed_agent_tools.rs:63`, `:230`, `:389`). Orchestration has live cold-start / no-op / race / subscriber-loop coverage on the Rust side (`tests/managed_agent_primitives_suite.rs:132`; `tests/managed_agent_orchestration.rs:84`, `:161`, `:249`), but `@fireline/client` still does not ship `resume(sessionId)`. Resources are live at the component layer and for ACP-fs / cross-runtime stream-backed file behavior (`tests/managed_agent_primitives_suite.rs:249`, `:308`, `:369`; `tests/managed_agent_resources.rs:195`, `:287`); the remaining ignored mount row is an intentional Docker-scoped cross-reference marker, not pending local-runtime work (`tests/managed_agent_resources.rs:154`; `tests/managed_agent_primitives_suite.rs:290`). **Net result: the remaining primitive-level gap is the Harness durable suspend/resume seam plus downstream TS/product-facing surfaces, not missing substrate basics.**
+**One-line summary:** Sandbox remains the strongest operational primitive (`tests/managed_agent_sandbox.rs:58`, `:109`, `:185`). Session is now fully green on the Rust-side managed-agent invariants (`tests/managed_agent_session.rs:52`, `:126`, `:213`, `:415`, `:523`), with slice 14 still owning canonical row schema + TS read-surface hardening. Harness is still honestly partial: the missing seam is the durable suspend/resume round trip at `tests/managed_agent_harness.rs:326`. Tools now have live schema-only / transport-agnostic / collision invariants (`tests/managed_agent_tools.rs:63`, `:230`, `:389`). Orchestration has live cold-start / no-op / race / subscriber-loop coverage on the Rust side (`tests/managed_agent_primitives_suite.rs:132`; `tests/managed_agent_orchestration.rs:84`, `:161`, `:249`), but `@fireline/client` still does not ship `wake(sessionId)`. Resources are live at the component layer and for ACP-fs / cross-runtime stream-backed file behavior (`tests/managed_agent_primitives_suite.rs:249`, `:308`, `:369`; `tests/managed_agent_resources.rs:195`, `:287`); the remaining ignored mount row is an intentional Docker-scoped cross-reference marker, not pending local-runtime work (`tests/managed_agent_resources.rs:154`; `tests/managed_agent_primitives_suite.rs:290`). **Net result: the remaining primitive-level gap is the Harness durable suspend/resume seam plus downstream TS/product-facing surfaces, not missing substrate basics.**
 
 ## Fireline as combinators over the primitives
 
@@ -193,8 +193,8 @@ This decomposition lets us round-trip cleanly between Fireline's complex shape a
 | `provision({ topology })` | Sandbox + Harness | `compose` of all topology components |
 | `sessionStore.get(id)` | Session | materializer fold |
 | `openStream(endpoint, cursor)` | Session | identity fold (raw passthrough) |
-| `resume(sessionId)` | Session + Sandbox + Harness | composition: `sessionStore.get` + `provision` + `connectAcp` + `loadSession` — **no standalone wake primitive** |
-| subscriber loop watching a runtime stream and calling `resume` | Orchestration | *"any loop that appends to a log and calls a function with retry"* — satisfied by `for await (event of openStream(...))` + `resume` |
+| `wake(sessionId)` | Session + Sandbox + Harness | composition: `sessionStore.get` + `provision` + `connectAcp` + `loadSession` — **no standalone wake primitive** |
+| subscriber loop watching a runtime stream and calling `wake` | Orchestration | *"any loop that appends to a log and calls a function with retry"* — satisfied by `for await (event of openStream(...))` + `wake` |
 | `acp.session.prompt(...)` | Sandbox.execute + Harness yield | direct passthrough |
 
 Everything Fireline does is reducible to "primitive(s) + combinator". This is the operational answer to "what belongs in Fireline vs. what belongs in Flamecast." Fireline is the substrate that provides the six primitives plus the seven-combinator algebra. Flamecast composes those into product objects (runs, workspaces, profiles, approval queues) that don't fit the combinator algebra and shouldn't.
@@ -272,15 +272,15 @@ Satisfied by *"any scheduler that can call a function with an ID and retry on fa
 An earlier version of this doc treated Orchestration as Fireline's biggest gap, recommending a new slice 18 to introduce a `wake(runtime_key)` HTTP endpoint and an in-process scheduler. On closer inspection **the primitive is already satisfied by composition of existing surfaces**:
 
 - **`durable-streams` accepts writes from any authenticated client**, not just from the runtime. Per [`control-and-data-plane.md`](../runtime/control-and-data-plane.md) §3b, the write surface is the standard durable-streams HTTP POST; nothing is gating external appends beyond the bearer token the control plane mints. An external process with a stream-write token can `emitEvent` to a runtime's Session log as freely as the runtime can.
-- **Any process that can `openStream` becomes a scheduler.** A subscriber is exactly *"any loop that can call a function with an ID and retry on failure"* — the "function" is `emitEvent` or `resume(sessionId)`, the "ID" is the session_id from the event, and retry semantics fall out of the fact that the subscriber can re-consume the stream from its last processed offset on restart.
+- **Any process that can `openStream` becomes a scheduler.** A subscriber is exactly *"any loop that can call a function with an ID and retry on failure"* — the "function" is `emitEvent` or `wake(sessionId)`, the "ID" is the session_id from the event, and retry semantics fall out of the fact that the subscriber can re-consume the stream from its last processed offset on restart.
 - **`session/load` already rebuilds session state from durable evidence.** `src/load_coordinator.rs` exposes `LoadCoordinatorComponent` taking a `SessionIndex` — a materialized view over the Session log — and reconstructing ACP session state when a client reconnects. It is event-sourcing the session.
 - **`RuntimeHost::create` can cold-start a runtime for a stored spec.** Provided the spec is durably persisted (write it into the Session log at provision time, read it back at wake time), any process with control-plane credentials can instantiate a fresh runtime against the same `runtime_key`.
 
-Composing these four things gives the canonical `resume` pattern:
+Composing these four things gives the canonical `wake` pattern:
 
 ```typescript
 // The ENTIRE Orchestration primitive, expressed as composition
-async function resume(sessionId: string) {
+async function wake(sessionId: string) {
   // 1. Look up session → runtime mapping from the Session read surface (slice 14)
   const session = await sessionStore.get(sessionId)
 
@@ -304,7 +304,7 @@ Ten lines. No scheduler service. No new HTTP endpoint. No new Rust primitive. Th
 const stream = openStream(runtime.state, { from: 'live' })
 for await (const event of stream) {
   if (event.kind === 'approval_resolved' && event.allow) {
-    await resume(event.sessionId)
+    await wake(event.sessionId)
   }
 }
 ```
@@ -320,22 +320,22 @@ Walk through an out-of-band approval, which is the hardest case (session may be 
 5. Service sees the `PermissionRequest` event, pings the human (Slack, email, whatever)
 6. Human approves
 7. Service appends an `ApprovalResolved { allow: true }` event to the Session log via direct durable-streams POST
-8. A "resumer" subscriber (same service or a separate process) sees the `ApprovalResolved` event and calls `resume(sessionId)`
-9. `resume` checks if the runtime is live: it's not (torn down in step 3)
-10. `resume` calls `provision(session.runtimeSpec)` to cold-start the runtime
+8. A "waker" subscriber (same service or a separate process) sees the `ApprovalResolved` event and calls `wake(sessionId)`
+9. `wake` checks if the runtime is live: it's not (torn down in step 3)
+10. `wake` calls `provision(session.runtimeSpec)` to cold-start the runtime
 11. Runtime comes up, `session/load` rebuilds the ACP session state from the Session log
 12. On rebuild, `ApprovalGateComponent` sees the recent `ApprovalResolved` event matching its pending `PermissionRequest` and releases the pause
 13. Agent's effect resumes and advances
 
 Every step uses an existing Fireline primitive. The only composition glue that doesn't exist yet is:
 
-- The `resume` helper itself (a ~10-line TS function)
-- The `runtimeSpec` being durably persisted alongside session metadata so `resume` can retrieve it (part of slice 14)
+- The `wake` helper itself (a ~10-line TS function)
+- The `runtimeSpec` being durably persisted alongside session metadata so `wake` can retrieve it (part of slice 14)
 - The `ApprovalGateComponent`'s "on rebuild, scan the log for pending resolutions" behavior (small addition to an existing component)
 
 ### Why this reduction works
 
-The thing that tripped up the earlier framing is that Anthropic's `wake(session_id) → void` sounded like it wanted a **single entry point** — a function you call to advance a specific session. The reduction is realizing that the entry point already exists: it's `emitEvent` to the Session log. Any event that a runtime-local component treats as "time to advance" becomes a wake trigger, and the runtime comes back to life via `resume` in response.
+The thing that tripped up the earlier framing is that Anthropic's `wake(session_id) → void` sounded like it wanted a **single entry point** — a function you call to advance a specific session. The reduction is realizing that the entry point already exists: it's `emitEvent` to the Session log. Any event that a runtime-local component treats as "time to advance" becomes a wake trigger, and the runtime comes back to life via `wake` in response.
 
 This matches Anthropic's stated framing — *"any scheduler that can call a function with an ID and retry on failure — a cron job, a queue consumer, a while-loop, etc."* The scheduler isn't a new service; it's anything that can subscribe to a durable log and call a function. Fireline's subscribers (materializers, external services, operator tools, other runtimes' components) are all satisfying the primitive already.
 
@@ -343,24 +343,24 @@ This matches Anthropic's stated framing — *"any scheduler that can call a func
 
 **Still needed, small:**
 
-- `resume(sessionId)` helper in `@fireline/client` — TS-side composition of `sessionStore.get` + `getRuntime` + `provision` + `connectAcp` + `loadSession`. Ships as part of the TS API surface work, not a Rust slice.
+- `wake(sessionId)` helper in `@fireline/client` — TS-side composition of `sessionStore.get` + `getRuntime` + `provision` + `connectAcp` + `loadSession`. Ships as part of the TS API surface work, not a Rust slice.
 - `runtimeSpec` durable persistence — add it to the Session log as an event at provision time (or to a small control-plane catalog). Part of slice 14's canonical read schema work.
 - `ApprovalGateComponent` rebuild behavior — on `session/load`, scan recent events for pending resolutions. Small addition to the existing component, not a new component.
-- A worked example of the subscriber pattern in docs — how to run a "resumer" loop, how to handle coordination between multiple subscribers, how to claim work via a stream event to avoid duplicate resumes.
+- A worked example of the subscriber pattern in docs — how to run a "waker" loop, how to handle coordination between multiple subscribers, how to claim work via a stream event to avoid duplicate resumes.
 
 **Not needed anymore:**
 
-- Slice 18 as originally scoped (new `/v1/runtimes/{key}/wake` HTTP endpoint, in-process scheduler service, new Rust primitive). The scheduler is anything that subscribes; the entry point is `emitEvent` + `resume`; the retry semantics fall out of subscription offset tracking.
-- `client.orchestration.wake` as its own TS namespace. The wake operation is `resume(sessionId)` — a composition helper, not a primitive.
+- Slice 18 as originally scoped (new `/v1/runtimes/{key}/wake` HTTP endpoint, in-process scheduler service, new Rust primitive). The scheduler is anything that subscribes; the entry point is `emitEvent` + `wake`; the retry semantics fall out of subscription offset tracking.
+- `client.orchestration.wake` as its own TS namespace. The wake operation is `wake(sessionId)` — a composition helper, not a primitive.
 - A new `WakeReason` type with variants for webhook, timer, approval, peer. Each of those triggers is just an event on the Session stream with its own `kind`, no special primitive.
 
 ### How existing slices contribute
 
 - **Already shipped:** `durable-streams` writes from any authenticated producer; runtime registration + heartbeat; `DurableStreamTracer` producing events; `LoadCoordinatorComponent` and `session/load` rebuilding session state; `RuntimeHost::create` cold-starting runtimes.
-- **Slice 13c (in flight)** — proves cold-start works for non-local providers, which is what `resume` exercises.
-- **Slice 14 (planned)** — canonical session read schema that `resume` relies on (session → runtime_key → runtimeSpec mapping).
-- **Slice 16 (reframed)** — out-of-band approvals become the FIRST CONSUMER of the `resume` pattern, not a new primitive. The work is: upgrade `ApprovalGateComponent` to rebuild from the log on `session/load`, ship a worked example of the resumer subscriber loop, document the coordination patterns.
-- **Slice 18 (deleted)** — Orchestration doesn't need its own slice. The work folds into slice 14 (durable spec persistence), slice 16 (approval component upgrade), and the TS API surface (`resume` helper).
+- **Slice 13c (in flight)** — proves cold-start works for non-local providers, which is what `wake` exercises.
+- **Slice 14 (planned)** — canonical session read schema that `wake` relies on (session → runtime_key → runtimeSpec mapping).
+- **Slice 16 (reframed)** — out-of-band approvals become the FIRST CONSUMER of the `wake` pattern, not a new primitive. The work is: upgrade `ApprovalGateComponent` to rebuild from the log on `session/load`, ship a worked example of the waker subscriber loop, document the coordination patterns.
+- **Slice 18 (deleted)** — Orchestration doesn't need its own slice. The work folds into slice 14 (durable spec persistence), slice 16 (approval component upgrade), and the TS API surface (`wake` helper).
 
 ## 3. Harness — Partial (by design)
 
@@ -587,7 +587,7 @@ This keeps credentials out of the runtime and out of the spawn spec.
 
 An earlier version of this doc said Orchestration and Resources were the two real gaps. Both have since been reduced:
 
-- **Orchestration** (§2) collapses into composition of Session subscribe + `session/load` + `RuntimeHost::create`, exposed as a ten-line `resume(sessionId)` helper. No slice 18, no new primitive, no scheduler service.
+- **Orchestration** (§2) collapses into composition of Session subscribe + `session/load` + `RuntimeHost::create`, exposed as a ten-line `wake(sessionId)` helper. No slice 18, no new primitive, no scheduler service.
 - **Resources** (§5) splits into two halves: ACP fs interception is pure composition via an `FsBackendComponent` (just `compose(substitute, appendToSession)`), and physical mounts for shell-based agents need a small focused addition via `ResourceMounter`.
 
 ### What's actually missing, sorted by size
@@ -600,17 +600,17 @@ An earlier version of this doc said Orchestration and Resources were the two rea
 **Small additions that fold into other slices:**
 
 - Canonical row schema + TS replay/catch-up surface (slice 14, Session read surface)
-- `@fireline/client` `resume(sessionId)` export / TS ownership of the orchestration helper
+- `@fireline/client` `wake(sessionId)` export / TS ownership of the orchestration helper
 - Portable `CapabilityRef` / `credential_ref` launch inputs (slice 17)
 
 **TS API surface work:**
 
-- `resume(sessionId)` helper as a named export (tracked in `typescript-functional-api-proposal.md`)
+- `wake(sessionId)` helper as a named export (tracked in `typescript-functional-api-proposal.md`)
 - `fsBackend` component factory and `FileBackend` types
 
 **Zero new primitives. Zero new slices. Zero new control-plane endpoints.**
 
-That's the whole remaining *shape* gap list — nothing the substrate is missing at the primitive level. The acceptance bars below show where the *live coverage* is still genuinely thin: the approval-gate durable suspend/resume round trip for Harness, the TypeScript-owned `resume(sessionId)` helper for Orchestration, and non-local mounters beyond the already-live local path story. The Docker-scoped shell-visible mount check remains intentionally external to the local-runtime managed-agent suite. Once those targeted additions land, the substrate is complete; everything else is composition over the seven combinators plus product-layer work that belongs in Flamecast, not in the substrate.
+That's the whole remaining *shape* gap list — nothing the substrate is missing at the primitive level. The acceptance bars below show where the *live coverage* is still genuinely thin: the approval-gate durable suspend/resume round trip for Harness, the TypeScript-owned `wake(sessionId)` helper for Orchestration, and non-local mounters beyond the already-live local path story. The Docker-scoped shell-visible mount check remains intentionally external to the local-runtime managed-agent suite. Once those targeted additions land, the substrate is complete; everything else is composition over the seven combinators plus product-layer work that belongs in Flamecast, not in the substrate.
 
 ## Build order and slice index
 
@@ -624,7 +624,7 @@ This is the operational plan: which slices ship in what order to close the gaps 
 | **Sandbox** | **Strong** (today's strongest — live `provision` + multi-execute tests) | `13a` control-plane runtime API; `13b` push lifecycle and auth; `13c` first remote provider (Docker via bollard) | 13a + 13b shipped on `main`; 13c in flight in workspace 7 |
 | **Tools** | Strong on live descriptor invariants; portable refs still pending | `17` capability profiles as portable tool references | Schema-only / transport-agnostic / deterministic-collision invariants are live at `tests/managed_agent_tools.rs:63`, `:230`, and `:389`; slice 17 remains for launch-spec portability and call-time credential resolution |
 | **Harness** | Honestly partial | `16` approval component rebuild behavior | The approval-gate-based durable suspend/resume round trip is the real missing piece — `tests/managed_agent_harness.rs:326` is `#[ignore]` |
-| **Orchestration** | Compositionally correct on the Rust side; TS helper still pending | `16` approval component rebuild; `14` canonical read surface; `@fireline/client` ships the `resume(sessionId)` helper | The cold-start acceptance contract is live at `tests/managed_agent_primitives_suite.rs:132`; the live-runtime no-op / concurrent-resume / subscriber-loop proofs are live at `tests/managed_agent_orchestration.rs:84`, `:161`, and `:249`; TS `resume(sessionId)` is still not shipped |
+| **Orchestration** | Compositionally correct on the Rust side; TS helper still pending | `16` approval component rebuild; `14` canonical read surface; `@fireline/client` ships the `wake(sessionId)` helper | The cold-start acceptance contract is live at `tests/managed_agent_primitives_suite.rs:132`; the live-runtime no-op / concurrent-wake / subscriber-loop proofs are live at `tests/managed_agent_orchestration.rs:84`, `:161`, and `:249`; TS `wake(sessionId)` is still not shipped |
 | **Resources** | Strong on ACP-fs and component-layer mounts; Docker shell-mount proof intentionally external | `15` depth work for additional mounters and documentation | Component-layer mount / fs-backend proofs are live at `tests/managed_agent_primitives_suite.rs:249`, `:308`, and `:369`; launched-runtime fs-backend + cross-runtime stream-backed file proofs are live at `tests/managed_agent_resources.rs:195` and `:287`; only the Docker-scoped shell-visible mount marker stays ignored at `tests/managed_agent_resources.rs:154` / `tests/managed_agent_primitives_suite.rs:290` |
 
 ### Build order, with rationales
@@ -637,20 +637,20 @@ First non-local provider. Forces the push lifecycle from 13b to be exercised end
 
 **2. `14` Session as canonical read surface** — *next, can start in parallel with 13c*
 
-Stabilizes the row schema downstream products read from the durable state stream: `runtime`, `session`, `prompt_turn`, `permission`, `terminal`, `chunks`, child-session edges. The `runtimeSpec` persistence needed for `resume` is already live; slice 14 now hardens the read contract and ships the TypeScript materialization layer that downstream consumers embed. Does not depend on 13c — they're orthogonal lanes.
+Stabilizes the row schema downstream products read from the durable state stream: `runtime`, `session`, `prompt_turn`, `permission`, `terminal`, `chunks`, child-session edges. The `runtimeSpec` persistence needed for `wake` is already live; slice 14 now hardens the read contract and ships the TypeScript materialization layer that downstream consumers embed. Does not depend on 13c — they're orthogonal lanes.
 
 **3. `15` Resources depth** — *small, can run in parallel with 13c and 14*
 
 Continue the Resources rewrite from "Workspace object" to "Resources primitive." `resources: Vec<ResourceRef>`, `ResourceMounter`, `LocalPathMounter`, and the fs-backend path are already live; the remaining work is `GitRemoteMounter`, additional mounters, and clearer provider/mounter contract documentation. S3 and GCS mounters land later.
 
-**4. `16` Out-of-band approvals + `resume` helper** — *first real Orchestration consumer*
+**4. `16` Out-of-band approvals + `wake` helper** — *first real Orchestration consumer*
 
 Reframed from "approval product object" to the first worked example of the Orchestration composition pattern from §2 above. Two pieces:
 
 - **`ApprovalGateComponent` rebuild behavior.** Upgrade the component so that on `session/load` it scans recent Session events for `ApprovalResolved` entries matching its pending `PermissionRequest`s and releases the pause accordingly. Small addition to an existing component.
-- **`resume(sessionId)` helper in `@fireline/client`.** Ten-line TS composition: `sessionStore.get` → `getRuntime` → `provision` if dormant → `connectAcp` → `loadSession`. Ships as a named export alongside the rest of the TS API surface.
+- **`wake(sessionId)` helper in `@fireline/client`.** Ten-line TS composition: `sessionStore.get` → `getRuntime` → `provision` if dormant → `connectAcp` → `loadSession`. Ships as a named export alongside the rest of the TS API surface.
 
-Plus a documented example of a "resumer" subscriber loop and guidance on multi-subscriber coordination (how to claim a wake via a durable claim event so two subscribers don't duplicate work). **No new Rust primitive, no new control-plane endpoint, no slice 18.**
+Plus a documented example of a "waker" subscriber loop and guidance on multi-subscriber coordination (how to claim a wake via a durable claim event so two subscribers don't duplicate work). **No new Rust primitive, no new control-plane endpoint, no slice 18.**
 
 **5. `17` Capability profiles as portable Tools references** — *Tools depth*
 
@@ -733,13 +733,13 @@ Orchestration is satisfied by composition of existing primitives (see §2 above)
 - [x] `LoadCoordinatorComponent` rebuilds ACP session state from the durable log
 - [x] `RuntimeHost::create` cold-starts a runtime against a spec
 - [x] Rust-side composition reduction has a live acceptance contract at `tests/managed_agent_primitives_suite.rs:132` (`managed_agent_orchestration_acceptance_contract`)
-- [x] `runtimeSpec` is durably persisted as a Session event at provision time so `resume` can read it back — exercised by `reconstruct_runtime_spec_from_log` inside `tests/managed_agent_primitives_suite.rs:132`
-- [ ] `resume(sessionId)` helper shipped in `@fireline/client` — not live yet; this is the "not product-ready or TS-owned" half of Orchestration
-- [x] Live runtime no-op / concurrent-resume safety are covered at `tests/managed_agent_orchestration.rs:84` (`orchestration_resume_on_live_runtime_is_noop`) and `tests/managed_agent_orchestration.rs:161` (`orchestration_concurrent_resume_creates_single_runtime`)
-- [x] At least one worked example of a "resumer" subscriber loop, with coordination through the durable stream — `tests/managed_agent_orchestration.rs:249` (`orchestration_subscriber_loop_drives_pause_release_cycle`)
-- [ ] At least one consumer proves the full cycle end-to-end: component suspends → event appended → subscriber sees it → calls `resume` → runtime cold-starts if needed → `session/load` rebuilds → component releases the pause → agent advances (closed by slice 16)
+- [x] `runtimeSpec` is durably persisted as a Session event at provision time so `wake` can read it back — exercised by `reconstruct_runtime_spec_from_log` inside `tests/managed_agent_primitives_suite.rs:132`
+- [ ] `wake(sessionId)` helper shipped in `@fireline/client` — not live yet; this is the "not product-ready or TS-owned" half of Orchestration
+- [x] Live runtime no-op / concurrent-wake safety are covered at `tests/managed_agent_orchestration.rs:84` (`orchestration_resume_on_live_runtime_is_noop`) and `tests/managed_agent_orchestration.rs:161` (`orchestration_concurrent_resume_creates_single_runtime`)
+- [x] At least one worked example of a "waker" subscriber loop, with coordination through the durable stream — `tests/managed_agent_orchestration.rs:249` (`orchestration_subscriber_loop_drives_pause_release_cycle`)
+- [ ] At least one consumer proves the full cycle end-to-end: component suspends → event appended → subscriber sees it → calls `wake` → runtime cold-starts if needed → `session/load` rebuilds → component releases the pause → agent advances (closed by slice 16)
 
-**Status:** Strong on the Rust-side composition story. The remaining gap is product/API ownership: `@fireline/client` still does not expose `resume(sessionId)`, and the full "pause survives runtime death" cycle still depends on the pending Harness suspend/resume seam.
+**Status:** Strong on the Rust-side composition story. The remaining gap is product/API ownership: `@fireline/client` still does not expose `wake(sessionId)`, and the full "pause survives runtime death" cycle still depends on the pending Harness suspend/resume seam.
 
 ### Resources — acceptance bar
 
@@ -777,9 +777,9 @@ This template lives in `docs/execution/SLICE_TEMPLATE.md` (to be created when sl
 
 The existing 13a → 17 plan in `docs/execution/` doesn't need a rewrite of its content — only of its framing. Each slice doc gets a header section that says which primitive it extends and which acceptance-bar items it closes, and the body is updated to use the primitive vocabulary. Specific changes per slice:
 
-- **Slice 14 (runs and sessions API)** — reframe header: extends Session, closes the canonical-row-schema and TS-materialization items, **plus the durable `runtimeSpec` persistence** that `resume` relies on. Body: replace "Run and Session as product objects" with "Session as a Fireline read surface that downstream products consume."
+- **Slice 14 (runs and sessions API)** — reframe header: extends Session, closes the canonical-row-schema and TS-materialization items, **plus the durable `runtimeSpec` persistence** that `wake` relies on. Body: replace "Run and Session as product objects" with "Session as a Fireline read surface that downstream products consume."
 - **Slice 15 (workspace object)** — replace entirely with a Resources refactor doc that defines `ResourceRef`, `ResourceMounter`, and the first two mounters.
-- **Slice 16 (out-of-band approvals)** — reframe header: first worked example of Orchestration composition (no longer "consumer of slice 18"). Body: upgrade `ApprovalGateComponent` to rebuild from the log on `session/load`, ship a resumer subscriber worked example, document multi-subscriber coordination.
+- **Slice 16 (out-of-band approvals)** — reframe header: first worked example of Orchestration composition (no longer "consumer of slice 18"). Body: upgrade `ApprovalGateComponent` to rebuild from the log on `session/load`, ship a waker subscriber worked example, document multi-subscriber coordination.
 - **Slice 17 (capability profiles)** — reframe header: extends Tools. Body: replace "CapabilityProfile product object" with "portable launch input bundling tool refs and credential refs."
 - **Slice 18 (deleted)** — the doc was never written; the Orchestration reduction in §2 means no dedicated slice is needed. The work folds into slices 14, 16, and the TS API surface.
 - **Slice 13a, 13b, 13c (existing)** — add a one-line header noting they extend Sandbox. Existing doc bodies are correct, just need the framing.
