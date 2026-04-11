@@ -295,6 +295,85 @@ If the drift-prevention hygiene items above still fail to prevent silent slippag
 
 All items are independently landable in any order. None of them block the current code lanes (Rust primitive split, TS client core, demo UI rewrite).
 
+## Crate restructure follow-up (logged mid-session, 2026-04-11 afternoon)
+
+The current Rust crate layout (`fireline-conductor`, `fireline-components`, `fireline-control-plane`, `fireline-semantics`, plus the `fireline` binary at `src/`) is a slice-by-slice accumulation that doesn't map cleanly to the Anthropic six-primitive taxonomy. Each of the current crates crosses 3-4 primitive boundaries. The cleanest target layout is a consolidation into primitive-aligned modules:
+
+```
+crates/
+├── fireline-substrate/
+│   └── src/
+│       ├── lib.rs
+│       ├── session/        — Session primitive: interface + stream-backed satisfier + index/materializer
+│       ├── orchestration/  — Orchestration primitive: Orchestrator/WakeHandler + whileLoop satisfier
+│       ├── harness/        — Harness primitive: conductor proxy chain + combinator interpreter
+│       ├── sandbox/        — Sandbox primitive: tool-execution satisfiers (subprocess/docker/microsandbox)
+│       ├── resources/      — Resources primitive: ResourceMounter + file backends
+│       └── tools/          — Tools primitive: ToolDescriptor + CapabilityRef + transport bridges
+├── fireline-semantics/     — pure formal kernel (unchanged)
+├── fireline-control-plane/ — HTTP deployment assembly (wraps substrate::{host,session,orchestration})
+└── fireline-runtime/       — the `fireline` binary assembly (wraps substrate::{harness,acp_transport})
+```
+
+**4 crates total.** The current `fireline-conductor` + `fireline-components` collapse into `fireline-substrate`. The binary at `src/` migrates to `crates/fireline-runtime/`. Primitive-aligned at the module level, matching the TS `@fireline/client/core` module layout 1:1. Cross-language symmetry.
+
+### Why post-demo and not now
+
+This is a ~full-day migration, touches every crate, breaks imports across the repo, requires a full CI pass to verify. Roughly 40-50 file moves + one new crate + ~500 lines of use-path updates across downstream crates/tests. Doing it now would require freezing all other code lanes. Demo comes first.
+
+### Partial realization already shipped
+
+workspace:10's `crates/fireline-conductor/src/primitives/{host,sandbox,orchestration}.rs` (from commit c794e35, Tier C) is a small partial realization of the target shape. When the migration happens, those three files map 1:1 into `fireline-substrate/src/{host,sandbox,orchestration}/traits.rs`. No work is wasted.
+
+### File-by-file migration map (reference for when execution happens)
+
+```
+crates/fireline-conductor/src/proxy.rs              → fireline-substrate/src/harness/proxy.rs
+crates/fireline-conductor/src/state_projector.rs    → fireline-substrate/src/session/state_projector.rs
+crates/fireline-conductor/src/trace.rs              → fireline-substrate/src/session/trace.rs
+crates/fireline-conductor/src/runtime/**            → fireline-substrate/src/host/**
+crates/fireline-conductor/src/primitives/host.rs    → fireline-substrate/src/host/traits.rs (merge)
+crates/fireline-conductor/src/primitives/sandbox.rs → fireline-substrate/src/sandbox/traits.rs
+crates/fireline-conductor/src/primitives/orchestration.rs → fireline-substrate/src/orchestration/traits.rs
+crates/fireline-conductor/src/topology.rs           → fireline-substrate/src/harness/topology.rs
+crates/fireline-conductor/src/shared_terminal.rs    → fireline-substrate/src/harness/shared_terminal.rs
+crates/fireline-conductor/src/transports/**         → fireline-runtime/src/transports/**  (deployment concern)
+
+crates/fireline-components/src/approval.rs          → fireline-substrate/src/harness/combinators/approval.rs
+crates/fireline-components/src/budget.rs            → fireline-substrate/src/harness/combinators/budget.rs
+crates/fireline-components/src/context.rs           → fireline-substrate/src/harness/combinators/context.rs
+crates/fireline-components/src/fs_backend.rs        → fireline-substrate/src/resources/fs_backend.rs
+crates/fireline-components/src/peer/**              → fireline-substrate/src/tools/peer/**
+crates/fireline-components/src/smithery.rs          → fireline-substrate/src/tools/smithery.rs
+crates/fireline-components/src/attach_tool.rs       → fireline-substrate/src/tools/attach_tool.rs
+crates/fireline-components/src/tools.rs             → fireline-substrate/src/tools/descriptor.rs
+crates/fireline-components/src/sandbox/microsandbox.rs → fireline-substrate/src/sandbox/microsandbox.rs
+
+src/bootstrap.rs                                    → fireline-runtime/src/bootstrap.rs
+src/routes/**                                       → fireline-runtime/src/routes/**
+src/runtime_host.rs                                 → fireline-runtime/src/runtime_host.rs
+src/orchestration.rs                                → fireline-substrate/src/orchestration/fireline_host.rs
+src/runtime_index.rs                                → fireline-substrate/src/host/runtime_index.rs
+src/session_index.rs                                → fireline-substrate/src/session/index.rs
+src/runtime_materializer.rs                         → fireline-substrate/src/session/materializer.rs
+src/stream_host.rs                                  → fireline-runtime/src/stream_host.rs
+src/main.rs                                         → fireline-runtime/src/main.rs
+src/bin/**                                          → fireline-runtime/src/bin/**
+```
+
+### Transition plan (when executed)
+
+1. Create empty `crates/fireline-substrate/` with `Cargo.toml` + `lib.rs` + the 6 primitive module dirs (empty)
+2. Create empty `crates/fireline-runtime/` with `Cargo.toml` + `main.rs` stub
+3. Per primitive, `git mv` the relevant files into the new substrate modules + fix up `mod.rs` declarations. One commit per primitive. Verify CI green after each.
+4. Move `src/**` binary code into `crates/fireline-runtime/src/**` in one commit
+5. Delete `crates/fireline-conductor/` and `crates/fireline-components/` (now empty shells) + update workspace members
+6. Add `pub use` re-exports at `fireline-substrate/lib.rs` for backward compat so downstream imports don't break immediately
+7. Update downstream imports in `fireline-control-plane`, `fireline-verification`, and tests to use the new paths (~400 lines, mechanical find-and-replace)
+8. Delete the backward-compat re-exports from step 6 in a follow-up commit once all downstream imports are clean
+
+Estimated cost: ~full day of migration, half day of CI babysitting. Single focused slice, dedicated handoff doc, zero other lane work during execution.
+
 ## Closing notes
 
 This session's strongest architectural commitment: **the durable stream is the source of truth, not an in-memory cache.** Every cut this session reinforced that thesis — the `RuntimeIndex` projection, the agreement invariant test, the formal Stateright check, the runtime-host-split proposal's stream-as-truth update. The next phase should continue the same trajectory: if something about a runtime's existence, lifecycle, or identity needs to survive restart or be observable cross-runtime, **it belongs in the stream**.
