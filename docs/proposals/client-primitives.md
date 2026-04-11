@@ -653,22 +653,86 @@ Every import is a shipping primitive or a `@fireline/state` collection. There is
 
 ## Stress-test example — Claude Agent SDK v2 host
 
-This satisfier proves the primitive interfaces are not Fireline-specific. It talks to the Claude Agent SDK v2 preview's `query({ resume: session_id })` path directly. No control plane, no runtime provisioning, no shared stream infrastructure from us.
+This satisfier proves the primitive interfaces are not Fireline-specific. It talks to the **Claude Agent SDK v2 preview** (`@anthropic-ai/claude-agent-sdk`'s `unstable_v2_*` surface) directly. No control plane, no runtime provisioning, no shared stream infrastructure from us — just a process-lifetime `Map<handle.id, SDKSession>` bridging our durable stream to Claude's live session object.
+
+> **SDK reference:** the V2 preview surface is documented at [`https://code.claude.com/docs/en/agent-sdk/typescript-v2-preview`](https://code.claude.com/docs/en/agent-sdk/typescript-v2-preview). The full divergence analysis, V1-vs-V2 comparison, and the reasoning behind the shape below lives in [`../explorations/claude-agent-sdk-v2-findings.md`](../explorations/claude-agent-sdk-v2-findings.md). Anyone touching this section should read the findings doc first — the V2 programming model is meaningfully different from V1, and an earlier draft of this sketch was written against V1.
 
 ```ts
 // @fireline/client/host-claude
-import { query } from '@anthropic-ai/agent-sdk'
-import type { Host, SessionHandle, WakeOutcome } from '@fireline/client/host'
+import {
+  unstable_v2_createSession,
+  unstable_v2_resumeSession,
+  type SDKMessage,
+  type SDKSession,
+} from '@anthropic-ai/claude-agent-sdk'
+import type { Host, WakeOutcome } from '@fireline/client/host'
+
+// Authentication: the SDK picks up ANTHROPIC_API_KEY from the environment.
+// No explicit field on the options type — same convention as every other
+// Anthropic TS SDK. If the SDK ever grows an explicit auth option, add it
+// here; until then, env-var is the contract.
 
 export function createClaudeHost(opts: {
-  readonly anthropicApiKey: string
   readonly model?: string
-  readonly stateProducer: StreamProducer     // mirrors Claude output into our durable stream
+  readonly stateProducer: StreamProducer        // mirrors Claude output into our durable stream
   readonly pendingInputs: PendingInputRegistry  // user's way of saying "process this next"
 }): Host {
+  // Process-lifetime cache of live SDKSession handles. Rebuilt lazily
+  // on wake() via unstable_v2_resumeSession when a handle is missing
+  // (e.g. after a process restart). This is symmetric to how FirelineHost
+  // transparently reconnects to a live runtime via RuntimeRegistry after
+  // a control-plane restart.
+  const live = new Map<string, SDKSession>()
+  const model = opts.model ?? 'claude-opus-4-6'
+
+  // Central acquire() helper — the bridge between "in-memory live session"
+  // and "persistent session id in our durable stream". Handles both the
+  // already-warm path and the cold-restart path. Robust to either close()
+  // semantic: if close() turns out to destroy server-side state, the
+  // resumeSession call will fail and the fallback path creates fresh.
+  async function acquire(handleId: string): Promise<SDKSession> {
+    const existing = live.get(handleId)
+    if (existing) return existing
+
+    // Restore from the durable stream — we stashed the Claude
+    // sessionId on the first successful wake.
+    const stashed = await opts.stateProducer.readOne({ type: 'session', key: handleId })
+    const claudeSessionId: string | undefined = stashed?.value?.claudeSessionId
+    try {
+      const sdkSession = claudeSessionId
+        ? unstable_v2_resumeSession(claudeSessionId, { model })
+        : unstable_v2_createSession({ model })
+      live.set(handleId, sdkSession)
+      return sdkSession
+    } catch (err) {
+      // resumeSession may fail if the server-side state was dropped
+      // (TTL expiry, deployment restart, close() actually deleted).
+      // Fall back to a fresh session and log the divergence for the
+      // durable trail.
+      const sdkSession = unstable_v2_createSession({ model })
+      live.set(handleId, sdkSession)
+      await opts.stateProducer.append({
+        type: 'session',
+        key: handleId,
+        headers: { operation: 'update' },
+        value: {
+          claudeSessionId: sdkSession.sessionId,
+          state: 'running',
+          note: `resume failed, recreated fresh: ${String(err)}`,
+        },
+      })
+      return sdkSession
+    }
+  }
+
   return {
     async createSession(spec) {
       const id = `claude:${crypto.randomUUID()}`
+      // V2 session creation is synchronous — no round-trip required,
+      // so we can do it eagerly. In V1 this was deferred to wake()
+      // because query() was stateless-per-call.
+      const sdkSession = unstable_v2_createSession({ model: spec.model ?? model })
+      live.set(id, sdkSession)
       await opts.stateProducer.append({
         type: 'session',
         key: id,
@@ -676,10 +740,12 @@ export function createClaudeHost(opts: {
         value: {
           sessionId: id,
           host: 'claude',
-          model: opts.model ?? 'claude-opus-4-6',
+          model: spec.model ?? model,
           state: 'created',
           createdAt: Date.now(),
-          claudeSessionId: null,   // filled in on first wake
+          // V2 exposes sessionId directly on the SDKSession object —
+          // no need to wait for an init system-message like V1 required.
+          claudeSessionId: sdkSession.sessionId,
         },
       })
       if (spec.initialPrompt) {
@@ -695,45 +761,39 @@ export function createClaudeHost(opts: {
       const pending = await opts.pendingInputs.drain(handle.id)
       if (pending.length === 0) return { kind: 'noop' }
 
-      // 2. Look up the Claude session_id we stashed on first wake, if any.
-      const session = await opts.stateProducer.readOne({ type: 'session', key: handle.id })
-      let claudeSessionId: string | undefined = session?.value?.claudeSessionId
+      // 2. Acquire a live SDKSession for this handle — either from the
+      //    in-memory cache or by resuming from the claudeSessionId we
+      //    stashed on first createSession.
+      const sdkSession = await acquire(handle.id)
+      const prompt = pending.map(p => p.text).join('\n\n')
 
-      // 3. Call Claude's query with resume semantics. The SDK picks up from
-      //    where it left off via resume; if claudeSessionId is undefined,
-      //    this is a fresh session and Claude assigns one in the init
-      //    system message.
-      const result = query({
-        prompt: pending.map(p => p.text).join('\n\n'),
-        options: {
-          resume: claudeSessionId,
-          model: opts.model ?? 'claude-opus-4-6',
-        },
-      })
+      // 3. V2 splits send() and stream() — send() dispatches the user
+      //    message, stream() yields the agent response for THAT turn.
+      //    This is different from V1's single query() call returning
+      //    an async iterable.
+      await sdkSession.send(prompt)
 
-      // 4. Mirror everything Claude emits into our durable stream. The
-      //    @fireline/state collections see these rows reactively.
+      // 4. Mirror everything the session emits into our durable stream.
+      //    The @fireline/state collections see these rows reactively.
+      //    Every SDKMessage carries session_id, so we can key by it.
       let steps = 0
-      for await (const msg of result) {
-        if (msg.type === 'system' && msg.subtype === 'init' && !claudeSessionId) {
-          claudeSessionId = msg.session_id
-          await opts.stateProducer.append({
-            type: 'session',
-            key: handle.id,
-            headers: { operation: 'update' },
-            value: { claudeSessionId, state: 'running' },
-          })
-        }
+      for await (const msg of sdkSession.stream()) {
         await opts.stateProducer.append({
           type: 'claude_message',
-          key: `${handle.id}:${msg.id ?? crypto.randomUUID()}`,
+          key: `${handle.id}:${msg.session_id}:${steps}`,
           headers: { operation: 'insert' },
           value: msg,
         })
         steps += 1
       }
 
-      // 5. Mark pending inputs as resolved.
+      // 5. Update the durable state row and mark pending as resolved.
+      await opts.stateProducer.append({
+        type: 'session',
+        key: handle.id,
+        headers: { operation: 'update' },
+        value: { state: 'running', claudeSessionId: sdkSession.sessionId },
+      })
       await opts.stateProducer.append({
         type: 'pending_resolved',
         key: handle.id,
@@ -750,28 +810,48 @@ export function createClaudeHost(opts: {
     },
 
     async stopSession(handle) {
+      // V2 exposes session.close() for local cleanup. The server-side
+      // semantics (whether close() destroys persisted session state or
+      // just disconnects the local handle) are unverified from the V2
+      // docs alone — see claude-agent-sdk-v2-findings.md §5. The
+      // acquire() helper above is defensive against either outcome:
+      // a subsequent wake() that tries resumeSession will fall back
+      // to createSession if the server-side state is gone.
+      const sdkSession = live.get(handle.id)
+      sdkSession?.close()
+      live.delete(handle.id)
       await opts.stateProducer.append({
         type: 'session',
         key: handle.id,
         headers: { operation: 'update' },
         value: { state: 'stopped' },
       })
-      // Claude has no explicit session delete in the current SDK.
     },
   }
 }
 ```
 
-**~90 lines total.** Plug it into the same `whileLoopOrchestrator` + `@fireline/state` collections the Fireline host uses. The browser demo UI is identical — it reads the same materialized collections, it calls `host.wake(handle)` and `host.createSession(spec)` and `host.stopSession(handle)`, it doesn't know or care whether the host is Fireline or Claude.
+**~150 lines.** Plug it into the same `whileLoopOrchestrator` + `@fireline/state` collections the Fireline host uses. The browser demo UI is identical — it reads the same materialized collections, it calls `host.wake(handle)` and `host.createSession(spec)` and `host.stopSession(handle)`, it doesn't know or care whether the host is Fireline or Claude.
 
-**What this proves about the design:**
+**What this proves about the design — and why the V2 divergence actually validates it:**
 
-1. `Host` is primitive-shaped. Both "spawn a Rust subprocess via HTTP control plane + WebSocket ACP" and "call `query({ resume })`" satisfy the same four-method interface.
-2. `wake(session_id)` is the right universal verb. It admits both "re-provision a runtime and replay the log" and "drain pending inputs and call the managed API" as idempotent, retry-safe implementations.
-3. `@fireline/state` is the right universal read surface. As long as every host mirrors its output via the STATE-PROTOCOL shape, the browser UI is host-agnostic.
-4. The `Combinator` + `Topology` types are genuinely Fireline-specific — the Claude host ignores them. That's fine. Other fields in `SessionSpec` (model, initialPrompt) carry the Claude case. The primitive interfaces don't force every host to implement every shape.
+The V2 programming model is fundamentally different from V1. V1 had a single stateless `query({ prompt, options: { resume } })` call that returned an async iterable. V2 has three entrypoints (`unstable_v2_createSession`, `unstable_v2_resumeSession`, `unstable_v2_prompt`) and a live `SDKSession` object with a `send()` / `stream()` split that you hold across turns. **Despite the drastic shape change, the `Host` primitive interface survives unchanged.** That is the critical finding from the stress test.
 
-**Open question:** The Claude SDK's `query({ resume })` model assumes each wake is a prompt. If the user wants the orchestrator to call wake on a timer (cron) without a pending input, the Claude handler's `noop` return is the right answer. But a future feature like "Claude polls a tool every N minutes without user prompt" would need a different wake semantics. Out of scope for v2; file as a follow-up if it comes up.
+Specifically:
+
+1. **`Host` is primitive-shaped, not SDK-shaped.** Both "spawn a Rust subprocess via HTTP control plane + WebSocket ACP" (FirelineHost) and "hold an SDKSession with per-turn send/stream" (ClaudeHost V2) satisfy the same four-method interface — `createSession / wake / status / stopSession`. The interface abstracts over the satisfier's internal state model entirely. Had we stayed with the earlier `Sandbox.provision + execute + shutdown` conflation, the V2 divergence would've been much worse: V2's `SDKSession` is inherently session-lifetime, not per-tool-execution, and the old conflated shape would've forced awkward bridging code. **The Host/Sandbox cleave is what makes both V1 and V2 satisfiers trivial.**
+
+2. **`wake(handle)` is the right universal verb.** It admits every known programming model: V1's one-shot `query()` call, V2's per-turn `send/stream`, Fireline's control-plane reprovision + ACP session/load, a cron job calling `wake` over HTTP. The verb only requires "idempotent, retry-safe advance by one step" and every satisfier can choose its own internal model.
+
+3. **`@fireline/state` is the universal read surface.** Every host mirrors its output via the STATE-PROTOCOL shape into the durable stream, and the same tanstack-react-db collections render in the browser regardless of which host produced the rows. Host-agnostic UI.
+
+4. **The `Combinator` + `Topology` types are Fireline-specific by design.** The Claude host ignores them — V2's topology is opaque to us, controlled by Anthropic's managed service. That's fine. `SessionSpec` is a union-of-needs per the earlier design decision; each host honors the fields it understands.
+
+5. **Session lifecycle state can live in the satisfier, not the interface.** FirelineHost keeps runtime_keys in the control plane's RuntimeRegistry. ClaudeHost keeps `SDKSession` handles in a process-lifetime `Map`. Neither leaks into the Host interface. The `acquire(handleId)` pattern in the V2 sketch above is the pure-functional-ish equivalent of the Fireline satisfier's lazy runtime reconnection — both satisfy the same contract ("give me back a ready session regardless of process-restart state"), both invisible through the Host trait.
+
+**Unresolved before a concrete ClaudeHost ships:** how V2 surfaces `tool_use` / `tool_result` events in the `stream()` generator. The V2 docs describe the session's assistant message flow but not the tool-execution model. If V2 streams `tool_use` events back to the caller and expects `tool_result` to be sent via `send()`, then ClaudeHost can delegate tool execution to a separate `Sandbox` satisfier (e.g. `MicrosandboxSandbox`) — which is the §7 story in `runtime-host-split.md` working as intended. If V2 bundles tool execution inside Claude's managed sandbox opaquely, the Sandbox-delegation story doesn't apply to ClaudeHost and the scope shrinks. This is the one genuine blocker for Step 3 (Tier E) code; see `claude-agent-sdk-v2-findings.md` §5 for the open items list.
+
+**Open question:** The wake loop assumes each wake processes a pending prompt. If the user wants a cron that calls `wake` on a timer without a pending input, the `noop` return is correct. Future work: a `wake(..., reason: 'poll')` variant for polling-style satisfiers. Out of scope for v2; file as a follow-up if it comes up.
 
 ---
 
