@@ -152,20 +152,19 @@ async fn resources_local_file_backend_reads_through_mount_mapping() -> Result<()
 /// bypasses the ACP fs protocol. The only faithful proof that Resources
 /// works for those agents is a shell-visible read inside the runtime.
 #[tokio::test]
-#[ignore = "pending: scripted testy harness (to deterministically trigger a bash tool \
-            call against the mount) + ControlPlaneHarness or LocalRuntimeHarness \
-            support for launching with resources passed through the launch spec"]
+#[ignore = "covered end-to-end by tests/control_plane_docker.rs slice 13c — this \
+            stub is a primitive-coverage cross-reference marker for the \
+            managed-agent mapping. The shell-visible-mount invariant only holds \
+            under a container filesystem; local runtimes have no container fs to \
+            prove it against. Not pending work; do not promote."]
 async fn resources_physical_mount_is_shell_visible_inside_runtime() -> Result<()> {
     pending_contract(
         "resources.shell_visible_physical_mount",
-        "This is the Resources contract Anthropic's post actually specifies for \
-         shell-based agents. Blocks on (1) scripted testy so the agent \
-         deterministically executes `cat /workspace/hello.txt` as a tool call, and \
-         (2) LocalRuntimeHarness or ControlPlaneHarness accepting ResourceRef in the \
-         launch config and wiring it through BootstrapConfig.mounted_resources so the \
-         runtime actually sees the mount. The current component-layer tests prove the \
-         mounter and backend composition; this test would prove the end-to-end \
-         contract against a real shell-reading agent.",
+        "Covered end-to-end by tests/control_plane_docker.rs slice 13c. This \
+         stub is a primitive-coverage cross-reference marker for the managed-agent \
+         mapping, not pending work. The shell-visible-mount invariant only holds \
+         under a container filesystem; local runtimes have no container fs to prove \
+         it against. Do not promote.",
     )
 }
 

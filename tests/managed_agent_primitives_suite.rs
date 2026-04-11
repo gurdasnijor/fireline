@@ -288,11 +288,19 @@ async fn managed_agent_resources_physical_mount_acceptance_contract() -> Result<
 }
 
 #[tokio::test]
-#[ignore = "pending shell-visible resource read end-to-end through a launched runtime"]
+#[ignore = "covered end-to-end by tests/control_plane_docker.rs slice 13c — this \
+            stub is a primitive-coverage cross-reference marker for the \
+            managed-agent mapping. The shell-visible-mount invariant only holds \
+            under a container filesystem; local runtimes have no container fs to \
+            prove it against. Not pending work; do not promote."]
 async fn managed_agent_resources_physical_mount_shell_visibility_contract() -> Result<()> {
     pending_contract(
         "resources.physical_mounts.shell_visible_read",
-        "Blocked on an end-to-end runtime/agent path that proves shell-visible reads inside the launched runtime. ResourceMounter coverage is handled by managed_agent_resources_physical_mount_acceptance_contract.",
+        "Covered end-to-end by tests/control_plane_docker.rs slice 13c. This \
+         stub is a primitive-coverage cross-reference marker for the managed-agent \
+         mapping, not pending work. The shell-visible-mount invariant only holds \
+         under a container filesystem; local runtimes have no container fs to prove \
+         it against. Do not promote.",
     )
 }
 
