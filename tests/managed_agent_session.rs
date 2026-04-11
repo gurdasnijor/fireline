@@ -27,10 +27,12 @@
 mod managed_agent_suite;
 
 use anyhow::{Context, Result};
+use fireline::orchestration::materialize_session_index;
 use managed_agent_suite::{
     ControlPlaneHarness, DEFAULT_TIMEOUT, LocalRuntimeHarness, count_events, pending_contract,
     prompt_session, read_session_records, wait_for_event_count, wait_for_session_record,
 };
+use std::collections::HashSet;
 
 /// Precondition: a local runtime has been spawned and has emitted at least the
 /// baseline `session`, `prompt_turn`, and `chunk` envelopes in response to one
@@ -256,15 +258,82 @@ async fn session_idempotent_append_under_retry() -> Result<()> {
 /// the log is a pure function of the log. Materializers never fabricate,
 /// drop, or reorder facts relative to what the raw stream shows.
 #[tokio::test]
-#[ignore = "pending: promote once the SessionIndex materializer exposes a deterministic \
-            list of session ids and the raw stream exposes a stable session envelope shape \
-            that a test can parse without reimplementing the projector"]
 async fn session_materialized_state_agrees_with_raw_stream() -> Result<()> {
-    pending_contract(
-        "session.materialized_vs_raw_agreement",
-        "Read the raw stream body, parse session envelopes, cross-check each one against \
-         a materialized SessionIndex. The test must NOT reimplement the projector — if it \
-         does, it is circular. Promote once the SessionIndex exposes a list+get surface a \
-         test can consume against parsed raw envelopes.",
-    )
+    let runtime = LocalRuntimeHarness::spawn("session-materialized-vs-raw").await?;
+
+    let result = async {
+        // Drive a prompt so the stream contains at least one session envelope.
+        let _ = runtime
+            .prompt("hello from the materialized-vs-raw contract")
+            .await?;
+
+        // Wait until the baseline session envelope has landed in the raw stream
+        // before we materialize. This ensures both oracles see the same prefix.
+        runtime
+            .wait_for_state_rows(&["\"type\":\"session\""], DEFAULT_TIMEOUT)
+            .await
+            .context(
+                "INVARIANT (Session): a session envelope must land before materialization",
+            )?;
+
+        // Oracle A: the production projector. `materialize_session_index` runs
+        // `RuntimeMaterializer` over the raw stream and folds it into a real
+        // `SessionIndex`, then aborts the live tail. Whatever it surfaces is
+        // exactly what production code would surface for the same stream.
+        let index = materialize_session_index(runtime.state_stream_url()).await?;
+        let materialized_ids: HashSet<String> = index
+            .list()
+            .await
+            .into_iter()
+            .map(|record| record.session_id)
+            .collect();
+
+        // Oracle B: the typed raw decoder. `read_session_records` reads every
+        // envelope on the stream and decodes the session ones via the same
+        // typed `DecodedStateEntity::Session` path the rest of the suite uses.
+        // It is NOT the projector — it is the flat list of session envelopes,
+        // not a fold over operations.
+        let raw_records = read_session_records(runtime.state_stream_url()).await?;
+        let raw_ids: HashSet<String> = raw_records
+            .iter()
+            .map(|record| record.session_id.clone())
+            .collect();
+
+        assert!(
+            !raw_ids.is_empty(),
+            "INVARIANT (Session): the raw stream must contain at least one session \
+             envelope after a prompt; otherwise this test proves nothing"
+        );
+        assert!(
+            !materialized_ids.is_empty(),
+            "INVARIANT (Session): the materialized SessionIndex must surface at least \
+             one session id after a prompt; otherwise this test proves nothing"
+        );
+
+        let only_in_materialized: Vec<&String> =
+            materialized_ids.difference(&raw_ids).collect();
+        let only_in_raw: Vec<&String> = raw_ids.difference(&materialized_ids).collect();
+
+        assert!(
+            only_in_materialized.is_empty(),
+            "INVARIANT (Session): SessionIndex fabricated session ids absent from the \
+             raw stream: {only_in_materialized:?}"
+        );
+        assert!(
+            only_in_raw.is_empty(),
+            "INVARIANT (Session): SessionIndex dropped session ids visible in the raw \
+             stream: {only_in_raw:?}"
+        );
+        assert_eq!(
+            materialized_ids, raw_ids,
+            "INVARIANT (Session): materialized SessionIndex must be a pure function of \
+             the raw stream — id sets must match exactly"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    runtime.shutdown().await?;
+    result
 }

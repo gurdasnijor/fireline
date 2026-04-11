@@ -35,7 +35,10 @@ mod managed_agent_suite;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use managed_agent_suite::{LocalRuntimeHarness, pending_contract, wait_for_event_count};
+use managed_agent_suite::{
+    ControlPlaneHarness, LocalRuntimeHarness, create_session, load_session, pending_contract,
+    prompt_session, testy_load_bin, wait_for_event_count,
+};
 
 /// Precondition: no runtime exists.
 ///
@@ -159,36 +162,88 @@ async fn sandbox_provisioned_runtime_serves_multiple_execute_calls() -> Result<(
     result
 }
 
-/// Precondition: a `ControlPlaneHarness`-backed runtime was provisioned against
-/// a shared external durable stream, served at least one prompt, and was
-/// stopped via `POST /v1/runtimes/{key}/stop`.
+/// Precondition: a `ControlPlaneHarness`-backed runtime was provisioned
+/// against a shared external durable stream, served at least one prompt,
+/// and was stopped via `POST /v1/runtimes/{key}/stop`.
 ///
-/// Action: provision a fresh runtime against the **same** stored spec
-/// (identical `runtime_key` and `agent_command`), then issue an ACP
-/// `session/load` for the session id that was created in the first runtime.
+/// Action: call `fireline::orchestration::resume(sessionId)`, which
+/// re-provisions a fresh runtime against the stored spec. Then issue an
+/// ACP `session/load` for the session id that was created in the first
+/// runtime and serve a follow-up prompt.
 ///
-/// Observable evidence: the `session/load` call succeeds and the resumed
-/// runtime can serve follow-up prompts against the same session state that
-/// existed at shutdown time.
+/// Observable evidence: the `session/load` call succeeds against the
+/// resumed runtime, and a subsequent `session/prompt` on the same
+/// session id completes — proving the re-provisioned sandbox is
+/// behaviorally equivalent to the original for session-load purposes.
 ///
-/// Invariant proven: **Sandbox stop + recreate equivalence** — the provision
-/// contract is stable enough that re-provisioning against the stored spec
-/// produces a runtime that is behaviorally equivalent to the original for the
-/// purposes of ACP `session/load`. This is the contract the `resume(sessionId)`
-/// helper in `src/orchestration.rs` relies on.
+/// Invariant proven: **Sandbox stop + recreate equivalence** — the
+/// provision contract is stable enough that re-provisioning against the
+/// stored spec produces a runtime the client can reattach to via
+/// `session/load`. This is the contract the `resume(sessionId)` helper
+/// in `src/orchestration.rs` relies on.
 #[tokio::test]
-#[ignore = "pending: requires a ControlPlaneHarness prompt helper and the resume helper \
-            wiring currently being debugged in managed_agent_primitives_suite.rs; will \
-            promote to real once the orchestration contract test passes"]
 async fn sandbox_stop_and_recreate_preserves_session_load() -> Result<()> {
-    pending_contract(
-        "sandbox.stop_and_recreate_session_load",
-        "Needs: (1) ControlPlaneHarness ACP prompt helper (not yet in the shared harness), \
-         (2) resume(sessionId) helper debugged and passing in managed_agent_primitives_suite. \
-         The test should provision via control plane, prompt, stop via control plane, \
-         call src/orchestration.rs resume, and verify the resumed runtime can load_session \
-         and serve a follow-up prompt. Promote once codex DAR's orchestration debug lands.",
-    )
+    let control_plane = ControlPlaneHarness::spawn(true).await?;
+
+    let result = async {
+        let runtime = control_plane
+            .create_runtime_with_agent(
+                "sandbox-stop-and-recreate",
+                &[testy_load_bin().display().to_string()],
+            )
+            .await?;
+
+        let session_id = create_session(&runtime.acp.url).await?;
+        prompt_session(
+            &runtime.acp.url,
+            &session_id,
+            "hello before the stop+recreate cycle",
+        )
+        .await?;
+
+        let _stopped = control_plane.stop_runtime(&runtime.runtime_key).await?;
+
+        let resumed = fireline::orchestration::resume(
+            &control_plane.http,
+            &control_plane.base_url,
+            &session_id,
+        )
+        .await
+        .context(
+            "INVARIANT (Sandbox): resume against the stored spec must produce a Ready runtime",
+        )?;
+
+        assert_eq!(
+            resumed.runtime_key, runtime.runtime_key,
+            "INVARIANT (Sandbox): recreated runtime uses the same runtime_key"
+        );
+        assert_ne!(
+            resumed.runtime_id, runtime.runtime_id,
+            "INVARIANT (Sandbox): recreated runtime has a fresh runtime_id (new process)"
+        );
+
+        load_session(&resumed.acp.url, &session_id).await.context(
+            "INVARIANT (Sandbox): recreated runtime must accept session/load for the previous \
+             session id",
+        )?;
+
+        prompt_session(
+            &resumed.acp.url,
+            &session_id,
+            "hello after the stop+recreate cycle",
+        )
+        .await
+        .context(
+            "INVARIANT (Sandbox): recreated runtime must serve follow-up prompts on the \
+             reloaded session",
+        )?;
+
+        Ok(())
+    }
+    .await;
+
+    control_plane.shutdown().await;
+    result
 }
 
 /// Precondition: a `LocalProvider` and a `DockerProvider` are both available
