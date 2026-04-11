@@ -1,225 +1,278 @@
-# 17: Out-of-Band Approvals
+# 16: Out-of-Band Approvals as First Orchestration Composition Consumer
 
 Status: planned
 Type: execution slice
 
 Related:
 
+- [`../explorations/managed-agents-mapping.md`](../explorations/managed-agents-mapping.md)
 - [`../product/out-of-band-approvals.md`](../product/out-of-band-approvals.md)
-- [`../product/runs-and-sessions.md`](../product/runs-and-sessions.md)
-- [`../product/product-api-surfaces.md`](../product/product-api-surfaces.md)
 - [`../product/priorities.md`](../product/priorities.md)
-- [`../product/roadmap-alignment.md`](../product/roadmap-alignment.md)
 - [`../state/session-load.md`](../state/session-load.md)
+- [`../ts/low-level-api-surface.md`](../ts/low-level-api-surface.md)
+- [`../explorations/typescript-functional-api-proposal.md`](../explorations/typescript-functional-api-proposal.md)
 - [`./14-runs-and-sessions-api.md`](./14-runs-and-sessions-api.md)
-- [`./16-capability-profiles.md`](./16-capability-profiles.md)
+
+## Primitive Anchor
+
+Primitive extended: `Orchestration`
+
+Acceptance-bar items this slice closes:
+
+- at least one worked example of a resumer subscriber loop, with documented
+  coordination semantics for multiple concurrent subscribers
+- at least one consumer proves the full cycle end-to-end:
+  component suspends, event is appended, subscriber sees it, calls
+  `resume(sessionId)`, runtime cold-starts if needed, `session/load` rebuilds,
+  component releases the pause, agent advances
+
+This slice also closes the remaining Harness suspend/resume items:
+
+- conductor components can pause mid-effect and resume across runtime death by
+  writing the pause as an event and rebuilding via `session/load`
+- documented contract for what conductor components can do at the
+  suspend/resume seam
+
+Depends on:
+
+- slice `14` for canonical Session reads and durable `runtimeSpec` persistence
+- the TS-side `resume(sessionId)` helper described in the mapping doc
+- the existing `ApprovalGateComponent` and `session/load` substrate
+
+Unblocks:
+
+- later durable waits beyond approvals
+- richer approval services built on the same Session + resume pattern
+- stronger documentation for component suspend/resume behavior
 
 ## Objective
 
-Prove the first durable `ApprovalRequest` and run wait-state model so a Fireline
-run can:
+Prove out-of-band approvals as the first worked example of Orchestration by
+composition.
 
-- pause on a gated action
-- persist that wait durably
-- be serviced later by a browser, control-plane UI, or operator path
-- resume or terminate without depending on the original interactive client
+This slice does not introduce a wake primitive, a wake endpoint, or a new
+control-plane service. It proves the existing composition:
 
-This slice should keep the first implementation intentionally small:
+- component writes a durable wait event
+- external service subscribes to Session
+- external service appends a resolution event
+- resumer loop calls `resume(sessionId)`
+- runtime cold-starts from stored `runtimeSpec` if needed
+- `session/load` rebuilds pending component state from the log
+- blocked work advances
 
-- one durable approval-request record type
-- one waiting run state
-- approve / deny / expire
-- one service path
+The first cut should stay intentionally narrow:
+
+- upgrade `ApprovalGateComponent` to write durable permission events
+- upgrade `ApprovalGateComponent` to rebuild pending state from Session on
+  `session/load`
+- document one resumer subscriber loop
+- document coordination semantics for multiple concurrent subscribers
 
 ## Product Pillar
 
-Reusable conductor extensions.
+Durable orchestration by composition.
 
 ## User Workflow Unlocked
 
-A long-running run can:
+A consuming product can pause on a gated tool call, let the runtime go dormant,
+service the approval later, and resume the work without depending on a browser
+tab or an always-live runtime.
 
-- hit a gated action
-- transition into a durable waiting state
-- show up in a later browser or operator queue
-- continue only after a human or external service responds
+The workflow unlocked by this slice is:
 
-This is the first real proof that Fireline sessions can survive beyond a single
-foreground interactive client.
+1. agent hits a gated action
+2. component writes durable wait state
+3. external service or operator resolves the wait later
+4. a subscriber observes the resolution and calls `resume(sessionId)`
+5. runtime reloads durable state and continues
 
-## Why This Slice Exists
-
-Without durable approvals, Fireline remains strongest only in foreground,
-interactive flows.
-
-With durable approvals, Fireline becomes much more compelling for:
-
-- long-running background coding runs
-- risky-action approvals
-- credential-connect flows
-- later operator intervention
-
-That is a major part of the durable-agent-fabric story.
+This is the first concrete proof that Fireline's orchestration story is
+composition over Session subscribe + Session append + `session/load` + cold
+start, not a new primitive.
 
 ## Scope
 
-### 1. ApprovalRequest product object
+### 1. Durable approval events, not a product object
 
-Define a first-cut `ApprovalRequest` product object that sits above lower-level
-permission or pending-request rows.
+This slice should define the durable Session evidence the approval flow needs.
 
-Required first-cut fields:
+At minimum:
 
-- `requestId`
-- `runId`
-- `sessionId?`
-- `promptTurnId?`
-- `kind`
-- `state`
-- `title`
-- `description?`
-- `requestedCapabilities?`
-- `options?`
-- `createdAtMs`
-- `resolvedAtMs?`
-- `expiresAtMs?`
+- `PermissionRequest` event on suspend
+- `ApprovalResolved` event on later service
+- enough identifiers to correlate the resolution back to the blocked effect,
+  prompt turn, session, and runtime
 
-Required first-cut request kinds:
+This is deliberately narrower than a Fireline-owned `ApprovalRequest` product
+API. The substrate proof is about durable wait state on the Session stream.
+Higher-level products may later project nicer approval objects on top.
 
-- `permission`
-- `credential_connect`
-- `operator_approval`
-- `policy_escalation`
+### 2. `ApprovalGateComponent` suspend path
 
-Required first-cut states:
+Upgrade `ApprovalGateComponent` so that when it suspends a gated effect it:
 
-- `pending`
-- `approved`
-- `denied`
-- `expired`
-- `cancelled`
-- `orphaned`
+- writes `PermissionRequest` as Session evidence
+- records the minimum durable correlation data needed for later resolution
+- returns a pending state to the harness without assuming the runtime stays
+  alive
 
-### 2. Run wait-state projection
+The important shift is that suspend must become durable by construction rather
+than a runtime-local in-memory pause.
 
-Define the run-level waiting view explicitly.
+### 3. `ApprovalGateComponent` rebuild path
 
-At minimum, a run in `waiting` should answer:
+Upgrade `ApprovalGateComponent` so that on `session/load` it can rebuild its
+pending approval state from the Session log.
 
-- which request ids are blocking it
-- what kind of wait is active
-- since when it has been waiting
-- whether the wait is resumable
+This slice should make explicit:
 
-This wait-state must be durable and externally inspectable.
+- how the component finds unresolved `PermissionRequest` entries
+- how it matches `ApprovalResolved` entries to those requests
+- how it decides whether to release, deny, or keep the pause
+- how much of the stream it must scan on rebuild
 
-### 3. Product API surface
+The success condition is not "the original runtime stayed alive." The success
+condition is "a fresh runtime instance can rebuild the gate state from Session
+evidence and continue correctly."
 
-Add first-cut product-layer approval APIs:
+### 4. `resume(sessionId)` as the consumer entry point
 
-```ts
-client.approvals.list(filter?)
-client.approvals.get(requestId)
-client.approvals.approve(requestId, payload?)
-client.approvals.deny(requestId, reason?)
-client.approvals.expire(requestId)
-```
+This slice consumes the TS-side `resume(sessionId)` helper described in
+`managed-agents-mapping.md` rather than introducing a new orchestration API.
 
-And at the run layer:
+The approval flow should be documented as:
 
-```ts
-client.runs.get(runId)
-client.runs.list({ state: "waiting" })
-```
+1. read `session.runtimeSpec` from the Session surface
+2. if the runtime is dormant, provision it from that stored spec
+3. reconnect ACP
+4. call `loadSession(sessionId)`
+5. let `ApprovalGateComponent` rebuild from the log and release the pause if a
+   matching resolution exists
 
-### 4. One gate path from conductor to durable request
+That dependency on durable `runtimeSpec` persistence is why this slice depends
+directly on slice `14`.
 
-This slice should include one real gate path from conductor behavior to durable
-approval state.
+### 5. Resumer subscriber worked example
 
-Examples:
+Ship a worked example in docs of the subscriber loop that turns durable Session
+events into resumed work.
 
-- risky permission gate
-- credential-connect gate
-- policy-escalation gate
+The example should cover:
 
-Only one is required for the first cut. The point is to prove the end-to-end
-model, not the whole gate matrix.
+- subscribing via `openStream(...)`
+- watching for `ApprovalResolved`
+- calling `resume(sessionId)`
+- handling runtime-not-live by letting `resume` provision from the stored spec
+- keeping progress via stream offsets so the subscriber can restart safely
 
-### 5. Resume semantics after service
+This example is part of the substrate contract. It is how Fireline demonstrates
+that "scheduler" means "any subscriber loop that can call `resume(sessionId)`"
+rather than "a new service Fireline must invent."
 
-This slice must make explicit:
+### 6. Multi-subscriber coordination semantics
 
-- what resumes blocked work
-- what terminates it
-- how resume works when the original client transport is gone
+Document how multiple concurrent subscribers should avoid duplicate resumes.
 
-The resume path must be owned by durable runtime/session substrate or the
-control plane, not by a one-off browser tab.
+This slice does not need a full distributed coordination system, but it should
+define one workable pattern.
 
-### 6. One service path
+First-cut guidance:
 
-One real surface must be able to service requests.
+- subscribers read the same Session stream
+- before calling `resume(sessionId)`, one subscriber appends a durable claim or
+  resume-attempt event keyed by the approval/session
+- other subscribers that observe the claim back off
+- if the claimer dies, lack of completion plus offset replay lets another
+  subscriber retry later
 
-Examples:
+The key property is that coordination itself is durable and stream-driven,
+rather than depending on in-memory locks.
 
-- browser harness
-- control-plane UI
-- operator-facing web surface
+### 7. First service path
 
-The proof needed is durability and serviceability, not broad UI coverage.
+One real service path should prove the end-to-end loop.
+
+Good candidates:
+
+- browser harness or browser contract test
+- a thin control-plane or operator endpoint
+- a diagnostic approval-service example
+
+The proof needed is:
+
+- resolution can happen after the original client disconnects
+- resolution is written as Session evidence
+- a subscriber can observe it and trigger `resume(sessionId)`
+- the resumed runtime continues correctly
 
 ## Explicit Non-Goals
 
 This slice does **not** require:
 
-- a rich workflow engine
-- complex multi-step approval chains
-- broad policy DSL design
-- fully solving shared-session or multiplayer semantics
+- `client.orchestration.*`
+- a `wake()` HTTP endpoint
+- a Fireline-owned approval queue product
+- `client.approvals.*`
+- a workflow engine
+- complex approval chains
+- policy DSL design
 - every possible wait type
-- making approval service depend on an always-live interactive client
+
+This is the first worked Orchestration-composition consumer, not a general
+approval product.
 
 ## Acceptance Criteria
 
-- `ApprovalRequest` exists as an explicit durable product object
-- a run can enter a first-cut `waiting` state with blocking request ids
-- `client.approvals.list/get/approve/deny/expire` exist
-- one conductor gate path can create a durable request and block the run
-- approve / deny / expire all produce deterministic durable outcomes
-- blocked work can resume or terminate after later service without requiring
-  the original client connection to still exist
-- one browser or control-plane service path can inspect and resolve requests
+- `ApprovalGateComponent` writes `PermissionRequest` as Session evidence when it
+  suspends a gated effect
+- `ApprovalGateComponent` can rebuild pending state from the Session log on
+  `session/load`
+- the flow explicitly depends on slice `14`'s durable `runtimeSpec`
+  persistence rather than an external hidden catalog
+- a worked resumer subscriber example is documented using `openStream(...)` +
+  `resume(sessionId)`
+- the docs define coordination semantics for multiple concurrent subscribers
+- one end-to-end proof shows:
+  - a gated effect suspends
+  - the runtime may go dormant
+  - a later service appends `ApprovalResolved`
+  - a subscriber observes it and calls `resume(sessionId)`
+  - the runtime cold-starts if needed
+  - `session/load` rebuilds gate state from the log
+  - the effect resumes or terminates deterministically
 
 ## Validation
 
 - `cargo test -q`
 - `pnpm --filter @fireline/client test`
-- one integration test that:
-  - starts a run that hits one gated action
-  - creates a durable approval request
-  - observes the run enter `waiting`
-  - services the request later through the product API
-  - verifies the run resumes or terminates correctly
-- one consumer-oriented integration test that:
-  - lists waiting runs
-  - fetches approval detail
-  - resolves the request through the service surface
+- one conductor/component integration test that:
+  - suspends on a gated tool call
+  - writes `PermissionRequest`
+  - reloads through `session/load`
+  - verifies the component rebuilds pending state from the log
+- one end-to-end integration test that:
+  - resolves the approval after the original client disconnects
+  - appends `ApprovalResolved`
+  - runs a subscriber loop that calls `resume(sessionId)`
+  - verifies the runtime cold-starts from the stored `runtimeSpec` when needed
+  - verifies the agent advances after rebuild
+- one coordination test or worked example that demonstrates the first-claim
+  wins pattern for multiple concurrent subscribers
 
 ## Handoff Note
 
-Keep the first cut deliberately small.
+Keep this slice focused on one durable wait pattern.
 
-Do not:
+The handoff should emphasize:
 
-- turn this into a general workflow engine
-- solve every approval pattern at once
-- make the product model depend on shared-session bridge work
-- overfit the first schema to one UI
+- no new orchestration primitive
+- no new control-plane endpoint
+- use `resume(sessionId)` as the consumer entry point
+- depend on slice `14` for durable `runtimeSpec`
+- make `ApprovalGateComponent` durable across runtime death by rebuilding from
+  Session on `session/load`
+- document multi-subscriber coordination instead of hand-waving it away
 
-The key proof is:
-
-- Fireline can pause durably on a gated action
-- the wait becomes an explicit serviceable object
-- later service can resume the work safely
-
+This slice proves that Fireline's orchestration story is composition over
+existing primitives, not a new scheduler subsystem.
