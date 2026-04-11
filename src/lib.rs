@@ -61,6 +61,7 @@ pub(crate) mod control_plane_peer_registry;
 pub(crate) mod error_codes;
 pub(crate) mod load_coordinator;
 pub(crate) mod routes;
+pub mod runtime_index;
 pub(crate) mod runtime_materializer;
 mod runtime_provider;
 pub(crate) mod session_index;

@@ -6,7 +6,11 @@ use fireline_conductor::runtime::{PersistedRuntimeSpec, RuntimeDescriptor, Runti
 use reqwest::Client as HttpClient;
 use tracing::{info, instrument};
 
-use crate::runtime_materializer::RuntimeMaterializer;
+// Re-export RuntimeMaterializer and its task handle so external callers
+// (including the stream-as-truth RuntimeIndex agreement tests) can attach
+// their own StateProjection implementations to a shared state stream
+// without reaching into the crate-private `runtime_materializer` module.
+pub use crate::runtime_materializer::{RuntimeMaterializer, RuntimeMaterializerTask};
 // Re-export SessionIndex so external callers of `materialize_session_index`
 // and `materialize_shared_session_index` can name the return type even
 // though the `session_index` module itself is crate-private.
