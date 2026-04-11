@@ -9,7 +9,7 @@ use fireline_conductor::runtime::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{RuntimeTokenClaims, RuntimeTokenStore, require_runtime_bearer};
+use crate::auth::{require_runtime_bearer, RuntimeTokenClaims, RuntimeTokenStore};
 use crate::heartbeat::HeartbeatTracker;
 
 #[derive(Clone)]
@@ -74,7 +74,9 @@ async fn stop_runtime(
     State(state): State<AppState>,
 ) -> Result<Json<RuntimeDescriptor>, ControlPlaneError> {
     let runtime = state.runtime_host.stop(&runtime_key).await?;
-    state.heartbeat_tracker.forget(&runtime_key).await;
+    if let Err(error) = state.heartbeat_tracker.forget(&runtime_key).await {
+        tracing::warn!(?error, runtime_key, "forget liveness after stop");
+    }
     Ok(Json(runtime))
 }
 
@@ -89,7 +91,9 @@ async fn delete_runtime(
         .ok_or_else(|| {
             ControlPlaneError::not_found(format!("runtime '{runtime_key}' not found"))
         })?;
-    state.heartbeat_tracker.forget(&runtime_key).await;
+    if let Err(error) = state.heartbeat_tracker.forget(&runtime_key).await {
+        tracing::warn!(?error, runtime_key, "forget liveness after delete");
+    }
     Ok(Json(runtime))
 }
 
@@ -136,7 +140,9 @@ async fn register_runtime(
         .runtime_host
         .register(&runtime_key, registration)
         .await?;
-    state.heartbeat_tracker.record(&runtime_key, now_ms()).await;
+    if let Err(error) = state.heartbeat_tracker.record(&runtime_key, now_ms()).await {
+        tracing::warn!(?error, runtime_key, "record liveness after register");
+    }
     Ok(StatusCode::OK)
 }
 
@@ -162,7 +168,9 @@ async fn heartbeat_runtime(
     }
 
     state.runtime_host.heartbeat(&runtime_key, report)?;
-    state.heartbeat_tracker.record(&runtime_key, now_ms()).await;
+    if let Err(error) = state.heartbeat_tracker.record(&runtime_key, now_ms()).await {
+        tracing::warn!(?error, runtime_key, "record liveness after heartbeat");
+    }
     Ok(StatusCode::OK)
 }
 

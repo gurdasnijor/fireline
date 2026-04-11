@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use axum::body::{Body, to_bytes};
+use axum::body::{to_bytes, Body};
 use axum::http::{Method, StatusCode};
 use fireline_conductor::runtime::{
     CreateRuntimeSpec, Endpoint, HeartbeatReport, LocalProvider, LocalRuntimeLauncher,
@@ -12,9 +12,9 @@ use fireline_conductor::runtime::{
     RuntimeProviderKind, RuntimeRegistration, RuntimeRegistry, RuntimeStatus,
 };
 use fireline_conductor::topology::TopologySpec;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::{json, Value};
 use tower::util::ServiceExt;
 use uuid::Uuid;
 
@@ -29,7 +29,7 @@ mod router;
 
 use auth::RuntimeTokenStore;
 use heartbeat::HeartbeatTracker;
-use router::{AppState, build_router};
+use router::{build_router, AppState};
 
 const PRELAUNCH_PROVIDER_INSTANCE_ID: &str = "launcher-provider-instance";
 const PRELAUNCH_ACP_URL: &str = "ws://127.0.0.1:4444/acp-prelaunch";
@@ -186,10 +186,10 @@ impl TestHarness {
     fn new() -> Result<Self> {
         let runtime_registry = RuntimeRegistry::load(temp_runtime_registry())?;
         let runtime_host = RuntimeHost::new(
-            runtime_registry,
+            runtime_registry.clone(),
             RuntimeManager::new(Arc::new(LocalProvider::new(Arc::new(FakeRuntimeLauncher)))),
         );
-        let heartbeat_tracker = HeartbeatTracker::new();
+        let heartbeat_tracker = HeartbeatTracker::new(runtime_registry.clone());
         let token_store = RuntimeTokenStore::default();
         let app = build_router(AppState {
             runtime_host: runtime_host.clone(),

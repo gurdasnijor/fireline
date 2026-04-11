@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use fireline_conductor::runtime::{
     CreateRuntimeSpec, LocalRuntimeLauncher, ManagedRuntime, MountedResource, RuntimeDescriptor,
@@ -102,7 +102,10 @@ impl ChildProcessRuntimeLauncher {
 
 #[async_trait]
 impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
-    #[instrument(skip(self, spec, mounted_resources), fields(runtime_key, node_id, provider = "local"))]
+    #[instrument(
+        skip(self, spec, mounted_resources),
+        fields(runtime_key, node_id, provider = "local")
+    )]
     async fn start_local_runtime(
         &self,
         spec: CreateRuntimeSpec,

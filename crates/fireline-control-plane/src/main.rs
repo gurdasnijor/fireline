@@ -20,7 +20,7 @@ use tracing_subscriber::EnvFilter;
 use self::auth::RuntimeTokenStore;
 use self::heartbeat::HeartbeatTracker;
 use self::local_provider::ChildProcessRuntimeLauncher;
-use self::router::{AppState, build_router};
+use self::router::{build_router, AppState};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ProviderMode {
@@ -123,9 +123,8 @@ async fn main() -> Result<()> {
 
     if let Some(listen_addr_file) = cli.listen_addr_file.as_ref() {
         if let Some(parent) = listen_addr_file.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("create listen-addr-file parent {}", parent.display())
-            })?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create listen-addr-file parent {}", parent.display()))?;
         }
         std::fs::write(listen_addr_file, bound_addr.to_string()).with_context(|| {
             format!(
@@ -141,7 +140,7 @@ async fn main() -> Result<()> {
     };
     let runtime_registry = RuntimeRegistry::load(runtime_registry_path.clone())?;
     let token_store = RuntimeTokenStore::default();
-    let heartbeat_tracker = HeartbeatTracker::new();
+    let heartbeat_tracker = HeartbeatTracker::new(runtime_registry.clone());
     let launcher = Arc::new(ChildProcessRuntimeLauncher::new(
         cli.fireline_bin,
         runtime_registry.clone(),
@@ -205,7 +204,14 @@ fn spawn_stale_runtime_task(
         loop {
             interval.tick().await;
             let stale_before_ms = now_ms() - stale_timeout.as_millis() as i64;
-            for runtime_key in heartbeat_tracker.stale_keys(stale_before_ms).await {
+            let stale_keys = match heartbeat_tracker.stale_keys(stale_before_ms).await {
+                Ok(stale_keys) => stale_keys,
+                Err(error) => {
+                    tracing::warn!(?error, "scan stale runtime heartbeats");
+                    continue;
+                }
+            };
+            for runtime_key in stale_keys {
                 let runtime = match runtime_registry.get(&runtime_key) {
                     Ok(runtime) => runtime,
                     Err(error) => {
@@ -219,7 +225,9 @@ fn spawn_stale_runtime_task(
                 };
 
                 let Some(mut descriptor) = runtime else {
-                    heartbeat_tracker.forget(&runtime_key).await;
+                    if let Err(error) = heartbeat_tracker.forget(&runtime_key).await {
+                        tracing::warn!(?error, runtime_key, "forget missing runtime heartbeat");
+                    }
                     continue;
                 };
 
@@ -229,7 +237,13 @@ fn spawn_stale_runtime_task(
                         fireline_conductor::runtime::RuntimeStatus::Stopped
                             | fireline_conductor::runtime::RuntimeStatus::Broken
                     ) {
-                        heartbeat_tracker.forget(&runtime_key).await;
+                        if let Err(error) = heartbeat_tracker.forget(&runtime_key).await {
+                            tracing::warn!(
+                                ?error,
+                                runtime_key,
+                                "forget finalized runtime heartbeat"
+                            );
+                        }
                     }
                     continue;
                 }
