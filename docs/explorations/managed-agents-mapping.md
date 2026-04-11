@@ -44,10 +44,10 @@ This doc does **not** propose new primitives that aren't in the Anthropic framew
 | 2 | **Orchestration** | `wake(session_id) → void` | Any scheduler that can call a function with an ID and retry on failure | **Composable** (no new primitive — satisfied by Session subscribe + `session/load` + `provision`; see §2 below) |
 | 3 | **Harness** | `yield Effect<T> → EffectResult<T>` | Any loop that yields effects and appends progress to the Session | **Partial** (by design; durable suspend/resume also satisfied via composition once Orchestration is wired up) |
 | 4 | **Sandbox** | `provision({resources}) → execute(name, input) → String` | Any executor configured once and called many times as a tool | **Strong** |
-| 5 | **Resources** | `[{source_ref, mount_path}]` | Any object store the container can fetch from by reference | **Missing** |
+| 5 | **Resources** | `[{source_ref, mount_path}]` | Any object store the container can fetch from by reference | **Partially composable** (ACP fs interception is pure composition; physical mounts for shell-based agents need a small targeted addition — see §5) |
 | 6 | **Tools** | `{name, description, input_schema}` | Any capability describable as a name and input shape | **Strong** |
 
-**One-line summary:** Fireline already has Session, Sandbox, and Tools strong; Harness is partial-by-design but its durable suspend/resume falls out of the Orchestration reduction; Orchestration is composable from existing primitives and does not require a new surface; **Resources is the one remaining real gap.**
+**One-line summary:** Fireline already has Session, Sandbox, and Tools strong. Harness is partial-by-design but its durable suspend/resume falls out of the Orchestration reduction. Orchestration is fully composable from existing primitives. Resources is partially composable (ACP file system interception) with a small physical-mount gap for shell-based agents that still needs slice 15. **Net result: Fireline has no remaining "primitive-sized" gaps — only targeted small additions that fold into the existing slice plan.**
 
 ## Fireline as combinators over the primitives
 
@@ -429,7 +429,7 @@ None at the substrate level. The trait exists, two implementations work, a third
 - **Slice 13c (in flight)** — `DockerProvider` via bollard
 - **Future slices:** E2B, Daytona, Cloudflare, Kubernetes providers — additive, no contract change
 
-## 5. Resources — Missing
+## 5. Resources — Partially composable (ACP fs interception) + small physical-mount gap
 
 ### Anthropic interface
 
@@ -439,31 +439,93 @@ None at the substrate level. The trait exists, two implementations work, a third
 
 Satisfied by *"any object store the container can fetch from by reference — Filestore, GCS, a git remote, S3."*
 
-### What Fireline exposes
+### The reduction
 
-The closest analog is the helper file API (`/api/v1/files/{...}` on the runtime) which lets the agent read files from the host filesystem. But that's local-file-only and assumes the host filesystem is the resource source. There is no first-class concept of "this run depends on these external resource references; mount them at these paths before the agent starts."
+An earlier version of this doc treated Resources as fully missing. Closer inspection shows it splits cleanly into two halves — one of which is composable over the existing combinator algebra, and the other of which needs a small targeted addition for one real-world constraint (shell-based agents).
 
-### Why this matters
+**The composable half: ACP file system interception.**
 
-Fireline's existing slice 15 (`docs/execution/15-workspace-object.md`) tried to solve this by introducing a heavy "Workspace product object" with identity, lifecycle, and product semantics. **Anthropic's framing is dramatically simpler:** it's just `[{source_ref, mount_path}]` — a list of refs paired with where they should land in the runtime.
+The ACP protocol defines [`fs/read_text_file` and `fs/write_text_file`](https://agentclientprotocol.com/protocol/file-system) as client-hosted methods. The runtime serves these. Because they flow through the conductor proxy chain as ACP requests, the seven-combinator algebra applies directly:
 
-This collapses slice 15 from a product-object problem into a launch-spec field. The implementation:
+```typescript
+// An FsBackendComponent is compose(substitute, appendToSession)
+const fsBackend = (backend: FileBackend): Component => compose(
+  substitute(e =>
+    isFsRead(e)  ? { ...e, resolve: () => backend.read(e.path) } :
+    isFsWrite(e) ? { ...e, resolve: () => backend.write(e.path, e.content) } :
+    e
+  ),
+  appendToSession((e, r) =>
+    isFsOp(e)
+      ? { kind: 'fs_op', op: opKind(e), path: e.path, result: r }
+      : null
+  ),
+)
+```
 
-- **`CreateRuntimeSpec`** grows a `resources: Vec<ResourceRef>` field where `ResourceRef = { source_ref: String, mount_path: PathBuf }`
-- **A `ResourceMounter` trait** with implementations:
-  - `LocalPathMounter` — bind-mounts a local directory (the current de facto behavior)
-  - `GitRemoteMounter` — clones a repo into the mount path
-  - `S3Mounter` — fetches an S3 prefix into the mount path
-  - `GcsMounter` — same for Google Cloud Storage
-- **`RuntimeProvider::start()`** invokes the appropriate mounter for each `ResourceRef` before launching the agent
+Where `FileBackend` is a small trait with pluggable implementations: `LocalFileBackend`, `S3FileBackend`, `GcsFileBackend`, `GitFileBackend`, `SessionLogFileBackend`.
 
-This is **a week of work, not a slice**. The current slice 15 doc should be heavily revised or demoted.
+Three things follow for free:
+
+1. **Backend is a configuration choice, not a new primitive.** Pointing the runtime at S3 instead of local disk is one component attach.
+2. **Artifact persistence is automatic.** Every `fs/write_text_file` is both routed to the backend AND appended to the Session log via `appendToSession`. A materializer over `fs_op` events becomes "what files did this run produce, and where did they land."
+3. **Session log can BE the backend.** `SessionLogFileBackend` stores file content as events and reads via projection. The Session log IS the filesystem — durable by construction, replayable, queryable, cross-runtime-observable. Elegant for small workflows; impractical for large binary-heavy ones.
+
+**The non-composable half: shell-based agents bypass ACP fs.**
+
+Claude Code, Codex, and most real agents use bash/python/their own internal tools to read and write files. A bash `cat /work/src/main.rs` is an opaque ACP `tools/call` that returns a string — we see the result, but the actual read happened inside the container's filesystem without passing through `fs/read_text_file`. Shell is Turing-complete; we can't reliably intercept every file operation.
+
+So for shell-based agents the files must physically exist on the container's filesystem before the agent starts. This means: **inbound `source_ref → mount_path` still needs a physical mount at provision time.** That's what slice 15's `ResourceMounter` trait is for, and we can't compose our way out of it.
+
+### What's actually needed
+
+| Piece | Status |
+|---|---|
+| `resources: Vec<ResourceRef>` field on `CreateRuntimeSpec` | **Missing** — slice 15 |
+| `ResourceMounter` trait on runtime provider side | **Missing** — slice 15 |
+| `LocalPathMounter` (bind mount) | **Missing** — slice 15, likely ships as 13c side effect |
+| `GitRemoteMounter` (clone + checkout) | **Missing** — slice 15 |
+| `S3Mounter` / `GcsMounter` | **Missing** — slice 15 follow-ups |
+| `FsBackendComponent` with `FileBackend` trait | **Composable** — one conductor component, no new primitive |
+| `LocalFileBackend`, `S3FileBackend`, `GcsFileBackend`, `GitFileBackend`, `SessionLogFileBackend` | **Composable** — backend implementations layered under the component |
+| Session log as artifact record | **Already works** — falls out of `appendToSession` on writes |
+
+### Why the two halves complement each other
+
+A single runtime can run both layers simultaneously:
+
+- **Physical mount at `/work`** — git repo cloned in for shell-based file access via bash/python/etc.
+- **`FsBackendComponent` for ACP fs ops** — any agent that uses `fs/read_text_file` or `fs/write_text_file` (or any MCP tool backed by ACP fs) gets routed through the component
+- **Artifact capture via `appendToSession`** — every ACP-native write is logged, regardless of backend
+
+Shell-based reads of the physical mount and ACP-native reads of the virtual backend coexist. Artifacts that the agent produces via `fs/write_text_file` land in the chosen backend AND the Session log. Artifacts produced via shell (e.g., `echo 'x' > /tmp/out.txt`) are invisible to the component — that's a known limitation of shell-based agents, and the mitigation is to configure the agent to use ACP fs or MCP file tools for anything that needs to be persisted.
+
+### What slice 15 actually ships
+
+Slice 15 shrinks from "full Resources product with workspace object" to **two focused deliverables**:
+
+1. **Physical mounts (Rust side, ~1 week):** `ResourceRef` type, `ResourceMounter` trait, `LocalPathMounter` and `GitRemoteMounter` implementations, `CreateRuntimeSpec.resources` field, provider wiring to invoke mounters at start time.
+2. **`FsBackendComponent` (Rust + TS, ~1–2 days):** the conductor component, the `FileBackend` trait, `LocalFileBackend` and `SessionLogFileBackend` as the first two implementations, TS-side `resources` helpers. S3/GCS/git backends land later.
+
+Total slice 15 scope: ~1.5 weeks of work spanning Rust conductor, Rust provider, and TS helpers. Not a full execution slice in the old sense, but meaningful and self-contained.
 
 ### How existing slices contribute
 
-- **Slice 15 (currently in plan as "workspace object")** — needs to be reframed as the Resources primitive: a launch-spec field plus pluggable mounters, not a product object
-- **Slice 13c (in flight)** — Docker provider needs to mount *something* into the container, so a minimal `LocalPathMounter` will probably land here as a side effect
-- **Future slices:** richer mounters (S3, GCS, git) added incrementally
+- **Slice 13c (in flight)** — Docker provider needs to mount *something* into the container; a minimal `LocalPathMounter` will likely land here as a side effect. The component work waits for slice 15.
+- **Slice 15 (reduced scope)** — physical `ResourceMounter` + `FsBackendComponent` + first two backends. Rewrites the existing slice 15 doc.
+- **Future slices:** S3/GCS/git backends added incrementally as real consumers need them.
+
+### One important unlock
+
+Once `FsBackendComponent` ships, the `SessionLogFileBackend` special case becomes a really interesting primitive for small, durable, distributed workflows. Imagine:
+
+- Two runtimes on different hosts, both pointed at the same Session stream
+- Runtime A writes `/scratch/report.md` via `fs/write_text_file`
+- The write is captured as an event on the shared Session stream
+- Runtime B reads `/scratch/report.md` via `fs/read_text_file`
+- The component queries the projection of the Session stream and returns runtime A's content
+
+**A cross-runtime virtual filesystem, for free, built on the existing durable-streams infrastructure.** No new primitive, no shared storage other than the stream that's already persistent. This is the kind of composition win that makes the primitive algebra worth using — features fall out that weren't designed in.
 
 ## 6. Tools — Strong
 
@@ -504,26 +566,34 @@ This keeps credentials out of the runtime and out of the spawn spec.
 - **Slice 17 (in plan, reframed)** — capability profiles as portable Tools references with credential_ref indirection
 - **External auth seam** (in priorities #5) — the credential_ref resolution layer
 
-## The one real gap
+## No remaining primitive-sized gaps
 
-An earlier version of this doc said Orchestration and Resources were the two real gaps. The Orchestration reduction in §2 above collapses Orchestration into composition of existing primitives — it is no longer a gap, and there is no slice 18. **Resources is the only remaining gap.**
+An earlier version of this doc said Orchestration and Resources were the two real gaps. Both have since been reduced:
 
-### Gap: Resources (`[{source_ref, mount_path}]`)
+- **Orchestration** (§2) collapses into composition of Session subscribe + `session/load` + `RuntimeHost::create`, exposed as a ten-line `resume(sessionId)` helper. No slice 18, no new primitive, no scheduler service.
+- **Resources** (§5) splits into two halves: ACP fs interception is pure composition via an `FsBackendComponent` (just `compose(substitute, appendToSession)`), and physical mounts for shell-based agents need a small focused addition via `ResourceMounter`.
 
-The current slice 15 ("workspace object") tries to solve a hard product-object problem; the Anthropic framing collapses it to a launch-spec field with pluggable mounters.
+### What's actually missing, sorted by size
 
-**Recommended action:** demote slice 15 from "execution slice" to "small refactor." Replace `docs/execution/15-workspace-object.md` with a much shorter doc that defines `ResourceRef`, `ResourceMounter`, and the four initial implementations (LocalPath, GitRemote, S3, Gcs). Estimated cost: a week, not a slice. A minimal `LocalPathMounter` may ship as a side effect of slice 13c Docker provider work.
+**Small Rust additions (slice 15 scope, ~1.5 weeks):**
 
-### Orchestration — what was framed as a gap, now satisfied by composition
+- `ResourceMounter` trait + `LocalPathMounter` + `GitRemoteMounter` for physical mounts at provision time
+- `FsBackendComponent` as a built-in conductor component with `FileBackend` trait
+- `LocalFileBackend` + `SessionLogFileBackend` as first two backend implementations
 
-Orchestration was framed as the largest single gap because `wake(session_id) → void` sounded like a new primitive. On closer inspection, the primitive is satisfied today by:
+**Small additions that fold into other slices:**
 
-- `durable-streams` accepts writes from any authenticated producer, not only the runtime
-- Any process that subscribes to the Session stream via `openStream` becomes a scheduler
-- `session/load` rebuilds ACP session state from the durable log via `LoadCoordinatorComponent`
-- `RuntimeHost::create` cold-starts runtimes against a stored spec
+- Durable `runtimeSpec` persistence for `resume` cold-start (slice 14, Session read surface)
+- `ApprovalGateComponent` rebuild-from-log behavior (slice 16, first worked Orchestration consumer)
 
-Composed via a ten-line `resume(sessionId)` helper, these four things satisfy *"any scheduler that can call a function with an ID and retry on failure."* See §2 above for the full walkthrough. The remaining work is small and folds into slice 14 (durable spec persistence) plus slice 16 (approval component rebuild behavior) plus a TS-side `resume` helper — no slice 18.
+**TS API surface work:**
+
+- `resume(sessionId)` helper as a named export (tracked in `typescript-functional-api-proposal.md`)
+- `fsBackend` component factory and `FileBackend` types
+
+**Zero new primitives. Zero new slices. Zero new control-plane endpoints.**
+
+That's the whole remaining gap list. Fireline's substrate is essentially complete once these targeted additions land; everything else is composition over the seven combinators plus product-layer work that belongs in Flamecast, not in the substrate.
 
 ## Build order and slice index
 
@@ -538,7 +608,7 @@ This is the operational plan: which slices ship in what order to close the gaps 
 | **Tools** | Strong | `17` capability profiles as portable tool references | Doc planned, will be reframed from heavy product object to portable refs with `credential_ref` indirection |
 | **Harness** | Partial (by design) | `16` approval component rebuild behavior | Durable suspend/resume falls out of Orchestration composition once slice 14 and the `resume` helper land |
 | **Orchestration** | **Composable** | `16` approval component rebuild; `14` durable spec persistence; `@fireline/client` ships the `resume(sessionId)` helper | No dedicated slice — work folds into 14, 16, and the TS API surface |
-| **Resources** | **Missing** | `15` workspace object → replaced by "Resources refactor: `ResourceRef` + pluggable mounters" | Existing slice doc needs to be replaced with a much shorter resources refactor doc |
+| **Resources** | **Partially composable** | `15` replaced by "Resources: physical `ResourceMounter` + `FsBackendComponent`" | Physical mounts for shell-based agents + ACP fs interception component; ~1.5 weeks combined |
 
 ### Build order, with rationales
 
@@ -650,14 +720,26 @@ Orchestration is satisfied by composition of existing primitives (see §2 above)
 
 ### Resources — acceptance bar
 
-- [ ] `resources: Vec<ResourceRef>` field on `CreateRuntimeSpec`
-- [ ] `ResourceMounter` trait
-- [ ] `LocalPathMounter` implementation (probably from slice 13c side effect)
-- [ ] At least one network-fetched mounter — `GitRemoteMounter` or `S3Mounter` (slice 15 rewrite)
-- [ ] Documented contract for how mounters interact with `RuntimeProvider::start()`
-- [ ] One end-to-end test where a runtime mounts a non-local resource and the agent reads from it
+The primitive splits into two halves (see §5); the bar covers both.
 
-**Status:** 0% complete. Owned by slice 15 rewrite, with a possible head start from slice 13c.
+**Physical mounts (for shell-based agents):**
+
+- [ ] `resources: Vec<ResourceRef>` field on `CreateRuntimeSpec`
+- [ ] `ResourceMounter` trait on runtime provider side
+- [ ] `LocalPathMounter` implementation (probably from slice 13c side effect)
+- [ ] `GitRemoteMounter` implementation (slice 15)
+- [ ] Documented contract for how mounters interact with `RuntimeProvider::start()`
+- [ ] One end-to-end test where a runtime mounts a git remote and the agent reads from it via bash
+
+**ACP fs interception (for ACP-native file ops and artifact capture):**
+
+- [ ] `FileBackend` trait on runtime side
+- [ ] `FsBackendComponent` in `fireline-components` implemented as `compose(substitute, appendToSession)`
+- [ ] `LocalFileBackend` implementation (default, mirrors current behavior)
+- [ ] `SessionLogFileBackend` implementation (file content stored as events, reads query the projection)
+- [ ] One end-to-end test where an agent `fs/write_text_file`s, the event lands on the Session log, and a materializer surfaces it as an artifact record
+
+**Status:** 0% complete on physical mounts, 0% complete on ACP fs interception — but the second half is pure composition via the seven combinators, so the effort is significantly smaller than the first half. Combined total: ~1.5–2 weeks, owned by slice 15 rewrite with a probable `LocalPathMounter` head start from slice 13c.
 
 ## How to add a new slice
 
