@@ -367,12 +367,104 @@ async fn managed_agent_resources_fs_backend_component_test() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "pending richer init-effect inspection for schema-only tool registration"]
 async fn managed_agent_tools_schema_only_acceptance_contract() -> Result<()> {
-    pending_contract(
-        "tools.schema_only",
-        "Once the init effect is easy to inspect in Rust, assert that tool registration exposes {name, description, input_schema} without transport details or credentials.",
-    )
+    // Acceptance-level sibling of tests/managed_agent_tools.rs::tools_schema_only_contract.
+    // Uses the same tool_descriptor envelope emission wired by the peer_mcp
+    // topology component — when the conductor builds, it emits one envelope
+    // per registered tool onto the state stream. The schema-only invariant is
+    // that each emitted value is exactly the Anthropic triple
+    // {name, description, inputSchema} and carries no transport or
+    // credential metadata.
+    let topology = TopologySpec {
+        components: vec![TopologyComponentSpec {
+            name: "peer_mcp".to_string(),
+            config: None,
+        }],
+    };
+    let spec =
+        ManagedAgentHarnessSpec::new("primitives-tools-schema-only").with_topology(topology);
+    let runtime = LocalRuntimeHarness::spawn_with(spec).await?;
+
+    let result = async {
+        // Create a session so the conductor build fires and the
+        // peer_mcp factory emits its tool_descriptor envelopes.
+        let _session_id = create_session(runtime.acp_url()).await?;
+
+        let descriptors = wait_for_event_count(
+            runtime.state_stream_url(),
+            "tool_descriptor",
+            1,
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+
+        for env in &descriptors {
+            let value = env
+                .value()
+                .expect("tool_descriptor envelope must carry a value");
+            let obj = value
+                .as_object()
+                .expect("tool_descriptor value must be a JSON object");
+
+            let allowed: std::collections::HashSet<&str> =
+                ["name", "description", "inputSchema"].into_iter().collect();
+            for key in obj.keys() {
+                assert!(
+                    allowed.contains(key.as_str()),
+                    "INVARIANT (Tools): tool_descriptor value key '{key}' is not part of the \
+                     Anthropic triple — schema-only descriptors must contain exactly \
+                     {{name, description, inputSchema}}"
+                );
+            }
+            for required in ["name", "description", "inputSchema"] {
+                assert!(
+                    obj.contains_key(required),
+                    "INVARIANT (Tools): tool_descriptor value must contain '{required}'"
+                );
+            }
+            for forbidden in [
+                "transport",
+                "credential",
+                "host",
+                "runtime_key",
+                "node_id",
+                "url",
+                "headers",
+            ] {
+                assert!(
+                    !obj.contains_key(forbidden),
+                    "INVARIANT (Tools): tool_descriptor must not leak transport/credential key \
+                     '{forbidden}'"
+                );
+            }
+            assert_eq!(
+                env.operation(),
+                Some("insert"),
+                "INVARIANT (Tools): tool_descriptor envelopes use operation insert"
+            );
+        }
+
+        let names: std::collections::HashSet<String> = descriptors
+            .iter()
+            .filter_map(|env| {
+                env.value()
+                    .and_then(|v| v.get("name"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .collect();
+        assert!(
+            names.contains("list_peers") && names.contains("prompt_peer"),
+            "INVARIANT (Tools): peer_mcp must emit tool_descriptor envelopes for both \
+             list_peers and prompt_peer; saw {names:?}"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    runtime.shutdown().await?;
+    result
 }
 
 fn state_stream_producer(state_stream_url: &str) -> durable_streams::Producer {
