@@ -21,10 +21,11 @@ use tokio::sync::Mutex;
 use url::Url;
 use walkdir::WalkDir;
 
-use super::mounter::{LocalPathMounter, ResourceMounter, prepare_resources};
-use super::provider::{
+use fireline_resources::{LocalPathMounter, ResourceMounter, prepare_resources};
+
+use crate::provider::{
     CreateRuntimeSpec, Endpoint, ManagedRuntime, RuntimeLaunch, RuntimeProvider,
-    RuntimeProviderKind, RuntimeTokenIssuer,
+    RuntimeProviderKind, RuntimeStatus, RuntimeTokenIssuer,
 };
 
 const CONTAINER_PORT: u16 = 4437;
@@ -252,7 +253,7 @@ impl RuntimeProvider for DockerProvider {
             .with_context(|| format!("start docker runtime container {container_name}"))?;
 
         Ok(RuntimeLaunch {
-            status: super::RuntimeStatus::Starting,
+            status: RuntimeStatus::Starting,
             runtime_id: String::new(),
             provider_instance_id,
             acp: Endpoint::new(advertised_acp_url),

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 
-use super::provider::{
+use crate::provider::{
     CreateRuntimeSpec, RuntimeLaunch, RuntimeProvider, RuntimeProviderKind, RuntimeProviderRequest,
 };
 

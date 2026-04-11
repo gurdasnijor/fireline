@@ -2,20 +2,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use fireline_resources::{LocalPathMounter, ResourceMounter, prepare_resources};
 
-use super::mounter::{LocalPathMounter, MountedResource, ResourceMounter, prepare_resources};
-use super::provider::{CreateRuntimeSpec, RuntimeLaunch, RuntimeProvider, RuntimeProviderKind};
-
-#[async_trait]
-pub trait LocalRuntimeLauncher: Send + Sync {
-    async fn start_local_runtime(
-        &self,
-        spec: CreateRuntimeSpec,
-        runtime_key: String,
-        node_id: String,
-        mounted_resources: Vec<MountedResource>,
-    ) -> Result<RuntimeLaunch>;
-}
+use crate::provider::{CreateRuntimeSpec, RuntimeLaunch, RuntimeProvider, RuntimeProviderKind};
+use crate::provider_trait::LocalRuntimeLauncher;
 
 #[derive(Clone)]
 pub struct LocalProvider {

@@ -9,11 +9,21 @@ description = "Tool execution sandbox primitives for Fireline"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+bollard.workspace = true
+dirs.workspace = true
+durable-streams.workspace = true
 fireline-resources.workspace = true
+fireline-session.workspace = true
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tar.workspace = true
 tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+url.workspace = true
 uuid.workspace = true
+walkdir.workspace = true
 microsandbox = { version = "0.3.12", optional = true }
 
 [features]

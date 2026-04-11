@@ -3,10 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use super::provider::RuntimeDescriptor;
+use crate::provider::RuntimeDescriptor;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeRegistry {
@@ -133,7 +133,7 @@ struct RuntimeRegistryFile {
 #[cfg(test)]
 mod tests {
     use super::{RuntimeRegistry, RuntimeRegistryFile};
-    use crate::runtime::{Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
+    use crate::{Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
     use anyhow::Result;
 
     #[test]
