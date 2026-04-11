@@ -79,18 +79,22 @@
 
 #![allow(unused_imports, dead_code, unused_variables)]
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use axum::Router;
 use fireline_conductor::runtime::{
     CreateRuntimeSpec, Endpoint, RuntimeDescriptor, RuntimeHost, RuntimeProviderKind,
     RuntimeProviderRequest, RuntimeStatus,
 };
 use reqwest::Client as HttpClient;
 use serde_json::Value as JsonValue;
+use tokio::process::{Child, Command};
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use stubs::{
@@ -510,25 +514,236 @@ struct TestContext {
     testy_bin: PathBuf,
     // Plus handles to spawned subprocesses that get killed in shutdown
     control_plane_child: Option<tokio::process::Child>,
-    state_stream_child: Option<tokio::process::Child>,
+    state_stream_server: Option<SharedStreamServer>,
 }
 
 impl TestContext {
     async fn spawn() -> Result<Self> {
-        // TODO: reuse spawn_control_plane + durable-streams bring-up from
-        // tests/control_plane_push.rs. For now, stubbed so the file compiles.
-        todo!(
-            "TestContext::spawn — reuse helpers from tests/control_plane_push.rs \
-             (spawn_control_plane, issue_runtime_token, wait_for_http_ok). The \
-             e2e spec needs: durable-streams server, control plane, temp mount \
-             directory, testy binary path."
+        ensure_control_plane_binaries_built()?;
+
+        let shared_streams = SharedStreamServer::spawn().await?;
+        let runtime_registry_path = temp_path("fireline-managed-agent-runtimes");
+        let peer_directory_path = temp_path("fireline-managed-agent-peers");
+        let control_plane_url = format!("http://127.0.0.1:{}", reserve_port()?);
+        let control_plane_child = spawn_control_plane(
+            &control_plane_url,
+            &runtime_registry_path,
+            &peer_directory_path,
+            &shared_streams.base_url,
         )
+        .await?;
+
+        let mount_dir = temp_path("fireline-managed-agent-mount");
+        std::fs::create_dir_all(&mount_dir)
+            .with_context(|| format!("create mount dir {}", mount_dir.display()))?;
+
+        Ok(Self {
+            http: HttpClient::new(),
+            control_plane_url,
+            state_stream_url: shared_streams.base_url.clone(),
+            mount_dir,
+            testy_bin: target_bin("fireline-testy"),
+            control_plane_child: Some(control_plane_child),
+            state_stream_server: Some(shared_streams),
+        })
     }
 
-    async fn shutdown(self) -> Result<()> {
-        // Best-effort teardown of spawned subprocesses.
+    async fn shutdown(mut self) -> Result<()> {
+        if let Some(mut child) = self.control_plane_child.take() {
+            shutdown_process(&mut child).await;
+        }
+        if let Some(streams) = self.state_stream_server.take() {
+            streams.shutdown().await;
+        }
+        let _ = std::fs::remove_dir_all(&self.mount_dir);
         Ok(())
     }
+}
+
+struct SharedStreamServer {
+    base_url: String,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl SharedStreamServer {
+    async fn spawn() -> Result<Self> {
+        let router: Router = fireline::stream_host::build_stream_router(None)?;
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .context("bind shared durable-streams test listener")?;
+        let addr = listener.local_addr().context("resolve shared streams address")?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+        Ok(Self {
+            base_url: format!("http://127.0.0.1:{}/v1/stream", addr.port()),
+            shutdown_tx: Some(shutdown_tx),
+            task,
+        })
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        let _ = self.task.await;
+    }
+}
+
+fn ensure_control_plane_binaries_built() -> Result<()> {
+    let status = std::process::Command::new("cargo")
+        .args([
+            "build",
+            "--quiet",
+            "-p",
+            "fireline",
+            "--bin",
+            "fireline",
+            "--bin",
+            "fireline-testy",
+            "-p",
+            "fireline-control-plane",
+            "--bin",
+            "fireline-control-plane",
+        ])
+        .status()
+        .context("build fireline test binaries")?;
+    if !status.success() {
+        return Err(anyhow!("failed to build fireline test binaries"));
+    }
+    Ok(())
+}
+
+fn target_bin(name: &str) -> PathBuf {
+    let cargo_var = format!("CARGO_BIN_EXE_{name}");
+    if let Some(path) = std::env::var_os(&cargo_var) {
+        return PathBuf::from(path);
+    }
+
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join(profile)
+        .join(name)
+}
+
+fn fireline_bin() -> PathBuf {
+    target_bin("fireline")
+}
+
+fn control_plane_bin() -> PathBuf {
+    target_bin("fireline-control-plane")
+}
+
+fn temp_path(prefix: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("{prefix}-{}", Uuid::new_v4()))
+}
+
+async fn spawn_control_plane(
+    base_url: &str,
+    runtime_registry_path: &PathBuf,
+    peer_directory_path: &PathBuf,
+    shared_stream_base_url: &str,
+) -> Result<Child> {
+    let port = base_url
+        .rsplit(':')
+        .next()
+        .ok_or_else(|| anyhow!("missing control-plane port"))?;
+    let mut command = Command::new(control_plane_bin());
+    command
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port)
+        .arg("--fireline-bin")
+        .arg(fireline_bin())
+        .arg("--runtime-registry-path")
+        .arg(runtime_registry_path)
+        .arg("--peer-directory-path")
+        .arg(peer_directory_path)
+        .arg("--prefer-push")
+        .arg("--shared-stream-base-url")
+        .arg(shared_stream_base_url)
+        .arg("--startup-timeout-ms")
+        .arg("20000")
+        .arg("--stop-timeout-ms")
+        .arg("10000")
+        .arg("--heartbeat-scan-interval-ms")
+        .arg("5000")
+        .arg("--stale-timeout-ms")
+        .arg("30000")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    let mut child = command.spawn().context("spawn fireline-control-plane")?;
+    wait_for_http_ok(&format!("{base_url}/healthz"), &mut child).await?;
+    Ok(child)
+}
+
+async fn issue_runtime_token(
+    client: &reqwest::Client,
+    base_url: &str,
+    runtime_key: &str,
+) -> Result<String> {
+    let response = client
+        .post(format!("{base_url}/v1/auth/runtime-token"))
+        .json(&serde_json::json!({
+            "runtimeKey": runtime_key,
+            "scope": "runtime.write"
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    let payload = response.json::<serde_json::Value>().await?;
+    payload
+        .get("token")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
+        .ok_or_else(|| anyhow!("missing runtime token"))
+}
+
+async fn wait_for_http_ok(url: &str, child: &mut Child) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Err(anyhow!(
+                "control plane exited before becoming ready: {status}"
+            ));
+        }
+
+        match reqwest::get(url).await {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(_) | Err(_) if tokio::time::Instant::now() >= deadline => {
+                return Err(anyhow!("timed out waiting for control plane at {url}"));
+            }
+            Ok(_) | Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+}
+
+async fn shutdown_process(child: &mut Child) {
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+}
+
+fn reserve_port() -> Result<u16> {
+    let listener = std::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        .context("bind ephemeral port")?;
+    Ok(listener.local_addr()?.port())
 }
 
 // =============================================================================
