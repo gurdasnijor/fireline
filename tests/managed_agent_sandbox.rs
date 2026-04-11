@@ -32,8 +32,10 @@
 #[path = "support/managed_agent_suite.rs"]
 mod managed_agent_suite;
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
-use managed_agent_suite::{DEFAULT_TIMEOUT, LocalRuntimeHarness, pending_contract};
+use managed_agent_suite::{LocalRuntimeHarness, pending_contract, wait_for_event_count};
 
 /// Precondition: no runtime exists.
 ///
@@ -128,23 +130,25 @@ async fn sandbox_provisioned_runtime_serves_multiple_execute_calls() -> Result<(
         }
 
         // Each prompt should land as a distinct prompt_turn envelope on the
-        // durable stream. We expect at least three prompt_turn markers.
-        let body = runtime
-            .wait_for_state_rows(
-                &[
-                    "\"type\":\"session\"",
-                    "\"type\":\"prompt_turn\"",
-                ],
-                DEFAULT_TIMEOUT,
-            )
-            .await
-            .context("runtime should have appended prompt_turn envelopes for each execute")?;
-
-        let prompt_turn_count = body.matches("\"type\":\"prompt_turn\"").count();
-        assert!(
-            prompt_turn_count >= 3,
+        // durable stream. Use count-aware polling to avoid the race where
+        // the substring helper returns after only the first prompt_turn is
+        // visible.
+        let prompt_turns = wait_for_event_count(
+            runtime.state_stream_url(),
+            "prompt_turn",
+            3,
+            Duration::from_secs(10),
+        )
+        .await
+        .context(
             "INVARIANT (Sandbox ∘ Session): each execute yields a distinct prompt_turn \
-             envelope in the durable log, saw {prompt_turn_count}"
+             envelope in the durable log",
+        )?;
+        assert!(
+            prompt_turns.len() >= 3,
+            "INVARIANT (Sandbox ∘ Session): wait_for_event_count returned {} prompt_turn \
+             envelopes, expected at least 3",
+            prompt_turns.len()
         );
 
         Ok(())

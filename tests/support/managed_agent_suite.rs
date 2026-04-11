@@ -11,9 +11,10 @@ use axum::Router;
 use durable_streams::{Client as DsClient, Offset};
 use fireline::bootstrap::{BootstrapConfig, BootstrapHandle, start};
 use fireline::runtime_host::{RuntimeDescriptor, RuntimeStatus};
+use fireline_conductor::runtime::{LocalPathMounter, ResourceMounter, ResourceRef};
 use fireline_conductor::topology::TopologySpec;
 use futures::{SinkExt, StreamExt};
-use serde_json::json;
+use serde_json::{Value as JsonValue, json};
 use tokio::process::{Child, Command as TokioCommand};
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -693,4 +694,364 @@ fn reserve_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
         .context("bind ephemeral port")?;
     Ok(listener.local_addr()?.port())
+}
+
+// =============================================================================
+// Configurable harness spec
+// =============================================================================
+//
+// The original `LocalRuntimeHarness::spawn(name)` and
+// `ControlPlaneHarness::create_runtime(name)` entry points hardcoded default
+// topology, empty resources, and embedded-vs-shared stream choice. That
+// rigidity was blocking most of the pending per-primitive contract tests
+// because they need resources in the launch spec, or specific topology
+// components (approval gate, fs backend), or a shared-stream mode for
+// cross-runtime reads.
+//
+// `ManagedAgentHarnessSpec` is a single builder-style spec that both harnesses
+// consume via `spawn_with()` / `create_runtime_from_spec()`. The existing
+// methods stay as thin wrappers over default specs for backwards compat.
+
+/// Controls whether the runtime writes to its own embedded durable-streams
+/// server or to a shared external one. Shared mode is required for tests
+/// that need the stream to outlive the runtime process (e.g. cold-start
+/// resume, cross-runtime virtual-fs reads).
+#[derive(Clone, Debug)]
+pub(crate) enum StreamMode {
+    /// Embedded durable-streams server inside the runtime process. Dies
+    /// with the runtime. This is the default for quick local tests.
+    Embedded,
+    /// External shared stream. The URL is the shared durable-streams
+    /// server's base URL; the stream name is the logical stream the runtime
+    /// appends to. Both produced by `SharedStreamServer::spawn` or
+    /// `ControlPlaneHarness::spawn`.
+    SharedExternal { base_url: String, stream_name: String },
+}
+
+/// Builder-style spec for provisioning a managed-agent test runtime. Both
+/// `LocalRuntimeHarness::spawn_with` and
+/// `ControlPlaneHarness::create_runtime_from_spec` consume this.
+#[derive(Clone)]
+pub(crate) struct ManagedAgentHarnessSpec {
+    pub name: String,
+    pub agent_command: Vec<String>,
+    pub topology: TopologySpec,
+    pub resources: Vec<ResourceRef>,
+    pub stream_mode: StreamMode,
+    pub prefer_push: bool,
+}
+
+impl ManagedAgentHarnessSpec {
+    /// Fresh default spec: testy agent, default topology, no resources,
+    /// embedded stream. Every field is then mutable via the `with_*`
+    /// builder methods.
+    pub(crate) fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            agent_command: vec![testy_bin().display().to_string()],
+            topology: TopologySpec::default(),
+            resources: Vec::new(),
+            stream_mode: StreamMode::Embedded,
+            prefer_push: false,
+        }
+    }
+
+    pub(crate) fn with_agent_command(mut self, cmd: Vec<String>) -> Self {
+        self.agent_command = cmd;
+        self
+    }
+
+    /// Swap the agent binary for `fireline-testy-load`, which implements
+    /// ACP `session/load` (same-process reattach only — does NOT survive
+    /// process restart).
+    pub(crate) fn with_testy_load_agent(mut self) -> Self {
+        self.agent_command = vec![testy_load_bin().display().to_string()];
+        self
+    }
+
+    pub(crate) fn with_topology(mut self, topology: TopologySpec) -> Self {
+        self.topology = topology;
+        self
+    }
+
+    pub(crate) fn with_resources(mut self, resources: Vec<ResourceRef>) -> Self {
+        self.resources = resources;
+        self
+    }
+
+    pub(crate) fn with_shared_stream(
+        mut self,
+        base_url: impl Into<String>,
+        stream_name: impl Into<String>,
+    ) -> Self {
+        self.stream_mode = StreamMode::SharedExternal {
+            base_url: base_url.into(),
+            stream_name: stream_name.into(),
+        };
+        self
+    }
+
+    pub(crate) fn with_prefer_push(mut self, prefer_push: bool) -> Self {
+        self.prefer_push = prefer_push;
+        self
+    }
+}
+
+impl LocalRuntimeHarness {
+    /// Spec-based alternative to `spawn(name)`. Supports configurable agent
+    /// command, topology, resources, and stream mode. Resources are mounted
+    /// via `LocalPathMounter` before the runtime boots so they are visible
+    /// to the conductor.
+    pub(crate) async fn spawn_with(spec: ManagedAgentHarnessSpec) -> Result<Self> {
+        let (state_stream, external_state_stream_url) = match &spec.stream_mode {
+            StreamMode::Embedded => (None, None),
+            StreamMode::SharedExternal { base_url, stream_name } => (
+                Some(stream_name.clone()),
+                Some(format!("{}/{}", base_url.trim_end_matches('/'), stream_name)),
+            ),
+        };
+
+        // Pre-mount LocalPath resources so the runtime sees them as real
+        // directories. Other mounter kinds (git, s3) are accepted by the
+        // spec but not yet implemented — they would need their own async
+        // mount step here.
+        let mounter = LocalPathMounter::new();
+        let runtime_key = format!("runtime:{}", Uuid::new_v4());
+        let mut mounted_resources = Vec::new();
+        for resource in &spec.resources {
+            if let Some(mounted) = mounter
+                .mount(resource, &runtime_key)
+                .await
+                .context("pre-mount resource before spawn")?
+            {
+                mounted_resources.push(mounted);
+            }
+        }
+
+        let handle = start(BootstrapConfig {
+            host: "127.0.0.1".parse::<IpAddr>()?,
+            port: 0,
+            name: spec.name.clone(),
+            runtime_key,
+            node_id: "node:managed-agent-suite".to_string(),
+            agent_command: spec.agent_command,
+            mounted_resources,
+            state_stream,
+            stream_storage: None,
+            peer_directory_path: temp_path("fireline-managed-agent-peers"),
+            control_plane_url: None,
+            external_state_stream_url,
+            topology: spec.topology,
+        })
+        .await?;
+
+        Ok(Self { handle })
+    }
+}
+
+impl ControlPlaneHarness {
+    /// Spec-based alternative to `create_runtime_with_agent`. Passes the
+    /// spec's topology and resources through to the control plane
+    /// `POST /v1/runtimes` request body, unlike the legacy method which
+    /// always sent empty topology and no resources.
+    pub(crate) async fn create_runtime_from_spec(
+        &self,
+        spec: ManagedAgentHarnessSpec,
+    ) -> Result<RuntimeDescriptor> {
+        // If the spec requests SharedExternal, use the requested stream name;
+        // otherwise fall back to the harness's default shared stream name
+        // (Embedded isn't meaningful in control-plane mode since the control
+        // plane always writes to the shared stream).
+        let stream_name = match &spec.stream_mode {
+            StreamMode::SharedExternal { stream_name, .. } => stream_name.clone(),
+            StreamMode::Embedded => self.shared_state_stream_name.clone(),
+        };
+
+        let body = json!({
+            "provider": "local",
+            "host": "127.0.0.1",
+            "port": 0,
+            "name": spec.name,
+            "agentCommand": spec.agent_command,
+            "stateStream": stream_name,
+            "topology": spec.topology,
+            "resources": spec.resources,
+        });
+
+        let response = self
+            .http
+            .post(format!("{}/v1/runtimes", self.base_url))
+            .json(&body)
+            .send()
+            .await
+            .context("POST /v1/runtimes with spec")?
+            .error_for_status()
+            .context("control plane rejected spec-based create")?;
+        let created = response.json::<RuntimeDescriptor>().await?;
+        self.wait_for_status(&created.runtime_key, RuntimeStatus::Ready)
+            .await
+    }
+}
+
+// =============================================================================
+// Parsed stream oracle
+// =============================================================================
+//
+// The original `wait_for_stream_rows` helper polls for substring presence and
+// returns as soon as every required needle appears ONCE. That's adequate for a
+// smoke check but wrong for count-based assertions: a test that wants to see
+// three `prompt_turn` events will call wait_for_stream_rows("prompt_turn"),
+// receive the body after the first prompt_turn appears, then count only one
+// and fail non-deterministically.
+//
+// The helpers below parse the stream body into structured envelopes and
+// support count-aware polling and predicate-based waiting.
+
+/// A parsed durable-streams state envelope — one line in the stream body is
+/// one of these. Wraps a raw `serde_json::Value` for flexibility.
+#[derive(Debug, Clone)]
+pub(crate) struct StateEnvelope {
+    pub raw: JsonValue,
+}
+
+impl StateEnvelope {
+    pub(crate) fn envelope_type(&self) -> Option<&str> {
+        self.raw.get("type").and_then(|v| v.as_str())
+    }
+
+    pub(crate) fn key(&self) -> Option<&str> {
+        self.raw.get("key").and_then(|v| v.as_str())
+    }
+
+    pub(crate) fn value(&self) -> Option<&JsonValue> {
+        self.raw.get("value")
+    }
+
+    pub(crate) fn operation(&self) -> Option<&str> {
+        self.raw
+            .get("headers")
+            .and_then(|h| h.get("operation"))
+            .and_then(|v| v.as_str())
+    }
+}
+
+fn parse_envelopes(body: &str) -> Result<Vec<StateEnvelope>> {
+    // durable-streams returns JSON envelopes separated either by newlines or
+    // as a single JSON array. Handle both shapes.
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if trimmed.starts_with('[') {
+        let arr: Vec<JsonValue> = serde_json::from_str(trimmed)
+            .with_context(|| format!("parse stream body as JSON array: {trimmed}"))?;
+        return Ok(arr.into_iter().map(|raw| StateEnvelope { raw }).collect());
+    }
+
+    trimmed
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let raw: JsonValue = serde_json::from_str(line)
+                .with_context(|| format!("parse stream envelope line: {line}"))?;
+            Ok(StateEnvelope { raw })
+        })
+        .collect()
+}
+
+/// Read every envelope currently on the stream from offset 0 to the live
+/// edge. Returns a parsed `Vec<StateEnvelope>` — callers that need
+/// count/order assertions should use this instead of `wait_for_state_rows`.
+pub(crate) async fn read_all_events(state_stream_url: &str) -> Result<Vec<StateEnvelope>> {
+    let client = DsClient::new();
+    let stream = client.stream(state_stream_url);
+    let mut reader = stream
+        .read()
+        .offset(Offset::Beginning)
+        .build()
+        .context("build stream reader from Offset::Beginning")?;
+
+    let mut body = String::new();
+    while let Some(chunk) = reader
+        .next_chunk()
+        .await
+        .context("read stream chunk for parsed events")?
+    {
+        body.push_str(
+            std::str::from_utf8(&chunk.data)
+                .context("stream chunk is not valid UTF-8")?,
+        );
+        if chunk.up_to_date {
+            break;
+        }
+    }
+
+    parse_envelopes(&body)
+}
+
+/// Count the envelopes currently on the stream whose `type` field equals
+/// `type_name`. Does a single read, not a poll.
+pub(crate) async fn count_events(state_stream_url: &str, type_name: &str) -> Result<usize> {
+    let events = read_all_events(state_stream_url).await?;
+    Ok(events
+        .iter()
+        .filter(|env| env.envelope_type() == Some(type_name))
+        .count())
+}
+
+/// Poll the stream until at least `target_count` events of the given type
+/// are visible, or the timeout fires. Returns the matching envelopes on
+/// success. Use this instead of `wait_for_state_rows` for count-based
+/// assertions — it fixes the "returns too early" race in the substring
+/// helper.
+pub(crate) async fn wait_for_event_count(
+    state_stream_url: &str,
+    type_name: &str,
+    target_count: usize,
+    timeout: Duration,
+) -> Result<Vec<StateEnvelope>> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let events = read_all_events(state_stream_url).await?;
+        let matches: Vec<StateEnvelope> = events
+            .into_iter()
+            .filter(|env| env.envelope_type() == Some(type_name))
+            .collect();
+        if matches.len() >= target_count {
+            return Ok(matches);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "timed out waiting for {target_count} '{type_name}' events in stream {state_stream_url}; saw {}",
+                matches.len()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Poll the stream until at least one envelope matches `pred`, or the
+/// timeout fires. Returns the first matching envelope.
+pub(crate) async fn wait_for_event<F>(
+    state_stream_url: &str,
+    mut pred: F,
+    timeout: Duration,
+) -> Result<StateEnvelope>
+where
+    F: FnMut(&StateEnvelope) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let events = read_all_events(state_stream_url).await?;
+        if let Some(found) = events.into_iter().find(|env| pred(env)) {
+            return Ok(found);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "timed out waiting for matching event in stream {state_stream_url}"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
