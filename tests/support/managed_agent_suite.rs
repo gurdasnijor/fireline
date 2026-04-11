@@ -253,6 +253,7 @@ pub(crate) struct ControlPlaneHarness {
     pub base_url: String,
     pub runtime_registry_path: PathBuf,
     pub peer_directory_path: PathBuf,
+    pub shared_state_stream_name: String,
     shared_stream_server: SharedStreamServer,
     child: Child,
 }
@@ -263,6 +264,7 @@ impl ControlPlaneHarness {
 
         let runtime_registry_path = temp_path("fireline-managed-agent-runtimes");
         let peer_directory_path = temp_path("fireline-managed-agent-peers");
+        let shared_state_stream_name = format!("fireline-managed-agent-suite-{}", Uuid::new_v4());
         let base_url = format!("http://127.0.0.1:{}", reserve_port()?);
         let shared_stream_server = SharedStreamServer::spawn().await?;
         let child = spawn_control_plane(
@@ -281,6 +283,7 @@ impl ControlPlaneHarness {
             base_url,
             runtime_registry_path,
             peer_directory_path,
+            shared_state_stream_name,
             shared_stream_server,
             child,
         })
@@ -305,6 +308,7 @@ impl ControlPlaneHarness {
                 "port": 0,
                 "name": name,
                 "agentCommand": agent_command,
+                "stateStream": self.shared_state_stream_name,
                 "topology": { "components": [] }
             }))
             .send()
