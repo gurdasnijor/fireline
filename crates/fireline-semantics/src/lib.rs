@@ -1,0 +1,599 @@
+pub mod conductor;
+
+pub mod session {
+    use std::collections::BTreeSet;
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum ProducerId {
+        Harness,
+        ApprovalService,
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum SessionEventId {
+        SessionCreated,
+        PromptTurnStarted,
+        ApprovalResolved,
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum SessionEventKind {
+        SessionCreated,
+        PromptTurnStarted,
+        ApprovalResolved,
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct ProducerCommit {
+        pub producer_id: ProducerId,
+        pub epoch: u64,
+        pub seq: u64,
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub struct LoggedEvent {
+        pub logical_event_id: SessionEventId,
+        pub commit: ProducerCommit,
+        pub kind: SessionEventKind,
+    }
+
+    #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+    pub struct ReplayObservation {
+        pub offset: usize,
+        pub captured_log: Vec<LoggedEvent>,
+        pub suffix: Vec<LoggedEvent>,
+    }
+
+    #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+    pub struct SessionState {
+        pub log: Vec<LoggedEvent>,
+        pub seen_commits: BTreeSet<ProducerCommit>,
+        pub runtime_alive: bool,
+    }
+
+    impl Default for SessionState {
+        fn default() -> Self {
+            Self {
+                log: Vec::new(),
+                seen_commits: BTreeSet::new(),
+                runtime_alive: true,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum SessionAction {
+        Append {
+            commit: ProducerCommit,
+            logical_event_id: SessionEventId,
+            kind: SessionEventKind,
+        },
+        ReplayFromOffset {
+            offset: usize,
+        },
+        CrashRuntime,
+    }
+
+    #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+    pub enum SessionTransition {
+        Appended,
+        DedupedRetry,
+        Replayed(ReplayObservation),
+        RuntimeCrashed,
+    }
+
+    pub fn replay_suffix(log: &[LoggedEvent], offset: usize) -> Vec<LoggedEvent> {
+        if offset >= log.len() {
+            Vec::new()
+        } else {
+            log[offset..].to_vec()
+        }
+    }
+
+    pub fn apply(
+        state: &SessionState,
+        action: SessionAction,
+    ) -> Option<(SessionState, SessionTransition)> {
+        match action {
+            SessionAction::Append {
+                commit,
+                logical_event_id,
+                kind,
+            } => {
+                let mut next = state.clone();
+                let transition = if next.seen_commits.insert(commit) {
+                    next.log.push(LoggedEvent {
+                        logical_event_id,
+                        commit,
+                        kind,
+                    });
+                    SessionTransition::Appended
+                } else {
+                    SessionTransition::DedupedRetry
+                };
+                Some((next, transition))
+            }
+            SessionAction::ReplayFromOffset { offset } => {
+                if offset > state.log.len() {
+                    return None;
+                }
+                let captured_log = state.log.clone();
+                let replay = ReplayObservation {
+                    offset,
+                    suffix: replay_suffix(&captured_log, offset),
+                    captured_log,
+                };
+                Some((state.clone(), SessionTransition::Replayed(replay)))
+            }
+            SessionAction::CrashRuntime => {
+                if !state.runtime_alive {
+                    return None;
+                }
+                let mut next = state.clone();
+                next.runtime_alive = false;
+                Some((next, SessionTransition::RuntimeCrashed))
+            }
+        }
+    }
+}
+
+pub mod approval {
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum ApprovalRequestId {
+        Expected,
+        Noise,
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum Decision {
+        Allow,
+        Deny,
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum ApprovalPhase {
+        Idle,
+        Blocked,
+        Completed,
+        Denied,
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub struct ApprovalRecord {
+        pub request_id: ApprovalRequestId,
+        pub decision: Decision,
+    }
+
+    #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+    pub struct ApprovalState {
+        pub phase: ApprovalPhase,
+        pub blocked_request: Option<ApprovalRequestId>,
+        pub history: Vec<ApprovalRecord>,
+        pub completion_count: u64,
+        pub retry_count: u64,
+    }
+
+    impl Default for ApprovalState {
+        fn default() -> Self {
+            Self {
+                phase: ApprovalPhase::Idle,
+                blocked_request: None,
+                history: Vec::new(),
+                completion_count: 0,
+                retry_count: 0,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum ApprovalAction {
+        Request {
+            request_id: ApprovalRequestId,
+        },
+        Resolve {
+            request_id: ApprovalRequestId,
+            decision: Decision,
+        },
+        RetryBlocked,
+        AdvanceBlocked,
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum ApprovalOutcome {
+        Blocked,
+        RecordedDecision,
+        Retried,
+        AdvancedAllowed,
+        AdvancedDenied,
+        Noop,
+    }
+
+    pub fn first_resolution_for(
+        state: &ApprovalState,
+        request_id: ApprovalRequestId,
+    ) -> Option<Decision> {
+        state
+            .history
+            .iter()
+            .find_map(|record| (record.request_id == request_id).then_some(record.decision))
+    }
+
+    pub fn first_matching_resolution(state: &ApprovalState) -> Option<Decision> {
+        let blocked_request = state.blocked_request?;
+        first_resolution_for(state, blocked_request)
+    }
+
+    pub fn apply(
+        state: &ApprovalState,
+        action: ApprovalAction,
+    ) -> Option<(ApprovalState, ApprovalOutcome)> {
+        match action {
+            ApprovalAction::Request { request_id } => {
+                if state.phase != ApprovalPhase::Idle || state.blocked_request.is_some() {
+                    return None;
+                }
+                let mut next = state.clone();
+                next.phase = ApprovalPhase::Blocked;
+                next.blocked_request = Some(request_id);
+                Some((next, ApprovalOutcome::Blocked))
+            }
+            ApprovalAction::Resolve {
+                request_id,
+                decision,
+            } => {
+                let mut next = state.clone();
+                next.history.push(ApprovalRecord {
+                    request_id,
+                    decision,
+                });
+                Some((next, ApprovalOutcome::RecordedDecision))
+            }
+            ApprovalAction::RetryBlocked => {
+                if state.phase != ApprovalPhase::Blocked {
+                    return None;
+                }
+                let mut next = state.clone();
+                next.retry_count += 1;
+                Some((next, ApprovalOutcome::Retried))
+            }
+            ApprovalAction::AdvanceBlocked => {
+                if state.phase != ApprovalPhase::Blocked {
+                    return None;
+                }
+                let Some(first) = first_matching_resolution(state) else {
+                    return Some((state.clone(), ApprovalOutcome::Noop));
+                };
+                let mut next = state.clone();
+                next.blocked_request = None;
+                match first {
+                    Decision::Allow => {
+                        if next.completion_count == 0 {
+                            next.completion_count += 1;
+                        }
+                        next.phase = ApprovalPhase::Completed;
+                        Some((next, ApprovalOutcome::AdvancedAllowed))
+                    }
+                    Decision::Deny => {
+                        next.phase = ApprovalPhase::Denied;
+                        Some((next, ApprovalOutcome::AdvancedDenied))
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub mod resume {
+    use std::collections::BTreeSet;
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum ResumeScenario {
+        Live,
+        Cold,
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum RuntimeStatus {
+        Ready,
+        Starting,
+        Stopped,
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum Caller {
+        A,
+        B,
+    }
+
+    impl Caller {
+        pub const ALL: [Caller; 2] = [Caller::A, Caller::B];
+
+        pub const fn index(self) -> usize {
+            match self {
+                Caller::A => 0,
+                Caller::B => 1,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum CallerPhase {
+        Idle,
+        Inspecting,
+        NeedsProvision,
+        WaitingForReady,
+        Done,
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub struct CallerState {
+        pub phase: CallerPhase,
+        pub observed_runtime_id: Option<u64>,
+    }
+
+    impl Default for CallerState {
+        fn default() -> Self {
+            Self {
+                phase: CallerPhase::Idle,
+                observed_runtime_id: None,
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+    pub struct ResumeState {
+        pub scenario: ResumeScenario,
+        pub runtime_key: u64,
+        pub initial_runtime_id: u64,
+        pub active_runtime_id: u64,
+        pub pending_runtime_id: Option<u64>,
+        pub next_runtime_id: u64,
+        pub runtime_status: RuntimeStatus,
+        pub callers: [CallerState; 2],
+        pub reprovision_count: u64,
+        pub session_exists: bool,
+        pub persisted_spec: bool,
+    }
+
+    impl ResumeState {
+        pub fn new(scenario: ResumeScenario) -> Self {
+            let runtime_status = match scenario {
+                ResumeScenario::Live => RuntimeStatus::Ready,
+                ResumeScenario::Cold => RuntimeStatus::Stopped,
+            };
+            Self {
+                scenario,
+                runtime_key: 1,
+                initial_runtime_id: 1,
+                active_runtime_id: 1,
+                pending_runtime_id: None,
+                next_runtime_id: 2,
+                runtime_status,
+                callers: [CallerState::default(), CallerState::default()],
+                reprovision_count: 0,
+                session_exists: true,
+                persisted_spec: true,
+            }
+        }
+
+        pub fn observed_ids(&self) -> BTreeSet<u64> {
+            self.callers
+                .iter()
+                .filter_map(|caller| caller.observed_runtime_id)
+                .collect()
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum ResumeAction {
+        Begin(Caller),
+        Inspect(Caller),
+        CreateOrJoin(Caller),
+        RegisterStartedRuntime,
+        Finish(Caller),
+    }
+
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub enum ResumeOutcome {
+        BeganInspecting,
+        InspectedLive,
+        InspectedNeedsProvision,
+        InspectedWaiting,
+        ReprovisionStarted(u64),
+        JoinedPending,
+        RegisteredStartedRuntime(u64),
+        Finished(u64),
+    }
+
+    pub fn apply(
+        state: &ResumeState,
+        action: ResumeAction,
+    ) -> Option<(ResumeState, ResumeOutcome)> {
+        let mut next = state.clone();
+        match action {
+            ResumeAction::Begin(caller) => {
+                let caller_state = &mut next.callers[caller.index()];
+                if caller_state.phase != CallerPhase::Idle {
+                    return None;
+                }
+                caller_state.phase = CallerPhase::Inspecting;
+                Some((next, ResumeOutcome::BeganInspecting))
+            }
+            ResumeAction::Inspect(caller) => {
+                let caller_state = &mut next.callers[caller.index()];
+                if caller_state.phase != CallerPhase::Inspecting {
+                    return None;
+                }
+                match next.runtime_status {
+                    RuntimeStatus::Ready => {
+                        caller_state.phase = CallerPhase::Done;
+                        caller_state.observed_runtime_id = Some(next.active_runtime_id);
+                        Some((next, ResumeOutcome::InspectedLive))
+                    }
+                    RuntimeStatus::Stopped => {
+                        caller_state.phase = CallerPhase::NeedsProvision;
+                        Some((next, ResumeOutcome::InspectedNeedsProvision))
+                    }
+                    RuntimeStatus::Starting => {
+                        caller_state.phase = CallerPhase::WaitingForReady;
+                        Some((next, ResumeOutcome::InspectedWaiting))
+                    }
+                }
+            }
+            ResumeAction::CreateOrJoin(caller) => {
+                let caller_state = &mut next.callers[caller.index()];
+                if caller_state.phase != CallerPhase::NeedsProvision
+                    && caller_state.phase != CallerPhase::WaitingForReady
+                {
+                    return None;
+                }
+                match next.runtime_status {
+                    RuntimeStatus::Stopped => {
+                        next.runtime_status = RuntimeStatus::Starting;
+                        next.pending_runtime_id = Some(next.next_runtime_id);
+                        let created = next.next_runtime_id;
+                        next.next_runtime_id += 1;
+                        next.reprovision_count += 1;
+                        caller_state.phase = CallerPhase::WaitingForReady;
+                        Some((next, ResumeOutcome::ReprovisionStarted(created)))
+                    }
+                    RuntimeStatus::Starting => {
+                        caller_state.phase = CallerPhase::WaitingForReady;
+                        Some((next, ResumeOutcome::JoinedPending))
+                    }
+                    RuntimeStatus::Ready => {
+                        caller_state.phase = CallerPhase::Done;
+                        let runtime_id = next.active_runtime_id;
+                        caller_state.observed_runtime_id = Some(runtime_id);
+                        Some((next, ResumeOutcome::Finished(runtime_id)))
+                    }
+                }
+            }
+            ResumeAction::RegisterStartedRuntime => {
+                if next.runtime_status != RuntimeStatus::Starting {
+                    return None;
+                }
+                let pending = next.pending_runtime_id?;
+                next.active_runtime_id = pending;
+                next.pending_runtime_id = None;
+                next.runtime_status = RuntimeStatus::Ready;
+                Some((next, ResumeOutcome::RegisteredStartedRuntime(pending)))
+            }
+            ResumeAction::Finish(caller) => {
+                let caller_state = &mut next.callers[caller.index()];
+                if caller_state.phase != CallerPhase::WaitingForReady
+                    || next.runtime_status != RuntimeStatus::Ready
+                {
+                    return None;
+                }
+                caller_state.phase = CallerPhase::Done;
+                let runtime_id = next.active_runtime_id;
+                caller_state.observed_runtime_id = Some(runtime_id);
+                Some((next, ResumeOutcome::Finished(runtime_id)))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::approval::{
+        apply as apply_approval, first_matching_resolution, ApprovalAction, ApprovalPhase,
+        ApprovalRequestId, ApprovalState, Decision,
+    };
+    use super::resume::{
+        apply as apply_resume, Caller, ResumeAction, ResumeOutcome, ResumeScenario, ResumeState,
+        RuntimeStatus,
+    };
+    use super::session::{
+        apply as apply_session, ProducerCommit, ProducerId, SessionAction, SessionEventId,
+        SessionEventKind, SessionState, SessionTransition,
+    };
+
+    #[test]
+    fn session_append_dedupes_by_commit_tuple() {
+        let state = SessionState::default();
+        let commit = ProducerCommit {
+            producer_id: ProducerId::Harness,
+            epoch: 0,
+            seq: 0,
+        };
+
+        let (state, transition) = apply_session(
+            &state,
+            SessionAction::Append {
+                commit,
+                logical_event_id: SessionEventId::PromptTurnStarted,
+                kind: SessionEventKind::PromptTurnStarted,
+            },
+        )
+        .expect("first append valid");
+        assert_eq!(transition, SessionTransition::Appended);
+        assert_eq!(state.log.len(), 1);
+
+        let (state, transition) = apply_session(
+            &state,
+            SessionAction::Append {
+                commit,
+                logical_event_id: SessionEventId::PromptTurnStarted,
+                kind: SessionEventKind::PromptTurnStarted,
+            },
+        )
+        .expect("duplicate append is still a valid retry");
+        assert_eq!(transition, SessionTransition::DedupedRetry);
+        assert_eq!(state.log.len(), 1);
+    }
+
+    #[test]
+    fn approval_first_matching_resolution_is_stable() {
+        let (state, _) = apply_approval(
+            &ApprovalState::default(),
+            ApprovalAction::Request {
+                request_id: ApprovalRequestId::Expected,
+            },
+        )
+        .expect("request valid");
+        let (state, _) = apply_approval(
+            &state,
+            ApprovalAction::Resolve {
+                request_id: ApprovalRequestId::Expected,
+                decision: Decision::Deny,
+            },
+        )
+        .expect("deny valid");
+        let (state, _) = apply_approval(
+            &state,
+            ApprovalAction::Resolve {
+                request_id: ApprovalRequestId::Expected,
+                decision: Decision::Allow,
+            },
+        )
+        .expect("late allow still records");
+
+        assert_eq!(first_matching_resolution(&state), Some(Decision::Deny));
+        let (state, outcome) =
+            apply_approval(&state, ApprovalAction::AdvanceBlocked).expect("advance valid");
+        assert_eq!(state.phase, ApprovalPhase::Denied);
+        assert_eq!(outcome, super::approval::ApprovalOutcome::AdvancedDenied);
+    }
+
+    #[test]
+    fn cold_resume_reprovisions_then_registers() {
+        let state = ResumeState::new(ResumeScenario::Cold);
+        let (state, _) = apply_resume(&state, ResumeAction::Begin(Caller::A)).expect("begin");
+        let (state, _) = apply_resume(&state, ResumeAction::Inspect(Caller::A)).expect("inspect");
+        let (state, outcome) =
+            apply_resume(&state, ResumeAction::CreateOrJoin(Caller::A)).expect("create");
+        let created = match outcome {
+            ResumeOutcome::ReprovisionStarted(id) => id,
+            other => panic!("unexpected outcome: {other:?}"),
+        };
+        assert_eq!(state.runtime_status, RuntimeStatus::Starting);
+
+        let (state, outcome) =
+            apply_resume(&state, ResumeAction::RegisterStartedRuntime).expect("register");
+        assert_eq!(outcome, ResumeOutcome::RegisteredStartedRuntime(created));
+        assert_eq!(state.runtime_status, RuntimeStatus::Ready);
+        assert_eq!(state.active_runtime_id, created);
+    }
+}

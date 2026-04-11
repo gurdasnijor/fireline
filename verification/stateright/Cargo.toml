@@ -1,0 +1,11 @@
+[package]
+name = "fireline-verification"
+version = "0.0.1"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Formal and model-checking harnesses for Fireline managed-agent primitives"
+
+[dependencies]
+fireline-semantics.workspace = true
+stateright = "0.31"

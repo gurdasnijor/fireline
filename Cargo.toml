@@ -1,9 +1,11 @@
 [workspace]
 members = [
     ".",
+    "crates/fireline-semantics",
     "crates/fireline-conductor",
     "crates/fireline-components",
     "crates/fireline-control-plane",
+    "verification/stateright",
 ]
 resolver = "2"
 
@@ -17,6 +19,7 @@ repository = "https://github.com/fireline/fireline"
 # Internal workspace crates
 fireline-conductor = { path = "crates/fireline-conductor" }
 fireline-components = { path = "crates/fireline-components" }
+fireline-semantics = { path = "crates/fireline-semantics" }
 
 # Async runtime + utility
 anyhow = "1"

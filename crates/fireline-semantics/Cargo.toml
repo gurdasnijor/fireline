@@ -1,0 +1,13 @@
+[package]
+name = "fireline-semantics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Pure managed-agent semantic kernels for session, resume, and approval transitions"
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1.6"
