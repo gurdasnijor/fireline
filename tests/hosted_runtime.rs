@@ -5,7 +5,7 @@ use std::time::Duration;
 use agent_client_protocol::{InitializeRequest, ProtocolVersion};
 use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
-use fireline::bootstrap::{BootstrapConfig, start};
+use fireline::bootstrap::{start, BootstrapConfig};
 use fireline_conductor::topology::TopologySpec;
 use uuid::Uuid;
 
@@ -207,6 +207,57 @@ async fn hosted_runtime_rejects_concurrent_attachment_and_recovers_after_disconn
     .await?;
 
     assert_eq!(response, "Hello, world!");
+
+    handle.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn hosted_runtime_allows_immediate_sequential_reattach_after_disconnect() -> Result<()> {
+    let handle = start(BootstrapConfig {
+        host: "127.0.0.1".parse::<IpAddr>()?,
+        port: 0,
+        name: "hosted-sequential-reattach".to_string(),
+        runtime_key: format!("runtime:{}", Uuid::new_v4()),
+        node_id: "node:test-hosted".to_string(),
+        agent_command: vec![testy_bin()],
+        mounted_resources: Vec::new(),
+        state_stream: None,
+        stream_storage: None,
+        peer_directory_path: temp_peer_directory(),
+        control_plane_url: None,
+        external_state_stream_url: None,
+        topology: TopologySpec::default(),
+    })
+    .await?;
+
+    for _ in 0..5 {
+        sacp::Client
+            .builder()
+            .connect_with(
+                WebSocketTransport {
+                    url: handle.acp_url.clone(),
+                },
+                move |cx: sacp::ConnectionTo<sacp::Agent>| async move {
+                    let _ = cx
+                        .send_request(InitializeRequest::new(ProtocolVersion::LATEST))
+                        .block_task()
+                        .await?;
+                    Ok::<(), sacp::Error>(())
+                },
+            )
+            .await?;
+
+        let response = yopo::prompt(
+            WebSocketTransport {
+                url: handle.acp_url.clone(),
+            },
+            "hello after immediate reconnect",
+        )
+        .await?;
+
+        assert_eq!(response, "Hello, world!");
+    }
 
     handle.shutdown().await?;
     Ok(())

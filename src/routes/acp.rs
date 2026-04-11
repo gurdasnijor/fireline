@@ -12,17 +12,19 @@
 //! and the conductor — it's the explicit "developer wires HTTP into
 //! the substrate" point that the rivet HTTP server pattern advocates.
 
-use axum::Router;
-use axum::extract::{State, ws::WebSocketUpgrade};
+use axum::extract::{ws::WebSocketUpgrade, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
+use axum::Router;
 use fireline_conductor::{
     build,
+    shared_terminal::{AttachError, SharedTerminal, SharedTerminalAttachment},
     trace::{CompositeTraceWriter, DurableStreamTracer},
     transports,
 };
 use sacp::{Client, Conductor, DynConnectTo};
+use std::time::Duration;
 use uuid::Uuid;
 
 pub(crate) fn router(state: crate::bootstrap::AppState) -> Router {
@@ -35,12 +37,12 @@ async fn acp_websocket_handler(
     State(app): State<crate::bootstrap::AppState>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    let terminal_attachment = match app.shared_terminal.try_attach().await {
+    let terminal_attachment = match attach_terminal_with_grace_period(&app.shared_terminal).await {
         Ok(attachment) => attachment,
-        Err(fireline_conductor::shared_terminal::AttachError::Busy) => {
+        Err(AttachError::Busy) => {
             return (StatusCode::CONFLICT, "runtime_busy").into_response();
         }
-        Err(fireline_conductor::shared_terminal::AttachError::Closed) => {
+        Err(AttachError::Closed) => {
             return (StatusCode::SERVICE_UNAVAILABLE, "runtime_closed").into_response();
         }
     };
@@ -79,4 +81,27 @@ async fn acp_websocket_handler(
             tracing::warn!(error = %e, "ACP session ended");
         }
     })
+}
+
+async fn attach_terminal_with_grace_period(
+    shared_terminal: &SharedTerminal,
+) -> Result<SharedTerminalAttachment, AttachError> {
+    const BUSY_RETRY_ATTEMPTS: usize = 10;
+    const BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
+
+    let mut attempts = 0usize;
+    loop {
+        match shared_terminal.try_attach().await {
+            Ok(attachment) => return Ok(attachment),
+            // Sequential ACP helpers can reconnect before the previous
+            // attachment's async detach signal has propagated through the
+            // actor. Give that teardown path a brief grace period before
+            // surfacing a real `runtime_busy` conflict.
+            Err(AttachError::Busy) if attempts < BUSY_RETRY_ATTEMPTS => {
+                attempts += 1;
+                tokio::time::sleep(BUSY_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
