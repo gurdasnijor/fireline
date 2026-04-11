@@ -1,4 +1,4 @@
-# 15: Resources Primitive Refactor
+# 15: Resources — Physical Mounts + FsBackendComponent
 
 Status: planned
 Type: execution refactor
@@ -18,45 +18,61 @@ Primitive extended: `Resources`
 
 Acceptance-bar items this refactor closes:
 
-- `resources: Vec<ResourceRef>` field on `CreateRuntimeSpec`
-- `ResourceMounter` trait
-- documented contract for how mounters interact with `RuntimeProvider::start()`
-- the first end-to-end proof that a runtime launches with mounted resources
+Physical mounts:
 
-This is intentionally smaller than a normal numbered slice. It is roughly a
-one-week substrate refactor, not a new Fireline product object.
+- `resources: Vec<ResourceRef>` field on `CreateRuntimeSpec`
+- `ResourceMounter` trait on the runtime provider side
+- documented contract for how mounters interact with `RuntimeProvider::start()`
+- one end-to-end proof that a runtime mounts a non-local resource and the agent
+  reads it from the filesystem
+
+ACP fs interception:
+
+- `FileBackend` trait on the runtime side
+- `FsBackendComponent` in `fireline-components` implemented as
+  `compose(substitute, appendToSession)`
+- `LocalFileBackend` and `SessionLogFileBackend` as the first two
+  implementations
+- one end-to-end proof that ACP-native fs writes land in the Session log and
+  surface as artifact evidence
+
+This is still smaller than a traditional execution slice. It is one focused
+Resources refactor with two complementary halves.
 
 Depends on:
 
 - the existing `RuntimeProvider` launch path
-- slice `13c` if the first non-local provider ends up contributing the initial
-  `LocalPath` mounting behavior
+- the conductor topology/component seam from slice `12`
+- slice `13c` if the first non-local provider contributes initial
+  `LocalPathMounter` behavior as a side effect
 
 Unblocks:
 
-- later non-local resource mounters under the same contract
+- later S3/GCS/git backends under the same `FileBackend` contract
 - downstream products that want to point Fireline at local paths, git refs, or
   object-store refs without inventing a workspace database
+- ACP-native artifact capture and virtual-fs patterns on top of the Session log
 
 ## Objective
 
-Replace "Workspace as a product object" with the smaller Resources primitive:
+Replace the old "Workspace object" framing with the actual Resources work
+Fireline needs to ship:
 
-- `resources: [{ source_ref, mount_path }]`
-- pluggable mounters that materialize those refs before runtime launch
+- physical mounts for shell-based agents
+- ACP fs interception via a composable `FsBackendComponent`
 
 The first cut should stay intentionally narrow:
 
-- add `resources` to launch specs
+- add `CreateRuntimeSpec.resources`
 - define `ResourceRef`
 - define `ResourceMounter`
-- name the first four mounter implementations:
-  - `LocalPath`
-  - `GitRemote`
-  - `S3`
-  - `GCS`
+- ship `LocalPathMounter` and `GitRemoteMounter`
+- define `FileBackend`
+- ship `FsBackendComponent` in `fireline-components`
+- ship `LocalFileBackend` and `SessionLogFileBackend`
 
-This refactor is about portable execution inputs, not product identity.
+This refactor is about portable execution inputs and ACP-native file routing,
+not product identity.
 
 ## Product Pillar
 
@@ -64,65 +80,70 @@ Resources.
 
 ## User Workflow Unlocked
 
-A consuming product can point Fireline at:
+A consuming product can do two things under one coherent Resources contract:
 
-- a local path
-- a git repository or ref
-- an object-store-backed source
+- point shell-based agents at real files on disk by mounting local or fetched
+  sources before runtime launch
+- point ACP-native file operations at a chosen backend without inventing a new
+  primitive
 
-without inventing a heavyweight workspace system first.
+That unlocks:
 
-The unlocked workflow is simple:
-
-- package resource references into the runtime launch spec
-- let Fireline materialize those resources into known mount paths
-- start the runtime against the mounted inputs
+- local path and git-backed working directories for shell-based agents
+- ACP-native file reads and writes routed to local disk or the Session log
+- artifact capture that falls out of Session appends instead of a separate
+  artifact subsystem
 
 ## Why This Slice Exists
 
-Today source context leaks through ad hoc launch details:
+Resources turned out to split into two distinct halves.
 
-- local filesystem paths
-- provider-specific mount flags
-- helper-file routes that assume the host filesystem is the source of truth
-- one-off bootstrap fields
+The first half is **not composable away**:
 
-The managed-agents anchor collapses this to a much smaller substrate shape:
+- Claude Code, Codex, and other shell-based agents read and write via
+  bash/python/their own tools
+- those file operations happen inside the runtime filesystem
+- we cannot reliably intercept arbitrary shell I/O through ACP
 
-- a resource reference
-- a mount path
-- a mounter that knows how to fetch or bind the source
+So physical files still need to exist at `mount_path` before the runtime
+starts. That is the `ResourceMounter` half.
 
-That means the current "workspace object" framing is too large for the problem
-Fireline actually needs to solve at the substrate layer.
+The second half **is composable**:
+
+- ACP defines `fs/read_text_file` and `fs/write_text_file`
+- those requests flow through the conductor proxy chain
+- a component can substitute the backend and append writes to Session
+
+That is the `FsBackendComponent` half.
+
+Both layers are needed. One runtime can use both at once.
 
 ## Scope
 
-### 1. `ResourceRef` shape
+### 1. `ResourceRef` and physical mounts
 
-Define the launch-spec shape Fireline accepts for portable execution inputs.
+Define the launch-spec shape Fireline accepts for physical execution inputs.
 
 First-cut shape:
 
 ```ts
 type ResourceRef = {
-  source_ref: string;
-  mount_path: string;
-  mode?: "read_only" | "read_write";
-  fetch_mode?: "bind" | "clone" | "download";
-};
+  source_ref: string
+  mount_path: string
+  mode?: "read_only" | "read_write"
+  fetch_mode?: "bind" | "clone" | "download"
+}
 ```
 
 The important fields are:
 
 - `source_ref`
-  A provider-neutral reference to the source material.
+  Provider-neutral reference to the source material.
 - `mount_path`
   Where the runtime should see the materialized resource.
 
-Optional fields can remain narrow in the first cut. The important thing is that
-resource identity lives in the launch spec, not in a separate Fireline-owned
-workspace object.
+This slice should wire `resources: ResourceRef[]` into `CreateRuntimeSpec` or
+the equivalent launch input so every provider sees the same resource contract.
 
 ### 2. `ResourceMounter` trait
 
@@ -143,64 +164,86 @@ The contract should make the ordering explicit:
 3. resources are materialized
 4. the runtime launches against the resulting mounts
 
-This is the entire substrate job. Catalog UIs, workspace identity, and snapshot
-management belong elsewhere.
-
-### 3. Initial implementations
-
-This refactor should explicitly define four implementations under the same
-contract:
+The first two implementations should be:
 
 - `LocalPathMounter`
 - `GitRemoteMounter`
-- `S3Mounter`
-- `GcsMounter`
 
-The first landing does not need all four to have equal depth, but it should
-name them as the initial contract surface so later additions do not invent
-different abstractions for each source kind.
+`S3Mounter` and `GcsMounter` remain follow-ups under the same trait.
 
-Recommended first landing:
+### 3. `FileBackend` trait
 
-- `LocalPathMounter` as the direct replacement for today's implicit local-path
-  behavior
-- `GitRemoteMounter` as the first network-fetched proof
+Define the runtime-side trait for ACP-native file operations.
 
-`S3Mounter` and `GcsMounter` can remain thinly specified if needed, but they
-should be named here so the trait surface is designed for object-store sources,
-not only filesystem paths.
+Responsibilities:
 
-### 4. Launch-spec integration
+- read a file by logical path
+- write a file by logical path and content
+- optionally expose metadata or existence checks later without changing the
+  basic routing contract
 
-Wire `resources` into `CreateRuntimeSpec` or the equivalent launch input so
-every provider sees the same resource contract.
+The first two implementations should be:
 
-This slice should make explicit:
+- `LocalFileBackend`
+- `SessionLogFileBackend`
 
-- where `resources` lives in the runtime create path
-- how the chosen mounter outputs feed into `RuntimeProvider::start()`
-- how mounted resources are reflected, if at all, in runtime descriptors or
-  session evidence
-- what "no matching mounter" and "materialization failed" errors look like
+`LocalFileBackend` mirrors today's local-disk behavior for ACP fs methods.
+`SessionLogFileBackend` stores file content as Session events and reads back via
+projection, making the Session log itself a virtual filesystem for small,
+durable workflows.
 
-This replaces the old "workspace linkage" language. Runs and sessions may later
-record which resources were used, but Resources itself is a launch input
-primitive.
+### 4. `FsBackendComponent`
 
-### 5. Initial materialization behavior
+Add a built-in `FsBackendComponent` in `fireline-components`.
 
-Document the first-cut behavior for each source kind.
+The shape should follow the managed-agents mapping directly:
 
-At minimum:
+- `compose(substitute, appendToSession)`
 
-- `LocalPathMounter` bind-mounts or directly exposes an existing local path
-- `GitRemoteMounter` clones or fetches a repo/ref into a materialized path
-- `S3Mounter` downloads an object or prefix into a materialized path
-- `GcsMounter` does the same for Google Cloud Storage
+Responsibilities:
 
-The exact transport or caching strategy can stay narrow in the first cut. The
-important contract is that all four produce materialized resources at
-`mount_path` before the runtime starts.
+- intercept ACP `fs/read_text_file` and `fs/write_text_file`
+- route them to the configured `FileBackend`
+- append a durable `fs_op` event to Session so writes become artifact evidence
+
+The important constraint is that this is a component, not a new primitive. It
+belongs in the conductor topology alongside `audit`, `approvalGate`, and other
+components.
+
+### 5. How the two halves coexist
+
+This refactor should explicitly document that physical mounts and ACP fs
+interception complement each other rather than compete:
+
+- shell-based reads and writes use the mounted filesystem
+- ACP-native fs operations use `FsBackendComponent`
+- ACP-native writes are durably logged through `appendToSession`
+
+A single runtime can therefore:
+
+- have `/work` populated by `ResourceMounter`
+- serve ACP file operations through `LocalFileBackend` or
+  `SessionLogFileBackend`
+- use the Session log as artifact evidence for ACP-native writes
+
+### 6. First implementation boundary
+
+What slice 15 actually ships:
+
+1. physical mounts:
+   - `ResourceRef`
+   - `CreateRuntimeSpec.resources`
+   - `ResourceMounter`
+   - `LocalPathMounter`
+   - `GitRemoteMounter`
+2. ACP fs interception:
+   - `FileBackend`
+   - `FsBackendComponent`
+   - `LocalFileBackend`
+   - `SessionLogFileBackend`
+
+This is enough to prove both halves of Resources without overcommitting to S3,
+GCS, or a full workspace product.
 
 ## Explicit Non-Goals
 
@@ -210,48 +253,67 @@ This refactor does **not** require:
 - `client.workspaces.*`
 - a workspace database or catalog
 - snapshot identity as a first-class Fireline substrate concern
-- remote sync architecture beyond what each mounter needs
-- provider-specific resource APIs leaking into the main launch spec
+- shell-level interception of arbitrary file operations
+- `S3Mounter` or `GcsMounter` in the first landing
+- `S3FileBackend`, `GcsFileBackend`, or `GitFileBackend` in the first landing
 
 If a consuming product wants reusable named workspaces, it can build them on
 top of `ResourceRef` lists.
 
 ## Acceptance Criteria
 
+Physical mounts:
+
 - runtime launch specs accept `resources: ResourceRef[]`
-- `ResourceRef` is documented with `source_ref` and `mount_path` as the core
-  stable fields
+- `ResourceRef` is documented with `source_ref` and `mount_path` as the stable
+  core fields
 - `ResourceMounter` exists as the shared materialization seam
-- the contract explicitly names:
-  - `LocalPathMounter`
-  - `GitRemoteMounter`
-  - `S3Mounter`
-  - `GcsMounter`
-- at least one provider path proves:
-  - a local resource can be mounted through the new contract
-  - a non-local resource kind can be materialized through the same contract
+- `LocalPathMounter` and `GitRemoteMounter` are defined as the first concrete
+  implementations
 - the launch path documents how mounter output feeds into
   `RuntimeProvider::start()`
+- one provider path proves a non-local resource can be mounted and read via the
+  runtime filesystem
+
+ACP fs interception:
+
+- `FileBackend` exists as the runtime-side file routing seam
+- `FsBackendComponent` exists in `fireline-components` and is explicitly
+  modeled as `compose(substitute, appendToSession)`
+- `LocalFileBackend` and `SessionLogFileBackend` exist as the first two
+  implementations
+- one end-to-end proof shows:
+  - an agent performs `fs/write_text_file`
+  - the configured backend handles the write
+  - an `fs_op` event lands on the Session log
+  - a materializer can surface that write as artifact evidence
 
 ## Validation
 
 - `cargo test -q`
 - one provider/bootstrap integration test for `LocalPathMounter`
-- one provider/bootstrap integration test for a network-fetched resource kind
-  such as `GitRemoteMounter`
-- one runtime smoke test that proves the agent can read mounted material from
-  the requested `mount_path`
+- one provider/bootstrap integration test for `GitRemoteMounter`
+- one runtime smoke test that proves a shell-based agent can read mounted
+  material from the requested `mount_path`
+- one conductor/component integration test that proves ACP-native
+  `fs/write_text_file` goes through `FsBackendComponent` and lands on the
+  Session log
 
 ## Handoff Note
 
-Keep this doc and the implementation small.
+Keep this refactor small and two-layered.
 
 The handoff should emphasize:
 
 - this is a Resources primitive refactor, not a workspace product slice
-- the deliverable is `ResourceRef` + `ResourceMounter` + launch-spec wiring
-- `LocalPath`, `GitRemote`, `S3`, and `GCS` should all fit the same contract
+- the physical-mount half is for shell-based agents
+- the `FsBackendComponent` half is for ACP-native fs operations
+- `FsBackendComponent` is composition, not a new primitive
 - do not invent `client.workspaces.*`
 - do not create a Fireline-managed workspace identity system here
 
-This is a small refactor, not a new Fireline product object.
+The success condition is not "Fireline has workspaces." It is:
+
+- shell-based agents can start with the right files mounted
+- ACP-native file operations can route through pluggable backends
+- ACP-native writes become durable Session evidence automatically
