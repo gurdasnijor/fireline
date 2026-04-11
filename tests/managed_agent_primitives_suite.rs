@@ -164,11 +164,17 @@ async fn managed_agent_orchestration_acceptance_contract() -> Result<()> {
         }
         assert_eq!(persisted.runtime_key, runtime.runtime_key);
         assert_eq!(
-            persisted.create_spec.runtime_key.as_deref(),
+            persisted
+                .create_spec
+                .get("runtimeKey")
+                .and_then(|v| v.as_str()),
             Some(runtime.runtime_key.as_str())
         );
         assert_eq!(
-            persisted.create_spec.node_id.as_deref(),
+            persisted
+                .create_spec
+                .get("nodeId")
+                .and_then(|v| v.as_str()),
             Some(runtime.node_id.as_str())
         );
 
