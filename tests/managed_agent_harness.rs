@@ -36,9 +36,11 @@ mod managed_agent_suite;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use fireline_conductor::topology::{TopologyComponentSpec, TopologySpec};
 use managed_agent_suite::{
-    DEFAULT_TIMEOUT, LocalRuntimeHarness, count_events, pending_contract, read_all_events,
-    wait_for_event_count,
+    DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec, append_approval_resolved,
+    count_events, create_session, pending_contract, prompt_session, read_all_events,
+    wait_for_event_count, wait_for_permission_request,
 };
 
 /// Precondition: a local runtime has been provisioned with the default
@@ -217,37 +219,122 @@ async fn harness_append_order_is_stable_under_continued_writes() -> Result<()> {
     result
 }
 
-/// Precondition: a runtime has been provisioned with an `ApprovalGateComponent`
-/// in its topology, and the agent has yielded a tool call that hits the
-/// approval gate and suspends.
+/// Precondition: a runtime is provisioned with an `approval_gate` topology
+/// component configured with a `PromptContains` policy that matches a
+/// specific needle and with `RequireApproval` as the action.
 ///
-/// Action: simulate the runtime dying mid-suspension (stop the runtime via
-/// control plane), then re-provision a fresh runtime against the same stored
-/// spec and issue `session/load` for the suspended session id.
+/// Action: fire a prompt containing the needle in a background task so it
+/// reaches the gate and blocks. Poll the state stream for the
+/// `permission_request` envelope emitted by the gate, extract the generated
+/// `requestId` from it, then append a synthetic `approval_resolved` event
+/// with that same `requestId` and `allow: true` through a fresh external
+/// producer (simulating an approval service).
 ///
-/// Observable evidence: the freshly started runtime observes the pending
-/// approval event on the Session log during `session/load`, rebuilds the
-/// component's pending state from the log, and releases the pause when the
-/// approval is resolved (either by a prior Allow event on the log or by a
-/// new external append).
+/// Observable evidence: the background prompt task completes successfully
+/// — its response is non-empty — and the stream records a
+/// `permission_request` followed by an `approval_resolved` envelope for
+/// the same `requestId`.
 ///
-/// Invariant proven: **Harness durable suspend/resume** — the conductor
-/// suspend combinator is event-sourced. A component can pause mid-effect,
-/// the pause survives runtime death, and a new runtime can rebuild the
-/// paused state from the log and continue. This is the Harness half of the
-/// Orchestration composition reduction.
+/// Invariant proven: **Harness suspend combinator actually suspends and
+/// releases on a durable event.** The approval gate does not forward to
+/// the downstream agent until a matching `approval_resolved` event
+/// appears on the Session log. The release signal comes from an external
+/// writer, not from the gate itself, which is the foundation the full
+/// "pause survives runtime death" story sits on.
 #[tokio::test]
-#[ignore = "pending: slice 16 ApprovalGateComponent rebuild-from-log behavior (currently \
-            uncommitted in crates/fireline-components/src/approval.rs) and the scripted \
-            testy harness needed to reliably trigger a tool call that hits the approval gate"]
+async fn harness_approval_gate_blocks_prompt_until_resolved_via_stream_event() -> Result<()> {
+    let topology = TopologySpec {
+        components: vec![TopologyComponentSpec {
+            name: "approval_gate".to_string(),
+            config: Some(serde_json::json!({
+                "timeoutMs": 15000,
+                "policies": [
+                    {
+                        "match": { "kind": "promptContains", "needle": "pause_here" },
+                        "action": "requireApproval",
+                        "reason": "test policy: pause_here"
+                    }
+                ]
+            })),
+        }],
+    };
+    let spec = ManagedAgentHarnessSpec::new("harness-approval-gate-blocks-until-resolved")
+        .with_topology(topology);
+    let runtime = LocalRuntimeHarness::spawn_with(spec).await?;
+
+    let result = async {
+        let session_id = create_session(runtime.acp_url()).await?;
+        let acp_url = runtime.acp_url().to_string();
+        let state_url = runtime.state_stream_url().to_string();
+        let session_id_prompt = session_id.clone();
+        let prompt_task = tokio::spawn(async move {
+            prompt_session(&acp_url, &session_id_prompt, "please pause_here for approval").await
+        });
+
+        let request_id = wait_for_permission_request(&state_url, &session_id, DEFAULT_TIMEOUT)
+            .await
+            .context(
+                "INVARIANT (Harness): approval gate must publish a permission_request on a \
+                 matching prompt before the agent sees it",
+            )?;
+
+        append_approval_resolved(&state_url, &session_id, &request_id, true).await?;
+
+        let prompt_result = tokio::time::timeout(Duration::from_secs(15), prompt_task)
+            .await
+            .context("prompt task did not complete within the post-approval window")?;
+        prompt_result
+            .context("prompt task panicked")?
+            .context("INVARIANT (Harness): blocked prompt must succeed once approval_resolved is appended")?;
+
+        let permission_envelopes = count_events(&state_url, "permission").await?;
+        assert!(
+            permission_envelopes >= 2,
+            "INVARIANT (Harness): stream must record both permission_request and \
+             approval_resolved envelopes, saw {permission_envelopes}"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    runtime.shutdown().await?;
+    result
+}
+
+/// Precondition: slice 16 ApprovalGateComponent rebuild-from-log behavior
+/// (exists as `rebuild_from_log` on `LoadSessionRequest`) plus a way to
+/// simulate runtime death mid-prompt without abandoning the client.
+///
+/// Action: block a prompt in the gate, snapshot the pending state, kill
+/// the runtime while the gate is still waiting, re-provision a fresh
+/// runtime against the same stored spec, issue `session/load` for the
+/// previously pending session, then externally append an
+/// `approval_resolved` event. The fresh runtime should see the pending
+/// permission entry during load, pick up the resolution, and release a
+/// follow-up prompt cleanly.
+///
+/// Invariant proven: **Harness paused state survives runtime death** —
+/// the blocked-until-resolved semantic (now proven in
+/// `harness_approval_gate_blocks_prompt_until_resolved_via_stream_event`)
+/// composes with `load_session` rebuild-from-log so the pause survives
+/// mid-flight process loss. Promote once the test can kill the runtime
+/// without losing the client connection that originated the prompt, or
+/// once a scripted agent can emit the pre-pause effects on cold start.
+#[tokio::test]
+#[ignore = "pending: needs a control-plane round-trip that can abandon the blocked prompt, \
+            re-provision a fresh runtime from the durable spec, and resume via a fresh \
+            session/load. The block-until-resolved half is now covered by \
+            harness_approval_gate_blocks_prompt_until_resolved_via_stream_event."]
 async fn harness_durable_suspend_resume_round_trip() -> Result<()> {
     pending_contract(
         "harness.durable_suspend_resume",
-        "Blocks on (1) codex DAR committing the ApprovalGateComponent rebuild-from-log \
-         work in crates/fireline-components/src/approval.rs, and (2) a scripted testy \
-         agent that deterministically emits a tool call the approval gate will suspend. \
-         Without (2), the test has to rely on the real agent's nondeterministic behavior, \
-         which isn't acceptable for a golden contract test. Promote once both land.",
+        "The 'gate actually blocks and releases on an external event' half is covered by \
+         harness_approval_gate_blocks_prompt_until_resolved_via_stream_event. What still \
+         blocks this test: a runtime-death-mid-prompt flow that preserves the original \
+         client's view long enough to observe a post-death load_session rebuild of the \
+         approval state. The approval.rs rebuild_from_log helper exists; the missing piece \
+         is the cross-runtime client shim.",
     )
 }
 

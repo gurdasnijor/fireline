@@ -1273,3 +1273,94 @@ pub(crate) async fn wait_for_session_record(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+/// Append a synthetic `approval_resolved` permission event to a state
+/// stream as an "external producer". Used by approval-gate contract
+/// tests that need to unblock a suspended prompt by simulating an
+/// approval service write.
+pub(crate) async fn append_approval_resolved(
+    state_stream_url: &str,
+    session_id: &str,
+    request_id: &str,
+    allow: bool,
+) -> Result<()> {
+    let client = DsClient::new();
+    let mut stream = client.stream(state_stream_url);
+    stream.set_content_type("application/json");
+    let producer = stream
+        .producer(format!("test-approval-writer-{}", Uuid::new_v4()))
+        .content_type("application/json")
+        .build();
+
+    let created_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    let envelope = serde_json::json!({
+        "type": "permission",
+        "key": format!("{session_id}:{request_id}:resolved"),
+        "headers": { "operation": "insert" },
+        "value": {
+            "kind": "approval_resolved",
+            "sessionId": session_id,
+            "requestId": request_id,
+            "allow": allow,
+            "resolvedBy": "test-approval-writer",
+            "createdAtMs": created_at_ms,
+        }
+    });
+
+    producer.append_json(&envelope);
+    producer
+        .flush()
+        .await
+        .context("flush external approval writer")?;
+    Ok(())
+}
+
+/// Wait for the approval gate to publish its `permission_request`
+/// envelope for a given session and return `(session_id, request_id)`
+/// parsed from the envelope. The request_id is reconstructed from the
+/// envelope key, which has the shape `"<session>:<request_id>"` as
+/// emitted by `ApprovalGateComponent::emit_permission_request`.
+pub(crate) async fn wait_for_permission_request(
+    state_stream_url: &str,
+    session_id: &str,
+    timeout: Duration,
+) -> Result<String> {
+    let envelope = wait_for_event(
+        state_stream_url,
+        |env| {
+            if env.envelope_type() != Some("permission") {
+                return false;
+            }
+            let Some(value) = env.value() else {
+                return false;
+            };
+            value
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .map(|k| k == "permission_request")
+                .unwrap_or(false)
+                && value
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s == session_id)
+                    .unwrap_or(false)
+        },
+        timeout,
+    )
+    .await?;
+
+    envelope
+        .value()
+        .and_then(|value| value.get("requestId"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            anyhow!(
+                "permission_request envelope missing requestId field for session '{session_id}'"
+            )
+        })
+}

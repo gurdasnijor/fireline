@@ -40,8 +40,12 @@
 #[path = "support/managed_agent_suite.rs"]
 mod managed_agent_suite;
 
-use anyhow::Result;
-use managed_agent_suite::pending_contract;
+use anyhow::{Context, Result};
+use fireline_conductor::topology::{TopologyComponentSpec, TopologySpec};
+use managed_agent_suite::{
+    DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec, append_approval_resolved,
+    count_events, create_session, pending_contract, prompt_session, wait_for_permission_request,
+};
 
 /// Cross-reference: the end-to-end cycle proof for Orchestration composition
 /// lives at
@@ -129,37 +133,118 @@ async fn orchestration_concurrent_resume_creates_single_runtime() -> Result<()> 
     )
 }
 
-/// Precondition: a runtime has a pending approval (wait) record on its
-/// Session stream, and the runtime has been stopped.
+/// Precondition: a runtime is provisioned with an `approval_gate` topology
+/// component whose policy suspends any prompt containing a known needle,
+/// and a prompt containing that needle has been fired.
 ///
-/// Action: an external process (simulating an approval service) appends an
-/// `approval_resolved` event to the durable stream using a stream-write token
-/// issued by the control plane. This is the "external producer" path — no
-/// live runtime is involved in the write. A second process subscribes to
-/// the stream, observes the `approval_resolved` event, and calls
-/// `resume(sessionId)` in response.
+/// Action: a separate task simulating an "approval service" tails the
+/// durable state stream, waits for the `permission_request` envelope
+/// emitted by the gate, extracts the `requestId`, and appends an
+/// `approval_resolved` event with `allow: true`. The original prompt
+/// task unblocks and the agent completes the turn.
 ///
-/// Observable evidence: the resumed runtime's `ApprovalGateComponent`
-/// rebuilds its pending state from the log, sees the `approval_resolved`
-/// event, and releases the pause. The agent continues from exactly where it
-/// was suspended.
+/// Observable evidence: the blocked prompt returns successfully, and the
+/// stream records the full cycle — `permission_request` then
+/// `approval_resolved` — in order.
 ///
-/// Invariant proven: **Orchestration subscriber-coordination cycle** — the
-/// full end-to-end story from the mapping doc §2 walkthrough: external
-/// append + subscriber loop + resume + event-sourced pause release. This is
-/// the Orchestration composition working at its highest leverage point.
+/// Invariant proven: **Orchestration subscriber-coordination cycle** —
+/// an external producer, a subscriber that observes the pending event,
+/// and an event-sourced pause release together drive a prompt to
+/// completion. This is the "two processes on the same stream, no shared
+/// memory, no RPC" shape from the mapping doc §2. It does not yet cover
+/// the "runtime dies mid-pause" branch; that remains the
+/// `harness_durable_suspend_resume_round_trip` case.
 #[tokio::test]
-#[ignore = "pending: slice 16 ApprovalGateComponent rebuild-from-log (uncommitted in \
-            crates/fireline-components/src/approval.rs) + scripted testy for deterministic \
-            tool-call-that-triggers-approval-gate + full cycle wiring through \
-            ControlPlaneHarness"]
 async fn orchestration_subscriber_loop_drives_pause_release_cycle() -> Result<()> {
-    pending_contract(
-        "orchestration.subscriber_loop_pause_release",
-        "The full §2 walkthrough as a single contract. Blocks on (1) slice 16 approval \
-         gate rebuild-from-log committing, (2) scripted testy to deterministically hit \
-         the approval gate, (3) ControlPlaneHarness prompt + stream write helpers. This \
-         is the capstone Orchestration test — once it passes, the composition reduction \
-         is fully validated.",
-    )
+    let topology = TopologySpec {
+        components: vec![TopologyComponentSpec {
+            name: "approval_gate".to_string(),
+            config: Some(serde_json::json!({
+                "timeoutMs": 15000,
+                "policies": [
+                    {
+                        "match": { "kind": "promptContains", "needle": "pause_here" },
+                        "action": "requireApproval",
+                        "reason": "test policy: subscriber loop"
+                    }
+                ]
+            })),
+        }],
+    };
+    let spec = ManagedAgentHarnessSpec::new("orchestration-subscriber-loop").with_topology(topology);
+    let runtime = LocalRuntimeHarness::spawn_with(spec).await?;
+
+    let result = async {
+        let session_id = create_session(runtime.acp_url()).await?;
+        let acp_url = runtime.acp_url().to_string();
+        let state_url = runtime.state_stream_url().to_string();
+
+        // Prompt task — blocks in the gate until an approval_resolved
+        // event lands on the stream.
+        let prompt_session_id = session_id.clone();
+        let prompt_acp_url = acp_url.clone();
+        let prompt_task = tokio::spawn(async move {
+            prompt_session(
+                &prompt_acp_url,
+                &prompt_session_id,
+                "please pause_here for orchestration",
+            )
+            .await
+        });
+
+        // Subscriber/approval-service task — tails the stream, observes
+        // the pending permission_request, and writes an
+        // approval_resolved response. This is the "external producer +
+        // subscriber loop" path from the mapping doc §2 walkthrough.
+        let subscriber_session_id = session_id.clone();
+        let subscriber_state_url = state_url.clone();
+        let subscriber = tokio::spawn(async move {
+            let request_id = wait_for_permission_request(
+                &subscriber_state_url,
+                &subscriber_session_id,
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
+            append_approval_resolved(
+                &subscriber_state_url,
+                &subscriber_session_id,
+                &request_id,
+                true,
+            )
+            .await?;
+            anyhow::Ok(request_id)
+        });
+
+        subscriber
+            .await
+            .context("subscriber task panicked")?
+            .context(
+                "INVARIANT (Orchestration): subscriber must observe the permission_request \
+                 and append an approval_resolved response",
+            )?;
+
+        let prompt_outcome =
+            tokio::time::timeout(std::time::Duration::from_secs(15), prompt_task)
+                .await
+                .context("prompt task did not complete within the post-approval window")?;
+        prompt_outcome
+            .context("prompt task panicked")?
+            .context(
+                "INVARIANT (Orchestration): blocked prompt must succeed once the subscriber \
+                 loop resolves the approval",
+            )?;
+
+        let permission_envelopes = count_events(&state_url, "permission").await?;
+        assert!(
+            permission_envelopes >= 2,
+            "INVARIANT (Orchestration): stream must record both permission_request and \
+             approval_resolved envelopes, saw {permission_envelopes}"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    runtime.shutdown().await?;
+    result
 }
