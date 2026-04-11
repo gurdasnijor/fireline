@@ -74,6 +74,20 @@ import type {
   Topology,
   TransportRef,
 } from './core/index.js'
+import type {
+  Host,
+  SessionHandle,
+  SessionInput,
+  SessionOutput,
+  SessionStatus,
+  WakeOutcome,
+} from './host/index.js'
+import type {
+  Orchestrator,
+  SessionRegistry,
+  Unsubscribe,
+  WakeHandler,
+} from './orchestration/index.js'
 
 export type {
   AcpConnectOptions,
@@ -86,7 +100,9 @@ export type {
   AgentDistributionKind,
   HostClient,
   HostClientOptions,
+  Host,
   OpenAcpConnection,
+  Orchestrator,
   ResourceRef,
   ResumeOptions,
   BinaryDistribution,
@@ -126,6 +142,11 @@ export type {
   ProjectSpec,
   RewriteSpec,
   SessionSpec,
+  SessionHandle,
+  SessionInput,
+  SessionOutput,
+  SessionRegistry,
+  SessionStatus,
   SuspendReasonSpec,
   ToolDescriptor,
   Topology,
@@ -133,6 +154,9 @@ export type {
   TopologyComponentSpec,
   TopologySpec,
   TransportRef,
+  Unsubscribe,
+  WakeHandler,
+  WakeOutcome,
 }
 
 export interface FirelineClient {
@@ -207,3 +231,9 @@ export {
   peer,
   topology,
 } from './core/index.js'
+
+export {
+  cronOrchestrator,
+  httpOrchestrator,
+  whileLoopOrchestrator,
+} from './orchestration/index.js'

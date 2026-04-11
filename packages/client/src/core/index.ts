@@ -5,5 +5,6 @@
  */
 export * from './combinator.js'
 export * from './resource.js'
+export * from './session.js'
 export * from './tool.js'
 export * from './session-spec.js'
