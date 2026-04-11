@@ -1,4 +1,4 @@
-# 14: Session Canonical Read Surface
+# 14: Session Canonical Read Surface + Durable Runtime Spec
 
 Status: planned
 Type: execution slice
@@ -11,6 +11,7 @@ Related:
 - [`../state/session-load.md`](../state/session-load.md)
 - [`../runtime/control-and-data-plane.md`](../runtime/control-and-data-plane.md)
 - [`./13-distributed-runtime-fabric/13a-control-plane-runtime-api-and-external-durable-stream-bootstrap.md`](./13-distributed-runtime-fabric/13a-control-plane-runtime-api-and-external-durable-stream-bootstrap.md)
+- [`./17-out-of-band-approvals.md`](./17-out-of-band-approvals.md)
 
 ## Primitive Anchor
 
@@ -23,6 +24,9 @@ Acceptance-bar items this slice closes:
   downstream products can embed
 - explicit distinction between hot ACP traffic and cold read-oriented state in
   the TS surface
+- `runtimeSpec` durably persisted as a Session event at provision time so a
+  later `resume(sessionId)` helper can cold-start the runtime from Session
+  evidence alone
 
 Depends on:
 
@@ -32,28 +36,33 @@ Depends on:
 
 Unblocks:
 
-- slice `18` (`Orchestration`), which needs a stable durable read contract for
-  wake-time restore
+- the TS-side `resume(sessionId)` helper described in
+  [`managed-agents-mapping.md`](../explorations/managed-agents-mapping.md)
+- the first worked Orchestration-composition consumer in
+  [`17-out-of-band-approvals.md`](./17-out-of-band-approvals.md)
 - downstream UIs and control planes that need durable session inspection
   without reverse-engineering raw rows
 
 ## Objective
 
-Stabilize `Session` as Fireline's canonical durable read surface.
+Stabilize `Session` as Fireline's canonical durable read surface and persist the
+runtime's provision-time spec as Session evidence.
 
 This slice is not "Run as a product object" and it is not "Session CRUD." It is
 the read contract downstream products embed when they need to answer:
 
 - what durable session lineage exists for this work
 - what happened in it
-- what child sessions, artifacts, and prompts belong to it
-- what metadata is required to reopen or resume it through later orchestration
+- what child sessions, artifacts, permissions, and prompts belong to it
+- what metadata is required to reopen or resume it later
+- what exact `runtimeSpec` was used to provision the runtime in the first place
 
 The first cut should stay intentionally narrow:
 
 - document a canonical row schema over the durable stream
 - ship replay/catch-up materialization helpers in TypeScript
 - define read semantics for timeline, children, artifacts, and reopen metadata
+- persist `runtimeSpec` as Session evidence at provision time
 - make the hot/cold split explicit: ACP is the hot transport, Session is the
   cold durable read surface
 
@@ -67,38 +76,18 @@ A control-plane UI, browser surface, or downstream product can consume Fireline
 state directly instead of inferring durable history from runtime descriptors,
 transport handles, and ad hoc query logic.
 
-The user workflow unlocked by this slice is:
+The workflow unlocked by this slice is:
 
 - read durable session state through stable collections and helpers
 - replay from any offset and catch up to live state
 - inspect timeline, artifacts, and child-session lineage
-- gather the metadata needed to reopen or resume work through a later
-  orchestration path
+- recover the exact provision-time `runtimeSpec` for a session
+- hand that evidence to a later `resume(sessionId)` helper without relying on a
+  second catalog
 
 The consumer here is not a new `client.runs.*` namespace. It is any product
 that needs a trustworthy durable read contract over Fireline's existing session
 substrate.
-
-## Why This Slice Exists
-
-Fireline already has strong Session substrate:
-
-- append-only durable stream writes through `DurableStreamTracer`
-- runtime-local materializers and indexes
-- browser-consumable `StreamDB`
-- local `session/load` coordination
-- durable rows for session, prompt, chunk, and lineage data
-
-The gap is not "invent a product object." The gap is:
-
-- stable schema
-- replay semantics
-- catch-up semantics
-- clear consumer-facing query helpers
-- explicit separation between live ACP traffic and durable read state
-
-Without this slice, every consumer has to rediscover the same row meanings and
-rebuild the same session projections by hand.
 
 ## Scope
 
@@ -106,8 +95,8 @@ rebuild the same session projections by hand.
 
 Define the durable row families Fireline treats as canonical Session evidence.
 
-At minimum this slice should name and stabilize the rows that downstream
-consumers may rely on:
+At minimum this slice should name and stabilize the rows or projections that
+downstream consumers may rely on:
 
 - `runtime`
 - `session`
@@ -117,8 +106,10 @@ consumers may rely on:
 - `chunk`
 - child-session lineage edges
 - first-cut artifact evidence rows or artifact projections
+- a provision-time `runtimeSpec` event or projection keyed back to the session
+  and runtime
 
-For each row family, the doc or schema surface should answer:
+For each row family, the schema surface should answer:
 
 - what durable fact this row represents
 - what its primary key or identity is
@@ -142,6 +133,7 @@ Required first-cut read surface:
 - `runtimeKey?`
 - `runtimeId?`
 - `nodeId?`
+- `runtimeSpec?`
 - started/updated/ended timestamps derived from durable evidence
 - resumability or reopen metadata derived from durable state
 - lineage references for children and artifacts
@@ -162,6 +154,7 @@ The helpers should make these reads straightforward:
 - list child sessions for a parent session
 - list first-cut artifacts for a session
 - follow runtime/session lineage needed for reopen or resume
+- read the provision-time `runtimeSpec` associated with the session
 - replay from a known durable offset and catch up to live state
 
 This is intentionally narrower than:
@@ -176,7 +169,29 @@ Those are downstream product surfaces. Fireline's job here is to make the
 durable read substrate clean enough that those surfaces can be built without
 guesswork.
 
-### 4. Durable evidence mapping
+### 4. Durable `runtimeSpec` persistence
+
+Persist the runtime's provision-time spec as Session evidence when the runtime
+is created.
+
+This slice should make explicit:
+
+- when the `runtimeSpec` event is written
+- which fields of the launch spec are preserved
+- how the event links to `runtime_key` and the root session
+- how consumers read the stored spec back through the Session surface
+
+The key constraint is architectural:
+
+- `resume(sessionId)` should be able to recover the cold-start input from
+  Session evidence
+- no second hidden runtime catalog should be required for the basic resume path
+
+If a future control plane also keeps a catalog copy, that is additive. The
+Session surface still needs the durable spec because the reduction in
+`managed-agents-mapping.md` depends on Session evidence being sufficient.
+
+### 5. Durable evidence mapping
 
 This slice must anchor every read helper in durable Session evidence from the
 managed-agents mapping doc.
@@ -184,32 +199,35 @@ managed-agents mapping doc.
 The main rules are:
 
 - no second hidden event model
-- no "UI-only" synthetic timeline state
+- no UI-only synthetic timeline state
 - no reopen semantics based on ephemeral runtime memory
 - no artifact listing that bypasses durable linkage
+- no resume path that depends on a launch spec hidden outside Session evidence
 
 If a read cannot be explained as "derived from the durable stream and its
 materialized collections," it does not belong in this slice.
 
-### 5. Resume and reopen semantics
+### 6. Resume and reopen semantics
 
 Define what metadata a consumer product needs from the Session read surface in
-order to reopen or resume work through an orchestration layer.
+order to reopen or resume work through the composition pattern described in
+`managed-agents-mapping.md` §2.
 
 This slice should make explicit:
 
 - how a consumer knows whether a session is reopenable or resumable
 - what durable lineage links a later runtime back to the prior session
+- how `runtimeSpec` is recovered for cold-start resume
 - which session metadata is sufficient for `session/load`-style reopen flows
-- which reopen/resume concerns belong to Session reads versus later
-  Orchestration state
+- which concerns belong to Session reads versus later composition glue such as
+  `resume(sessionId)`
 
 The key boundary is:
 
 - `Session` tells consumers what durable work exists and how it links together
-- `Orchestration` decides how compute is reattached or restarted against it
+- `resume(sessionId)` composes Session reads with provision + ACP reconnect
 
-### 6. First consumer path
+### 7. First consumer path
 
 One real consumer should prove that the read surface is sufficient without
 reaching through to raw row interpretation in application code.
@@ -226,6 +244,7 @@ The proof should show a consumer reading:
 - timeline
 - children
 - artifacts or first-cut artifact evidence
+- `runtimeSpec`
 - reopen metadata
 
 without inventing its own schema on the side.
@@ -240,7 +259,7 @@ This slice does **not** require:
 - a REST CRUD surface for sessions
 - a new event store
 - replacing ACP as the live write path
-- solving background orchestration or wake logic
+- a separate orchestration namespace or wake endpoint
 - a complete artifact product model beyond the first durable read answer
 
 Run belongs to orchestration and downstream product projection, not to this
@@ -255,16 +274,18 @@ read-surface slice.
 - the TS surface makes the hot/cold split explicit:
   - ACP is the hot transport for live prompts and completions
   - Session reads are the cold durable surface for inspection and restore
+- a provision-time `runtimeSpec` event is part of the canonical Session surface
 - consumers can read, from the canonical surface:
   - session detail
   - timeline
   - child-session lineage
   - first-cut artifact evidence
+  - `runtimeSpec`
   - reopen/resume metadata
 - at least one consumer proves those reads without hand-decoding raw stream
   rows inside product code
-- the read model is sufficient input for later orchestration work, but it does
-  not itself own run lifecycle or wake semantics
+- the read model is sufficient input for a later `resume(sessionId)` helper,
+  but it does not itself own run lifecycle or orchestration
 
 ## Validation
 
@@ -274,9 +295,14 @@ read-surface slice.
   - materializes session state from a known offset
   - catches up to new durable events
   - verifies the consumer-facing collections stay consistent
+- one `runtimeSpec` persistence test that:
+  - provisions a runtime
+  - verifies the spec is written as Session evidence
+  - reconstructs the spec from the read surface
+  - proves that recovered spec is sufficient input for a later cold-start
+    resume path
 - one consumer-oriented TypeScript or UI integration test that:
-  - reads session detail, timeline, children, and artifacts from the canonical
-    surface
+  - reads session detail, timeline, children, artifacts, and `runtimeSpec`
   - disconnects and reconnects
   - proves reopen metadata can be recovered from durable state without touching
     ACP first
@@ -289,7 +315,9 @@ The handoff should emphasize:
 
 - do not build `client.runs.*`
 - do not build session CRUD
-- do build the canonical schema and the TS replay/read helpers
+- do build the canonical schema and TS replay/read helpers
+- do persist `runtimeSpec` as Session evidence at provision time
 - do make the hot ACP path and cold durable read path explicit
 
-Session is Fireline's durable read surface; Run belongs to orchestration.
+Session is Fireline's durable read surface. `runtimeSpec` is part of that
+surface. `resume(sessionId)` is downstream composition over it.
