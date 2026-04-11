@@ -44,7 +44,24 @@ durable-streams.workspace = true
 
 # Smithery bridge HTTP client
 reqwest.workspace = true
-microsandbox = "0.3.12"
+
+# Optional: the microsandbox-backed Sandbox satisfier. Gated behind the
+# `microsandbox-provider` feature because the upstream crate pulls
+# keyring → libdbus-sys on Linux (needs system libdbus-1-dev) and
+# microsandbox-prebuilt downloads libkrun binaries at build time.
+# Neither is available on default GitHub Actions runners, so the
+# default build excludes it and CI only compiles the feature when
+# explicitly asked.
+microsandbox = { version = "0.3.12", optional = true }
+
+[features]
+default = []
+# Enables the real microVM backend via the `microsandbox` crate —
+# requires libdbus-1-dev at build time on Linux, and KVM (Linux) /
+# Apple Silicon (macOS) at runtime. Off in CI because neither is
+# available on standard GitHub Actions runners. Enable locally with
+# `cargo check --features fireline-components/microsandbox-provider`.
+microsandbox-provider = ["dep:microsandbox"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
