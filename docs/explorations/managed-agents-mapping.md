@@ -49,6 +49,170 @@ This doc does **not** propose new primitives that aren't in the Anthropic framew
 
 **One-line summary:** Fireline already has Session, Sandbox, and Tools strong; Harness is partial-by-design; Orchestration and Resources are the two real gaps and they are tightly coupled.
 
+## Fireline as combinators over the primitives
+
+Fireline introduces concepts above Anthropic's minimal six — conductor components, proxy chains, materializers, the topology spec — but **none of these are new primitives**. They are all functional compositions over the existing six. This section gives the algebraic decomposition.
+
+Anyone proposing a new conductor component should be able to express it as one of the combinators below or a small composition of them. If they cannot, that's a signal: either Fireline needs a new primitive (so far only Orchestration and Resources have qualified) or the feature belongs in a downstream product layer, not in the substrate.
+
+### A conductor component is `Harness → Harness`
+
+The Harness primitive is `Effect → EffectResult`. A conductor component is a higher-order function that takes a harness and returns a wrapped harness:
+
+```typescript
+type Harness   = (e: Effect) => Promise<EffectResult>
+type Component = (next: Harness) => Harness
+```
+
+This is the standard middleware shape — Tower in Rust, Express middleware in Node, Connect handlers, Polka, Hapi extensions, Tower's `Layer`, the `decorator` pattern. Components compose via standard function composition:
+
+```typescript
+const compose = (...components: Component[]): Component =>
+  (next) => components.reduceRight((acc, c) => c(acc), next)
+```
+
+`client.topology` is `[Component]`. Building the topology is `compose`. The runtime takes the composed function and uses it as its proxy chain. Your example — `context_injection(peer(audit(Effect)))` — is exactly this composition: each component wraps the next, the result is a single transformed `Harness`.
+
+### Seven combinators cover every Fireline component today
+
+There are exactly seven base combinators that all current Fireline conductor components decompose into. Each is parameterized by which primitive(s) it touches.
+
+| # | Combinator | Type signature | Touches primitive | Example use |
+|---|---|---|---|---|
+| 1 | `observe(sink)` | `(e: Effect) => void` → `Component` | external sink | logging, metrics export |
+| 2 | `mapEffect(fn)` | `(e: Effect) => Effect` → `Component` | Harness only | context injection, prompt template rewriting |
+| 3 | `appendToSession(mk)` | `(e: Effect) => Event` → `Component` | **Session** | audit, durable trace |
+| 4 | `filter(pred, reject)` | `(e: Effect) => bool` × `() => EffectResult` → `Component` | Harness only | budget gate, policy block |
+| 5 | `substitute(rewrite)` | `(e: Effect) => Effect` → `Component` | Harness only | peer call routing, tool dispatch |
+| 6 | `suspend(reason)` | `(e: Effect) => SuspendReason` → `Component` | **Session** + **Orchestration** | approval gate, durable wait |
+| 7 | `fanout(split, merge)` | `(e: Effect) => Effect[]` × `(rs: EffectResult[]) => EffectResult` → `Component` | Harness (asymmetric n→1) | parallel tool calls, multi-peer dispatch |
+
+Six base + fanout for parallelism. Combinators 1, 2, 4, 5, 7 touch only the Harness primitive (they're pure transformers). Combinator 3 writes to the Session primitive. Combinator 6 writes to the Session primitive AND registers a wake handler with the Orchestration primitive — that's why Orchestration is the load-bearing missing piece for suspend/resume to be meaningful.
+
+### How current Fireline components decompose
+
+| Component | Combinator decomposition |
+|---|---|
+| `AuditTracer` | `appendToSession(e => ({kind: 'audit', effect: e}))` |
+| `DurableStreamTracer` | `appendToSession(e => ({kind: 'trace', effect: e, result: r}))` — bidirectional, also captures result on the way back |
+| `ContextInjectionComponent` | `mapEffect(e => addContext(e, sources))` |
+| `BudgetComponent` | `filter(e => budget.check(e), () => ({error: 'budget exceeded'}))` |
+| `ApprovalGateComponent` | `suspend(e => isToolCall(e) ? {kind: 'approval', tool: e.tool} : null)` — gates only on tool calls, passes prompts through |
+| `PeerComponent` | `substitute(e => isPeerCall(e) ? toPeerEffect(e) : e)` plus tool registration via `mapEffect` |
+| `SmitheryComponent` | tool registration via `mapEffect(e => e.kind === 'init' ? {...e, tools: [...e.tools, ...smitheryTools]} : e)` |
+
+Every existing Fireline component is one combinator or a small composition. None of them require a new primitive. If a future component cannot be written as a combinator, that's a signal worth investigating — it usually means either a missing primitive (rare) or that the feature is composing too many concerns and should be split into smaller components (common).
+
+### Tools are also Components
+
+A Tools registration is just a `mapEffect` that adds an item to the Effect's `available_tools` set on the init Effect:
+
+```typescript
+const registerTool = (tool: ToolSpec): Component =>
+  mapEffect(e => e.kind === 'init'
+    ? { ...e, tools: [...e.tools, tool] }
+    : e)
+```
+
+This means **Tools and Components are the same kind of thing**. The Tools primitive is a special case of `mapEffect` over the init Effect. `client.topology.attachTool({...})` is sugar for `compose(currentTopology, registerTool({...}))`. A list of tools is a list of init-time Components.
+
+### Resources are also Components
+
+Resources are nominally a launch-spec field, but algebraically they're a Component that fires once on the init Effect:
+
+```typescript
+const provision = (resources: ResourceRef[]): Component =>
+  (next) => async (e) => {
+    if (e.kind === 'init') {
+      for (const r of resources) {
+        await mount(r.source_ref, r.mount_path)
+      }
+    }
+    return next(e)
+  }
+```
+
+Resources fire once per Sandbox lifetime, on the init Effect. They're an init-time Component with a single-fire constraint. The TS-side surface exposes them as a launch-spec field for ergonomics, but the underlying shape is still a Component composed into the proxy chain at provision time.
+
+### Materializers are folds over the Session event log
+
+Outside the proxy chain, **materializers** are a different combinator family that operates on the Session event log directly rather than on the live effect path. They are pure folds:
+
+```typescript
+type Materializer<S> = (event: Event, state: S) => S
+```
+
+Each materializer is a fold step: given an event and the current state, return the new state. The Session is the source list, the materializer is the fold function, the result is derived state. `SessionIndex`, `RuntimeMaterializer`, and TS `StreamDB` all fit this exact shape.
+
+Materializers compose via product:
+
+```typescript
+const productMat = <A, B>(ma: Materializer<A>, mb: Materializer<B>): Materializer<{a: A, b: B}> =>
+  (e, {a, b}) => ({ a: ma(e, a), b: mb(e, b) })
+```
+
+So Fireline has **two layers of pure functional folds** sitting on top of the six Anthropic primitives:
+
+```text
+┌────────────────────────────────────────────────────────────┐
+│  Materializer pipeline                                     │
+│  fold of (Event, S) → S over the Session event log         │
+│  produces: derived state for queries (SessionIndex, etc.)  │
+└────────────────────────────────────────────────────────────┘
+                            ▲
+                            │ reads
+                            │
+┌────────────────────────────────────────────────────────────┐
+│  Session primitive                                         │
+│  append-only log + idempotent appends                      │
+└────────────────────────────────────────────────────────────┘
+                            ▲
+                            │ writes (via appendToSession)
+                            │
+┌────────────────────────────────────────────────────────────┐
+│  Conductor proxy chain                                     │
+│  fold of Component transformers over the base Harness      │
+│  produces: a wrapped Harness with the topology behaviors   │
+└────────────────────────────────────────────────────────────┘
+                            ▲
+                            │ wraps
+                            │
+┌────────────────────────────────────────────────────────────┐
+│  Harness primitive                                         │
+│  Effect → EffectResult                                     │
+└────────────────────────────────────────────────────────────┘
+```
+
+Both layers are pure functional folds. Both compose. Both decompose into operations on the existing primitives. Neither requires Fireline to introduce a new abstraction beyond the seven combinators above plus the materializer fold.
+
+### The Anthropic round-trip
+
+This decomposition lets us round-trip cleanly between Fireline's complex shape and Anthropic's minimal shape. Anyone reading the Anthropic post should be able to point at any Fireline feature and ask "which primitive plus which combinator?" and get a single-sentence answer:
+
+| Fireline feature | Anthropic primitive | Combinator |
+|---|---|---|
+| `client.topology.attach('audit', ...)` | Session + Harness | `appendToSession . mapEffect` |
+| `client.topology.attach('approval-gate', ...)` | Session + Orchestration + Harness | `suspend` |
+| `client.topology.attachTool({...})` | Tools + Harness | `mapEffect` over init |
+| `client.host.create({ resources: [...] })` | Resources + Harness | `provision` (init-time Component) |
+| `client.host.create({ topology })` | Sandbox + Harness | `compose` of all topology components |
+| `client.state.session.get(id)` | Session | materializer fold |
+| `client.stream.replay(endpoint, cursor)` | Session | identity fold (raw passthrough) |
+| `client.orchestration.wake(key, reason)` | Orchestration | `wake` (the primitive itself) |
+| `client.acp.session.prompt(...)` | Sandbox.execute + Harness yield | direct passthrough |
+
+Everything Fireline does is reducible to "primitive(s) + combinator". This is the operational answer to "what belongs in Fireline vs. what belongs in Flamecast." Fireline is the substrate that provides the six primitives plus the seven-combinator algebra. Flamecast composes those into product objects (runs, workspaces, profiles, approval queues) that don't fit the combinator algebra and shouldn't.
+
+### Why this matters operationally
+
+When proposing a new Fireline feature, run it through this test:
+
+1. **Express it as a combinator first.** If it's a new conductor component, decompose it into the seven combinators. If it's a materializer, write it as a `(Event, S) → S` fold step.
+2. **If you cannot decompose it, be suspicious.** A feature that doesn't fit the combinator algebra is reaching for something the substrate doesn't have. Either Fireline needs a new primitive (unusual — only Orchestration and Resources have qualified so far) or the feature is a product object that belongs in Flamecast.
+3. **If it composes cleanly, you are probably right.** The combinator algebra is the test for "does this fit Fireline's shape" before any code is written.
+
+This is also the test for whether a feature is *too small* to belong in Fireline. If a proposed component is "just `mapEffect(addHeader)`", that's a one-liner; it's a configuration, not a component. Fireline ships components that have meaningful internal state or non-trivial composition; one-liners belong in user code.
+
 ## 1. Session — Strong
 
 ### Anthropic interface
@@ -154,6 +318,8 @@ The pieces:
 - **`DurableStreamTracer`** persists every effect into the Session log, satisfying the "appends progress to the Session" half of the contract
 
 So Fireline serves the Harness primitive at a different layer than Anthropic's framing assumes — Anthropic models the harness as an opaque loop that the substrate calls; Fireline treats the harness's I/O as a programmable proxy chain. **Both are valid.** Fireline's choice is more flexible because it lets components compose around the loop without owning the loop.
+
+The proxy chain is not a new abstraction. Algebraically, it's a `compose` over a small set of `Harness → Harness` transformers that decompose into seven combinators (`observe`, `mapEffect`, `appendToSession`, `filter`, `substitute`, `suspend`, `fanout`). Every Fireline component today is one combinator or a small composition. See [§Fireline as combinators over the primitives](#fireline-as-combinators-over-the-primitives) above for the full algebraic decomposition.
 
 ### Gap
 
