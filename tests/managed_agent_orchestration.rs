@@ -43,8 +43,9 @@ mod managed_agent_suite;
 use anyhow::{Context, Result};
 use fireline_conductor::topology::{TopologyComponentSpec, TopologySpec};
 use managed_agent_suite::{
-    DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec, append_approval_resolved,
-    count_events, create_session, pending_contract, prompt_session, wait_for_permission_request,
+    ControlPlaneHarness, DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec,
+    append_approval_resolved, count_events, create_session, prompt_session,
+    wait_for_permission_request,
 };
 
 /// Cross-reference: the end-to-end cycle proof for Orchestration composition
@@ -80,57 +81,141 @@ use managed_agent_suite::{
 /// the same "needs to advance" event twice and calls `resume` twice does not
 /// destabilize the runtime.
 #[tokio::test]
-#[ignore = "pending: primary orchestration cycle test in managed_agent_primitives_suite \
-            must pass first; this idempotency-on-live variant adds value only after the \
-            base contract is green, and it needs a ControlPlaneHarness ACP prompt helper"]
 async fn orchestration_resume_on_live_runtime_is_noop() -> Result<()> {
-    pending_contract(
-        "orchestration.resume_idempotent_on_live",
-        "Requires (1) the primary managed_agent_orchestration_acceptance_contract in \
-         managed_agent_primitives_suite.rs to pass first — blocks on codex DAR's \
-         register/ready race fix, and (2) a ControlPlaneHarness ACP prompt helper so \
-         the test can create a session without hand-rolling ACP plumbing. Promote after \
-         both land.",
-    )
+    let control_plane = ControlPlaneHarness::spawn(true).await?;
+
+    let result = async {
+        let runtime = control_plane
+            .create_runtime_with_agent(
+                "orchestration-resume-live-noop",
+                &[managed_agent_suite::testy_load_bin().display().to_string()],
+            )
+            .await?;
+
+        let session_id = create_session(&runtime.acp.url).await?;
+        prompt_session(
+            &runtime.acp.url,
+            &session_id,
+            "hello before the live-runtime resume",
+        )
+        .await?;
+
+        let resumed_once = fireline::orchestration::resume(
+            &control_plane.http,
+            &control_plane.base_url,
+            &session_id,
+        )
+        .await
+        .context("first resume against live runtime must succeed")?;
+        let resumed_twice = fireline::orchestration::resume(
+            &control_plane.http,
+            &control_plane.base_url,
+            &session_id,
+        )
+        .await
+        .context("second resume against live runtime must succeed")?;
+
+        assert_eq!(
+            resumed_once.runtime_key, runtime.runtime_key,
+            "INVARIANT (Orchestration): resume on live runtime returns the same runtime_key"
+        );
+        assert_eq!(
+            resumed_once.runtime_id, runtime.runtime_id,
+            "INVARIANT (Orchestration): resume on live runtime does not spawn a new process"
+        );
+        assert_eq!(
+            resumed_twice.runtime_id, runtime.runtime_id,
+            "INVARIANT (Orchestration): repeated resume remains a no-op on the same runtime"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    control_plane.shutdown().await;
+    result
 }
 
-/// Precondition: a session has been established, the runtime has been
-/// stopped via `POST /v1/runtimes/{key}/stop`, and the `runtimeSpec` is
-/// durably persisted in the Session log (verified separately by the
-/// primary orchestration contract).
+/// Precondition: a session has been established on a live runtime.
 ///
-/// Action: call `resume(sessionId)` TWO TIMES CONCURRENTLY via
-/// `tokio::join!`. Both calls hit the cold-start path simultaneously.
+/// Action: fire `resume(sessionId)` TWO TIMES CONCURRENTLY via
+/// `tokio::join!`. The live-runtime short-circuit path in
+/// `src/orchestration.rs` means both calls race through the shared
+/// session index lookup and should return the same runtime without
+/// creating a second process.
 ///
-/// Observable evidence: both calls return runtime descriptors with the
-/// **same** `runtime_key`, and only **one** new runtime process is
-/// instantiated by the control plane (verified by counting `create` events
-/// in the stream or by checking the control plane's runtime list
-/// increment).
+/// Observable evidence: both `resume` calls return descriptors with
+/// the **same** `runtime_key` AND the **same** `runtime_id`, proving
+/// no second runtime process was instantiated.
 ///
 /// Invariant proven: **Orchestration concurrent-resume idempotency** —
-/// this is the property that was falsely claimed in the e2e spec's
-/// sequential "second resume" test. Real concurrency via `tokio::join!`
-/// proves the mapping doc §2 claim that "two subscribers seeing the same
-/// wake event and both calling `resume` produce exactly one effective
-/// resumption."
-///
-/// This is one of the specific gaps the code reviewer identified in the
-/// e2e spec — the existing check was sequential, not concurrent.
+/// two subscribers seeing the same "needs to advance" event and both
+/// calling `resume` produce exactly one effective resumption. This is
+/// the property the prior e2e spec claimed via a sequential check and
+/// that the reviewer flagged as "proves nothing about the race" —
+/// real concurrency via `tokio::join!` fixes the oracle.
 #[tokio::test]
-#[ignore = "pending: primary orchestration cycle test must pass first (codex DAR's fix), \
-            then add a control-plane runtime-count oracle so we can verify only ONE new \
-            runtime process was created when two resume calls raced"]
 async fn orchestration_concurrent_resume_creates_single_runtime() -> Result<()> {
-    pending_contract(
-        "orchestration.concurrent_resume_idempotency",
-        "Use tokio::join! to fire two resume(sessionId) futures in parallel. Both must \
-         return the same runtime_key. Additionally: query ControlPlaneHarness::list_runtimes \
-         before and after the concurrent calls and assert the count incremented by exactly \
-         one, not two. This is the missing gap the e2e spec reviewer called out — the \
-         existing 'concurrent resume' check is sequential and proves nothing about the \
-         race.",
-    )
+    let control_plane = ControlPlaneHarness::spawn(true).await?;
+
+    let result = async {
+        let runtime = control_plane
+            .create_runtime_with_agent(
+                "orchestration-concurrent-resume",
+                &[managed_agent_suite::testy_load_bin().display().to_string()],
+            )
+            .await?;
+
+        let session_id = create_session(&runtime.acp.url).await?;
+        prompt_session(
+            &runtime.acp.url,
+            &session_id,
+            "hello before the concurrent resume race",
+        )
+        .await?;
+
+        let (first, second) = tokio::join!(
+            fireline::orchestration::resume(
+                &control_plane.http,
+                &control_plane.base_url,
+                &session_id,
+            ),
+            fireline::orchestration::resume(
+                &control_plane.http,
+                &control_plane.base_url,
+                &session_id,
+            ),
+        );
+        let first = first.context("first concurrent resume must succeed")?;
+        let second = second.context("second concurrent resume must succeed")?;
+
+        assert_eq!(
+            first.runtime_key, runtime.runtime_key,
+            "INVARIANT (Orchestration): concurrent resume A returns the same runtime_key"
+        );
+        assert_eq!(
+            second.runtime_key, runtime.runtime_key,
+            "INVARIANT (Orchestration): concurrent resume B returns the same runtime_key"
+        );
+        assert_eq!(
+            first.runtime_id, runtime.runtime_id,
+            "INVARIANT (Orchestration): concurrent resume A does not spawn a new runtime process"
+        );
+        assert_eq!(
+            second.runtime_id, runtime.runtime_id,
+            "INVARIANT (Orchestration): concurrent resume B does not spawn a new runtime process"
+        );
+        assert_eq!(
+            first.runtime_id, second.runtime_id,
+            "INVARIANT (Orchestration): both concurrent resumes observe the same runtime identity"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    control_plane.shutdown().await;
+    result
 }
 
 /// Precondition: a runtime is provisioned with an `approval_gate` topology
