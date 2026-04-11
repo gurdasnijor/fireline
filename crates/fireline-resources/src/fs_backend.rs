@@ -13,12 +13,13 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use durable_streams::{Client as DurableStreamsClient, LiveMode, Offset, Producer};
-use fireline_conductor::runtime::MountedResource;
 use sacp::schema::{
     ReadTextFileRequest, ReadTextFileResponse, WriteTextFileRequest, WriteTextFileResponse,
 };
 use sacp::{Agent, Conductor, ConnectTo, Proxy};
 use serde::{Deserialize, Serialize};
+
+use crate::MountedResource;
 
 #[async_trait]
 pub trait FileBackend: Send + Sync {
@@ -442,7 +443,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::LocalFileBackend;
-    use crate::fs_backend::FileBackend;
+    use crate::{FileBackend, MountedResource};
 
     #[tokio::test]
     async fn local_file_backend_reads_through_mount_mapping() {
@@ -451,7 +452,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).unwrap();
         std::fs::write(source_dir.join("hello.txt"), "hello").unwrap();
 
-        let backend = LocalFileBackend::new(vec![fireline_conductor::runtime::MountedResource {
+        let backend = LocalFileBackend::new(vec![MountedResource {
             host_path: source_dir.clone(),
             mount_path: PathBuf::from("/work"),
             read_only: true,

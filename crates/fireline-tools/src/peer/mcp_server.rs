@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use super::directory::PeerRegistry;
 use super::lookup::{ActiveTurnLookup, ChildSessionEdgeInput, ChildSessionEdgeSink};
 use super::transport;
-use crate::tools::ToolDescriptor;
+use crate::ToolDescriptor;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct ListPeersInput {}

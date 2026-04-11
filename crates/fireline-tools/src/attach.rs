@@ -35,7 +35,7 @@ use std::collections::HashSet;
 use durable_streams::Producer;
 use sacp::{ConnectTo, Proxy};
 
-use crate::tools::{CapabilityRef, emit_tool_descriptor};
+use crate::{CapabilityRef, emit_tool_descriptor};
 
 /// Source tag threaded through every `tool_descriptor` envelope this
 /// component emits. Matches the `peer_mcp` / `smithery` pattern so the
@@ -119,7 +119,7 @@ impl ConnectTo<sacp::Conductor> for AttachToolComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::{ToolDescriptor, TransportRef};
+    use crate::{ToolDescriptor, TransportRef};
 
     fn descriptor(name: &str, description: &str) -> ToolDescriptor {
         ToolDescriptor {

@@ -5,7 +5,30 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use super::provider::ResourceRef;
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ResourceRef {
+    LocalPath {
+        path: PathBuf,
+        mount_path: PathBuf,
+    },
+    GitRemote {
+        repo_url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+        mount_path: PathBuf,
+    },
+    S3 {
+        bucket: String,
+        prefix: String,
+        mount_path: PathBuf,
+    },
+    Gcs {
+        bucket: String,
+        prefix: String,
+        mount_path: PathBuf,
+    },
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -102,7 +125,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{LocalPathMounter, ResourceMounter};
-    use crate::runtime::ResourceRef;
+    use crate::ResourceRef;
 
     #[tokio::test]
     async fn local_path_mounter_canonicalizes_host_path() {

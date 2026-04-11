@@ -8,6 +8,8 @@ description = "Prebuilt topology components for Fireline (peer calls, audit, con
 
 [dependencies]
 fireline-conductor.workspace = true
+fireline-resources.workspace = true
+fireline-tools.workspace = true
 
 # Async runtime
 tokio.workspace = true

@@ -103,6 +103,7 @@ description = "Fireline runtime substrate for ACP-compatible agents"
 # Workspace crates
 fireline-conductor.workspace = true
 fireline-components.workspace = true
+fireline-resources.workspace = true
 
 # Async runtime
 tokio.workspace = true

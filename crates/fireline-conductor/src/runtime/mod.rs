@@ -8,10 +8,12 @@ mod registry;
 pub use self::docker::{DockerProvider, DockerProviderConfig};
 pub use self::local::{LocalProvider, LocalRuntimeLauncher};
 pub use self::manager::RuntimeManager;
-pub use self::mounter::{LocalPathMounter, MountedResource, ResourceMounter, prepare_resources};
+pub use self::mounter::{
+    LocalPathMounter, MountedResource, ResourceMounter, ResourceRef, prepare_resources,
+};
 pub use self::provider::{
     CreateRuntimeSpec, Endpoint, HeartbeatMetrics, HeartbeatReport, ManagedRuntime,
-    PersistedRuntimeSpec, ResourceRef, RuntimeDescriptor, RuntimeLaunch, RuntimeProvider,
+    PersistedRuntimeSpec, RuntimeDescriptor, RuntimeLaunch, RuntimeProvider,
     RuntimeProviderKind, RuntimeProviderRequest, RuntimeRegistration, RuntimeStatus,
     RuntimeTokenIssuer, StreamStorageConfig, StreamStorageMode,
 };

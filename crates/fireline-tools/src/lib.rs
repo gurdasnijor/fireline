@@ -48,6 +48,15 @@ use durable_streams::Producer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod attach;
+pub mod peer;
+pub mod smithery;
+
+pub use attach::AttachToolComponent;
+pub use peer::PeerComponent;
+pub use peer::directory::{self, Directory, LocalPeerDirectory, PeerRegistry};
+pub use peer::lookup;
+
 /// The Anthropic-shape tool triple.
 ///
 /// Every tool Fireline exposes to the agent is fully described by this

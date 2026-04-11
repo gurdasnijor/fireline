@@ -61,7 +61,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::tools::{ToolDescriptor, emit_tool_descriptors};
+use crate::{ToolDescriptor, emit_tool_descriptors};
 
 #[derive(Clone, Debug)]
 pub struct SmitheryConfig {

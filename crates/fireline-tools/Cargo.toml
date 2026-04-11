@@ -7,3 +7,18 @@ repository.workspace = true
 description = "Tool registry and peer transport primitives for Fireline"
 
 [dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+durable-streams.workspace = true
+dirs.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+sacp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio-tungstenite.workspace = true
+toml.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+agent-client-protocol.workspace = true

@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use fireline_resources::ResourceRef;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::topology::TopologySpec;
@@ -238,31 +239,6 @@ impl<'de> Deserialize<'de> for PersistedRuntimeSpec {
             },
         })
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum ResourceRef {
-    LocalPath {
-        path: PathBuf,
-        mount_path: PathBuf,
-    },
-    GitRemote {
-        repo_url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reference: Option<String>,
-        mount_path: PathBuf,
-    },
-    S3 {
-        bucket: String,
-        prefix: String,
-        mount_path: PathBuf,
-    },
-    Gcs {
-        bucket: String,
-        prefix: String,
-        mount_path: PathBuf,
-    },
 }
 
 pub struct RuntimeLaunch {
