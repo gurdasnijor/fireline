@@ -27,6 +27,10 @@
       "types": "./dist/sandbox/index.d.ts",
       "default": "./dist/sandbox/index.js"
     },
+    "./sandbox-local": {
+      "types": "./dist/sandbox-local/index.d.ts",
+      "default": "./dist/sandbox-local/index.js"
+    },
     "./host-fireline": {
       "types": "./dist/host-fireline/index.d.ts",
       "default": "./dist/host-fireline/index.js"
