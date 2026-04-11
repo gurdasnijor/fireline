@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::{Command as StdCommand, Stdio};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -21,9 +22,26 @@ use futures::{SinkExt, StreamExt};
 use serde_json::{Value as JsonValue, json};
 use tokio::process::{Child, Command as TokioCommand};
 use tokio::sync::oneshot;
+use tracing::instrument;
+use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 use uuid::Uuid;
 
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn init_test_tracing() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("fireline=info,fireline_control_plane=info,fireline_conductor=info")
+        });
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(filter)
+            .with_span_events(FmtSpan::CLOSE)
+            .without_time()
+            .try_init();
+    });
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Primitive {
@@ -205,6 +223,7 @@ pub(crate) struct LocalRuntimeHarness {
 
 impl LocalRuntimeHarness {
     pub(crate) async fn spawn(name: &str) -> Result<Self> {
+        init_test_tracing();
         let handle = start(BootstrapConfig {
             host: "127.0.0.1".parse::<IpAddr>()?,
             port: 0,
@@ -269,6 +288,7 @@ pub(crate) struct ControlPlaneHarness {
 
 impl ControlPlaneHarness {
     pub(crate) async fn spawn(prefer_push: bool) -> Result<Self> {
+        init_test_tracing();
         ensure_control_plane_binaries_built()?;
 
         let runtime_registry_path = temp_path("fireline-managed-agent-runtimes");
@@ -301,6 +321,7 @@ impl ControlPlaneHarness {
             .await
     }
 
+    #[instrument(skip(self, agent_command), fields(name))]
     pub(crate) async fn create_runtime_with_agent(
         &self,
         name: &str,
@@ -326,6 +347,7 @@ impl ControlPlaneHarness {
             .await
     }
 
+    #[instrument(skip(self), fields(runtime_key, expected = ?expected))]
     pub(crate) async fn wait_for_status(
         &self,
         runtime_key: &str,
@@ -373,6 +395,20 @@ impl ControlPlaneHarness {
             .ok_or_else(|| anyhow!("missing runtime token"))
     }
 
+    /// Return the fully-qualified shared state stream URL for this
+    /// harness — the same URL the control plane passes to its spawned
+    /// runtimes as `FIRELINE_ADVERTISED_STATE_STREAM_URL`. Callers of
+    /// `fireline::orchestration::resume` must pass this explicitly
+    /// (slice: "explicit shared-state endpoint surface").
+    pub(crate) fn shared_state_url(&self) -> String {
+        format!(
+            "{}/{}",
+            self.shared_stream_server.base_url.trim_end_matches('/'),
+            self.shared_state_stream_name
+        )
+    }
+
+    #[instrument(skip(self), fields(runtime_key))]
     pub(crate) async fn stop_runtime(&self, runtime_key: &str) -> Result<RuntimeDescriptor> {
         self.http
             .post(format!("{}/v1/runtimes/{runtime_key}/stop", self.base_url))
@@ -477,6 +513,7 @@ pub(crate) struct WebSocketTransport {
     url: String,
 }
 
+#[instrument(fields(acp_url))]
 pub(crate) async fn create_session(acp_url: &str) -> Result<String> {
     sacp::Client
         .builder()
@@ -504,6 +541,7 @@ pub(crate) async fn create_session(acp_url: &str) -> Result<String> {
         .map_err(anyhow::Error::from)
 }
 
+#[instrument(fields(acp_url, session_id))]
 pub(crate) async fn load_session(acp_url: &str, session_id: &str) -> Result<()> {
     let session_id = session_id.to_string();
     sacp::Client
@@ -537,6 +575,7 @@ pub(crate) async fn load_session(acp_url: &str, session_id: &str) -> Result<()> 
         .map_err(anyhow::Error::from)
 }
 
+#[instrument(skip(text), fields(acp_url, session_id))]
 pub(crate) async fn prompt_session(acp_url: &str, session_id: &str, text: &str) -> Result<()> {
     let session_id = session_id.to_string();
     let text = text.to_string();
@@ -620,6 +659,7 @@ impl sacp::ConnectTo<sacp::Client> for WebSocketTransport {
     }
 }
 
+#[instrument(fields(shared_stream_base_url, prefer_push, heartbeat_scan_interval_ms, stale_timeout_ms))]
 async fn spawn_control_plane(
     runtime_registry_path: &PathBuf,
     peer_directory_path: &PathBuf,
@@ -633,6 +673,7 @@ async fn spawn_control_plane(
     // into this file. That closes the old TOCTOU race where the harness used
     // to reserve-and-drop a port and then hand the integer to the subprocess,
     // only to have another parallel test binary grab the same port first.
+    let inherit_child_logs = std::env::var_os("FIRELINE_TEST_CHILD_LOGS").is_some();
     let mut command = TokioCommand::new(control_plane_bin());
     command
         .arg("--host")
@@ -656,9 +697,12 @@ async fn spawn_control_plane(
         .arg("--stale-timeout-ms")
         .arg(stale_timeout_ms.to_string())
         .arg("--shared-stream-base-url")
-        .arg(shared_stream_base_url)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .arg(shared_stream_base_url);
+    if inherit_child_logs {
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else {
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+    }
     if prefer_push {
         command.arg("--prefer-push");
     }
@@ -842,7 +886,9 @@ impl LocalRuntimeHarness {
     /// command, topology, resources, and stream mode. Resources are mounted
     /// via `LocalPathMounter` before the runtime boots so they are visible
     /// to the conductor.
+    #[instrument(skip(spec), fields(name = %spec.name))]
     pub(crate) async fn spawn_with(spec: ManagedAgentHarnessSpec) -> Result<Self> {
+        init_test_tracing();
         let (state_stream, external_state_stream_url) = match &spec.stream_mode {
             StreamMode::Embedded => (None, None),
             StreamMode::SharedExternal { base_url, stream_name } => (
@@ -894,6 +940,7 @@ impl ControlPlaneHarness {
     /// spec's topology and resources through to the control plane
     /// `POST /v1/runtimes` request body, unlike the legacy method which
     /// always sent empty topology and no resources.
+    #[instrument(skip(self, spec), fields(name = %spec.name))]
     pub(crate) async fn create_runtime_from_spec(
         &self,
         spec: ManagedAgentHarnessSpec,

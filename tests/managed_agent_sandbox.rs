@@ -206,6 +206,7 @@ async fn sandbox_stop_and_recreate_preserves_session_load() -> Result<()> {
         let resumed = fireline::orchestration::resume(
             &control_plane.http,
             &control_plane.base_url,
+            &control_plane.shared_state_url(),
             &session_id,
         )
         .await

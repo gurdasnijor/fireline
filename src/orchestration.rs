@@ -4,21 +4,43 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use fireline_conductor::runtime::{PersistedRuntimeSpec, RuntimeDescriptor, RuntimeStatus};
 use reqwest::Client as HttpClient;
+use tracing::{info, instrument};
 
 use crate::runtime_materializer::RuntimeMaterializer;
 use crate::session_index::SessionIndex;
 
+/// Resume a session by session id.
+///
+/// The caller must supply the **shared** state stream URL explicitly.
+/// Earlier versions of this helper discovered the shared stream URL by
+/// listing the control plane's runtimes and using the first non-empty
+/// `state.url` field — that was a hack that depended on at least one
+/// runtime already existing and on its descriptor carrying a URL that
+/// matched the shared stream. Resume's contract is "given a shared
+/// state endpoint, look up this session and hand the caller a Ready
+/// runtime for it", and the shared endpoint is best modeled as an
+/// explicit parameter the caller already holds (e.g., the control
+/// plane's configured `shared_stream_base_url/{stream_name}`) — not
+/// as something to rediscover from live runtime state every call.
+#[instrument(skip(http), fields(session_id, control_plane_url, shared_state_url))]
 pub async fn resume(
     http: &HttpClient,
     control_plane_url: &str,
+    shared_state_url: &str,
     session_id: &str,
 ) -> Result<RuntimeDescriptor> {
-    let shared_index =
-        wait_for_shared_session_index(http, control_plane_url, session_id).await?;
+    let started = tokio::time::Instant::now();
+    let shared_index = wait_for_shared_session_index(shared_state_url, session_id).await?;
     let runtime = lookup_runtime_for_session(http, control_plane_url, &shared_index, session_id)
         .await?;
 
     if runtime.status == RuntimeStatus::Ready {
+        info!(
+            session_id,
+            runtime_key = runtime.runtime_key,
+            elapsed_ms = started.elapsed().as_millis(),
+            "resume found live ready runtime"
+        );
         return Ok(runtime);
     }
 
@@ -40,17 +62,28 @@ pub async fn resume(
         .await
         .context("decode resumed runtime descriptor")?;
 
-    wait_for_runtime_ready(http, control_plane_url, &created.runtime_key).await
+    let ready = wait_for_runtime_ready(http, control_plane_url, &created.runtime_key).await?;
+    info!(
+        session_id,
+        runtime_key = ready.runtime_key,
+        elapsed_ms = started.elapsed().as_millis(),
+        "resume recreated runtime from persisted spec"
+    );
+    Ok(ready)
 }
 
+#[instrument(fields(runtime_key, state_stream_url))]
 pub async fn reconstruct_runtime_spec_from_log(
     state_stream_url: &str,
     runtime_key: &str,
 ) -> Result<PersistedRuntimeSpec> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut attempts = 0usize;
     loop {
+        attempts += 1;
         let index = materialize_session_index(state_stream_url).await?;
         if let Some(spec) = index.runtime_spec(runtime_key).await {
+            info!(runtime_key, attempts, "reconstructed runtime_spec from durable state");
             return Ok(spec);
         }
 
@@ -64,6 +97,7 @@ pub async fn reconstruct_runtime_spec_from_log(
     }
 }
 
+#[instrument(fields(state_stream_url))]
 pub async fn materialize_session_index(state_stream_url: &str) -> Result<SessionIndex> {
     let index = SessionIndex::new();
     let materializer = RuntimeMaterializer::new(vec![Arc::new(index.clone())]);
@@ -74,30 +108,31 @@ pub async fn materialize_session_index(state_stream_url: &str) -> Result<Session
 }
 
 pub async fn materialize_shared_session_index(
-    http: &HttpClient,
-    control_plane_url: &str,
+    shared_state_url: &str,
 ) -> Result<SessionIndex> {
-    let shared_state_stream_url = shared_state_stream_url(http, control_plane_url).await?;
-    materialize_session_index(&shared_state_stream_url).await
+    materialize_session_index(shared_state_url).await
 }
 
+#[instrument(fields(session_id, shared_state_url))]
 async fn wait_for_shared_session_index(
-    http: &HttpClient,
-    control_plane_url: &str,
+    shared_state_url: &str,
     session_id: &str,
 ) -> Result<SessionIndex> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut attempts = 0usize;
     loop {
-        let index = materialize_shared_session_index(http, control_plane_url).await?;
+        attempts += 1;
+        let index = materialize_shared_session_index(shared_state_url).await?;
         if index.get(session_id).await.is_some()
             && index.runtime_spec_for_session(session_id).await.is_some()
         {
+            info!(session_id, attempts, "shared session index is ready for resume");
             return Ok(index);
         }
 
         if tokio::time::Instant::now() >= deadline {
             return Err(anyhow!(
-                "session '{session_id}' or its runtime_spec was not found in the shared session index"
+                "session '{session_id}' or its runtime_spec was not found in the shared session index at {shared_state_url}"
             ));
         }
 
@@ -105,6 +140,7 @@ async fn wait_for_shared_session_index(
     }
 }
 
+#[instrument(skip(http, index), fields(session_id, control_plane_url))]
 async fn lookup_runtime_for_session(
     http: &HttpClient,
     control_plane_url: &str,
@@ -131,36 +167,16 @@ async fn lookup_runtime_for_session(
     .context("decode control-plane runtime descriptor for session")
 }
 
-async fn list_runtimes(
-    http: &HttpClient,
-    control_plane_url: &str,
-) -> Result<Vec<RuntimeDescriptor>> {
-    http.get(format!("{}/v1/runtimes", control_plane_url.trim_end_matches('/')))
-        .send()
-        .await
-        .context("list control-plane runtimes")?
-        .error_for_status()
-        .context("control plane rejected runtime list")?
-        .json::<Vec<RuntimeDescriptor>>()
-        .await
-        .context("decode control-plane runtime list")
-}
-
-async fn shared_state_stream_url(http: &HttpClient, control_plane_url: &str) -> Result<String> {
-    let runtimes = list_runtimes(http, control_plane_url).await?;
-    runtimes
-        .into_iter()
-        .find_map(|runtime| (!runtime.state.url.is_empty()).then_some(runtime.state.url))
-        .ok_or_else(|| anyhow!("no shared state stream URL available from control-plane runtimes"))
-}
-
+#[instrument(skip(http), fields(runtime_key, control_plane_url))]
 async fn wait_for_runtime_ready(
     http: &HttpClient,
     control_plane_url: &str,
     runtime_key: &str,
 ) -> Result<RuntimeDescriptor> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut polls = 0usize;
     loop {
+        polls += 1;
         let descriptor = http
             .get(format!(
                 "{}/v1/runtimes/{}",
@@ -177,6 +193,7 @@ async fn wait_for_runtime_ready(
             .context("decode control-plane runtime descriptor")?;
 
         if descriptor.status == RuntimeStatus::Ready {
+            info!(runtime_key, polls, "runtime became ready during resume");
             return Ok(descriptor);
         }
 

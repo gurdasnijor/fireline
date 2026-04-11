@@ -100,9 +100,11 @@ async fn orchestration_resume_on_live_runtime_is_noop() -> Result<()> {
         )
         .await?;
 
+        let shared_state_url = control_plane.shared_state_url();
         let resumed_once = fireline::orchestration::resume(
             &control_plane.http,
             &control_plane.base_url,
+            &shared_state_url,
             &session_id,
         )
         .await
@@ -110,6 +112,7 @@ async fn orchestration_resume_on_live_runtime_is_noop() -> Result<()> {
         let resumed_twice = fireline::orchestration::resume(
             &control_plane.http,
             &control_plane.base_url,
+            &shared_state_url,
             &session_id,
         )
         .await
@@ -174,15 +177,18 @@ async fn orchestration_concurrent_resume_creates_single_runtime() -> Result<()> 
         )
         .await?;
 
+        let shared_state_url = control_plane.shared_state_url();
         let (first, second) = tokio::join!(
             fireline::orchestration::resume(
                 &control_plane.http,
                 &control_plane.base_url,
+                &shared_state_url,
                 &session_id,
             ),
             fireline::orchestration::resume(
                 &control_plane.http,
                 &control_plane.base_url,
+                &shared_state_url,
                 &session_id,
             ),
         );

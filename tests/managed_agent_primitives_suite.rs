@@ -17,6 +17,7 @@ mod managed_agent_suite;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use agent_client_protocol::{
     ReadTextFileRequest, ReadTextFileResponse, WriteTextFileRequest, WriteTextFileResponse,
@@ -129,7 +130,10 @@ async fn managed_agent_baseline_smoke_validates_session_harness_and_sandbox() ->
 
 #[tokio::test]
 async fn managed_agent_orchestration_acceptance_contract() -> Result<()> {
+    let timings = std::env::var_os("FIRELINE_TEST_TIMINGS").is_some();
+    let total_started = Instant::now();
     let control_plane = ControlPlaneHarness::spawn(true).await?;
+    let mut last_step = Instant::now();
 
     let result = async {
         let runtime = control_plane
@@ -138,12 +142,26 @@ async fn managed_agent_orchestration_acceptance_contract() -> Result<()> {
                 &[testy_load_bin().display().to_string()],
             )
             .await?;
+        if timings {
+            eprintln!(
+                "[timing] create_runtime_with_agent: {} ms",
+                last_step.elapsed().as_millis()
+            );
+            last_step = Instant::now();
+        }
 
         let persisted = fireline::orchestration::reconstruct_runtime_spec_from_log(
             &runtime.state.url,
             &runtime.runtime_key,
         )
         .await?;
+        if timings {
+            eprintln!(
+                "[timing] reconstruct_runtime_spec_from_log: {} ms",
+                last_step.elapsed().as_millis()
+            );
+            last_step = Instant::now();
+        }
         assert_eq!(persisted.runtime_key, runtime.runtime_key);
         assert_eq!(
             persisted.create_spec.runtime_key.as_deref(),
@@ -155,20 +173,40 @@ async fn managed_agent_orchestration_acceptance_contract() -> Result<()> {
         );
 
         let session_id = create_session(&runtime.acp.url).await?;
+        if timings {
+            eprintln!("[timing] create_session: {} ms", last_step.elapsed().as_millis());
+            last_step = Instant::now();
+        }
         let _ = prompt_session(
             &runtime.acp.url,
             &session_id,
             "hello before orchestrated resume",
         )
         .await?;
+        if timings {
+            eprintln!(
+                "[timing] first prompt_session: {} ms",
+                last_step.elapsed().as_millis()
+            );
+            last_step = Instant::now();
+        }
 
         let _stopped = control_plane.stop_runtime(&runtime.runtime_key).await?;
+        if timings {
+            eprintln!("[timing] stop_runtime: {} ms", last_step.elapsed().as_millis());
+            last_step = Instant::now();
+        }
         let resumed = fireline::orchestration::resume(
             &control_plane.http,
             &control_plane.base_url,
+            &control_plane.shared_state_url(),
             &session_id,
         )
         .await?;
+        if timings {
+            eprintln!("[timing] orchestration::resume: {} ms", last_step.elapsed().as_millis());
+            last_step = Instant::now();
+        }
 
         assert_eq!(resumed.runtime_key, runtime.runtime_key);
         assert_eq!(resumed.status, fireline::runtime_host::RuntimeStatus::Ready);
@@ -178,12 +216,26 @@ async fn managed_agent_orchestration_acceptance_contract() -> Result<()> {
         );
 
         load_session(&resumed.acp.url, &session_id).await?;
+        if timings {
+            eprintln!("[timing] load_session: {} ms", last_step.elapsed().as_millis());
+            last_step = Instant::now();
+        }
         let _ = prompt_session(
             &resumed.acp.url,
             &session_id,
             "hello after orchestrated resume",
         )
         .await?;
+        if timings {
+            eprintln!(
+                "[timing] second prompt_session: {} ms",
+                last_step.elapsed().as_millis()
+            );
+            eprintln!(
+                "[timing] managed_agent_orchestration_acceptance_contract total: {} ms",
+                total_started.elapsed().as_millis()
+            );
+        }
 
         Ok(())
     }
