@@ -118,17 +118,26 @@ pub fn emit_runtime_instance_started(
     ));
 }
 
-pub fn emit_runtime_instance_stopped(
+pub async fn emit_runtime_instance_stopped(
     producer: &Producer,
     runtime_id: &str,
     runtime_name: &str,
     created_at: i64,
-) {
+) -> anyhow::Result<()> {
     producer.append_json(&runtime_instance_stopped(
         runtime_id,
         runtime_name,
         created_at,
     ));
+    // Explicit flush is load-bearing for stream-as-truth: without it, the
+    // stopped envelope can be lost when the runtime process exits before
+    // the producer's buffered writes have propagated. That divergence was
+    // caught by tests/runtime_index_agreement.rs::runtime_index_observes_
+    // stopped_runtimes_on_the_shared_stream, which would otherwise see a
+    // control-plane-stopped runtime still advertised as Running on the
+    // shared state stream.
+    producer.flush().await?;
+    Ok(())
 }
 
 pub async fn emit_runtime_spec_persisted(

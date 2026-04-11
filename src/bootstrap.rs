@@ -88,7 +88,9 @@ impl BootstrapHandle {
             &self.runtime_id,
             &self.runtime_name,
             self.runtime_created_at,
-        );
+        )
+        .await
+        .context("flush runtime_instance_stopped on shutdown")?;
 
         self.runtime_materializer_task.abort();
 
