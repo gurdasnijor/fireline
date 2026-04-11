@@ -83,6 +83,8 @@ async fn hosted_runtime_serves_acp_and_emits_state_events() -> Result<()> {
         state_stream: None,
         stream_storage: None,
         peer_directory_path: temp_peer_directory(),
+        control_plane_url: None,
+        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -157,6 +159,8 @@ async fn hosted_runtime_rejects_concurrent_attachment_and_recovers_after_disconn
         state_stream: None,
         stream_storage: None,
         peer_directory_path: temp_peer_directory(),
+        control_plane_url: None,
+        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;

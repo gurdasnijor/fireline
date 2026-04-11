@@ -21,6 +21,7 @@ use anyhow::{Context, Result};
 use axum::Router;
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, DurableStream, Producer};
 use fireline_components::LocalPeerDirectory;
+use fireline_components::directory::PeerRegistry;
 use fireline_conductor::topology::{TopologyRegistry, TopologySpec};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -53,6 +54,8 @@ pub struct BootstrapConfig {
     pub state_stream: Option<String>,
     pub stream_storage: Option<fireline_conductor::runtime::StreamStorageConfig>,
     pub peer_directory_path: PathBuf,
+    pub control_plane_url: Option<String>,
+    pub external_state_stream_url: Option<String>,
     pub topology: TopologySpec,
 }
 
@@ -65,7 +68,7 @@ pub struct BootstrapHandle {
     runtime_name: String,
     runtime_created_at: i64,
     state_producer: Producer,
-    peer_directory_path: PathBuf,
+    local_peer_directory_path: Option<PathBuf>,
     runtime_materializer_task: crate::runtime_materializer::RuntimeMaterializerTask,
     shared_terminal: fireline_conductor::shared_terminal::SharedTerminal,
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -74,9 +77,11 @@ pub struct BootstrapHandle {
 
 impl BootstrapHandle {
     pub async fn shutdown(mut self) -> Result<()> {
-        LocalPeerDirectory::load(&self.peer_directory_path)?
-            .unregister(&self.runtime_id)
-            .context("unregister peer runtime")?;
+        if let Some(path) = &self.local_peer_directory_path {
+            LocalPeerDirectory::load(path)?
+                .unregister(&self.runtime_id)
+                .context("unregister peer runtime")?;
+        }
 
         fireline_conductor::trace::emit_runtime_instance_stopped(
             &self.state_producer,
@@ -116,11 +121,15 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     let connect_host_name = connect_host(local_addr.ip());
     let health_url = format!("http://{connect_host_name}:{}/healthz", local_addr.port());
     let acp_url = format!("ws://{connect_host_name}:{}/acp", local_addr.port());
-    let state_stream_url = format!(
+    let local_state_stream_url = format!(
         "http://{connect_host_name}:{}/v1/stream/{state_stream}",
         local_addr.port()
     );
-    let stream_base_url = format!("http://{connect_host_name}:{}/v1/stream", local_addr.port());
+    let state_stream_url = config
+        .external_state_stream_url
+        .clone()
+        .unwrap_or(local_state_stream_url);
+    let stream_base_url = state_stream_base_url(&state_stream_url)?;
     let runtime_name = config.name.clone();
 
     let stream_client = DurableStreamsClient::new();
@@ -132,7 +141,25 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         .build();
     let node_id = config.node_id;
     let peer_directory_path = config.peer_directory_path;
-    let directory = LocalPeerDirectory::load(&peer_directory_path)?;
+    let local_peer_directory = if config.control_plane_url.is_none() {
+        Some(LocalPeerDirectory::load(&peer_directory_path)?)
+    } else {
+        None
+    };
+    let peer_registry: std::sync::Arc<dyn PeerRegistry> =
+        if let Some(control_plane_url) = config.control_plane_url.clone() {
+            std::sync::Arc::new(
+                crate::control_plane_peer_registry::ControlPlanePeerRegistry::new(
+                    control_plane_url,
+                )?,
+            )
+        } else {
+            std::sync::Arc::new(
+                local_peer_directory
+                    .clone()
+                    .expect("local peer directory should exist when push mode is disabled"),
+            )
+        };
     let session_index = crate::session_index::SessionIndex::new();
     let active_turn_index = crate::active_turn_index::ActiveTurnIndex::new();
     let runtime_materializer = crate::runtime_materializer::RuntimeMaterializer::new(vec![
@@ -147,7 +174,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
             runtime_id: runtime_id.clone(),
             node_id: node_id.clone(),
             stream_base_url: stream_base_url.clone(),
-            peer_registry: std::sync::Arc::new(directory.clone()),
+            peer_registry: peer_registry.clone(),
             active_turn_lookup: std::sync::Arc::new(active_turn_index.clone()),
             child_session_edge_sink: std::sync::Arc::new(
                 crate::child_session_edge::ChildSessionEdgeWriter::new(state_producer.clone()),
@@ -198,13 +225,15 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         &runtime_name,
         runtime_created_at,
     );
-    directory.register(fireline_components::directory::Peer {
-        runtime_id: runtime_id.clone(),
-        agent_name: runtime_name.clone(),
-        acp_url: acp_url.clone(),
-        state_stream_url: Some(state_stream_url.clone()),
-        registered_at_ms: runtime_created_at,
-    })?;
+    if let Some(directory) = &local_peer_directory {
+        directory.register(fireline_components::directory::Peer {
+            runtime_id: runtime_id.clone(),
+            agent_name: runtime_name.clone(),
+            acp_url: acp_url.clone(),
+            state_stream_url: Some(state_stream_url.clone()),
+            registered_at_ms: runtime_created_at,
+        })?;
+    }
 
     Ok(BootstrapHandle {
         runtime_id,
@@ -215,7 +244,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         runtime_name,
         runtime_created_at,
         state_producer,
-        peer_directory_path,
+        local_peer_directory_path: local_peer_directory.map(|_| peer_directory_path),
         runtime_materializer_task,
         shared_terminal,
         shutdown_tx: Some(shutdown_tx),
@@ -232,6 +261,13 @@ fn connect_host(ip: IpAddr) -> String {
     } else {
         ip.to_string()
     }
+}
+
+fn state_stream_base_url(state_stream_url: &str) -> Result<String> {
+    let (base, _) = state_stream_url
+        .rsplit_once('/')
+        .ok_or_else(|| anyhow::anyhow!("state stream url must include a stream name"))?;
+    Ok(base.to_string())
 }
 
 async fn ensure_stream_exists(stream: &DurableStream) -> Result<()> {

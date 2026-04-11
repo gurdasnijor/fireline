@@ -52,16 +52,36 @@ struct Cli {
     peer_directory_path: Option<PathBuf>,
 
     /// Optional explicit runtime key for control-plane-managed subprocess mode.
-    #[arg(long, hide = true)]
+    #[arg(long, env = "FIRELINE_RUNTIME_KEY", hide = true)]
     runtime_key: Option<String>,
 
     /// Optional explicit node id for control-plane-managed subprocess mode.
-    #[arg(long, hide = true)]
+    #[arg(long, env = "FIRELINE_NODE_ID", hide = true)]
     node_id: Option<String>,
 
     /// Optional control-plane base URL used by managed runtimes in push mode.
     #[arg(long, env = "FIRELINE_CONTROL_PLANE_URL", hide = true)]
     control_plane_url: Option<String>,
+
+    /// Optional provider kind override for control-plane-managed runtimes.
+    #[arg(long, env = "FIRELINE_PROVIDER_KIND", hide = true)]
+    provider_kind: Option<String>,
+
+    /// Optional provider instance id override for control-plane-managed runtimes.
+    #[arg(long, env = "FIRELINE_PROVIDER_INSTANCE_ID", hide = true)]
+    provider_instance_id: Option<String>,
+
+    /// Optional externally reachable ACP URL to register instead of the bind URL.
+    #[arg(long, env = "FIRELINE_ADVERTISED_ACP_URL", hide = true)]
+    advertised_acp_url: Option<String>,
+
+    /// Optional externally reachable state stream URL to register instead of the bind URL.
+    #[arg(long, env = "FIRELINE_ADVERTISED_STATE_STREAM_URL", hide = true)]
+    advertised_state_stream_url: Option<String>,
+
+    /// Optional external durable-streams URL for this runtime's state stream.
+    #[arg(long, env = "FIRELINE_EXTERNAL_STATE_STREAM_URL", hide = true)]
+    external_state_stream_url: Option<String>,
 
     /// Optional runtime topology JSON payload.
     #[arg(long)]
@@ -150,20 +170,35 @@ async fn run_managed_runtime(
         state_stream: cli.state_stream,
         stream_storage: None,
         peer_directory_path,
+        control_plane_url: cli.control_plane_url.clone(),
+        external_state_stream_url: cli.external_state_stream_url.clone(),
         topology,
     })
     .await?;
     wait_for_runtime_listener_ready(&handle.health_url).await?;
 
+    let provider = parse_provider_kind(cli.provider_kind.as_deref())?;
+    let advertised_acp_url = cli
+        .advertised_acp_url
+        .clone()
+        .unwrap_or_else(|| handle.acp_url.clone());
+    let advertised_state_stream_url = cli
+        .advertised_state_stream_url
+        .clone()
+        .or(cli.external_state_stream_url.clone())
+        .unwrap_or_else(|| handle.state_stream_url.clone());
     let descriptor = RuntimeDescriptor {
         runtime_key: runtime_key.clone(),
         runtime_id: handle.runtime_id.clone(),
         node_id,
-        provider: RuntimeProviderKind::Local,
-        provider_instance_id: handle.runtime_id.clone(),
+        provider,
+        provider_instance_id: cli
+            .provider_instance_id
+            .clone()
+            .unwrap_or_else(|| handle.runtime_id.clone()),
         status: RuntimeStatus::Ready,
-        acp: Endpoint::new(handle.acp_url.clone()),
-        state: Endpoint::new(handle.state_stream_url.clone()),
+        acp: Endpoint::new(advertised_acp_url),
+        state: Endpoint::new(advertised_state_stream_url),
         helper_api_base_url: None,
         created_at_ms: started_at_ms,
         updated_at_ms: started_at_ms,
@@ -257,4 +292,12 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("time went backwards")
         .as_millis() as i64
+}
+
+fn parse_provider_kind(value: Option<&str>) -> Result<RuntimeProviderKind> {
+    match value {
+        None | Some("local") => Ok(RuntimeProviderKind::Local),
+        Some("docker") => Ok(RuntimeProviderKind::Docker),
+        Some(other) => Err(anyhow::anyhow!("unsupported runtime provider kind '{other}'")),
+    }
 }

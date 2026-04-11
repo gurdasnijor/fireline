@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 
 use super::provider::{
     CreateRuntimeSpec, RuntimeLaunch, RuntimeProvider, RuntimeProviderKind, RuntimeProviderRequest,
@@ -8,12 +9,19 @@ use super::provider::{
 
 #[derive(Clone)]
 pub struct RuntimeManager {
-    local: Arc<dyn RuntimeProvider>,
+    providers: HashMap<RuntimeProviderKind, Arc<dyn RuntimeProvider>>,
 }
 
 impl RuntimeManager {
     pub fn new(local: Arc<dyn RuntimeProvider>) -> Self {
-        Self { local }
+        let mut providers = HashMap::new();
+        providers.insert(RuntimeProviderKind::Local, local);
+        Self { providers }
+    }
+
+    pub fn with_provider(mut self, provider: Arc<dyn RuntimeProvider>) -> Self {
+        self.providers.insert(provider.kind(), provider);
+        self
     }
 
     pub async fn start(
@@ -22,15 +30,28 @@ impl RuntimeManager {
         runtime_key: String,
         node_id: String,
     ) -> Result<(RuntimeProviderKind, RuntimeLaunch)> {
-        let provider = self.resolve(spec.provider);
+        let provider = self.resolve(spec.provider)?;
         let kind = provider.kind();
         let launch = provider.start(spec, runtime_key, node_id).await?;
         Ok((kind, launch))
     }
 
-    fn resolve(&self, request: RuntimeProviderRequest) -> Arc<dyn RuntimeProvider> {
+    pub fn resolve_kind(&self, request: RuntimeProviderRequest) -> Result<RuntimeProviderKind> {
+        self.resolve(request).map(|provider| provider.kind())
+    }
+
+    fn resolve(&self, request: RuntimeProviderRequest) -> Result<Arc<dyn RuntimeProvider>> {
         match request {
-            RuntimeProviderRequest::Auto | RuntimeProviderRequest::Local => self.local.clone(),
+            RuntimeProviderRequest::Auto | RuntimeProviderRequest::Local => self
+                .providers
+                .get(&RuntimeProviderKind::Local)
+                .cloned()
+                .ok_or_else(|| anyhow!("local runtime provider is not configured")),
+            RuntimeProviderRequest::Docker => self
+                .providers
+                .get(&RuntimeProviderKind::Docker)
+                .cloned()
+                .ok_or_else(|| anyhow!("docker runtime provider is not configured")),
         }
     }
 }

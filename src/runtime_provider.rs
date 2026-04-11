@@ -31,6 +31,8 @@ impl LocalRuntimeLauncher for BootstrapRuntimeLauncher {
             state_stream: spec.state_stream,
             stream_storage: spec.stream_storage,
             peer_directory_path,
+            control_plane_url: None,
+            external_state_stream_url: None,
             topology: spec.topology,
         })
         .await

@@ -104,6 +104,8 @@ async fn session_load_returns_explicit_non_resumable_error_with_durable_record()
         state_stream: None,
         stream_storage: None,
         peer_directory_path: temp_peer_directory(),
+        control_plane_url: None,
+        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -175,6 +177,8 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
             stream_data_dir.clone(),
         )),
         peer_directory_path: peer_directory_path.clone(),
+        control_plane_url: None,
+        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -195,6 +199,8 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
             stream_data_dir,
         )),
         peer_directory_path,
+        control_plane_url: None,
+        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -242,6 +248,8 @@ async fn session_load_reattaches_against_runtime_owned_terminal_when_agent_suppo
         state_stream: None,
         stream_storage: None,
         peer_directory_path: temp_peer_directory(),
+        control_plane_url: None,
+        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -290,6 +298,8 @@ async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not
             stream_data_dir.clone(),
         )),
         peer_directory_path: peer_directory_path.clone(),
+        control_plane_url: None,
+        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -310,6 +320,8 @@ async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not
             stream_data_dir,
         )),
         peer_directory_path,
+        control_plane_url: None,
+        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;

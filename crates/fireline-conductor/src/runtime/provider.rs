@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -13,12 +14,14 @@ use crate::topology::TopologySpec;
 pub enum RuntimeProviderRequest {
     Auto,
     Local,
+    Docker,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeProviderKind {
     Local,
+    Docker,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -184,6 +187,10 @@ impl RuntimeLaunch {
 #[async_trait]
 pub trait ManagedRuntime: Send {
     async fn shutdown(self: Box<Self>) -> Result<()>;
+}
+
+pub trait RuntimeTokenIssuer: Send + Sync {
+    fn issue(&self, runtime_key: &str, ttl: Duration) -> String;
 }
 
 #[async_trait]

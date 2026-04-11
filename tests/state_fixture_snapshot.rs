@@ -86,6 +86,8 @@ async fn update_rust_state_fixture_snapshot() -> Result<()> {
         state_stream: Some(format!("fireline-fixture-child-{}", Uuid::new_v4())),
         stream_storage: None,
         peer_directory_path: peer_directory_path.clone(),
+        control_plane_url: None,
+        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -100,6 +102,8 @@ async fn update_rust_state_fixture_snapshot() -> Result<()> {
         state_stream: Some(format!("fireline-fixture-{}", Uuid::new_v4())),
         stream_storage: None,
         peer_directory_path,
+        control_plane_url: None,
+        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;

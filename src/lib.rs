@@ -33,6 +33,7 @@ pub mod bootstrap;
 pub mod child_session_edge;
 pub mod connections;
 pub mod control_plane_client;
+pub mod control_plane_peer_registry;
 pub mod error_codes;
 pub mod load_coordinator;
 pub mod routes;

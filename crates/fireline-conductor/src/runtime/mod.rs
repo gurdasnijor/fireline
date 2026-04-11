@@ -1,15 +1,16 @@
+mod docker;
 mod local;
 mod manager;
 mod provider;
 mod registry;
 
+pub use self::docker::{DockerProvider, DockerProviderConfig};
 pub use self::local::{LocalProvider, LocalRuntimeLauncher};
 pub use self::manager::RuntimeManager;
 pub use self::provider::{
     CreateRuntimeSpec, Endpoint, HeartbeatMetrics, HeartbeatReport, ManagedRuntime,
-    RuntimeDescriptor, RuntimeLaunch, RuntimeProvider, RuntimeProviderKind,
-    RuntimeProviderRequest, RuntimeRegistration, RuntimeStatus, StreamStorageConfig,
-    StreamStorageMode,
+    RuntimeDescriptor, RuntimeLaunch, RuntimeProvider, RuntimeProviderKind, RuntimeProviderRequest,
+    RuntimeRegistration, RuntimeStatus, RuntimeTokenIssuer, StreamStorageConfig, StreamStorageMode,
 };
 pub use self::registry::RuntimeRegistry;
 
@@ -53,12 +54,13 @@ impl RuntimeHost {
         let runtime_key = format!("runtime:{}", Uuid::new_v4());
         let created_at_ms = now_ms();
         let node_id = node_id_for(spec.host);
+        let provider = self.inner.manager.resolve_kind(spec.provider)?;
 
         self.inner.registry.upsert(RuntimeDescriptor {
             runtime_key: runtime_key.clone(),
             runtime_id: String::new(),
             node_id: node_id.clone(),
-            provider: RuntimeProviderKind::Local,
+            provider,
             provider_instance_id: runtime_key.clone(),
             status: RuntimeStatus::Starting,
             acp: Endpoint::new(""),

@@ -13,6 +13,7 @@ tokio-util.workspace = true
 futures.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
+bollard.workspace = true
 
 # Serde (for the state writer's JSON construction)
 serde.workspace = true
@@ -20,6 +21,9 @@ serde_json.workspace = true
 uuid.workspace = true
 dirs.workspace = true
 toml.workspace = true
+tar.workspace = true
+walkdir.workspace = true
+url.workspace = true
 
 # Tracing
 tracing.workspace = true
