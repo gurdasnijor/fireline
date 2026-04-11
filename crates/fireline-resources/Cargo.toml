@@ -1,0 +1,9 @@
+[package]
+name = "fireline-resources"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Resource mounting and filesystem primitives for Fireline"
+
+[dependencies]

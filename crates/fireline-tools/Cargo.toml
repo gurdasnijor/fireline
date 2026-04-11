@@ -1,0 +1,9 @@
+[package]
+name = "fireline-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tool registry and peer transport primitives for Fireline"
+
+[dependencies]

@@ -1,0 +1,9 @@
+[package]
+name = "fireline-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ACP harness, approval, and effect-capture primitives for Fireline"
+
+[dependencies]

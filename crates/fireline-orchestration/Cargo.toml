@@ -1,0 +1,9 @@
+[package]
+name = "fireline-orchestration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Session wake orchestration primitives for Fireline"
+
+[dependencies]
