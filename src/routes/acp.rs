@@ -25,13 +25,13 @@ use fireline_conductor::{
 use sacp::{Client, Conductor, DynConnectTo};
 use uuid::Uuid;
 
-pub fn router(state: crate::bootstrap::AppState) -> Router {
+pub(crate) fn router(state: crate::bootstrap::AppState) -> Router {
     Router::new()
         .route("/acp", get(acp_websocket_handler))
         .with_state(state)
 }
 
-pub async fn acp_websocket_handler(
+async fn acp_websocket_handler(
     State(app): State<crate::bootstrap::AppState>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {

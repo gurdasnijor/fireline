@@ -30,19 +30,16 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 #[derive(Clone)]
-pub struct AppState {
+pub(crate) struct AppState {
     pub conductor_name: String,
     pub runtime_key: String,
     pub node_id: String,
     pub runtime_id: String,
     pub state_producer: Producer,
-    pub peer_directory_path: PathBuf,
     pub session_index: crate::session_index::SessionIndex,
-    pub active_turn_index: crate::active_turn_index::ActiveTurnIndex,
     pub shared_terminal: fireline_conductor::shared_terminal::SharedTerminal,
     pub topology_registry: TopologyRegistry,
     pub topology: TopologySpec,
-    pub mounted_resources: Vec<MountedResource>,
 }
 
 #[derive(Debug, Clone)]
@@ -192,13 +189,10 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         node_id: node_id.clone(),
         runtime_id: runtime_id.clone(),
         state_producer: state_producer.clone(),
-        peer_directory_path: peer_directory_path.clone(),
         session_index: session_index.clone(),
-        active_turn_index: active_turn_index.clone(),
         shared_terminal: shared_terminal.clone(),
         topology_registry,
         topology: config.topology.clone(),
-        mounted_resources: config.mounted_resources,
     };
 
     let app = Router::new()

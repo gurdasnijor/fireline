@@ -33,12 +33,12 @@
 //!
 //! Everything else is process glue: request routing, connection
 //! lookup files, error-code constants, topology wiring, and the
-//! materializer/index projections that sit behind `bootstrap::AppState`.
-//! These are subject to change without notice and must not be imported
-//! from outside this crate. If you find yourself wanting to reach into
-//! one of them from a test or another crate, that is a signal to
-//! promote the needed API into the public surface above rather than
-//! broaden visibility by hand.
+//! materializer/index projections that sit behind the crate-private
+//! `bootstrap::AppState`. These are subject to change without notice
+//! and must not be imported from outside this crate. If you find
+//! yourself wanting to reach into one of them from a test or another
+//! crate, that is a signal to promote the needed API into the public
+//! surface above rather than broaden visibility by hand.
 //!
 //! For the physical/logical architecture of the workspace, see
 //! `docs/architecture.md`.
@@ -52,12 +52,8 @@ pub mod runtime_registry;
 pub mod stream_host;
 
 // Binary-internal modules. These must stay crate-private; see the
-// module docstring for rationale. The modules wired into
-// `bootstrap::AppState` as typed fields (`active_turn_index`,
-// `runtime_materializer`, `session_index`) are left `pub mod` until
-// `AppState` itself is scoped down — tightening them in isolation
-// would make public-field types privately reachable.
-pub mod active_turn_index;
+// module docstring for rationale.
+pub(crate) mod active_turn_index;
 pub(crate) mod agent_catalog;
 pub(crate) mod child_session_edge;
 pub(crate) mod connections;
@@ -65,7 +61,7 @@ pub(crate) mod control_plane_peer_registry;
 pub(crate) mod error_codes;
 pub(crate) mod load_coordinator;
 pub(crate) mod routes;
-pub mod runtime_materializer;
+pub(crate) mod runtime_materializer;
 mod runtime_provider;
-pub mod session_index;
+pub(crate) mod session_index;
 pub(crate) mod topology;
