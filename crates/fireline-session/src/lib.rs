@@ -2,8 +2,8 @@
 
 pub mod active_turn_index;
 pub mod runtime_materializer;
+pub mod runtime_identity;
 pub mod session_index;
-mod spec;
 pub mod stream_host;
 
 pub use active_turn_index::{ActiveTurnIndex, ActiveTurnRecord};
@@ -11,8 +11,12 @@ pub use runtime_materializer::{
     RawStateEnvelope, RawStateHeaders, RuntimeMaterializer, RuntimeMaterializerTask,
     StateProjection,
 };
+pub use runtime_identity::{
+    CreateRuntimeSpec, Endpoint, HeartbeatMetrics, HeartbeatReport, PersistedRuntimeSpec,
+    RuntimeDescriptor, RuntimeProviderKind, RuntimeProviderRequest, RuntimeRegistration,
+    RuntimeStatus,
+};
 pub use session_index::SessionIndex;
-pub use spec::PersistedRuntimeSpec;
 pub use stream_host::*;
 
 use serde::{Deserialize, Serialize};

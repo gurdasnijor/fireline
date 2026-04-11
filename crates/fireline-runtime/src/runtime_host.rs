@@ -4,7 +4,7 @@ use anyhow::Result;
 use crate::runtime::{LocalProvider, RuntimeHost as InnerRuntimeHost, RuntimeManager, RuntimeRegistry};
 use crate::runtime_provider::BootstrapRuntimeLauncher;
 
-pub use crate::runtime::{
+pub use fireline_session::{
     CreateRuntimeSpec, Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeProviderRequest,
     RuntimeRegistration, RuntimeStatus, StreamStorageConfig, StreamStorageMode,
 };
