@@ -180,6 +180,22 @@ pub async fn emit_runtime_spec_persisted(
 /// the stream always sees the latest observed view for each
 /// runtime_key.
 ///
+/// # Why a unique producer id per call
+///
+/// `runtime_endpoints` is a **publish-current-state** envelope — every
+/// call carries a different `status`/`updated_at_ms` body. It is NOT
+/// a deliver-once command. The durable-streams Rust producer dedups
+/// on `(producer_id, epoch, seq)` and resets `next_seq` to 0 on every
+/// fresh `.build()`, so a shared producer_id across call sites makes
+/// every emit after the first appear as `duplicate: true` and get
+/// silently dropped server-side. The projection then sees only the
+/// first state forever.
+///
+/// A per-call `Uuid` suffix makes each emit its own producer session,
+/// which is what the call sites actually want. Dedup safety for
+/// genuine retries is preserved at the endpoint level (tests observe
+/// eventual Stopped) because every transition writes a fresh body.
+///
 /// Empty `state_stream_url` early-returns (direct-host mode with no
 /// shared stream does not emit).
 pub async fn emit_runtime_endpoints_persisted(
@@ -194,7 +210,11 @@ pub async fn emit_runtime_endpoints_persisted(
     let mut stream = client.stream(state_stream_url);
     stream.set_content_type("application/json");
     let producer = stream
-        .producer(format!("runtime-endpoints-{}", descriptor.runtime_key))
+        .producer(format!(
+            "runtime-endpoints-{}-{}",
+            descriptor.runtime_key,
+            uuid::Uuid::new_v4()
+        ))
         .content_type("application/json")
         .build();
     producer.append_json(&StateEnvelope {

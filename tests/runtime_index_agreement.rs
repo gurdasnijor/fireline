@@ -175,11 +175,11 @@ async fn runtime_index_observes_stopped_runtimes_on_the_shared_stream() -> Resul
         let runtime = control_plane.create_runtime_from_spec(spec).await?;
         control_plane.stop_runtime(&runtime.runtime_key).await?;
 
-        // Brief propagation window — the runtime's shutdown path
-        // emits `runtime_instance_stopped` asynchronously after the
-        // control plane's stop call has returned. 500ms is far under
-        // the DEFAULT_TIMEOUT but comfortably above the typical
-        // propagation window for an in-process shared stream.
+        // Brief propagation window: stop()'s emit is synchronous+
+        // flushed and every emit call now uses a fresh producer id
+        // (see `emit_runtime_endpoints_persisted` in trace.rs), so we
+        // just need enough time for the materializer's live-follow
+        // loop to read the committed chunk.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         let index = Arc::new(RuntimeIndex::new());
