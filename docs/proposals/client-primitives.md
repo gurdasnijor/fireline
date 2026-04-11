@@ -367,23 +367,24 @@ export function httpOrchestrator(opts: {
 }): Orchestrator
 ```
 
-**The orchestrator is Host-independent.** It only knows how to call the `WakeHandler` with a session ID and retry. The handler's body is what dispatches to a `Host.wake(handle)`.
+**The orchestrator is Host-independent.** It only knows how to call the `WakeHandler` with a session ID and retry. It does NOT know about `SessionHandle` at all — only strings. The handler's body is what dispatches to a `Host.wake(handle)`, and constructing that handle from the string is a satisfier-layer concern, not a primitive-layer one.
 
-Most consumers will use the convenience factory that builds both together:
+**Deliberately NOT included at the primitive layer:** a generic `orchestratorFor(host, opts)` helper or any `resolveHandle(host, session_id)` function. An earlier draft of this doc sketched such a helper; it was a design mistake. There is no generic way to reconstruct a `SessionHandle` from a `session_id` string without knowing the specific Host satisfier's handle shape, and if you know the satisfier you're already outside the primitive layer. Each Host satisfier provides its own convenience factory that closes over the host and produces a `WakeHandler` internally. For example:
 
 ```ts
-export function orchestratorFor(host: Host, opts?: {
-  readonly registry?: SessionRegistry
-  readonly kind?: 'while_loop' | 'cron' | 'http'
-  readonly pollIntervalMs?: number
-}): Orchestrator {
+// Tier 3 / satisfier-layer sketch — NOT part of @fireline/client/orchestration
+// lives in @fireline/client/host-fireline instead
+export function createFirelineHostOrchestrator(opts: FirelineHostOptions): Orchestrator {
+  const host = createFirelineHost(opts)
   const handler: WakeHandler = async (session_id) => {
-    const handle = await resolveHandle(host, session_id)
-    return host.wake(handle)
+    // Fireline's session_id is the handle.id trivially
+    await host.wake({ id: session_id, kind: 'fireline' })
   }
-  return whileLoopOrchestrator({ handler, registry: opts?.registry ?? defaultRegistry, ... })
+  return whileLoopOrchestrator({ handler, registry: defaultFirelineRegistry(opts), pollIntervalMs: 500 })
 }
 ```
+
+The Claude-host satisfier has an analogous factory that closes over its own dependencies and produces a `{ id: session_id, kind: 'claude' }` handle inside the closure. Neither satisfier's factory appears in the primitive-layer `@fireline/client/orchestration` module — they live in the respective host satisfier packages.
 
 ### `SessionRegistry` — reading "which sessions need wake" from `@fireline/state`
 
@@ -789,10 +790,10 @@ Each tier is individually reviewable and individually useful.
 ### Tier 2 — `@fireline/client/host` + `@fireline/client/orchestration` (day)
 
 - `Host` interface + `SessionHandle`, `SessionStatus`, `WakeOutcome`, `SessionInput`, `SessionOutput` types
-- `Orchestrator` interface + `WakeHandler` type
-- `whileLoopOrchestrator` + `cronOrchestrator` + `httpOrchestrator` builders
-- `SessionRegistry` interface + `streamSessionRegistry` default satisfier
-- `orchestratorFor(host)` convenience factory
+- `Orchestrator` interface + `WakeHandler = (session_id: string) => Promise<void>` type. Note: `WakeHandler` deals in strings, never in `SessionHandle`. Handle construction is a satisfier-layer concern.
+- `whileLoopOrchestrator` live builder + `cronOrchestrator` / `httpOrchestrator` stubbed signatures (future satisfiers)
+- `SessionRegistry` interface (`listPending(): AsyncIterable<string>`, `onPendingChange`) + `streamSessionRegistry` default satisfier
+- **No generic `orchestratorFor(host)` convenience factory.** See the "Deliberately NOT included at the primitive layer" callout in Module 2 — a generic `orchestratorFor` requires resolving a `SessionHandle` from a string without knowing the satisfier's handle shape, which isn't possible at the interface layer. Per-satisfier convenience factories live in Tier 3 (`createFirelineHostOrchestrator`) and Tier 6 (`createClaudeHostOrchestrator`) respectively.
 - Zero runtime dependencies on Fireline specifics. Tests use a mock `Host`.
 
 ### Tier 3 — `@fireline/client/host-fireline` (day)
