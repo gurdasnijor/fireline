@@ -7,6 +7,8 @@ repository.workspace = true
 description = "Prebuilt topology components for Fireline (peer calls, audit, context, approval, budget, smithery bridge)"
 
 [dependencies]
+fireline-conductor.workspace = true
+
 # Async runtime
 tokio.workspace = true
 futures.workspace = true

@@ -127,18 +127,76 @@ impl StreamStorageConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateRuntimeSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
     pub provider: RuntimeProviderRequest,
     pub host: IpAddr,
     pub port: u16,
     pub name: String,
     pub agent_command: Vec<String>,
+    #[serde(default)]
+    pub resources: Vec<ResourceRef>,
     pub state_stream: Option<String>,
     pub stream_storage: Option<StreamStorageConfig>,
     pub peer_directory_path: Option<PathBuf>,
     pub topology: TopologySpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedRuntimeSpec {
+    pub runtime_key: String,
+    pub node_id: String,
+    #[serde(flatten)]
+    pub create_spec: CreateRuntimeSpec,
+}
+
+impl PersistedRuntimeSpec {
+    pub fn new(
+        runtime_key: impl Into<String>,
+        node_id: impl Into<String>,
+        mut create_spec: CreateRuntimeSpec,
+    ) -> Self {
+        let runtime_key = runtime_key.into();
+        let node_id = node_id.into();
+        create_spec.runtime_key = Some(runtime_key.clone());
+        create_spec.node_id = Some(node_id.clone());
+        Self {
+            runtime_key,
+            node_id,
+            create_spec,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ResourceRef {
+    LocalPath {
+        path: PathBuf,
+        mount_path: PathBuf,
+    },
+    GitRemote {
+        repo_url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+        mount_path: PathBuf,
+    },
+    S3 {
+        bucket: String,
+        prefix: String,
+        mount_path: PathBuf,
+    },
+    Gcs {
+        bucket: String,
+        prefix: String,
+        mount_path: PathBuf,
+    },
 }
 
 pub struct RuntimeLaunch {

@@ -14,7 +14,7 @@ use fireline::bootstrap::{self, BootstrapConfig};
 use fireline::control_plane_client::ControlPlaneClient;
 use fireline::runtime_host::{Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
 use fireline::runtime_registry::RuntimeRegistry;
-use fireline_conductor::runtime::{HeartbeatMetrics, RuntimeRegistration};
+use fireline_conductor::runtime::{HeartbeatMetrics, MountedResource, RuntimeRegistration};
 use fireline_conductor::topology::TopologySpec;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -87,6 +87,10 @@ struct Cli {
     #[arg(long)]
     topology_json: Option<String>,
 
+    /// Optional normalized resource mounts prepared by the provider.
+    #[arg(long, hide = true)]
+    mounted_resources_json: Option<String>,
+
     /// The agent command to run, e.g. `npx -y @zed-industries/claude-code-acp`.
     #[arg(trailing_var_arg = true, required = true)]
     agent_command: Vec<String>,
@@ -105,16 +109,20 @@ async fn main() -> Result<()> {
         Some(ref json) => serde_json::from_str::<TopologySpec>(json)?,
         None => TopologySpec::default(),
     };
+    let mounted_resources = match cli.mounted_resources_json.as_deref() {
+        Some(json) => serde_json::from_str::<Vec<MountedResource>>(json)?,
+        None => Vec::new(),
+    };
     let managed_runtime_key = cli.runtime_key.clone();
     let managed_node_id = cli.node_id.clone();
 
     match (managed_runtime_key, managed_node_id) {
         (Some(runtime_key), Some(node_id)) => {
-            run_managed_runtime(cli, host, topology, runtime_key, node_id).await
+            run_managed_runtime(cli, host, topology, mounted_resources, runtime_key, node_id).await
         }
         (None, None) => {
             let registry = load_runtime_registry(cli.runtime_registry_path.clone())?;
-            run_direct_host(cli, host, topology, registry).await
+            run_direct_host(cli, host, topology, mounted_resources, registry).await
         }
         _ => Err(anyhow::anyhow!(
             "--runtime-key and --node-id must be provided together"
@@ -126,16 +134,20 @@ async fn run_direct_host(
     cli: Cli,
     host: IpAddr,
     topology: TopologySpec,
+    _mounted_resources: Vec<MountedResource>,
     registry: RuntimeRegistry,
 ) -> Result<()> {
     let runtime_host = fireline::runtime_host::RuntimeHost::new(registry);
     let descriptor = runtime_host
         .create(fireline::runtime_host::CreateRuntimeSpec {
+            runtime_key: None,
+            node_id: None,
             provider: fireline::runtime_host::RuntimeProviderRequest::Local,
             host,
             port: cli.port,
             name: cli.name,
             agent_command: cli.agent_command,
+            resources: Vec::new(),
             state_stream: cli.state_stream,
             stream_storage: None,
             peer_directory_path: cli.peer_directory_path,
@@ -152,6 +164,7 @@ async fn run_managed_runtime(
     cli: Cli,
     host: IpAddr,
     topology: TopologySpec,
+    mounted_resources: Vec<MountedResource>,
     runtime_key: String,
     node_id: String,
 ) -> Result<()> {
@@ -167,6 +180,7 @@ async fn run_managed_runtime(
         runtime_key: runtime_key.clone(),
         node_id: node_id.clone(),
         agent_command: cli.agent_command,
+        mounted_resources,
         state_stream: cli.state_stream,
         stream_storage: None,
         peer_directory_path,
@@ -298,6 +312,8 @@ fn parse_provider_kind(value: Option<&str>) -> Result<RuntimeProviderKind> {
     match value {
         None | Some("local") => Ok(RuntimeProviderKind::Local),
         Some("docker") => Ok(RuntimeProviderKind::Docker),
-        Some(other) => Err(anyhow::anyhow!("unsupported runtime provider kind '{other}'")),
+        Some(other) => Err(anyhow::anyhow!(
+            "unsupported runtime provider kind '{other}'"
+        )),
     }
 }

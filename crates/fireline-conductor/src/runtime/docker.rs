@@ -8,22 +8,23 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
+use bollard::Docker;
 use bollard::body_full;
 use bollard::models::{ContainerCreateBody, HostConfig, PortBinding};
 use bollard::query_parameters::{
     BuildImageOptionsBuilder, CreateContainerOptionsBuilder, RemoveContainerOptionsBuilder,
     StartContainerOptions, StopContainerOptionsBuilder,
 };
-use bollard::Docker;
 use futures::StreamExt;
 use tar::Builder;
 use tokio::sync::Mutex;
 use url::Url;
 use walkdir::WalkDir;
 
+use super::mounter::{LocalPathMounter, ResourceMounter, prepare_resources};
 use super::provider::{
-    CreateRuntimeSpec, Endpoint, ManagedRuntime, RuntimeLaunch, RuntimeProvider, RuntimeProviderKind,
-    RuntimeTokenIssuer,
+    CreateRuntimeSpec, Endpoint, ManagedRuntime, RuntimeLaunch, RuntimeProvider,
+    RuntimeProviderKind, RuntimeTokenIssuer,
 };
 
 const CONTAINER_PORT: u16 = 4437;
@@ -44,6 +45,7 @@ pub struct DockerProvider {
     docker: Docker,
     config: DockerProviderConfig,
     token_issuer: Arc<dyn RuntimeTokenIssuer>,
+    mounters: Vec<Arc<dyn ResourceMounter>>,
     image_ready: Mutex<bool>,
 }
 
@@ -56,6 +58,7 @@ impl DockerProvider {
             docker: Docker::connect_with_local_defaults().context("connect to local docker")?,
             config,
             token_issuer,
+            mounters: vec![Arc::new(LocalPathMounter::new())],
             image_ready: Mutex::new(false),
         })
     }
@@ -118,6 +121,8 @@ impl RuntimeProvider for DockerProvider {
         node_id: String,
     ) -> Result<RuntimeLaunch> {
         self.ensure_image_ready().await?;
+        let mounted_resources =
+            prepare_resources(&spec.resources, &self.mounters, &runtime_key).await?;
 
         let control_plane_url = rewrite_loopback_for_container(&self.config.control_plane_url)?;
         let container_name = format!("fireline-{}", sanitize_name(&runtime_key));
@@ -131,9 +136,7 @@ impl RuntimeProvider for DockerProvider {
             .as_ref()
             .map(|base| join_stream_url(base, &state_stream_name))
             .unwrap_or_else(|| {
-                format!(
-                    "http://127.0.0.1:{published_port}/v1/stream/{state_stream_name}"
-                )
+                format!("http://127.0.0.1:{published_port}/v1/stream/{state_stream_name}")
             });
         let connect_state_stream_url = self
             .config
@@ -144,6 +147,17 @@ impl RuntimeProvider for DockerProvider {
 
         let runtime_token = self.token_issuer.issue(&runtime_key, TOKEN_TTL);
         let agent_command = rewrite_agent_command_for_image(&spec.agent_command)?;
+        let bind_mounts = mounted_resources
+            .iter()
+            .map(|resource| {
+                format!(
+                    "{}:{}:{}",
+                    resource.host_path.display(),
+                    resource.mount_path.display(),
+                    if resource.read_only { "ro" } else { "rw" }
+                )
+            })
+            .collect::<Vec<_>>();
         let mut cmd = vec![
             "--host".to_string(),
             "0.0.0.0".to_string(),
@@ -162,9 +176,18 @@ impl RuntimeProvider for DockerProvider {
                 serde_json::to_string(&spec.topology).context("serialize runtime topology")?;
             cmd.splice(
                 cmd.len() - 1..cmd.len() - 1,
+                ["--topology-json".to_string(), topology_json],
+            );
+        }
+
+        if !mounted_resources.is_empty() {
+            let mounted_resources_json =
+                serde_json::to_string(&mounted_resources).context("serialize mounted resources")?;
+            cmd.splice(
+                cmd.len() - 1..cmd.len() - 1,
                 [
-                    "--topology-json".to_string(),
-                    topology_json,
+                    "--mounted-resources-json".to_string(),
+                    mounted_resources_json,
                 ],
             );
         }
@@ -181,14 +204,14 @@ impl RuntimeProvider for DockerProvider {
                     "FIRELINE_PROVIDER_KIND=docker".to_string(),
                     format!("FIRELINE_PROVIDER_INSTANCE_ID={provider_instance_id}"),
                     format!("FIRELINE_ADVERTISED_ACP_URL={advertised_acp_url}"),
-                    format!(
-                        "FIRELINE_ADVERTISED_STATE_STREAM_URL={advertised_state_stream_url}"
-                    ),
+                    format!("FIRELINE_ADVERTISED_STATE_STREAM_URL={advertised_state_stream_url}"),
                 ]
                 .into_iter()
-                .chain(connect_state_stream_url.into_iter().map(|url| {
-                    format!("FIRELINE_EXTERNAL_STATE_STREAM_URL={url}")
-                }))
+                .chain(
+                    connect_state_stream_url
+                        .into_iter()
+                        .map(|url| format!("FIRELINE_EXTERNAL_STATE_STREAM_URL={url}")),
+                )
                 .collect(),
             ),
             exposed_ports: Some(HashMap::from([(
@@ -200,6 +223,7 @@ impl RuntimeProvider for DockerProvider {
                 (LABEL_PROVIDER.to_string(), "docker".to_string()),
             ])),
             host_config: Some(HostConfig {
+                binds: (!bind_mounts.is_empty()).then_some(bind_mounts),
                 port_bindings: Some(HashMap::from([(
                     format!("{CONTAINER_PORT}/tcp"),
                     Some(vec![PortBinding {
@@ -275,7 +299,8 @@ fn reserve_host_port() -> Result<u16> {
 }
 
 fn sanitize_name(value: &str) -> String {
-    value.chars()
+    value
+        .chars()
         .map(|ch| match ch {
             'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => ch,
             _ => '-',
@@ -353,8 +378,8 @@ fn tar_build_context(root: &Path) -> Result<Vec<u8>> {
         }
 
         if entry.file_type().is_file() {
-            let mut file =
-                File::open(path).with_context(|| format!("open build context {}", path.display()))?;
+            let mut file = File::open(path)
+                .with_context(|| format!("open build context {}", path.display()))?;
             let mut contents = Vec::new();
             file.read_to_end(&mut contents)
                 .with_context(|| format!("read build context {}", path.display()))?;

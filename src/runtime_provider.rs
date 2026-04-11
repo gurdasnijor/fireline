@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use fireline_conductor::runtime::{
-    CreateRuntimeSpec, Endpoint, LocalRuntimeLauncher, ManagedRuntime, RuntimeLaunch,
+    CreateRuntimeSpec, Endpoint, LocalRuntimeLauncher, ManagedRuntime, MountedResource,
+    RuntimeLaunch,
 };
 
 use crate::bootstrap::{BootstrapConfig, BootstrapHandle};
@@ -15,6 +16,7 @@ impl LocalRuntimeLauncher for BootstrapRuntimeLauncher {
         spec: CreateRuntimeSpec,
         runtime_key: String,
         node_id: String,
+        mounted_resources: Vec<MountedResource>,
     ) -> Result<RuntimeLaunch> {
         let peer_directory_path = match spec.peer_directory_path {
             Some(path) => path,
@@ -28,6 +30,7 @@ impl LocalRuntimeLauncher for BootstrapRuntimeLauncher {
             runtime_key,
             node_id,
             agent_command: spec.agent_command,
+            mounted_resources,
             state_stream: spec.state_stream,
             stream_storage: spec.stream_storage,
             peer_directory_path,

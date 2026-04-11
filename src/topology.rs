@@ -4,13 +4,21 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, DurableStream, Producer};
 use fireline_components::PeerComponent;
+use fireline_components::approval::{
+    ApprovalAction, ApprovalConfig, ApprovalGateComponent, ApprovalMatch, ApprovalPolicy,
+};
 use fireline_components::audit::{AuditConfig, AuditSink, AuditTracer};
+use fireline_components::budget::{BudgetAction, BudgetComponent, BudgetConfig};
 use fireline_components::context::{
     ContextConfig, ContextInjectionComponent, ContextPlacement, ContextSource, DatetimeSource,
     WorkspaceFileSource,
 };
 use fireline_components::directory::PeerRegistry;
+use fireline_components::fs_backend::{
+    FileBackend, FsBackendComponent, FsBackendConfig, LocalFileBackend, RuntimeStreamFileBackend,
+};
 use fireline_components::lookup::{ActiveTurnLookup, ChildSessionEdgeSink};
+use fireline_conductor::runtime::MountedResource;
 use fireline_conductor::topology::{TopologyRegistry, TopologySpec, TraceWriterInstance};
 use serde::Deserialize;
 
@@ -21,9 +29,12 @@ pub struct ComponentContext {
     pub runtime_id: String,
     pub node_id: String,
     pub stream_base_url: String,
+    pub state_stream_url: String,
+    pub state_producer: Producer,
     pub peer_registry: Arc<dyn PeerRegistry>,
     pub active_turn_lookup: Arc<dyn ActiveTurnLookup>,
     pub child_session_edge_sink: Arc<dyn ChildSessionEdgeSink>,
+    pub mounted_resources: Vec<MountedResource>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -43,6 +54,20 @@ pub struct ContextInjectionConfig {
     pub placement: ContextPlacementConfig,
     #[serde(default)]
     pub sources: Vec<ContextSourceSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetComponentConfig {
+    #[serde(default)]
+    pub max_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalGateComponentConfig {
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -129,6 +154,70 @@ pub fn build_runtime_topology_registry(context: ComponentContext) -> TopologyReg
                 build_context_config(parsed),
             )))
         })
+        .register_component("budget", move |config| {
+            let parsed = config
+                .cloned()
+                .map(serde_json::from_value::<BudgetComponentConfig>)
+                .transpose()
+                .context("parse budget config")?
+                .unwrap_or(BudgetComponentConfig { max_tokens: None });
+            Ok(sacp::DynConnectTo::new(BudgetComponent::new(
+                BudgetConfig {
+                    max_tokens: parsed.max_tokens,
+                    max_tool_calls: None,
+                    max_duration: None,
+                    on_exceeded: BudgetAction::TerminateTurn,
+                },
+            )))
+        })
+        .register_component("approval_gate", {
+            let context = context.clone();
+            move |config| {
+                let _parsed = config
+                    .cloned()
+                    .map(serde_json::from_value::<ApprovalGateComponentConfig>)
+                    .transpose()
+                    .context("parse approval gate config")?
+                    .unwrap_or(ApprovalGateComponentConfig { timeout_ms: None });
+                Ok(sacp::DynConnectTo::new(ApprovalGateComponent::with_stream(
+                    ApprovalConfig {
+                        policies: vec![ApprovalPolicy {
+                            match_rule: ApprovalMatch::PromptContains {
+                                needle: String::new(),
+                            },
+                            action: ApprovalAction::RequireApproval,
+                            reason: "approval required".to_string(),
+                        }],
+                    },
+                    Some(context.state_stream_url.clone()),
+                    Some(context.state_producer.clone()),
+                )))
+            }
+        })
+        .register_tracer("durable_trace", |_config| {
+            Ok(Box::new(NoopTraceWriter) as TraceWriterInstance)
+        })
+        .register_component("fs_backend", {
+            let context = context.clone();
+            move |config| {
+                let config = config
+                    .ok_or_else(|| anyhow!("topology component 'fs_backend' requires config"))?;
+                let parsed: FsBackendConfig =
+                    serde_json::from_value(config.clone()).context("parse fs backend config")?;
+                let backend: Arc<dyn FileBackend> = match parsed {
+                    FsBackendConfig::Local => {
+                        Arc::new(LocalFileBackend::new(context.mounted_resources.clone()))
+                    }
+                    FsBackendConfig::RuntimeStream => Arc::new(RuntimeStreamFileBackend::new(
+                        context.state_stream_url.clone(),
+                    )),
+                };
+                Ok(sacp::DynConnectTo::new(FsBackendComponent::new(
+                    backend,
+                    context.state_producer.clone(),
+                )))
+            }
+        })
         .build()
 }
 
@@ -202,5 +291,13 @@ impl StaticTextSource {
 impl ContextSource for StaticTextSource {
     async fn gather(&self, _session_id: &str) -> Result<String, sacp::Error> {
         Ok(self.text.clone())
+    }
+}
+
+struct NoopTraceWriter;
+
+impl sacp_conductor::trace::WriteEvent for NoopTraceWriter {
+    fn write_event(&mut self, _event: &sacp_conductor::trace::TraceEvent) -> std::io::Result<()> {
+        Ok(())
     }
 }

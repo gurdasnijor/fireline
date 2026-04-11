@@ -29,6 +29,7 @@ pub mod approval;
 pub mod audit;
 pub mod budget;
 pub mod context;
+pub mod fs_backend;
 pub mod smithery;
 
 // Backwards-compatible re-exports that match the old `fireline_peer`

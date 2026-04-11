@@ -5,8 +5,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use fireline_conductor::runtime::{
-    CreateRuntimeSpec, LocalRuntimeLauncher, ManagedRuntime, RuntimeDescriptor, RuntimeLaunch,
-    RuntimeRegistry, RuntimeStatus,
+    CreateRuntimeSpec, LocalRuntimeLauncher, ManagedRuntime, MountedResource, RuntimeDescriptor,
+    RuntimeLaunch, RuntimeRegistry, RuntimeStatus,
 };
 use tokio::process::{Child, Command};
 
@@ -100,11 +100,11 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
         spec: CreateRuntimeSpec,
         runtime_key: String,
         node_id: String,
+        mounted_resources: Vec<MountedResource>,
     ) -> Result<RuntimeLaunch> {
-        let state_stream_name = spec
-            .state_stream
-            .clone()
-            .unwrap_or_else(|| format!("fireline-state-{}", sanitize_state_stream_key(&runtime_key)));
+        let state_stream_name = spec.state_stream.clone().unwrap_or_else(|| {
+            format!("fireline-state-{}", sanitize_state_stream_key(&runtime_key))
+        });
         let mut command = Command::new(&self.fireline_bin);
         command
             .arg("--host")
@@ -153,6 +153,12 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
             command
                 .arg("--topology-json")
                 .arg(serde_json::to_string(&spec.topology).context("serialize topology")?);
+        }
+
+        if !mounted_resources.is_empty() {
+            command.arg("--mounted-resources-json").arg(
+                serde_json::to_string(&mounted_resources).context("serialize mounted resources")?,
+            );
         }
 
         command
@@ -245,7 +251,8 @@ fn send_interrupt(_pid: Option<u32>) -> Result<()> {
 }
 
 fn sanitize_state_stream_key(value: &str) -> String {
-    value.chars()
+    value
+        .chars()
         .map(|ch| match ch {
             'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
             _ => '-',

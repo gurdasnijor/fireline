@@ -22,6 +22,7 @@ use axum::Router;
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, DurableStream, Producer};
 use fireline_components::LocalPeerDirectory;
 use fireline_components::directory::PeerRegistry;
+use fireline_conductor::runtime::MountedResource;
 use fireline_conductor::topology::{TopologyRegistry, TopologySpec};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -41,6 +42,7 @@ pub struct AppState {
     pub shared_terminal: fireline_conductor::shared_terminal::SharedTerminal,
     pub topology_registry: TopologyRegistry,
     pub topology: TopologySpec,
+    pub mounted_resources: Vec<MountedResource>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +53,7 @@ pub struct BootstrapConfig {
     pub runtime_key: String,
     pub node_id: String,
     pub agent_command: Vec<String>,
+    pub mounted_resources: Vec<MountedResource>,
     pub state_stream: Option<String>,
     pub stream_storage: Option<fireline_conductor::runtime::StreamStorageConfig>,
     pub peer_directory_path: PathBuf,
@@ -146,20 +149,19 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     } else {
         None
     };
-    let peer_registry: std::sync::Arc<dyn PeerRegistry> =
-        if let Some(control_plane_url) = config.control_plane_url.clone() {
-            std::sync::Arc::new(
-                crate::control_plane_peer_registry::ControlPlanePeerRegistry::new(
-                    control_plane_url,
-                )?,
-            )
-        } else {
-            std::sync::Arc::new(
-                local_peer_directory
-                    .clone()
-                    .expect("local peer directory should exist when push mode is disabled"),
-            )
-        };
+    let peer_registry: std::sync::Arc<dyn PeerRegistry> = if let Some(control_plane_url) =
+        config.control_plane_url.clone()
+    {
+        std::sync::Arc::new(
+            crate::control_plane_peer_registry::ControlPlanePeerRegistry::new(control_plane_url)?,
+        )
+    } else {
+        std::sync::Arc::new(
+            local_peer_directory
+                .clone()
+                .expect("local peer directory should exist when push mode is disabled"),
+        )
+    };
     let session_index = crate::session_index::SessionIndex::new();
     let active_turn_index = crate::active_turn_index::ActiveTurnIndex::new();
     let runtime_materializer = crate::runtime_materializer::RuntimeMaterializer::new(vec![
@@ -174,11 +176,14 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
             runtime_id: runtime_id.clone(),
             node_id: node_id.clone(),
             stream_base_url: stream_base_url.clone(),
+            state_stream_url: state_stream_url.clone(),
+            state_producer: state_producer.clone(),
             peer_registry: peer_registry.clone(),
             active_turn_lookup: std::sync::Arc::new(active_turn_index.clone()),
             child_session_edge_sink: std::sync::Arc::new(
                 crate::child_session_edge::ChildSessionEdgeWriter::new(state_producer.clone()),
             ),
+            mounted_resources: config.mounted_resources.clone(),
         });
 
     let app_state = AppState {
@@ -193,6 +198,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         shared_terminal: shared_terminal.clone(),
         topology_registry,
         topology: config.topology.clone(),
+        mounted_resources: config.mounted_resources,
     };
 
     let app = Router::new()
