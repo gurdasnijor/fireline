@@ -24,9 +24,9 @@ use agent_client_protocol::{
 };
 use anyhow::Result;
 use durable_streams::Client as DsClient;
+use fireline_harness::{TopologyComponentSpec, TopologySpec};
 use fireline_resources::{FsBackendComponent, LocalFileBackend};
 use fireline_runtime::{LocalPathMounter, ResourceMounter, ResourceRef};
-use fireline_harness::{TopologyComponentSpec, TopologySpec};
 use managed_agent_suite::{
     ControlPlaneHarness, ManagedAgentHarnessSpec, count_events, create_session, load_session,
     prompt_session, testy_fs_bin, testy_load_bin, wait_for_event_count,
@@ -164,23 +164,20 @@ async fn managed_agent_orchestration_acceptance_contract() -> Result<()> {
         }
         assert_eq!(persisted.runtime_key, runtime.runtime_key);
         assert_eq!(
-            persisted
-                .create_spec
-                .get("runtimeKey")
-                .and_then(|v| v.as_str()),
+            persisted.create_spec.runtime_key.as_deref(),
             Some(runtime.runtime_key.as_str())
         );
         assert_eq!(
-            persisted
-                .create_spec
-                .get("nodeId")
-                .and_then(|v| v.as_str()),
+            persisted.create_spec.node_id.as_deref(),
             Some(runtime.node_id.as_str())
         );
 
         let session_id = create_session(&runtime.acp.url).await?;
         if timings {
-            eprintln!("[timing] create_session: {} ms", last_step.elapsed().as_millis());
+            eprintln!(
+                "[timing] create_session: {} ms",
+                last_step.elapsed().as_millis()
+            );
             last_step = Instant::now();
         }
         let _ = prompt_session(
@@ -199,7 +196,10 @@ async fn managed_agent_orchestration_acceptance_contract() -> Result<()> {
 
         let _stopped = control_plane.stop_runtime(&runtime.runtime_key).await?;
         if timings {
-            eprintln!("[timing] stop_runtime: {} ms", last_step.elapsed().as_millis());
+            eprintln!(
+                "[timing] stop_runtime: {} ms",
+                last_step.elapsed().as_millis()
+            );
             last_step = Instant::now();
         }
         let resumed = fireline_orchestration::resume(
@@ -210,12 +210,18 @@ async fn managed_agent_orchestration_acceptance_contract() -> Result<()> {
         )
         .await?;
         if timings {
-            eprintln!("[timing] orchestration::resume: {} ms", last_step.elapsed().as_millis());
+            eprintln!(
+                "[timing] orchestration::resume: {} ms",
+                last_step.elapsed().as_millis()
+            );
             last_step = Instant::now();
         }
 
         assert_eq!(resumed.runtime_key, runtime.runtime_key);
-        assert_eq!(resumed.status, fireline_runtime::runtime_host::RuntimeStatus::Ready);
+        assert_eq!(
+            resumed.status,
+            fireline_runtime::runtime_host::RuntimeStatus::Ready
+        );
         assert_ne!(
             resumed.runtime_id, runtime.runtime_id,
             "cold-start resume should produce a new runtime process identity"
@@ -223,7 +229,10 @@ async fn managed_agent_orchestration_acceptance_contract() -> Result<()> {
 
         load_session(&resumed.acp.url, &session_id).await?;
         if timings {
-            eprintln!("[timing] load_session: {} ms", last_step.elapsed().as_millis());
+            eprintln!(
+                "[timing] load_session: {} ms",
+                last_step.elapsed().as_millis()
+            );
             last_step = Instant::now();
         }
         let _ = prompt_session(
@@ -340,13 +349,8 @@ async fn managed_agent_resources_fs_backend_acceptance_contract() -> Result<()> 
         .to_string();
         prompt_session(runtime.acp_url(), &session_id, &write_prompt).await?;
 
-        let fs_ops = wait_for_event_count(
-            runtime.state_stream_url(),
-            "fs_op",
-            1,
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
+        let fs_ops =
+            wait_for_event_count(runtime.state_stream_url(), "fs_op", 1, DEFAULT_TIMEOUT).await?;
         assert!(
             fs_ops.iter().any(|env| env
                 .value()
@@ -447,8 +451,7 @@ async fn managed_agent_tools_schema_only_acceptance_contract() -> Result<()> {
             config: None,
         }],
     };
-    let spec =
-        ManagedAgentHarnessSpec::new("primitives-tools-schema-only").with_topology(topology);
+    let spec = ManagedAgentHarnessSpec::new("primitives-tools-schema-only").with_topology(topology);
     let runtime = LocalRuntimeHarness::spawn_with(spec).await?;
 
     let result = async {
