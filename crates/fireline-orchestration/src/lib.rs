@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use fireline_conductor::runtime::{PersistedRuntimeSpec, RuntimeDescriptor, RuntimeStatus};
-use fireline_session::{RuntimeMaterializer, RuntimeMaterializerTask, SessionIndex};
+use fireline_conductor::runtime::{RuntimeDescriptor, RuntimeStatus};
+use fireline_session::{PersistedRuntimeSpec, RuntimeMaterializer, SessionIndex};
 use reqwest::Client as HttpClient;
 use tracing::{info, instrument};
 

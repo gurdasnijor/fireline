@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use fireline_harness::TopologySpec;
 use fireline_resources::ResourceRef;
+use fireline_session::{StreamStorageConfig, StreamStorageMode};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-use crate::topology::TopologySpec;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -97,35 +97,6 @@ pub struct HeartbeatReport {
     pub ts_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<HeartbeatMetrics>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum StreamStorageMode {
-    Memory,
-    FileFast,
-    FileDurable,
-    Acid,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct StreamStorageConfig {
-    pub mode: StreamStorageMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data_dir: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acid_shard_count: Option<usize>,
-}
-
-impl StreamStorageConfig {
-    pub fn file_durable(data_dir: impl Into<PathBuf>) -> Self {
-        Self {
-            mode: StreamStorageMode::FileDurable,
-            data_dir: Some(data_dir.into()),
-            acid_shard_count: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

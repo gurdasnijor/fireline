@@ -10,11 +10,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use fireline_conductor::runtime::PersistedRuntimeSpec;
 use tokio::sync::RwLock;
 
 use crate::runtime_materializer::{RawStateEnvelope, StateProjection};
-use crate::SessionRecord;
+use crate::{PersistedRuntimeSpec, SessionRecord};
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionIndex {
@@ -119,15 +118,8 @@ impl StateProjection for SessionIndex {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
-    use std::path::PathBuf;
-
-    use fireline_conductor::runtime::{
-        CreateRuntimeSpec, PersistedRuntimeSpec, RuntimeProviderRequest,
-    };
-
     use super::SessionIndex;
-    use crate::runtime_materializer::RawStateEnvelope;
+    use crate::{PersistedRuntimeSpec, runtime_materializer::RawStateEnvelope};
 
     #[tokio::test]
     async fn materializes_session_rows_from_state_events() {
@@ -166,20 +158,18 @@ mod tests {
         let runtime_spec = PersistedRuntimeSpec::new(
             "runtime:1",
             "node:test",
-            CreateRuntimeSpec {
-                runtime_key: None,
-                node_id: None,
-                provider: RuntimeProviderRequest::Local,
-                host: IpAddr::V4(Ipv4Addr::LOCALHOST),
-                port: 0,
-                name: "resume-test".to_string(),
-                agent_command: vec!["/bin/echo".to_string()],
-                resources: Vec::new(),
-                state_stream: Some("state-test".to_string()),
-                stream_storage: None,
-                peer_directory_path: Some(PathBuf::from("/tmp/peers.toml")),
-                topology: fireline_conductor::topology::TopologySpec::default(),
-            },
+            serde_json::json!({
+                "provider": "local",
+                "host": "127.0.0.1",
+                "port": 0,
+                "name": "resume-test",
+                "agentCommand": ["/bin/echo"],
+                "resources": [],
+                "stateStream": "state-test",
+                "streamStorage": null,
+                "peerDirectoryPath": "/tmp/peers.toml",
+                "topology": { "components": [] }
+            }),
         );
         let runtime_envelope: RawStateEnvelope = serde_json::from_value(serde_json::json!({
             "type":"runtime_spec",

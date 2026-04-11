@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use fireline_components::lookup::{ActiveTurnLookup, ActiveTurnRecord as PeerActiveTurnRecord};
+use fireline_tools::lookup::{ActiveTurnLookup, ActiveTurnRecord as PeerActiveTurnRecord};
 use serde::Deserialize;
 use tokio::sync::{Mutex, Notify, RwLock};
 

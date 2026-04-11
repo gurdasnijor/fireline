@@ -40,7 +40,36 @@ use durable_streams_server::{
     router,
     storage::{acid::AcidStorage, file::FileStorage, memory::InMemoryStorage},
 };
-pub use fireline_conductor::runtime::{StreamStorageConfig, StreamStorageMode};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamStorageMode {
+    Memory,
+    FileFast,
+    FileDurable,
+    Acid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamStorageConfig {
+    pub mode: StreamStorageMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<std::path::PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acid_shard_count: Option<usize>,
+}
+
+impl StreamStorageConfig {
+    pub fn file_durable(data_dir: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            mode: StreamStorageMode::FileDurable,
+            data_dir: Some(data_dir.into()),
+            acid_shard_count: None,
+        }
+    }
+}
 
 /// Build the embedded stream server router.
 ///
