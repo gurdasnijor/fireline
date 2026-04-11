@@ -18,6 +18,8 @@ use fireline_components::fs_backend::{
     FileBackend, FsBackendComponent, FsBackendConfig, LocalFileBackend, RuntimeStreamFileBackend,
 };
 use fireline_components::lookup::{ActiveTurnLookup, ChildSessionEdgeSink};
+use fireline_components::peer;
+use fireline_components::tools::emit_tool_descriptors;
 use fireline_conductor::runtime::MountedResource;
 use fireline_conductor::topology::{TopologyRegistry, TopologySpec, TraceWriterInstance};
 use serde::Deserialize;
@@ -144,6 +146,29 @@ pub fn build_runtime_topology_registry(context: ComponentContext) -> TopologyReg
         .register_component("peer_mcp", {
             let context = context.clone();
             move |_config| {
+                // Mirror the peer MCP server's registered tool surface
+                // onto the durable state stream as `tool_descriptor`
+                // envelopes. The schema-only `{name, description,
+                // input_schema}` triple is the contract Anthropic's
+                // Tools primitive specifies; emitting it at component-
+                // registration time (once per conductor build) gives
+                // tests and external subscribers a typed view of the
+                // tool surface without having to reach through the MCP
+                // wire. Inserts with the same `{source}:{tool_name}`
+                // key project to the same record, so repeated conductor
+                // builds are idempotent on the projection side.
+                let producer = context.state_producer.clone();
+                tokio::spawn(async move {
+                    let descriptors = peer::tool_descriptors();
+                    if let Err(error) =
+                        emit_tool_descriptors(&producer, "peer_mcp", &descriptors).await
+                    {
+                        tracing::warn!(
+                            %error,
+                            "failed to emit peer_mcp tool_descriptor envelopes"
+                        );
+                    }
+                });
                 Ok(sacp::DynConnectTo::new(PeerComponent::new(
                     context.peer_registry.clone(),
                     context.active_turn_lookup.clone(),

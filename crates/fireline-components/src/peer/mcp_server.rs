@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use super::directory::PeerRegistry;
 use super::lookup::{ActiveTurnLookup, ChildSessionEdgeInput, ChildSessionEdgeSink};
 use super::transport;
+use crate::tools::ToolDescriptor;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct ListPeersInput {}
@@ -51,6 +52,35 @@ pub(crate) struct PromptPeerOutput {
     pub agent_name: String,
     pub response_text: String,
     pub stop_reason: String,
+}
+
+/// Return the `{name, description, input_schema}` triple for every tool
+/// this component registers with its MCP server. Used by the topology
+/// wire-up site to mirror the registered surface onto the durable state
+/// stream as `tool_descriptor` envelopes so tests and external
+/// subscribers can witness the Anthropic Tools primitive without
+/// reaching through the MCP wire.
+///
+/// Keep this in sync with the `tool_fn(...)` chain in
+/// [`build_peer_mcp_server`] — the description strings and input types
+/// are the source of truth and live in exactly one place (here plus the
+/// builder call below).
+pub fn tool_descriptors() -> Vec<ToolDescriptor> {
+    vec![
+        ToolDescriptor {
+            name: "list_peers".to_string(),
+            description:
+                "List running Fireline peers available through the local directory."
+                    .to_string(),
+            input_schema: schemars::schema_for!(ListPeersInput).to_value(),
+        },
+        ToolDescriptor {
+            name: "prompt_peer".to_string(),
+            description: "Send a prompt to a named Fireline peer and return its response."
+                .to_string(),
+            input_schema: schemars::schema_for!(PromptPeerInput).to_value(),
+        },
+    ]
 }
 
 pub(crate) fn build_peer_mcp_server(

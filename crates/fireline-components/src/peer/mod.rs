@@ -14,6 +14,8 @@ pub mod lookup;
 pub(crate) mod mcp_server;
 pub(crate) mod transport;
 
+pub use mcp_server::tool_descriptors;
+
 use std::sync::{Arc, OnceLock};
 
 use sacp::{Client, ConnectTo, Proxy};

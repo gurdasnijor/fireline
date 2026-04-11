@@ -54,11 +54,14 @@
 //!
 //! [`McpServer::from_rmcp`]: https://docs.rs/agent-client-protocol-rmcp
 
+use durable_streams::Producer;
 use reqwest::Client as HttpClient;
 use sacp::{Conductor, ConnectTo, Proxy};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use crate::tools::{ToolDescriptor, emit_tool_descriptors};
 
 #[derive(Clone, Debug)]
 pub struct SmitheryConfig {
@@ -88,6 +91,7 @@ impl SmitheryServerRef {
 pub struct SmitheryComponent {
     config: Arc<SmitheryConfig>,
     http: HttpClient,
+    state_producer: Option<Producer>,
 }
 
 impl SmitheryComponent {
@@ -95,7 +99,33 @@ impl SmitheryComponent {
         Self {
             config: Arc::new(config),
             http: HttpClient::new(),
+            state_producer: None,
         }
+    }
+
+    /// Attach a durable-streams producer so the component can emit
+    /// `tool_descriptor` envelopes for every tool it registers with
+    /// the agent. Without a producer the MCP wire-up still works —
+    /// just without the state-stream projection. This is the hook the
+    /// topology layer calls when it wants tests or external
+    /// subscribers to witness the Anthropic triple.
+    pub fn with_state_producer(mut self, producer: Producer) -> Self {
+        self.state_producer = Some(producer);
+        self
+    }
+
+    /// Return the Anthropic triple for every tool this component
+    /// registers. Kept in sync with the `tool_fn(...)` chain in
+    /// [`build_smithery_mcp_server`] — any new tool added below must
+    /// add a matching descriptor here.
+    pub fn tool_descriptors() -> Vec<ToolDescriptor> {
+        vec![ToolDescriptor {
+            name: "smithery_call".to_string(),
+            description:
+                "Call a tool on a configured Smithery-hosted MCP server."
+                    .to_string(),
+            input_schema: schemars::schema_for!(SmitheryCallInput).to_value(),
+        }]
     }
 
     /// Build the Smithery endpoint URL for a specific server.
@@ -252,6 +282,15 @@ fn build_smithery_mcp_server(
 
 impl ConnectTo<sacp::Conductor> for SmitheryComponent {
     async fn connect_to(self, client: impl ConnectTo<Proxy>) -> Result<(), sacp::Error> {
+        // Mirror the registered tool surface onto the durable state
+        // stream before we wire the MCP server into the conductor
+        // chain. Only runs when the topology layer attached a
+        // producer; standalone construction (unit tests, etc.) stays
+        // side-effect-free.
+        if let Some(producer) = self.state_producer.as_ref() {
+            let descriptors = Self::tool_descriptors();
+            emit_tool_descriptors(producer, "smithery", &descriptors).await?;
+        }
         let mcp_server = build_smithery_mcp_server(self);
         sacp::Proxy
             .builder()
