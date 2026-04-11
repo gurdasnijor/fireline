@@ -2,6 +2,7 @@
 
 pub mod active_turn_index;
 pub mod runtime_identity;
+pub mod runtime_index;
 pub mod runtime_materializer;
 pub mod session_index;
 pub mod stream_host;
@@ -12,6 +13,7 @@ pub use runtime_identity::{
     RuntimeDescriptor, RuntimeProviderKind, RuntimeProviderRequest, RuntimeRegistration,
     RuntimeStatus, TopologyComponentSpec, TopologySpec,
 };
+pub use runtime_index::{RuntimeIndex, RuntimeInstanceRecord, RuntimeInstanceStatus};
 pub use runtime_materializer::{
     RawStateEnvelope, RawStateHeaders, RuntimeMaterializer, RuntimeMaterializerTask,
     StateProjection,
