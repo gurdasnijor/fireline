@@ -18,7 +18,7 @@ use durable_streams::{Client as DurableStreamsClient, Producer};
 use sacp_conductor::trace::{TraceEvent, WriteEvent};
 use serde::Serialize;
 
-use crate::runtime::PersistedRuntimeSpec;
+use crate::runtime::{PersistedRuntimeSpec, RuntimeDescriptor};
 use crate::state_projector::{StateProjector, runtime_instance_started, runtime_instance_stopped};
 
 pub type BoxedTraceWriter = Box<dyn WriteEvent + Send>;
@@ -162,6 +162,48 @@ pub async fn emit_runtime_spec_persisted(
             operation: "insert",
         },
         value: spec,
+    });
+    producer.flush().await?;
+    Ok(())
+}
+
+/// Mirror the current observed state of a runtime descriptor onto the
+/// shared state stream as a `runtime_endpoints` envelope. This is the
+/// load-bearing emit for the stream-as-truth projection: the
+/// `runtime_spec` envelope records what the runtime was asked to be,
+/// and `runtime_endpoints` records the child-advertised launch surface
+/// (`acp.url`, `state.url`, helper_api_base_url) plus observed status.
+///
+/// Callers should invoke this at every transition point that mutates
+/// the in-memory `RuntimeRegistry`: create, register, stop. Each call
+/// writes the full current descriptor, so a `RuntimeIndex` replaying
+/// the stream always sees the latest observed view for each
+/// runtime_key.
+///
+/// Empty `state_stream_url` early-returns (direct-host mode with no
+/// shared stream does not emit).
+pub async fn emit_runtime_endpoints_persisted(
+    state_stream_url: &str,
+    descriptor: &RuntimeDescriptor,
+) -> anyhow::Result<()> {
+    if state_stream_url.is_empty() {
+        return Ok(());
+    }
+
+    let client = DurableStreamsClient::new();
+    let mut stream = client.stream(state_stream_url);
+    stream.set_content_type("application/json");
+    let producer = stream
+        .producer(format!("runtime-endpoints-{}", descriptor.runtime_key))
+        .content_type("application/json")
+        .build();
+    producer.append_json(&StateEnvelope {
+        entity_type: "runtime_endpoints",
+        key: descriptor.runtime_key.clone(),
+        headers: StateHeaders {
+            operation: "update",
+        },
+        value: descriptor,
     });
     producer.flush().await?;
     Ok(())

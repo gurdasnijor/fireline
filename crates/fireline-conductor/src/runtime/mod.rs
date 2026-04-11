@@ -128,6 +128,8 @@ impl RuntimeHost {
                 && !descriptor.state.url.is_empty()
             {
                 crate::trace::emit_runtime_spec_persisted(&descriptor.state.url, &spec).await?;
+                crate::trace::emit_runtime_endpoints_persisted(&descriptor.state.url, &descriptor)
+                    .await?;
                 self.inner
                     .pending_runtime_specs
                     .lock()
@@ -154,6 +156,8 @@ impl RuntimeHost {
         self.inner.registry.upsert(descriptor.clone())?;
         if !descriptor.state.url.is_empty() {
             crate::trace::emit_runtime_spec_persisted(&descriptor.state.url, &persisted_spec).await?;
+            crate::trace::emit_runtime_endpoints_persisted(&descriptor.state.url, &descriptor)
+                .await?;
             self.inner
                 .pending_runtime_specs
                 .lock()
@@ -193,6 +197,10 @@ impl RuntimeHost {
         descriptor.status = RuntimeStatus::Stopped;
         descriptor.updated_at_ms = now_ms();
         self.inner.registry.upsert(descriptor.clone())?;
+        if !descriptor.state.url.is_empty() {
+            crate::trace::emit_runtime_endpoints_persisted(&descriptor.state.url, &descriptor)
+                .await?;
+        }
         info!(runtime_key, "runtime host stopped runtime");
         Ok(descriptor)
     }
@@ -266,6 +274,10 @@ impl RuntimeHost {
                 .remove(runtime_key);
         }
         self.inner.registry.upsert(descriptor.clone())?;
+        if !descriptor.state.url.is_empty() {
+            crate::trace::emit_runtime_endpoints_persisted(&descriptor.state.url, &descriptor)
+                .await?;
+        }
         info!(
             runtime_key,
             runtime_id = descriptor.runtime_id,

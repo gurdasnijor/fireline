@@ -49,7 +49,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use fireline_conductor::runtime::PersistedRuntimeSpec;
+use fireline_conductor::runtime::{PersistedRuntimeSpec, RuntimeDescriptor};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
@@ -86,6 +86,13 @@ pub struct RuntimeInstanceRecord {
 pub struct RuntimeIndex {
     runtime_specs: Arc<RwLock<HashMap<String, PersistedRuntimeSpec>>>,
     runtime_instances: Arc<RwLock<HashMap<String, RuntimeInstanceRecord>>>,
+    /// Latest observed `RuntimeDescriptor` per runtime_key. Populated
+    /// from `runtime_endpoints` envelopes emitted at every mutation
+    /// point in `RuntimeHost` (create, register, stop). This is the
+    /// map commits C/D of the stream-as-truth sequence will use to
+    /// serve `GET /v1/runtimes` reads, replacing the in-memory
+    /// `RuntimeRegistry` entirely.
+    runtime_endpoints: Arc<RwLock<HashMap<String, RuntimeDescriptor>>>,
 }
 
 impl RuntimeIndex {
@@ -142,6 +149,30 @@ impl RuntimeIndex {
         )
     }
 
+    /// Returns the latest observed `RuntimeDescriptor` for a given
+    /// runtime_key, derived from `runtime_endpoints` envelopes on the
+    /// shared state stream. This is the replacement lookup that
+    /// commit C of the stream-as-truth sequence will use in place of
+    /// `RuntimeRegistry::get`.
+    pub async fn endpoints_for(&self, runtime_key: &str) -> Option<RuntimeDescriptor> {
+        self.runtime_endpoints
+            .read()
+            .await
+            .get(runtime_key)
+            .cloned()
+    }
+
+    /// Returns all observed `RuntimeDescriptor`s, derived from
+    /// `runtime_endpoints` envelopes. Sorted by runtime_key for
+    /// deterministic test assertions. This is the replacement for
+    /// `RuntimeRegistry::list`.
+    pub async fn list_endpoints(&self) -> Vec<RuntimeDescriptor> {
+        let guard = self.runtime_endpoints.read().await;
+        let mut descriptors: Vec<RuntimeDescriptor> = guard.values().cloned().collect();
+        descriptors.sort_by(|left, right| left.runtime_key.cmp(&right.runtime_key));
+        descriptors
+    }
+
     async fn apply_envelope(&self, envelope: &RawStateEnvelope) -> Result<()> {
         match envelope.entity_type.as_str() {
             "runtime_spec" => match envelope.headers.operation.as_str() {
@@ -176,6 +207,25 @@ impl RuntimeIndex {
                 }
                 _ => {}
             },
+            "runtime_endpoints" => match envelope.headers.operation.as_str() {
+                "insert" | "update" => {
+                    let Some(value) = envelope.value.as_ref() else {
+                        return Ok(());
+                    };
+                    let descriptor: RuntimeDescriptor = serde_json::from_value(value.clone())?;
+                    self.runtime_endpoints
+                        .write()
+                        .await
+                        .insert(descriptor.runtime_key.clone(), descriptor);
+                }
+                "delete" => {
+                    self.runtime_endpoints
+                        .write()
+                        .await
+                        .remove(&envelope.key);
+                }
+                _ => {}
+            },
             _ => {}
         }
 
@@ -192,6 +242,7 @@ impl StateProjection for RuntimeIndex {
     async fn reset(&self) -> Result<()> {
         self.runtime_specs.write().await.clear();
         self.runtime_instances.write().await.clear();
+        self.runtime_endpoints.write().await.clear();
         Ok(())
     }
 }
@@ -361,6 +412,98 @@ mod tests {
 
         StateProjection::reset(&index).await.unwrap();
         assert_eq!(index.counts().await, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn materializes_runtime_endpoints_rows_from_state_events() {
+        let index = RuntimeIndex::new();
+        let envelope: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+            "type": "runtime_endpoints",
+            "key": "runtime:one",
+            "headers": { "operation": "update" },
+            "value": {
+                "runtimeKey": "runtime:one",
+                "runtimeId": "fireline:one:abcd",
+                "nodeId": "node:test",
+                "provider": "local",
+                "providerInstanceId": "local:1",
+                "status": "ready",
+                "acp": { "url": "ws://127.0.0.1:9991/acp" },
+                "state": { "url": "http://127.0.0.1:9991/v1/stream/state-one" },
+                "createdAtMs": 100,
+                "updatedAtMs": 200
+            }
+        }))
+        .unwrap();
+
+        index.apply_state_event(&envelope).await.unwrap();
+
+        let descriptor = index
+            .endpoints_for("runtime:one")
+            .await
+            .expect("endpoints indexed");
+        assert_eq!(descriptor.runtime_key, "runtime:one");
+        assert_eq!(descriptor.runtime_id, "fireline:one:abcd");
+        assert_eq!(descriptor.acp.url, "ws://127.0.0.1:9991/acp");
+        assert_eq!(
+            descriptor.state.url,
+            "http://127.0.0.1:9991/v1/stream/state-one"
+        );
+
+        let listed = index.list_endpoints().await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].runtime_key, "runtime:one");
+    }
+
+    #[tokio::test]
+    async fn endpoints_update_overwrites_previous_observation() {
+        let index = RuntimeIndex::new();
+        let first: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+            "type": "runtime_endpoints",
+            "key": "runtime:one",
+            "headers": { "operation": "update" },
+            "value": {
+                "runtimeKey": "runtime:one",
+                "runtimeId": "fireline:one:abcd",
+                "nodeId": "node:test",
+                "provider": "local",
+                "providerInstanceId": "local:1",
+                "status": "ready",
+                "acp": { "url": "ws://127.0.0.1:9991/acp" },
+                "state": { "url": "http://127.0.0.1:9991/v1/stream/state-one" },
+                "createdAtMs": 100,
+                "updatedAtMs": 200
+            }
+        }))
+        .unwrap();
+        let after_stop: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+            "type": "runtime_endpoints",
+            "key": "runtime:one",
+            "headers": { "operation": "update" },
+            "value": {
+                "runtimeKey": "runtime:one",
+                "runtimeId": "fireline:one:abcd",
+                "nodeId": "node:test",
+                "provider": "local",
+                "providerInstanceId": "local:1",
+                "status": "stopped",
+                "acp": { "url": "ws://127.0.0.1:9991/acp" },
+                "state": { "url": "http://127.0.0.1:9991/v1/stream/state-one" },
+                "createdAtMs": 100,
+                "updatedAtMs": 300
+            }
+        }))
+        .unwrap();
+
+        index.apply_state_event(&first).await.unwrap();
+        index.apply_state_event(&after_stop).await.unwrap();
+
+        let descriptor = index.endpoints_for("runtime:one").await.unwrap();
+        assert_eq!(descriptor.updated_at_ms, 300);
+        assert!(matches!(
+            descriptor.status,
+            fireline_conductor::runtime::RuntimeStatus::Stopped
+        ));
     }
 
     #[tokio::test]

@@ -97,6 +97,43 @@ async fn runtime_index_agrees_with_registry_on_a_live_managed_runtime() -> Resul
             running_ids
         );
 
+        // Step 1 of the registry-removal sequence: `runtime_endpoints`
+        // envelopes let the stream projection reconstruct the full
+        // RuntimeDescriptor (acp.url, state.url, helper_api_base_url,
+        // status, timestamps) without reading through RuntimeRegistry.
+        // This is the load-bearing agreement — once it holds for every
+        // mutation point, the read path can flip to the projection.
+        let endpoints_from_index = index
+            .endpoints_for(&runtime.runtime_key)
+            .await
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "INVARIANT (stream-as-truth): runtime_endpoints envelope must be \
+                     observable for every control-plane-managed runtime (missing for {})",
+                    runtime.runtime_key
+                )
+            })?;
+        assert_eq!(
+            endpoints_from_index.runtime_key, runtime.runtime_key,
+            "INVARIANT (stream-as-truth): runtime_endpoints.runtime_key must equal the \
+             descriptor the control plane returned",
+        );
+        assert_eq!(
+            endpoints_from_index.runtime_id, runtime.runtime_id,
+            "INVARIANT (stream-as-truth): runtime_endpoints.runtime_id must agree with \
+             the registry descriptor",
+        );
+        assert_eq!(
+            endpoints_from_index.acp.url, runtime.acp.url,
+            "INVARIANT (stream-as-truth): stream projection must carry the same \
+             advertised acp URL the registry carries",
+        );
+        assert_eq!(
+            endpoints_from_index.state.url, runtime.state.url,
+            "INVARIANT (stream-as-truth): stream projection must carry the same \
+             state stream URL the registry carries",
+        );
+
         task.abort();
         Ok::<(), anyhow::Error>(())
     }
@@ -172,6 +209,31 @@ async fn runtime_index_observes_stopped_runtimes_on_the_shared_stream() -> Resul
             "INVARIANT (stream-as-truth): after a control-plane stop, the stopped \
              runtime_id must not appear in the Running projection (saw {:?})",
             running
+        );
+
+        // The endpoints projection should reflect the Stopped status
+        // transition: after stop, the runtime_endpoints row for this
+        // runtime_key must carry status=Stopped. This closes the loop
+        // on stream-derived liveness: the stream alone tells you every
+        // fact the registry knows about the stopped runtime.
+        let endpoints = index
+            .endpoints_for(&runtime.runtime_key)
+            .await
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "INVARIANT (stream-as-truth): runtime_endpoints row must survive \
+                     stop transitions for post-mortem inspection (missing for {})",
+                    runtime.runtime_key
+                )
+            })?;
+        assert!(
+            matches!(
+                endpoints.status,
+                fireline_conductor::runtime::RuntimeStatus::Stopped
+            ),
+            "INVARIANT (stream-as-truth): runtime_endpoints.status must reflect \
+             the Stopped transition after a control-plane stop (got {:?})",
+            endpoints.status
         );
 
         task.abort();
