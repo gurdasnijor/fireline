@@ -26,10 +26,7 @@
 #[path = "support/managed_agent_suite.rs"]
 mod managed_agent_suite;
 
-use std::time::Duration;
-
 use anyhow::{Context, Result};
-use durable_streams::{Client as DsClient, Offset};
 use managed_agent_suite::{DEFAULT_TIMEOUT, LocalRuntimeHarness, pending_contract};
 
 /// Precondition: a local runtime has been spawned and has emitted at least the
