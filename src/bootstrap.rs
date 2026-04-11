@@ -167,6 +167,10 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         std::sync::Arc::new(session_index.clone()),
         std::sync::Arc::new(active_turn_index.clone()),
     ]);
+    // Keep a clone of the agent command around so we can thread it into
+    // the `runtime_spec` envelope further down — SharedTerminal::spawn
+    // consumes the original.
+    let agent_command_for_spec = config.agent_command.clone();
     let shared_terminal =
         fireline_conductor::shared_terminal::SharedTerminal::spawn(config.agent_command).await?;
     let topology_registry =
@@ -221,6 +225,44 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     ensure_stream_exists(&state_stream_handle).await?;
     let runtime_materializer_task = runtime_materializer.connect(state_stream_url.clone());
     runtime_materializer_task.preload().await?;
+
+    // Direct-host analogue of the control-plane `runtime_spec_persisted`
+    // emit that `RuntimeHost::create` performs at
+    // `crates/fireline-conductor/src/runtime/mod.rs:130`. Without this,
+    // direct-host bootstraps are invisible to stream-derived projections
+    // like `crate::runtime_index::RuntimeIndex` — the `runtime_instance`
+    // row lands on the stream but nothing describes what the runtime
+    // was asked to be. Closing this gap is a prerequisite for replacing
+    // the in-memory `RuntimeRegistry` with a pure stream projection.
+    //
+    // The `resources` field is left empty: BootstrapConfig only carries
+    // already-mounted `MountedResource` values, not the original
+    // `ResourceRef` launch spec. Direct-host runtimes therefore record
+    // their host/port/topology/agent_command but not their resource
+    // launch spec. Promotion to a full round-trip spec is follow-up
+    // work when a caller actually needs it.
+    let persisted_spec = fireline_conductor::runtime::PersistedRuntimeSpec::new(
+        runtime_key.clone(),
+        node_id.clone(),
+        fireline_conductor::runtime::CreateRuntimeSpec {
+            runtime_key: Some(runtime_key.clone()),
+            node_id: Some(node_id.clone()),
+            provider: fireline_conductor::runtime::RuntimeProviderRequest::Local,
+            host: config.host,
+            port: local_addr.port(),
+            name: runtime_name.clone(),
+            agent_command: agent_command_for_spec,
+            resources: Vec::new(),
+            state_stream: Some(state_stream.clone()),
+            stream_storage: config.stream_storage.clone(),
+            peer_directory_path: Some(peer_directory_path.clone()),
+            topology: config.topology.clone(),
+        },
+    );
+    fireline_conductor::trace::emit_runtime_spec_persisted(&state_stream_url, &persisted_spec)
+        .await
+        .context("emit runtime_spec_persisted from direct-host bootstrap")?;
+
     fireline_conductor::trace::emit_runtime_instance_started(
         &state_producer,
         &runtime_id,
