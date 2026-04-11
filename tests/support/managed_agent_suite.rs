@@ -192,6 +192,13 @@ pub(crate) fn target_bin(name: &str) -> PathBuf {
 }
 
 pub(crate) fn ensure_control_plane_binaries_built() -> Result<()> {
+    let fireline = fireline_bin();
+    let control_plane = control_plane_bin();
+    let testy = testy_bin();
+    if fireline.exists() && control_plane.exists() && testy.exists() {
+        return Ok(());
+    }
+
     let status = StdCommand::new("cargo")
         .args([
             "build",
@@ -420,7 +427,33 @@ impl ControlPlaneHarness {
             .map_err(anyhow::Error::from)
     }
 
+    async fn stop_all_live_runtimes(&self) {
+        let runtimes = match self
+            .http
+            .get(format!("{}/v1/runtimes", self.base_url))
+            .send()
+            .await
+        {
+            Ok(response) => match response.error_for_status() {
+                Ok(ok) => match ok.json::<Vec<RuntimeDescriptor>>().await {
+                    Ok(runtimes) => runtimes,
+                    Err(_) => return,
+                },
+                Err(_) => return,
+            },
+            Err(_) => return,
+        };
+
+        for runtime in runtimes {
+            if matches!(runtime.status, RuntimeStatus::Stopped | RuntimeStatus::Broken) {
+                continue;
+            }
+            let _ = self.stop_runtime(&runtime.runtime_key).await;
+        }
+    }
+
     pub(crate) async fn shutdown(mut self) {
+        self.stop_all_live_runtimes().await;
         shutdown_process(&mut self.child).await;
         self.shared_stream_server.shutdown().await;
     }
