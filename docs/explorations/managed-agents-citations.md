@@ -1,30 +1,31 @@
 # Managed Agents Citations
 
 Source primitive set: Anthropic, ["Scaling Managed Agents: Decoupling the brain from the hands"](https://www.anthropic.com/engineering/managed-agents).  
-Code snapshot: local `main` at `47bc10b`.
+Code snapshot: local `main` at `a4dc19c`.
 
 ## 1. Session — Strong
 
 - Closest code today:
-  - `crates/fireline-conductor/src/trace.rs:43-89` — `DurableStreamTracer` is the producer-side append path from ACP/conductor events into the durable stream.
-  - `crates/fireline-conductor/src/state_projector.rs:189-249,389-419,478-565` — projects those trace events into durable `session`, `prompt_turn`, `pending_request`, and `chunk` rows.
-  - `src/runtime_materializer.rs:34-83,90-133` and `src/session_index.rs:19-67` — replay/live-follow plus `session_id -> SessionRecord` lookup.
-  - `packages/state/src/collection.ts:35-55`, `packages/state/src/schema.ts:91-193`, `packages/client/src/browser.ts:33-67` — browser/read-model side of the same replayable stream.
+  - `crates/fireline-conductor/src/trace.rs` — producer-side append path from ACP/conductor effects into durable streams.
+  - `crates/fireline-conductor/src/state_projector.rs` — projects durable trace events into typed `session`, `prompt_turn`, `permission`, and `chunk` rows.
+  - `src/runtime_materializer.rs` and `src/session_index.rs` — replay/live-follow plus `session_id -> SessionRecord` lookup.
+  - `packages/state/src/collection.ts`, `packages/state/src/schema.ts`, `packages/client/src/browser.ts` — browser/read-model side consuming the same replayable stream.
 
 - Relevant signatures:
 ```rust
-// src/runtime_materializer.rs:34-54
+// src/runtime_materializer.rs
 #[async_trait]
 pub trait StateProjection: Send + Sync {
     async fn apply_state_event(&self, event: &RawStateEnvelope) -> Result<()>;
 }
+
 pub struct RuntimeMaterializer;
 impl RuntimeMaterializer {
     pub fn new(projections: Vec<Arc<dyn StateProjection>>) -> Self;
     pub fn connect(&self, state_stream_url: impl Into<String>) -> RuntimeMaterializerTask;
 }
 
-// src/session_index.rs:19-33
+// src/session_index.rs
 pub struct SessionIndex;
 impl SessionIndex {
     pub fn new() -> Self;
@@ -33,62 +34,63 @@ impl SessionIndex {
 }
 ```
 
-- Assessment: Strong.
+- Live contract coverage:
+  - `tests/managed_agent_session.rs:52` — append-only replay from offset 0
+  - `tests/managed_agent_session.rs:126` — durability across runtime death
+  - `tests/managed_agent_session.rs:213` — replay from a captured mid-stream offset
+  - `tests/managed_agent_session.rs:415` — idempotent append under retry
+  - `tests/managed_agent_session.rs:523` — materialized-vs-raw agreement
 
-## 2. Orchestration — Missing
+- Assessment: Strong. The durable log, replay surface, retry-safe producer semantics, and materialized consumer agreement all have live managed-agent proofs.
+
+## 2. Orchestration — Strong
 
 - Closest code today:
-  - `src/load_coordinator.rs:23-65` — explicit `session/load` coordination, but only when a client reconnects and asks for resume.
-  - `crates/fireline-conductor/src/runtime/mod.rs:23-221` and `src/runtime_host.rs:19-69` — runtime lifecycle and local auto-registration; this boots runtimes, it does not wake dormant work by session id.
-  - `crates/fireline-control-plane/src/router.rs:22-163`, `crates/fireline-control-plane/src/main.rs:93-165`, `crates/fireline-control-plane/src/heartbeat.rs:6-40` — control-plane lifecycle, heartbeat tracking, and stale scanning.
-  - `src/control_plane_client.rs:17-119` — retrying `register(...)` and a heartbeat loop; again lifecycle, not scheduler-owned wake.
+  - `src/orchestration.rs:12-73` — `resume(session_id)` composition helper over shared session state, runtime lookup, cold-start, and readiness polling.
+  - `src/orchestration.rs:75-108` — `reconstruct_runtime_spec_from_log(...)` and materialization helpers.
+  - `src/load_coordinator.rs` — `session/load` rebuild seam.
+  - `crates/fireline-conductor/src/runtime/mod.rs` and `src/runtime_host.rs` — runtime lifecycle and readiness.
+  - `crates/fireline-control-plane/src/router.rs` — runtime create/get/stop surfaces orchestration composes against.
 
 - Relevant signatures:
 ```rust
-// src/load_coordinator.rs:23-29
-pub struct LoadCoordinatorComponent;
-impl LoadCoordinatorComponent {
-    pub fn new(session_index: crate::session_index::SessionIndex) -> Self;
-}
+// src/orchestration.rs
+pub async fn resume(
+    http: &HttpClient,
+    control_plane_url: &str,
+    shared_state_url: &str,
+    session_id: &str,
+) -> Result<RuntimeDescriptor>;
 
-// crates/fireline-conductor/src/runtime/mod.rs:23-221
-pub struct RuntimeHost;
-impl RuntimeHost {
-    pub async fn create(&self, spec: CreateRuntimeSpec) -> Result<RuntimeDescriptor>;
-    pub fn register(&self, runtime_key: &str, registration: RuntimeRegistration) -> Result<RuntimeDescriptor>;
-    pub fn heartbeat(&self, runtime_key: &str, report: HeartbeatReport) -> Result<RuntimeDescriptor>;
-    pub async fn stop(&self, runtime_key: &str) -> Result<RuntimeDescriptor>;
-}
-
-// src/control_plane_client.rs:17-119
-pub struct ControlPlaneClient;
-impl ControlPlaneClient {
-    pub async fn register(&self, registration: RuntimeRegistration) -> Result<()>;
-    pub fn spawn_heartbeat_loop(
-        self: &Arc<Self>,
-        metrics_source: impl Fn() -> HeartbeatMetrics + Send + Sync + 'static,
-    ) -> JoinHandle<()>;
-}
+pub async fn reconstruct_runtime_spec_from_log(
+    state_stream_url: &str,
+    runtime_key: &str,
+) -> Result<PersistedRuntimeSpec>;
 ```
 
-- Assessment: Missing.
-- Closest analog: runtime lifecycle plus `session/load`; there is still no `wake(session_id)` or scheduler that can retry advancing suspended work by durable session identity.
+- Live contract coverage:
+  - `tests/managed_agent_primitives_suite.rs:132` — cold-start orchestration acceptance contract
+  - `tests/managed_agent_orchestration.rs:84` — `resume` is a no-op on a live runtime
+  - `tests/managed_agent_orchestration.rs:161` — concurrent `resume` calls converge on one runtime
+  - `tests/managed_agent_orchestration.rs:249` — subscriber loop drives pause-release through the durable stream
 
-## 3. Harness — Partial
+- Assessment: Strong on the Rust-side primitive. The remaining gap is API ownership in `@fireline/client`, not missing orchestration substrate.
+
+## 3. Harness — Strong
 
 - Closest code today:
-  - `crates/fireline-conductor/src/build.rs:17-62` — composes the conductor, terminal, components, and trace writer.
-  - `src/routes/acp.rs:34-81` — runtime-owned harness composition point per ACP WebSocket.
-  - `crates/fireline-conductor/src/shared_terminal.rs:61-129,153-243` — long-lived subprocess plus attach/detach borrowing.
-  - `crates/fireline-conductor/src/trace.rs:22-89` — appends harness progress to the durable session/state stream.
+  - `crates/fireline-conductor/src/build.rs` — conductor composition around the underlying agent/harness.
+  - `src/routes/acp.rs` — runtime-owned ACP entrypoint where the harness is exposed.
+  - `crates/fireline-conductor/src/shared_terminal.rs` — long-lived subprocess plus attach/detach lifecycle.
+  - `crates/fireline-conductor/src/trace.rs` — durable logging of harness progress.
 
 - Relevant signatures:
 ```rust
-// crates/fireline-conductor/src/build.rs:18-44
+// crates/fireline-conductor/src/build.rs
 pub fn build_subprocess_conductor(...) -> ConductorImpl<Agent>;
 pub fn build_conductor_with_terminal(...) -> ConductorImpl<Agent>;
 
-// crates/fireline-conductor/src/shared_terminal.rs:18-21,61-105
+// crates/fireline-conductor/src/shared_terminal.rs
 pub struct SharedTerminal;
 impl SharedTerminal {
     pub async fn spawn(agent_command: Vec<String>) -> Result<Self>;
@@ -97,78 +99,128 @@ impl SharedTerminal {
 }
 ```
 
-- Assessment: Partial.
-- Closest analog: Fireline owns an ACP proxy/conductor loop around the harness, but not a first-class `Effect<T> -> EffectResult<T>` interface independent of ACP traffic.
+- Live contract coverage:
+  - `tests/managed_agent_harness.rs:64` — every effect is appended to the durable session log
+  - `tests/managed_agent_harness.rs:139` — append order remains stable under continued writes
+  - `tests/managed_agent_harness.rs:248` — approval-gate prompt blocks until durable resolution
+  - `tests/managed_agent_harness.rs:333` — durable suspend/resume survives runtime death
+  - `tests/managed_agent_harness.rs:477` — all seven topology combinators are represented in the harness surface
+
+- Assessment: Strong. Fireline now has live proofs for durable progress logging, stable append order, suspend/release through the stream, and suspend/resume across runtime death.
 
 ## 4. Sandbox — Strong
 
 - Closest code today:
-  - `crates/fireline-conductor/src/runtime/provider.rs:127-199` — `CreateRuntimeSpec`, `RuntimeProvider`, `RuntimeLaunch`, and `ManagedRuntime` define the provisioning contract.
-  - `src/runtime_provider.rs:9-55` and `src/bootstrap.rs:103-223` — in-process local runtime provisioning.
-  - `crates/fireline-control-plane/src/local_provider.rs:93-180,183-216` — control-plane subprocess provisioning and shutdown path.
+  - `crates/fireline-conductor/src/runtime/provider.rs:130-173` — `CreateRuntimeSpec`, `PersistedRuntimeSpec`, `RuntimeProvider`, and `RuntimeLaunch`.
+  - `src/runtime_provider.rs` and `src/bootstrap.rs` — local runtime provisioning.
+  - `crates/fireline-control-plane/src/local_provider.rs` — control-plane-backed subprocess provisioning and shutdown path.
 
 - Relevant signatures:
 ```rust
-// crates/fireline-conductor/src/runtime/provider.rs:127-199
-pub struct CreateRuntimeSpec { pub agent_command: Vec<String>, pub state_stream: Option<String>, pub stream_storage: Option<StreamStorageConfig>, pub peer_directory_path: Option<PathBuf>, pub topology: TopologySpec, ... }
-pub trait ManagedRuntime: Send {
-    async fn shutdown(self: Box<Self>) -> Result<()>;
-}
-pub trait RuntimeProvider: Send + Sync {
-    fn kind(&self) -> RuntimeProviderKind;
-    async fn start(&self, spec: CreateRuntimeSpec, runtime_key: String, node_id: String) -> Result<RuntimeLaunch>;
-}
-```
-
-- Assessment: Strong.
-
-## 5. Resources — Missing
-
-- Closest code today:
-  - `crates/fireline-components/src/context.rs:45-52,169-200` — `WorkspaceFileSource` reads host-local files by direct path.
-  - `crates/fireline-conductor/src/runtime/provider.rs:127-139` and `crates/fireline-control-plane/src/local_provider.rs:126-144` — raw local path fields such as `peer_directory_path` are threaded directly into launch.
-  - `src/routes/files.rs:1-30` and `src/connections.rs:1-37` — planned helper-file and connection-lookup surfaces, still explicitly filesystem-local.
-
-- Relevant signatures:
-```rust
-// crates/fireline-components/src/context.rs:50-52,176-183
-pub trait ContextSource: Send + Sync {
-    async fn gather(&self, session_id: &str) -> Result<String, sacp::Error>;
-}
-pub struct WorkspaceFileSource;
-impl WorkspaceFileSource {
-    pub fn new(path: impl Into<PathBuf>) -> Self;
-}
-
-// crates/fireline-conductor/src/runtime/provider.rs:129-138
+// crates/fireline-conductor/src/runtime/provider.rs
 pub struct CreateRuntimeSpec {
-    pub peer_directory_path: Option<PathBuf>;
-    pub topology: TopologySpec;
+    pub provider: RuntimeProviderRequest,
+    pub agent_command: Vec<String>,
+    pub resources: Vec<ResourceRef>,
+    pub state_stream: Option<String>,
+    pub topology: TopologySpec,
     ...
 }
+
+pub trait RuntimeProvider: Send + Sync {
+    fn kind(&self) -> RuntimeProviderKind;
+    async fn start(&self, spec: CreateRuntimeSpec, runtime_key: String, node_id: String)
+        -> Result<RuntimeLaunch>;
+}
 ```
 
-- Assessment: Missing.
-- Closest analog: direct host-path plumbing and local file reads; I did not find a closer `[{source_ref, mount_path}]` abstraction hiding on `main`.
+- Live contract coverage:
+  - `tests/managed_agent_sandbox.rs:58` — provision returns a reachable runtime
+  - `tests/managed_agent_sandbox.rs:109` — a provisioned runtime serves multiple execute calls
+  - `tests/managed_agent_sandbox.rs:185` — stop + recreate preserves `session/load`
+  - `tests/managed_agent_sandbox.rs:267` — cross-provider equivalence is intentionally delegated to `tests/control_plane_docker.rs` slice 13c via an explicit cross-reference marker
+
+- Assessment: Strong. The local/control-plane-backed Sandbox contract is live, and the Docker mixed-topology proof is explicitly tracked outside the lightweight managed-agent suite.
+
+## 5. Resources — Strong
+
+- Closest code today:
+  - `crates/fireline-conductor/src/runtime/provider.rs:132-148` — `CreateRuntimeSpec.resources`.
+  - `crates/fireline-conductor/src/runtime/mounter.rs:10-89` — `MountedResource`, `ResourceMounter`, `LocalPathMounter`, and `prepare_resources(...)`.
+  - `crates/fireline-components/src/fs_backend.rs:23-152` — `FileBackend` plus `FsBackendComponent`.
+  - `crates/fireline-components/src/fs_backend.rs:155-260` — `LocalFileBackend` and `RuntimeStreamFileBackend` / `SessionLogFileBackend`.
+
+- Relevant signatures:
+```rust
+// crates/fireline-conductor/src/runtime/mounter.rs
+pub struct MountedResource {
+    pub host_path: PathBuf,
+    pub mount_path: PathBuf,
+    pub read_only: bool,
+}
+
+#[async_trait]
+pub trait ResourceMounter: Send + Sync {
+    async fn mount(&self, resource: &ResourceRef, runtime_key: &str)
+        -> Result<Option<MountedResource>>;
+}
+
+// crates/fireline-components/src/fs_backend.rs
+#[async_trait]
+pub trait FileBackend: Send + Sync {
+    async fn read(&self, path: &Path) -> Result<Vec<u8>>;
+    async fn write(&self, path: &Path, content: &[u8]) -> Result<()>;
+}
+
+pub struct FsBackendComponent;
+```
+
+- Live contract coverage:
+  - `tests/managed_agent_resources.rs:60` — `LocalPathMounter` maps source to mount correctly
+  - `tests/managed_agent_resources.rs:108` — `LocalFileBackend` reads through mount mapping
+  - `tests/managed_agent_resources.rs:195` — launched runtime captures ACP fs writes as durable `fs_op`
+  - `tests/managed_agent_resources.rs:287` — stream-backed backend supports cross-runtime reads
+  - `tests/managed_agent_primitives_suite.rs:249` — acceptance-level physical mount contract at component layer
+  - `tests/managed_agent_primitives_suite.rs:308` — acceptance-level fs-backend contract
+  - `tests/managed_agent_primitives_suite.rs:369` — component-level fs-backend evidence path
+  - `tests/managed_agent_resources.rs:154` and `tests/managed_agent_primitives_suite.rs:290` — shell-visible mount remains an intentional Docker-scoped cross-reference marker, not missing local-runtime substrate
+
+- Assessment: Strong. Local-path mounting, ACP fs interception, artifact capture, and cross-runtime stream-backed file reads all have live coverage. The only non-local-runtime proof is the intentionally external Docker/container shell-visible mount invariant.
 
 ## 6. Tools — Strong
 
 - Closest code today:
-  - `crates/fireline-components/src/peer/mcp_server.rs:22-170` — typed MCP tools `list_peers` and `prompt_peer`.
-  - `crates/fireline-components/src/smithery.rs:195-263` — typed `smithery_call` tool with explicit input/output schema.
-  - `crates/fireline-components/src/lib.rs:1-41` — components crate treats MCP bridges as first-class runtime surfaces.
+  - `crates/fireline-components/src/peer/mcp_server.rs:57-84` — canonical `ToolDescriptor` generation for peer tools.
+  - `crates/fireline-components/src/tools.rs:1-195` — schema-only `ToolDescriptor`, `TransportRef`, `CredentialRef`, `CapabilityRef`, and durable `tool_descriptor` emission.
+  - `crates/fireline-components/src/smithery.rs` — Smithery-backed tool attachment path.
 
 - Relevant signatures:
 ```rust
-// crates/fireline-components/src/peer/mcp_server.rs:22-62
-pub(crate) struct ListPeersInput {}
-pub(crate) struct PromptPeerInput { pub agent_name: String, pub prompt: String }
-pub(crate) struct PromptPeerOutput { pub runtime_id: String, pub agent_name: String, pub response_text: String, pub stop_reason: String }
-pub(crate) fn build_peer_mcp_server(...) -> sacp::mcp_server::McpServer<Conductor, impl sacp::RunWithConnectionTo<Conductor>>;
+// crates/fireline-components/src/tools.rs
+pub struct ToolDescriptor {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
 
-// crates/fireline-components/src/smithery.rs:195-217
-pub struct SmitheryCallInput { pub server: String, pub tool: String, pub arguments: serde_json::Value }
-pub struct SmitheryCallOutput { pub result: serde_json::Value }
+pub enum TransportRef {
+    PeerRuntime { runtime_key: String },
+    Smithery { catalog: String, tool: String },
+    McpUrl { url: String },
+    InProcess { component_name: String },
+}
+
+pub struct CapabilityRef {
+    pub descriptor: ToolDescriptor,
+    pub transport_ref: TransportRef,
+    pub credential_ref: Option<CredentialRef>,
+}
 ```
 
-- Assessment: Strong.
+- Live contract coverage:
+  - `tests/managed_agent_tools.rs:63` — schema-only descriptor surface with no transport/credential leakage
+  - `tests/managed_agent_tools.rs:230` — transport-agnostic registration projects the same wire shape
+  - `tests/managed_agent_tools.rs:389` — same-name collisions resolve deterministically via first-attach-wins
+  - `tests/managed_agent_primitives_suite.rs:430` — acceptance-level schema-only sibling in the primitives suite
+
+- Assessment: Strong. The Anthropic tool triple is live and enforced against real topology wiring; Slice 17 now extends portability and credential indirection rather than fixing a missing primitive.
