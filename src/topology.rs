@@ -7,6 +7,7 @@ use fireline_components::PeerComponent;
 use fireline_components::approval::{
     ApprovalAction, ApprovalConfig, ApprovalGateComponent, ApprovalMatch, ApprovalPolicy,
 };
+use fireline_components::attach_tool::AttachToolComponent;
 use fireline_components::audit::{AuditConfig, AuditSink, AuditTracer};
 use fireline_components::budget::{BudgetAction, BudgetComponent, BudgetConfig};
 use fireline_components::context::{
@@ -19,7 +20,7 @@ use fireline_components::fs_backend::{
 };
 use fireline_components::lookup::{ActiveTurnLookup, ChildSessionEdgeSink};
 use fireline_components::peer;
-use fireline_components::tools::emit_tool_descriptors;
+use fireline_components::tools::{CapabilityRef, emit_tool_descriptors};
 use fireline_conductor::runtime::MountedResource;
 use fireline_conductor::topology::{TopologyRegistry, TopologySpec, TraceWriterInstance};
 use serde::Deserialize;
@@ -72,6 +73,19 @@ pub struct ApprovalGateComponentConfig {
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub policies: Vec<ApprovalPolicyConfig>,
+}
+
+/// Config for the `attach_tool` topology component (slice 17
+/// Capability profiles). Each entry in `capabilities` is a portable
+/// attachment that projects to a single `tool_descriptor` state
+/// envelope on conductor wire-up; see
+/// [`fireline_components::attach_tool`] for the first-attach-wins
+/// collision rule and the slice 17 scope boundary.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachToolConfig {
+    #[serde(default)]
+    pub capabilities: Vec<CapabilityRef>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -287,6 +301,31 @@ pub fn build_runtime_topology_registry(context: ComponentContext) -> TopologyReg
                 };
                 Ok(sacp::DynConnectTo::new(FsBackendComponent::new(
                     backend,
+                    context.state_producer.clone(),
+                )))
+            }
+        })
+        .register_component("attach_tool", {
+            let context = context.clone();
+            move |config| {
+                // Slice 17 capability-profiles factory. The config is
+                // optional; an empty `capabilities` list is valid and
+                // yields a no-op pass-through proxy. Each capability is
+                // a portable `{descriptor, transport_ref, credential_ref}`
+                // triple; the component emits only the descriptor half
+                // onto the durable state stream, so the wire value stays
+                // the Anthropic triple regardless of which transport the
+                // capability is carrying at launch.
+                let parsed = config
+                    .cloned()
+                    .map(serde_json::from_value::<AttachToolConfig>)
+                    .transpose()
+                    .context("parse attach_tool config")?
+                    .unwrap_or(AttachToolConfig {
+                        capabilities: Vec::new(),
+                    });
+                Ok(sacp::DynConnectTo::new(AttachToolComponent::new(
+                    parsed.capabilities,
                     context.state_producer.clone(),
                 )))
             }

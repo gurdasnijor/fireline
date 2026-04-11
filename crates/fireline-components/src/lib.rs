@@ -26,12 +26,15 @@
 pub mod peer;
 
 pub mod approval;
+pub mod attach_tool;
 pub mod audit;
 pub mod budget;
 pub mod context;
 pub mod fs_backend;
 pub mod smithery;
 pub mod tools;
+
+pub use attach_tool::AttachToolComponent;
 
 // Backwards-compatible re-exports that match the old `fireline_peer`
 // public surface. Consumers currently use `fireline_peer::PeerComponent`

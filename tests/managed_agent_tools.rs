@@ -30,7 +30,7 @@ use anyhow::{Context, Result};
 use fireline_conductor::topology::{TopologyComponentSpec, TopologySpec};
 use managed_agent_suite::{
     DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec, create_session,
-    pending_contract, wait_for_event_count,
+    wait_for_event_count,
 };
 use std::collections::HashSet;
 
@@ -193,61 +193,300 @@ async fn tools_schema_only_contract() -> Result<()> {
     result
 }
 
-/// Precondition: two tools are registered with the same `name` but through
-/// different transports (one via `PeerComponent`, one via `SmitheryComponent`,
-/// one via a custom `attachTool`).
+/// Precondition: two tools are registered through the new `attach_tool`
+/// topology component, each carrying a **different** `TransportRef`
+/// variant but still exposing the Anthropic-shape `{name, description,
+/// input_schema}` descriptor.
 ///
-/// Action: observe how the conductor's init effect surfaces these to the
-/// agent — does it enforce name uniqueness, does it window by source, does
-/// it last-wins, does it reject the second registration?
+/// Action: open an ACP session so the conductor wires `attach_tool`
+/// into the proxy chain, triggering `tool_descriptor` emission for
+/// every capability in the list.
 ///
-/// Observable evidence: the init effect's tool list has a deterministic
-/// resolution rule for same-name collisions.
+/// Observable evidence: exactly two `tool_descriptor` envelopes land on
+/// the durable state stream, one per capability; each envelope's
+/// `value` contains exactly the Anthropic triple
+/// `{name, description, inputSchema}` with no transport or credential
+/// keys leaked through the wire.
 ///
-/// Invariant proven: **Tools transport-agnostic registration** — the agent
-/// cannot distinguish a tool registered via one transport from the same tool
-/// registered via another. The conductor collapses them to a single schema
-/// and resolves the transport at call time, which is the contract that makes
-/// tool portability (slice 17 Capability profiles) possible.
+/// Invariant proven: **Tools transport-agnostic registration** — the
+/// agent cannot distinguish a tool attached through one transport from
+/// the same-shaped tool attached through another. The wire value is
+/// always the `ToolDescriptor` triple; `transport_ref` and
+/// `credential_ref` stay inside the conductor layer. Slice 17's
+/// `CapabilityRef` shape (descriptor + transport_ref + credential_ref)
+/// makes this invariant cheap to test: the same `attach_tool`
+/// component handles both `TransportRef::InProcess` and
+/// `TransportRef::McpUrl` entries with zero difference visible on the
+/// wire.
+///
+/// # Slice 17 scope boundary
+/// This test covers the descriptor-emission surface only. Live tool
+/// dispatch through `TransportRef` (connecting to the remote MCP URL,
+/// forwarding the call, resolving credentials) is an explicit
+/// follow-up slice — there is no assertion here that the two tools are
+/// callable, only that their descriptors project onto the stream with
+/// the correct shape.
 #[tokio::test]
-#[ignore = "pending: schema-only observability is unblocked (see \
-            tools_schema_only_contract, which promotes a real test against the \
-            `tool_descriptor` state envelope emitted by src/topology.rs at peer_mcp \
-            wire-up time). The missing piece is the *collision-resolution* half of \
-            the contract: same-name tools registered through more than one transport \
-            cannot yet be constructed in Fireline because there is no attachTool- \
-            shaped registration API carrying portable transport_ref / credential_ref \
-            handles, and no conductor rule for resolving collisions between tools \
-            sourced from different MCP servers. Today each topology component scopes \
-            its tool namespace (peer_mcp: {list_peers, prompt_peer}; \
-            SmitheryComponent: {smithery_call}) so a collision can't even be wired. \
-            Slice 17 (capability profiles with portable refs + first-attach-wins \
-            collision rule) is the production substrate this test was written \
-            against, and it has not started. When slice 17 lands, the assertion \
-            becomes: 'after registering tool X via two transports, exactly one \
-            tool_descriptor envelope with name=X is visible, its key prefix records \
-            which transport won the collision, and the value still carries only the \
-            Anthropic triple {name, description, inputSchema}'."]
 async fn tools_transport_agnostic_registration() -> Result<()> {
-    pending_contract(
-        "tools.transport_agnostic",
-        "Blocked on slice 17 (Capability profiles). The schema-only observability \
-         half of the Tools contract is now live — tools_schema_only_contract \
-         witnesses the `tool_descriptor` state envelope emitted at peer_mcp wire-up. \
-         What this test still needs: \
-         (1) an attachTool-shaped registration path that accepts portable \
-         `transport_ref` and `credential_ref` handles rather than an embedded \
-         transport (not in Fireline or the SDK yet), \
-         (2) a documented collision-resolution rule in the conductor — specifically \
-         first-attach-wins across different transports, with the loser's \
-         tool_descriptor either suppressed or annotated for provenance, \
-         (3) a fixture that can mount the same logical tool through two transports \
-         simultaneously so the collision actually occurs. \
-         None of (1)-(3) exist today; tools are MCP-server-scoped per topology \
-         component, so the collision can't even be constructed. When slice 17 \
-         ships, the assertion becomes: register tool X via two transports, observe \
-         that exactly one tool_descriptor envelope with name=X lands on the stream, \
-         its key prefix identifies the winning transport, and its value keys are \
-         exactly {name, description, inputSchema}.",
-    )
+    let topology = TopologySpec {
+        components: vec![TopologyComponentSpec {
+            name: "attach_tool".to_string(),
+            config: Some(serde_json::json!({
+                "capabilities": [
+                    {
+                        "descriptor": {
+                            "name": "inproc_tool",
+                            "description": "Tool fetched via in-process component delegation.",
+                            "inputSchema": {"type": "object"}
+                        },
+                        "transportRef": {
+                            "kind": "inProcess",
+                            "componentName": "peer_mcp"
+                        }
+                    },
+                    {
+                        "descriptor": {
+                            "name": "remote_tool",
+                            "description": "Tool fetched via remote MCP URL.",
+                            "inputSchema": {"type": "object"}
+                        },
+                        "transportRef": {
+                            "kind": "mcpUrl",
+                            "url": "https://example.invalid/fake-mcp"
+                        },
+                        "credentialRef": {
+                            "kind": "env",
+                            "var": "FAKE_API_KEY"
+                        }
+                    }
+                ]
+            })),
+        }],
+    };
+    let spec = ManagedAgentHarnessSpec::new("tools-transport-agnostic-registration")
+        .with_topology(topology);
+    let runtime = LocalRuntimeHarness::spawn_with(spec).await?;
+
+    let result = async {
+        // Open a session so the conductor builds its topology and the
+        // attach_tool component runs its emission loop.
+        let _session_id = create_session(runtime.acp_url())
+            .await
+            .context("create session to trigger attach_tool emission")?;
+
+        let envelopes =
+            wait_for_event_count(runtime.state_stream_url(), "tool_descriptor", 2, DEFAULT_TIMEOUT)
+                .await
+                .context(
+                    "INVARIANT (Tools): attach_tool must emit one tool_descriptor envelope \
+                     per CapabilityRef on conductor wire-up, regardless of the capability's \
+                     transport variant",
+                )?;
+
+        let required_keys: HashSet<&str> =
+            ["name", "description", "inputSchema"].into_iter().collect();
+        let forbidden_keys: HashSet<&str> = [
+            "transport",
+            "transportRef",
+            "credential",
+            "credentialRef",
+            "host",
+            "runtimeKey",
+            "nodeId",
+        ]
+        .into_iter()
+        .collect();
+
+        let mut witnessed_names: HashSet<String> = HashSet::new();
+
+        for envelope in &envelopes {
+            assert_eq!(
+                envelope.envelope_type(),
+                Some("tool_descriptor"),
+                "INVARIANT (Tools): filtered envelopes must all be tool_descriptor",
+            );
+            assert_eq!(
+                envelope.operation(),
+                Some("insert"),
+                "INVARIANT (Tools): tool_descriptor envelopes must use `insert`",
+            );
+
+            let key = envelope.key().unwrap_or_default();
+            assert!(
+                key.starts_with("attach_tool:"),
+                "INVARIANT (Tools): attach_tool-sourced tool_descriptor keys must be prefixed \
+                 with `attach_tool:` for provenance, got `{key}`",
+            );
+
+            let value = envelope
+                .value()
+                .context("tool_descriptor envelope missing value")?;
+            let obj = value.as_object().context(
+                "INVARIANT (Tools): tool_descriptor value must be a JSON object",
+            )?;
+            let present_keys: HashSet<&str> = obj.keys().map(String::as_str).collect();
+            assert_eq!(
+                present_keys, required_keys,
+                "INVARIANT (Tools): tool_descriptor value must carry exactly the Anthropic \
+                 triple {{name, description, inputSchema}} regardless of transport. Got \
+                 keys: {present_keys:?}. The transport_ref / credential_ref half of \
+                 CapabilityRef must NEVER leak onto the wire.",
+            );
+            for forbidden in &forbidden_keys {
+                assert!(
+                    !present_keys.contains(forbidden),
+                    "INVARIANT (Tools): tool_descriptor value must not leak `{forbidden}`; \
+                     the wire value is the Anthropic triple, not the CapabilityRef shape",
+                );
+            }
+
+            let name = value
+                .get("name")
+                .and_then(|v| v.as_str())
+                .context("tool_descriptor.value.name must be a string")?;
+            witnessed_names.insert(name.to_string());
+        }
+
+        let expected: HashSet<&str> = ["inproc_tool", "remote_tool"].into_iter().collect();
+        let witnessed_refs: HashSet<&str> = witnessed_names.iter().map(String::as_str).collect();
+        assert_eq!(
+            witnessed_refs, expected,
+            "INVARIANT (Tools): attach_tool must emit descriptors for every configured \
+             capability, regardless of which TransportRef variant carries them. \
+             Expected {expected:?}, witnessed {witnessed_refs:?}.",
+        );
+
+        Ok(())
+    }
+    .await;
+
+    runtime.shutdown().await?;
+    result
+}
+
+/// Precondition: one `attach_tool` topology component configured with
+/// two `CapabilityRef` values that share a `descriptor.name` but
+/// differ in `description`.
+///
+/// Action: open an ACP session so the `attach_tool` emission loop runs
+/// against the two colliding capabilities.
+///
+/// Observable evidence: exactly **one** `tool_descriptor` envelope for
+/// the shared name lands on the state stream, and its description
+/// matches the **first** capability's description. The second
+/// capability's emission is suppressed by the first-attach-wins rule
+/// (the loser's descriptor never lands on the wire).
+///
+/// Invariant proven: **First-attach-wins collision rule** — the
+/// `attach_tool` component is the single source of truth for
+/// resolving same-name collisions between `CapabilityRef` entries.
+/// The rule is deterministic (list order) and documented in the
+/// `attach_tool` module docstring. Without this, a topology carrying
+/// the same logical tool through two transports would project two
+/// conflicting descriptors, and the agent would see a non-deterministic
+/// tool surface at session wire-up.
+#[tokio::test]
+async fn tools_first_attach_wins_on_name_collision() -> Result<()> {
+    let topology = TopologySpec {
+        components: vec![TopologyComponentSpec {
+            name: "attach_tool".to_string(),
+            config: Some(serde_json::json!({
+                "capabilities": [
+                    {
+                        "descriptor": {
+                            "name": "shared_tool",
+                            "description": "first attach — should win",
+                            "inputSchema": {"type": "object"}
+                        },
+                        "transportRef": {
+                            "kind": "inProcess",
+                            "componentName": "peer_mcp"
+                        }
+                    },
+                    {
+                        "descriptor": {
+                            "name": "shared_tool",
+                            "description": "second attach — should be suppressed",
+                            "inputSchema": {"type": "object"}
+                        },
+                        "transportRef": {
+                            "kind": "mcpUrl",
+                            "url": "https://example.invalid/second"
+                        }
+                    }
+                ]
+            })),
+        }],
+    };
+    let spec = ManagedAgentHarnessSpec::new("tools-first-attach-wins-collision")
+        .with_topology(topology);
+    let runtime = LocalRuntimeHarness::spawn_with(spec).await?;
+
+    let result = async {
+        let _session_id = create_session(runtime.acp_url())
+            .await
+            .context("create session to trigger attach_tool collision emission")?;
+
+        // Wait for at least one envelope, then assert we have *exactly*
+        // one by counting all tool_descriptor envelopes that carry
+        // name="shared_tool".
+        let _ = wait_for_event_count(
+            runtime.state_stream_url(),
+            "tool_descriptor",
+            1,
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .context(
+            "INVARIANT (Tools): attach_tool must emit at least one tool_descriptor \
+             envelope even when the capability list contains a name collision",
+        )?;
+
+        // Now read every tool_descriptor envelope on the stream and
+        // filter to the shared name to confirm first-attach-wins.
+        let envelopes = wait_for_event_count(
+            runtime.state_stream_url(),
+            "tool_descriptor",
+            1,
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        let shared: Vec<_> = envelopes
+            .iter()
+            .filter(|env| {
+                env.value()
+                    .and_then(|v| v.get("name"))
+                    .and_then(|v| v.as_str())
+                    == Some("shared_tool")
+            })
+            .collect();
+
+        assert_eq!(
+            shared.len(),
+            1,
+            "INVARIANT (Tools): first-attach-wins must collapse same-name capabilities to a \
+             single tool_descriptor envelope on the wire. Observed {} envelopes for \
+             name=shared_tool.",
+            shared.len()
+        );
+
+        let winner = shared[0];
+        let description = winner
+            .value()
+            .and_then(|v| v.get("description"))
+            .and_then(|v| v.as_str())
+            .context("winner tool_descriptor.value.description must be a string")?;
+        assert_eq!(
+            description, "first attach — should win",
+            "INVARIANT (Tools): first-attach-wins means the FIRST capability in the \
+             list is the one whose descriptor lands on the stream. Got description: \
+             `{description}`",
+        );
+
+        Ok(())
+    }
+    .await;
+
+    runtime.shutdown().await?;
+    result
 }
