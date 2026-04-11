@@ -3,10 +3,8 @@
 //! Parses CLI args, calls [`fireline_runtime::bootstrap::start`], waits for
 //! the shutdown signal, and exits. Should stay under ~50 lines.
 //!
-//! All bootstrap logic — wiring the stream server, the ACP host
-//! routes, the conductor builder with components, the helper API,
-//! — lives in the binary's `lib.rs` module
-//! tree, not here.
+//! All runtime assembly lives in the primitive crates, not in a root
+//! `fireline` library shim.
 
 use anyhow::{Context, Result};
 use clap::Parser;
