@@ -19,6 +19,7 @@ pub struct ChildProcessRuntimeLauncher {
     default_peer_directory_path: Option<PathBuf>,
     prefer_push: bool,
     control_plane_url: String,
+    shared_stream_base_url: Option<String>,
     token_store: RuntimeTokenStore,
     startup_timeout: Duration,
     stop_timeout: Duration,
@@ -35,6 +36,7 @@ impl ChildProcessRuntimeLauncher {
         default_peer_directory_path: Option<PathBuf>,
         prefer_push: bool,
         control_plane_url: String,
+        shared_stream_base_url: Option<String>,
         token_store: RuntimeTokenStore,
         startup_timeout: Duration,
         stop_timeout: Duration,
@@ -46,6 +48,7 @@ impl ChildProcessRuntimeLauncher {
             default_peer_directory_path,
             prefer_push,
             control_plane_url,
+            shared_stream_base_url,
             token_store,
             startup_timeout,
             stop_timeout,
@@ -98,6 +101,10 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
         runtime_key: String,
         node_id: String,
     ) -> Result<RuntimeLaunch> {
+        let state_stream_name = spec
+            .state_stream
+            .clone()
+            .unwrap_or_else(|| format!("fireline-state-{}", sanitize_state_stream_key(&runtime_key)));
         let mut command = Command::new(&self.fireline_bin);
         command
             .arg("--host")
@@ -111,7 +118,9 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
             .arg("--node-id")
             .arg(&node_id)
             .arg("--runtime-registry-path")
-            .arg(&self.runtime_registry_path);
+            .arg(&self.runtime_registry_path)
+            .arg("--state-stream")
+            .arg(&state_stream_name);
 
         if self.prefer_push {
             let runtime_token = self
@@ -123,8 +132,11 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
                 .env("FIRELINE_CONTROL_PLANE_TOKEN", runtime_token.token);
         }
 
-        if let Some(state_stream) = &spec.state_stream {
-            command.arg("--state-stream").arg(state_stream);
+        if let Some(shared_stream_base_url) = &self.shared_stream_base_url {
+            let state_stream_url = join_stream_url(shared_stream_base_url, &state_stream_name);
+            command
+                .env("FIRELINE_EXTERNAL_STATE_STREAM_URL", &state_stream_url)
+                .env("FIRELINE_ADVERTISED_STATE_STREAM_URL", state_stream_url);
         }
 
         if let Some(peer_directory_path) = spec
@@ -230,4 +242,17 @@ fn send_interrupt(pid: Option<u32>) -> Result<()> {
 #[cfg(not(unix))]
 fn send_interrupt(_pid: Option<u32>) -> Result<()> {
     Ok(())
+}
+
+fn sanitize_state_stream_key(value: &str) -> String {
+    value.chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
+            _ => '-',
+        })
+        .collect()
+}
+
+fn join_stream_url(base: &str, stream_name: &str) -> String {
+    format!("{}/{}", base.trim_end_matches('/'), stream_name)
 }

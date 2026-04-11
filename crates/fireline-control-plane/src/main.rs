@@ -9,14 +9,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::Parser;
-use fireline_conductor::runtime::{LocalProvider, RuntimeHost, RuntimeManager, RuntimeRegistry};
+use clap::{Parser, ValueEnum};
+use fireline_conductor::runtime::{
+    DockerProvider, DockerProviderConfig, LocalProvider, RuntimeHost, RuntimeManager,
+    RuntimeRegistry, RuntimeTokenIssuer,
+};
 use tracing_subscriber::EnvFilter;
 
 use self::auth::RuntimeTokenStore;
 use self::heartbeat::HeartbeatTracker;
 use self::local_provider::ChildProcessRuntimeLauncher;
 use self::router::{AppState, build_router};
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ProviderMode {
+    Local,
+    Docker,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -45,6 +54,9 @@ struct Cli {
     #[arg(long, default_value_t = 10_000)]
     stop_timeout_ms: u64,
 
+    #[arg(long, value_enum, default_value_t = ProviderMode::Local)]
+    provider: ProviderMode,
+
     #[arg(
         long,
         env = "FIRELINE_CONTROL_PLANE_PREFER_PUSH",
@@ -57,6 +69,18 @@ struct Cli {
 
     #[arg(long, default_value_t = 30_000)]
     stale_timeout_ms: u64,
+
+    #[arg(long)]
+    shared_stream_base_url: Option<String>,
+
+    #[arg(long)]
+    docker_build_context: Option<PathBuf>,
+
+    #[arg(long, default_value = "docker/fireline-runtime.Dockerfile")]
+    dockerfile: PathBuf,
+
+    #[arg(long, default_value = "fireline-runtime:dev")]
+    docker_image: String,
 }
 
 #[tokio::main]
@@ -82,14 +106,29 @@ async fn main() -> Result<()> {
         cli.peer_directory_path,
         cli.prefer_push,
         control_plane_base_url(host, cli.port),
+        cli.shared_stream_base_url.clone(),
         token_store.clone(),
         Duration::from_millis(cli.startup_timeout_ms),
         Duration::from_millis(cli.stop_timeout_ms),
     ));
-    let runtime_host = RuntimeHost::new(
-        runtime_registry.clone(),
-        RuntimeManager::new(Arc::new(LocalProvider::new(launcher))),
-    );
+    let mut runtime_manager = RuntimeManager::new(Arc::new(LocalProvider::new(launcher)));
+    if matches!(cli.provider, ProviderMode::Docker) {
+        let build_context = cli.docker_build_context.clone().unwrap_or(default_repo_root()?);
+        let docker_provider = Arc::new(DockerProvider::new(
+            DockerProviderConfig {
+                control_plane_url: control_plane_base_url(host, cli.port),
+                shared_stream_base_url: cli.shared_stream_base_url.clone(),
+                image: cli.docker_image.clone(),
+                build_context,
+                dockerfile: cli.dockerfile.clone(),
+            },
+            Arc::new(ControlPlaneTokenIssuer {
+                token_store: token_store.clone(),
+            }),
+        )?);
+        runtime_manager = runtime_manager.with_provider(docker_provider);
+    }
+    let runtime_host = RuntimeHost::new(runtime_registry.clone(), runtime_manager);
     spawn_stale_runtime_task(
         runtime_registry.clone(),
         heartbeat_tracker.clone(),
@@ -176,9 +215,29 @@ fn control_plane_base_url(host: std::net::IpAddr, port: u16) -> String {
     format!("http://{connect_host}:{port}")
 }
 
+fn default_repo_root() -> Result<PathBuf> {
+    Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .context("resolve control-plane crate parent")?
+        .parent()
+        .context("resolve workspace root")?
+        .to_path_buf())
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("time went backwards")
         .as_millis() as i64
+}
+
+#[derive(Clone)]
+struct ControlPlaneTokenIssuer {
+    token_store: RuntimeTokenStore,
+}
+
+impl RuntimeTokenIssuer for ControlPlaneTokenIssuer {
+    fn issue(&self, runtime_key: &str, ttl: Duration) -> String {
+        self.token_store.issue(runtime_key, ttl).token
+    }
 }
