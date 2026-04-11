@@ -85,6 +85,9 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use agent_client_protocol::{
+    InitializeRequest, LoadSessionRequest, NewSessionRequest, PromptRequest, ProtocolVersion,
+};
 use anyhow::{Context, Result, anyhow};
 use axum::Router;
 use fireline_conductor::runtime::{
@@ -598,6 +601,13 @@ impl SharedStreamServer {
 }
 
 fn ensure_control_plane_binaries_built() -> Result<()> {
+    if fireline_bin().exists()
+        && control_plane_bin().exists()
+        && target_bin("fireline-testy").exists()
+    {
+        return Ok(());
+    }
+
     let status = std::process::Command::new("cargo")
         .args([
             "build",
@@ -1251,36 +1261,185 @@ mod stubs {
     // -------------------------------------------------------------------------
 
     pub struct AcpClient {
-        _placeholder: (),
+        endpoint: Endpoint,
+        cwd: PathBuf,
     }
 
     impl AcpClient {
         pub async fn new_session(&mut self) -> Result<String> {
-            todo!(
-                "AcpClient::new_session — creates an ACP session and returns \
-                 the session_id. Wrap existing ACP client helpers from \
-                 tests/mesh_baseline.rs or similar."
-            )
+            let cwd = self.cwd.clone();
+            let endpoint = self.endpoint.clone();
+            sacp::Client
+                .builder()
+                .connect_with(
+                    WebSocketTransport::new(endpoint)?,
+                    move |cx: sacp::ConnectionTo<sacp::Agent>| {
+                        let cwd = cwd.clone();
+                        async move {
+                            let _ = cx
+                                .send_request(InitializeRequest::new(ProtocolVersion::LATEST))
+                                .block_task()
+                                .await?;
+
+                            let session = cx
+                                .send_request(NewSessionRequest::new(cwd))
+                                .block_task()
+                                .await?;
+
+                            Ok(session.session_id.to_string())
+                        }
+                    },
+                )
+                .await
+                .map_err(anyhow::Error::from)
         }
-        pub async fn load_session(&mut self, _session_id: &str) -> Result<()> {
-            todo!(
-                "AcpClient::load_session — issues ACP session/load; existing \
-                 LoadCoordinatorComponent handles the rebuild."
-            )
+        pub async fn load_session(&mut self, session_id: &str) -> Result<()> {
+            let cwd = self.cwd.clone();
+            let endpoint = self.endpoint.clone();
+            let session_id = session_id.to_string();
+            let result = sacp::Client
+                .builder()
+                .connect_with(
+                    WebSocketTransport::new(endpoint)?,
+                    move |cx: sacp::ConnectionTo<sacp::Agent>| {
+                        let cwd = cwd.clone();
+                        let session_id = session_id.clone();
+                        async move {
+                            let _ = cx
+                                .send_request(InitializeRequest::new(ProtocolVersion::LATEST))
+                                .block_task()
+                                .await?;
+
+                            Ok(cx
+                                .send_request(LoadSessionRequest::new(session_id, cwd))
+                                .block_task()
+                                .await)
+                        }
+                    },
+                )
+                .await
+                .map_err(anyhow::Error::from)?;
+
+            result.map(|_| ()).map_err(anyhow::Error::from)
         }
-        pub async fn prompt(&mut self, _session_id: &str, _text: &str) -> Result<()> {
-            todo!("AcpClient::prompt — issues ACP session/prompt")
+        pub async fn prompt(&mut self, session_id: &str, text: &str) -> Result<()> {
+            let endpoint = self.endpoint.clone();
+            let session_id = session_id.to_string();
+            let text = text.to_string();
+            sacp::Client
+                .builder()
+                .connect_with(
+                    WebSocketTransport::new(endpoint)?,
+                    move |cx: sacp::ConnectionTo<sacp::Agent>| {
+                        let session_id = session_id.clone();
+                        let text = text.clone();
+                        async move {
+                            let _ = cx
+                                .send_request(InitializeRequest::new(ProtocolVersion::LATEST))
+                                .block_task()
+                                .await?;
+
+                            let _ = cx
+                                .send_request(PromptRequest::new(session_id, vec![text.into()]))
+                                .block_task()
+                                .await?;
+
+                            Ok(())
+                        }
+                    },
+                )
+                .await
+                .map_err(anyhow::Error::from)
         }
         pub async fn disconnect(&mut self) -> Result<()> {
             Ok(())
         }
     }
 
-    pub async fn connect_acp(_endpoint: &Endpoint) -> Result<AcpClient> {
-        todo!(
-            "connect_acp — opens an ACP WebSocket against the endpoint URL \
-             carrying the endpoint's bearer token. Reuse helpers from existing \
-             tests."
-        )
+    pub async fn connect_acp(endpoint: &Endpoint) -> Result<AcpClient> {
+        Ok(AcpClient {
+            endpoint: endpoint.clone(),
+            cwd: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        })
+    }
+
+    struct WebSocketTransport {
+        url: String,
+        headers: Option<std::collections::BTreeMap<String, String>>,
+    }
+
+    impl WebSocketTransport {
+        fn new(endpoint: Endpoint) -> Result<Self> {
+            Ok(Self {
+                url: endpoint.url,
+                headers: endpoint.headers,
+            })
+        }
+    }
+
+    impl sacp::ConnectTo<sacp::Client> for WebSocketTransport {
+        async fn connect_to(
+            self,
+            client: impl sacp::ConnectTo<sacp::Agent>,
+        ) -> Result<(), sacp::Error> {
+            let mut request = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(self.url.as_str())
+                .map_err(|e| sacp::util::internal_error(format!("WebSocket request build: {e}")))?;
+
+            if let Some(headers) = self.headers {
+                for (name, value) in headers {
+                    let header_name = axum::http::header::HeaderName::try_from(name)
+                        .map_err(|e| sacp::util::internal_error(format!("invalid header name: {e}")))?;
+                    let header_value = axum::http::HeaderValue::try_from(value)
+                        .map_err(|e| sacp::util::internal_error(format!("invalid header value: {e}")))?;
+                    request.headers_mut().insert(header_name, header_value);
+                }
+            }
+
+            let (ws, _) = tokio_tungstenite::connect_async(request)
+                .await
+                .map_err(|e| sacp::util::internal_error(format!("WebSocket connect: {e}")))?;
+
+            let (write, read) = futures::StreamExt::split(ws);
+
+            let outgoing = futures::SinkExt::with(
+                futures::SinkExt::sink_map_err(write, std::io::Error::other),
+                |line: String| async move {
+                    Ok::<_, std::io::Error>(tokio_tungstenite::tungstenite::Message::Text(
+                        line.into(),
+                    ))
+                },
+            );
+
+            let incoming = futures::StreamExt::filter_map(read, |msg| async move {
+                match msg {
+                    Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
+                        let line = text.trim().to_string();
+                        if line.is_empty() {
+                            None
+                        } else {
+                            Some(Ok(line))
+                        }
+                    }
+                    Ok(tokio_tungstenite::tungstenite::Message::Binary(bytes)) => {
+                        String::from_utf8(bytes.to_vec()).ok().and_then(|text| {
+                            let line = text.trim().to_string();
+                            if line.is_empty() {
+                                None
+                            } else {
+                                Some(Ok(line))
+                            }
+                        })
+                    }
+                    Ok(_) => None,
+                    Err(err) => Some(Err(std::io::Error::other(err))),
+                }
+            });
+
+            sacp::ConnectTo::<sacp::Client>::connect_to(
+                sacp::Lines::new(outgoing, incoming),
+                client,
+            )
+            .await
+        }
     }
 }
