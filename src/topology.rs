@@ -68,6 +68,31 @@ pub struct BudgetComponentConfig {
 pub struct ApprovalGateComponentConfig {
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub policies: Vec<ApprovalPolicyConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalPolicyConfig {
+    pub r#match: ApprovalMatchConfig,
+    pub action: ApprovalActionConfig,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ApprovalMatchConfig {
+    PromptContains { needle: String },
+    Tool { name: String },
+    ToolPrefix { prefix: String },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalActionConfig {
+    RequireApproval,
+    Deny,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -173,25 +198,48 @@ pub fn build_runtime_topology_registry(context: ComponentContext) -> TopologyReg
         .register_component("approval_gate", {
             let context = context.clone();
             move |config| {
-                let _parsed = config
+                let parsed = config
                     .cloned()
                     .map(serde_json::from_value::<ApprovalGateComponentConfig>)
                     .transpose()
                     .context("parse approval gate config")?
-                    .unwrap_or(ApprovalGateComponentConfig { timeout_ms: None });
-                Ok(sacp::DynConnectTo::new(ApprovalGateComponent::with_stream(
-                    ApprovalConfig {
-                        policies: vec![ApprovalPolicy {
-                            match_rule: ApprovalMatch::PromptContains {
-                                needle: String::new(),
-                            },
-                            action: ApprovalAction::RequireApproval,
-                            reason: "approval required".to_string(),
-                        }],
-                    },
-                    Some(context.state_stream_url.clone()),
-                    Some(context.state_producer.clone()),
-                )))
+                    .unwrap_or(ApprovalGateComponentConfig {
+                        timeout_ms: None,
+                        policies: Vec::new(),
+                    });
+                let policies = parsed
+                    .policies
+                    .into_iter()
+                    .map(|policy| ApprovalPolicy {
+                        match_rule: match policy.r#match {
+                            ApprovalMatchConfig::PromptContains { needle } => {
+                                ApprovalMatch::PromptContains { needle }
+                            }
+                            ApprovalMatchConfig::Tool { name } => ApprovalMatch::Tool { name },
+                            ApprovalMatchConfig::ToolPrefix { prefix } => {
+                                ApprovalMatch::ToolPrefix { prefix }
+                            }
+                        },
+                        action: match policy.action {
+                            ApprovalActionConfig::RequireApproval => {
+                                ApprovalAction::RequireApproval
+                            }
+                            ApprovalActionConfig::Deny => ApprovalAction::Deny,
+                        },
+                        reason: policy.reason,
+                    })
+                    .collect();
+                let timeout = parsed
+                    .timeout_ms
+                    .map(std::time::Duration::from_millis);
+                Ok(sacp::DynConnectTo::new(
+                    ApprovalGateComponent::with_stream_and_timeout(
+                        ApprovalConfig { policies },
+                        Some(context.state_stream_url.clone()),
+                        Some(context.state_producer.clone()),
+                        timeout,
+                    ),
+                ))
             }
         })
         .register_tracer("durable_trace", |_config| {

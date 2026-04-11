@@ -6,11 +6,12 @@
 //!
 //! - **Deny** the request outright, returning a tool-level error
 //!   so the agent sees a failure instead of the requested action
-//! - **RequireApproval** — forward the request only after a
-//!   human approver signals consent (scaffolded below as a TODO,
-//!   because the SDK doesn't yet expose a clean proxy-level hook
-//!   for `session/request_permission` round-trips initiated from
-//!   inside an `on_receive_request_from` handler)
+//! - **RequireApproval** — emit a `permission_request` event to the
+//!   durable state stream with a unique request id, then block the
+//!   request until a matching `approval_resolved` event appears on
+//!   the stream. The request is forwarded to the agent only if the
+//!   resolution event carries `allow: true`. A `Deny` resolution
+//!   surfaces as a gate error the agent never sees.
 //!
 //! # Why prompt-level, not tool-call-level
 //!
@@ -33,8 +34,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use durable_streams::{Client as DurableStreamsClient, Producer};
+use durable_streams::{Client as DurableStreamsClient, LiveMode, Offset, Producer};
 use sacp::schema::{ContentBlock, PromptRequest};
 use sacp::{Agent, Client, ConnectTo, Proxy};
 use serde::Serialize;
@@ -67,10 +69,10 @@ pub enum ApprovalMatch {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApprovalAction {
-    /// Pause the request and ask the user via
-    /// `session/request_permission`. **TODO**: currently falls
-    /// through to forwarding; the round-trip is scaffolded but
-    /// not wired.
+    /// Emit a `permission_request` event and block the request
+    /// until a matching `approval_resolved` event appears on the
+    /// durable state stream. The downstream agent only sees the
+    /// request if the resolution event is `allow: true`.
     RequireApproval,
     /// Refuse the request with a gate error the agent will see.
     Deny,
@@ -118,6 +120,7 @@ pub struct ApprovalGateComponent {
     config: Arc<ApprovalConfig>,
     state_stream_url: Option<String>,
     state_producer: Option<Producer>,
+    approval_timeout: Option<Duration>,
     approved_sessions: Arc<Mutex<HashSet<String>>>,
     pending_sessions: Arc<Mutex<HashMap<String, String>>>,
 }
@@ -132,10 +135,20 @@ impl ApprovalGateComponent {
         state_stream_url: Option<String>,
         state_producer: Option<Producer>,
     ) -> Self {
+        Self::with_stream_and_timeout(config, state_stream_url, state_producer, None)
+    }
+
+    pub fn with_stream_and_timeout(
+        config: ApprovalConfig,
+        state_stream_url: Option<String>,
+        state_producer: Option<Producer>,
+        approval_timeout: Option<Duration>,
+    ) -> Self {
         Self {
             config: Arc::new(config),
             state_stream_url,
             state_producer,
+            approval_timeout,
             approved_sessions: Arc::new(Mutex::new(HashSet::new())),
             pending_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -235,26 +248,126 @@ impl ApprovalGateComponent {
         Ok(())
     }
 
-    fn emit_permission_request(&self, session_id: &str, reason: &str) {
+    async fn emit_permission_request(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        reason: &str,
+    ) -> Result<(), sacp::Error> {
         let Some(producer) = self.state_producer.as_ref() else {
-            return;
+            return Err(sacp::util::internal_error(
+                "approval gate has no state producer; cannot emit permission_request",
+            ));
         };
 
         producer.append_json(&StateEnvelope {
             entity_type: "permission",
-            key: format!("{session_id}:{}", now_ms()),
+            key: format!("{session_id}:{request_id}"),
             headers: StateHeaders {
                 operation: "insert",
             },
             value: PermissionEvent {
                 kind: "permission_request",
                 session_id: session_id.to_string(),
+                request_id: Some(request_id.to_string()),
                 allow: None,
                 resolved_by: None,
                 reason: Some(reason.to_string()),
                 created_at_ms: now_ms(),
             },
         });
+        producer
+            .flush()
+            .await
+            .map_err(|error| sacp::util::internal_error(format!("approval flush: {error}")))?;
+        Ok(())
+    }
+
+    /// Block until an `approval_resolved` event with a matching
+    /// `request_id` appears on the state stream. Returns `Ok(true)`
+    /// if the request was approved, `Ok(false)` if explicitly
+    /// denied, or an error if the gate timeout elapses or the
+    /// stream terminates.
+    async fn wait_for_approval(
+        &self,
+        session_id: &str,
+        request_id: &str,
+    ) -> Result<bool, sacp::Error> {
+        let state_stream_url = self
+            .state_stream_url
+            .as_deref()
+            .ok_or_else(|| sacp::util::internal_error("approval gate has no state stream URL"))?;
+
+        let client = DurableStreamsClient::new();
+        let stream = client.stream(state_stream_url);
+        let mut reader = stream
+            .read()
+            .offset(Offset::Beginning)
+            .live(LiveMode::Sse)
+            .build()
+            .map_err(|error| {
+                sacp::util::internal_error(format!("approval stream reader: {error}"))
+            })?;
+
+        let deadline = self
+            .approval_timeout
+            .map(|timeout| tokio::time::Instant::now() + timeout);
+
+        loop {
+            let next = if let Some(deadline) = deadline {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(approval_timeout_error(session_id));
+                }
+                match tokio::time::timeout(remaining, reader.next_chunk()).await {
+                    Ok(chunk_result) => chunk_result,
+                    Err(_) => return Err(approval_timeout_error(session_id)),
+                }
+            } else {
+                reader.next_chunk().await
+            };
+
+            match next {
+                Ok(Some(chunk)) => {
+                    if chunk.data.is_empty() {
+                        continue;
+                    }
+                    let events: Vec<Value> =
+                        serde_json::from_slice(&chunk.data).map_err(|error| {
+                            sacp::util::internal_error(format!("approval parse: {error}"))
+                        })?;
+                    for event in events {
+                        let Some(value) = event.get("value") else {
+                            continue;
+                        };
+                        if value.get("kind").and_then(Value::as_str) != Some("approval_resolved") {
+                            continue;
+                        }
+                        if value.get("sessionId").and_then(Value::as_str) != Some(session_id) {
+                            continue;
+                        }
+                        if value.get("requestId").and_then(Value::as_str) != Some(request_id) {
+                            continue;
+                        }
+                        let allow = value
+                            .get("allow")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        return Ok(allow);
+                    }
+                }
+                Ok(None) => {
+                    return Err(sacp::util::internal_error(
+                        "approval stream closed before the permission was resolved",
+                    ));
+                }
+                Err(error) => {
+                    return Err(sacp::util::internal_error(format!(
+                        "approval stream read error: {error}"
+                    )));
+                }
+            }
+        }
     }
 
     fn is_session_approved(&self, session_id: &str) -> bool {
@@ -265,11 +378,19 @@ impl ApprovalGateComponent {
     }
 }
 
+fn approval_timeout_error(session_id: &str) -> sacp::Error {
+    sacp::util::internal_error(format!(
+        "approval_gate timed out waiting for approval on session {session_id}"
+    ))
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PermissionEvent {
     kind: &'static str,
     session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     allow: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -312,29 +433,49 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                                 .forward_response_to(responder);
                         }
 
-                        if let Some(policy) = this.config.policy_for_prompt(&prompt_text) {
-                            match policy.action {
-                                ApprovalAction::Deny => {
+                        let policy_match = this
+                            .config
+                            .policy_for_prompt(&prompt_text)
+                            .map(|policy| (policy.action, policy.reason.clone()));
+
+                        let Some((action, reason)) = policy_match else {
+                            return cx
+                                .send_request_to(Agent, request)
+                                .forward_response_to(responder);
+                        };
+
+                        match action {
+                            ApprovalAction::Deny => Err(sacp::util::internal_error(format!(
+                                "approval_gate denied prompt: {reason}"
+                            ))),
+                            ApprovalAction::RequireApproval => {
+                                let request_id = uuid::Uuid::new_v4().to_string();
+                                this.pending_sessions
+                                    .lock()
+                                    .expect("approval state poisoned")
+                                    .insert(session_id.clone(), reason.clone());
+                                this.emit_permission_request(&session_id, &request_id, &reason)
+                                    .await?;
+                                let allowed = this
+                                    .wait_for_approval(&session_id, &request_id)
+                                    .await?;
+                                this.pending_sessions
+                                    .lock()
+                                    .expect("approval state poisoned")
+                                    .remove(&session_id);
+                                if !allowed {
                                     return Err(sacp::util::internal_error(format!(
-                                        "approval_gate denied prompt: {}",
-                                        policy.reason
+                                        "approval_gate denied by approver: {reason}"
                                     )));
                                 }
-                                ApprovalAction::RequireApproval => {
-                                    let result = cx
-                                        .send_request_to(Agent, request)
-                                        .forward_response_to(responder);
-                                    this.emit_permission_request(&session_id, &policy.reason);
-                                    this.pending_sessions
-                                        .lock()
-                                        .expect("approval state poisoned")
-                                        .insert(session_id, policy.reason.clone());
-                                    return result;
-                                }
+                                this.approved_sessions
+                                    .lock()
+                                    .expect("approval state poisoned")
+                                    .insert(session_id);
+                                cx.send_request_to(Agent, request)
+                                    .forward_response_to(responder)
                             }
                         }
-                        cx.send_request_to(Agent, request)
-                            .forward_response_to(responder)
                     }
                 },
                 sacp::on_receive_request!(),
