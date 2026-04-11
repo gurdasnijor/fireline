@@ -109,6 +109,12 @@ impl StateProjection for SessionIndex {
     async fn apply_state_event(&self, event: &RawStateEnvelope) -> Result<()> {
         self.apply_envelope(event).await
     }
+
+    async fn reset(&self) -> Result<()> {
+        self.sessions.write().await.clear();
+        self.runtime_specs.write().await.clear();
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -246,7 +246,7 @@ impl FileBackend for RuntimeStreamFileBackend {
             entity_type: "runtime_stream_file",
             key: path_key(path),
             headers: StateHeaders {
-                operation: "upsert",
+                operation: "update",
             },
             value: Some(RuntimeStreamFileRecord {
                 path: path_key(path),
@@ -298,7 +298,7 @@ fn append_fs_op_event(producer: &Producer, session_id: &str, path: &Path, conten
         entity_type: "fs_op",
         key: format!("{session_id}:{}", path_key(path)),
         headers: StateHeaders {
-            operation: "upsert",
+            operation: "update",
         },
         value: Some(FsOpRecord {
             session_id: session_id.to_string(),

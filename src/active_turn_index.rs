@@ -113,6 +113,12 @@ impl StateProjection for ActiveTurnIndex {
     async fn apply_state_event(&self, event: &RawStateEnvelope) -> Result<()> {
         self.apply_envelope(event).await
     }
+
+    async fn reset(&self) -> Result<()> {
+        self.inner.write().await.clear();
+        self.waiters.lock().await.clear();
+        Ok(())
+    }
 }
 
 #[async_trait]
