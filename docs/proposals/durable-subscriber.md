@@ -66,7 +66,7 @@ The same pattern appears in six categories:
 | Approval gate | `permission_request` | `approval_resolved` | `PromptKey(SessionId, RequestId)` |
 | Durable webhooks | prompt or tool event | `webhook_delivered` | `PromptKey` or `ToolKey` |
 | Auto-approval | `permission_request` | `approval_resolved` | `PromptKey(SessionId, RequestId)` |
-| Peer routing | prompt or tool event | `peer_call_delivered` or callee session start | `CrossSessionKey(SessionId, RequestId, SessionId)` |
+| Peer routing | prompt or tool event | `peer_call_delivered` on the caller stream | `PromptKey(SessionId, RequestId)` or `ToolKey(SessionId, ToolCallId)` |
 | Wake timers | prompt-bound reminder | `timer_fired` | `PromptKey(SessionId, RequestId)` |
 | External integrations | prompt/tool event | delivery/ack envelope | `PromptKey` or `ToolKey` |
 
@@ -154,7 +154,6 @@ use sacp::schema::{RequestId, SessionId, ToolCallId};
 pub enum CompletionKey {
     PromptKey(SessionId, RequestId),
     ToolKey(SessionId, ToolCallId),
-    CrossSessionKey(SessionId, RequestId, SessionId),
 }
 ```
 
@@ -317,14 +316,14 @@ This is the active mirror of the approval gate. It watches the same event shape 
 ### 5.4 PeerCallSubscriber
 
 - event: outbound prompt or tool event on the caller side
-- completion: peer delivery acknowledgment or callee session start
-- key: `CrossSessionKey(caller_session_id, caller_request_id, callee_session_id)`
+- completion: peer delivery acknowledgment on the caller stream
+- key: `PromptKey(SessionId, RequestId)` for prompt-scoped peer calls, or `ToolKey(SessionId, ToolCallId)` for tool-scoped peer calls
 - mode: active
 
 Trace rule:
 
 - outbound peer ACP request must propagate `_meta.traceparent`, `_meta.tracestate`, and `_meta.baggage`
-- callee-side completion keeps the same trace lineage
+- callee-side work joins the same trace lineage through ACP `_meta`; it does not introduce a second Fireline completion key
 
 ### 5.5 WakeTimerSubscriber
 
@@ -390,7 +389,6 @@ type SubscriberKeyStrategy =
   | 'session'
   | 'session_request'
   | 'session_tool_call'
-  | 'cross_session'
 ```
 
 Mapping:
@@ -398,7 +396,6 @@ Mapping:
 - `'session'` means the subscriber expects only a `SessionId`
 - `'session_request'` maps to `CompletionKey::PromptKey`
 - `'session_tool_call'` maps to `CompletionKey::ToolKey`
-- `'cross_session'` maps to `CompletionKey::CrossSessionKey`
 
 No custom string key is allowed in userland middleware.
 
@@ -444,7 +441,6 @@ Once canonical ids are in place, subscriber invariants key directly by canonical
 
 - `PromptKey == <<session_id, request_id>>`
 - `ToolKey == <<session_id, tool_call_id>>`
-- `CrossSessionKey == <<caller_session_id, caller_request_id, callee_session_id>>`
 
 No separate matched-event id or completion id is introduced.
 
