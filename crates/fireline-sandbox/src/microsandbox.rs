@@ -107,7 +107,7 @@ pub struct MicrosandboxSandbox {
     // Provisioned VMs, keyed by the opaque SandboxHandle id we hand
     // back to callers. The handle id doubles as the microsandbox
     // sandbox name (sanitized and uuid-suffixed at provision time).
-    live: Arc<Mutex<HashMap<String, MsbSandbox>>>,
+    live: Arc<Mutex<HashMap<String, Arc<MsbSandbox>>>>,
 }
 
 impl MicrosandboxSandbox {
@@ -187,18 +187,23 @@ impl Sandbox for MicrosandboxSandbox {
             .await
             .with_context(|| format!("microsandbox::Sandbox::create_detached('{id}')"))?;
 
-        self.live.lock().await.insert(id.clone(), sandbox);
+        self.live.lock().await.insert(id.clone(), Arc::new(sandbox));
         Ok(SandboxHandle::new(id, MICROSANDBOX_SANDBOX_KIND))
     }
 
     async fn execute(&self, handle: &SandboxHandle, call: ToolCall) -> Result<ToolCallResult> {
-        let guard = self.live.lock().await;
-        let sandbox = guard.get(&handle.id).ok_or_else(|| {
-            anyhow!(
-                "MicrosandboxSandbox: no provisioned sandbox for handle '{}'",
-                handle.id
-            )
-        })?;
+        let sandbox = {
+            let guard = self.live.lock().await;
+            guard
+                .get(&handle.id)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "MicrosandboxSandbox: no provisioned sandbox for handle '{}'",
+                        handle.id
+                    )
+                })?
+        };
 
         match call.name.as_str() {
             "shell" => {
