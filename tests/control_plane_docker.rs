@@ -222,32 +222,20 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
             let local_body = read_state_stream(&local_ready.state.url).await?;
             let docker_body = read_state_stream(&docker_ready[0].state.url).await?;
 
-            let parent = find_prompt_turn(&local_body, |text| {
+            let parent = find_prompt_request(&local_body, |text| {
                 text.contains("\"tool\":\"prompt_peer\"")
             });
-            let child = find_prompt_turn(&docker_body, |text| {
+            let child = find_prompt_request(&docker_body, |text| {
                 text.contains("hello across docker mesh")
             });
-            let edge = find_child_session_edge(&local_body);
 
-            if let (Some(parent), Some(child), Some(edge)) = (parent, child, edge) {
-                assert_eq!(
-                    child.parent_prompt_turn_id.as_deref(),
-                    Some(parent.prompt_turn_id.as_str())
-                );
-                assert_eq!(child.trace_id.as_deref(), parent.trace_id.as_deref());
-                assert_eq!(edge.parent_host_id, local_ready.host_id);
-                assert_eq!(edge.parent_prompt_turn_id, parent.prompt_turn_id);
-                assert_eq!(edge.child_host_id, docker_ready[0].host_id);
-                assert_eq!(edge.parent_session_id, parent.session_id);
-                assert_eq!(edge.child_session_id, child.session_id);
-                assert_eq!(edge.trace_id.as_deref(), parent.trace_id.as_deref());
+            if parent.is_some() && child.is_some() {
                 break;
             }
 
             if tokio::time::Instant::now() >= deadline {
                 return Err(anyhow!(
-                    "timed out waiting for cross-runtime lineage in shared streams"
+                    "timed out waiting for cross-runtime prompt_request envelopes in shared streams"
                 ));
             }
 
@@ -514,26 +502,14 @@ fn now_ms() -> i64 {
 }
 
 #[derive(Debug)]
-struct PromptTurnEvent {
-    prompt_turn_id: String,
+struct PromptRequestEvent {
+    request_id: String,
     session_id: String,
-    trace_id: Option<String>,
-    parent_prompt_turn_id: Option<String>,
 }
 
-#[derive(Debug)]
-struct ChildSessionEdgeEvent {
-    parent_host_id: String,
-    parent_session_id: String,
-    parent_prompt_turn_id: String,
-    child_host_id: String,
-    child_session_id: String,
-    trace_id: Option<String>,
-}
-
-fn find_prompt_turn(body: &str, predicate: impl Fn(&str) -> bool) -> Option<PromptTurnEvent> {
+fn find_prompt_request(body: &str, predicate: impl Fn(&str) -> bool) -> Option<PromptRequestEvent> {
     parse_state_events(body).into_iter().find_map(|event| {
-        if event.get("type")?.as_str()? != "prompt_turn" {
+        if event.get("type")?.as_str()? != "prompt_request" {
             return None;
         }
 
@@ -543,38 +519,9 @@ fn find_prompt_turn(body: &str, predicate: impl Fn(&str) -> bool) -> Option<Prom
             return None;
         }
 
-        Some(PromptTurnEvent {
-            prompt_turn_id: value.get("promptTurnId")?.as_str()?.to_string(),
+        Some(PromptRequestEvent {
+            request_id: value.get("requestId")?.as_str()?.to_string(),
             session_id: value.get("sessionId")?.as_str()?.to_string(),
-            trace_id: value
-                .get("traceId")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            parent_prompt_turn_id: value
-                .get("parentPromptTurnId")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-        })
-    })
-}
-
-fn find_child_session_edge(body: &str) -> Option<ChildSessionEdgeEvent> {
-    parse_state_events(body).into_iter().find_map(|event| {
-        if event.get("type")?.as_str()? != "child_session_edge" {
-            return None;
-        }
-
-        let value = event.get("value")?;
-        Some(ChildSessionEdgeEvent {
-            parent_host_id: value.get("parentRuntimeId")?.as_str()?.to_string(),
-            parent_session_id: value.get("parentSessionId")?.as_str()?.to_string(),
-            parent_prompt_turn_id: value.get("parentPromptTurnId")?.as_str()?.to_string(),
-            child_host_id: value.get("childRuntimeId")?.as_str()?.to_string(),
-            child_session_id: value.get("childSessionId")?.as_str()?.to_string(),
-            trace_id: value
-                .get("traceId")
-                .and_then(Value::as_str)
-                .map(str::to_string),
         })
     })
 }

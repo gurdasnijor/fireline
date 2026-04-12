@@ -9,7 +9,7 @@ use fireline_resources::{
 };
 use fireline_tools::attach::AttachToolComponent;
 use fireline_tools::directory::PeerRegistry;
-use fireline_tools::lookup::{ActiveTurnLookup, ChildSessionEdgeSink};
+use fireline_tools::lookup::ActiveTurnLookup;
 use fireline_tools::peer;
 use fireline_tools::{CapabilityRef, PeerComponent, emit_tool_descriptors};
 use serde::Deserialize;
@@ -40,7 +40,6 @@ pub struct ComponentContext {
     pub state_producer: Producer,
     pub peer_registry: Arc<dyn PeerRegistry>,
     pub active_turn_lookup: Arc<dyn ActiveTurnLookup>,
-    pub child_session_edge_sink: Arc<dyn ChildSessionEdgeSink>,
     pub mounted_resources: Vec<MountedResource>,
 }
 
@@ -208,8 +207,6 @@ pub fn build_host_topology_registry(context: ComponentContext) -> TopologyRegist
                 Ok(sacp::DynConnectTo::new(PeerComponent::new(
                     context.peer_registry.clone(),
                     context.active_turn_lookup.clone(),
-                    context.child_session_edge_sink.clone(),
-                    context.host_id.clone(),
                 )))
             }
         })

@@ -107,7 +107,7 @@ async fn session_permission_request_ids(
 /// Action: prompt the runtime once via ACP.
 ///
 /// Observable evidence: the runtime's durable state stream contains
-/// `session`, `prompt_turn`, and `chunk` envelopes. This is the minimal
+/// `session_v2`, `prompt_request`, and `chunk_v2` envelopes. This is the minimal
 /// effect set for a non-trivial prompt — anything less would mean the
 /// conductor proxy chain failed to append progress for at least one
 /// observable event.
@@ -129,10 +129,9 @@ async fn harness_every_effect_is_appended_to_session_log() -> Result<()> {
         let body = runtime
             .wait_for_state_rows(
                 &[
-                    "\"type\":\"connection\"",
-                    "\"type\":\"session\"",
-                    "\"type\":\"prompt_turn\"",
-                    "\"type\":\"chunk\"",
+                    "\"type\":\"session_v2\"",
+                    "\"type\":\"prompt_request\"",
+                    "\"type\":\"chunk_v2\"",
                 ],
                 DEFAULT_TIMEOUT,
             )
@@ -142,26 +141,21 @@ async fn harness_every_effect_is_appended_to_session_log() -> Result<()> {
                  land in the durable state stream via the conductor proxy chain",
             )?;
 
-        let connection_count = body.matches("\"type\":\"connection\"").count();
-        let session_count = body.matches("\"type\":\"session\"").count();
-        let prompt_turn_count = body.matches("\"type\":\"prompt_turn\"").count();
-        let chunk_count = body.matches("\"type\":\"chunk\"").count();
+        let session_count = body.matches("\"type\":\"session_v2\"").count();
+        let prompt_request_count = body.matches("\"type\":\"prompt_request\"").count();
+        let chunk_count = body.matches("\"type\":\"chunk_v2\"").count();
 
         assert!(
-            connection_count >= 1,
-            "connection envelope count = {connection_count}"
-        );
-        assert!(
             session_count >= 1,
-            "session envelope count = {session_count}"
+            "session_v2 envelope count = {session_count}"
         );
         assert!(
-            prompt_turn_count >= 1,
-            "prompt_turn envelope count = {prompt_turn_count}"
+            prompt_request_count >= 1,
+            "prompt_request envelope count = {prompt_request_count}"
         );
         assert!(
             chunk_count >= 1,
-            "chunk envelope count = {chunk_count} (at least one message chunk expected)"
+            "chunk_v2 envelope count = {chunk_count} (at least one message chunk expected)"
         );
 
         Ok(())
@@ -179,7 +173,7 @@ async fn harness_every_effect_is_appended_to_session_log() -> Result<()> {
 /// Action: (1) snapshot the durable stream at time T1 via
 /// `read_all_events` and extract the ordered sequence of envelope type
 /// strings; (2) send another prompt; (3) wait for the event count to
-/// increase via `wait_for_event_count` on prompt_turn; (4) snapshot again
+/// increase via `wait_for_event_count` on prompt_request; (4) snapshot again
 /// at time T2 and extract the new ordered sequence.
 ///
 /// Observable evidence: the T1 sequence is an exact prefix of the T2
@@ -201,12 +195,12 @@ async fn harness_append_order_is_stable_under_continued_writes() -> Result<()> {
         let _ = runtime.prompt("first prompt to seed the log").await?;
         let _ = wait_for_event_count(
             runtime.state_stream_url(),
-            "prompt_turn",
+            "prompt_request",
             1,
             DEFAULT_TIMEOUT,
         )
         .await
-        .context("first prompt's prompt_turn must land in the log")?;
+        .context("first prompt's prompt_request must land in the log")?;
 
         // T1 snapshot: extract the ordered type sequence.
         let t1_events = read_all_events(runtime.state_stream_url()).await?;
@@ -222,20 +216,20 @@ async fn harness_append_order_is_stable_under_continued_writes() -> Result<()> {
         // Second prompt — continue writing to the live stream.
         let _ = runtime.prompt("second prompt after T1 snapshot").await?;
 
-        // Wait until the prompt_turn count is strictly greater than the T1
+        // Wait until the prompt_request count is strictly greater than the T1
         // count — confirms the second prompt landed.
-        let t1_prompt_turn_count = t1_sequence
+        let t1_prompt_request_count = t1_sequence
             .iter()
-            .filter(|kind| *kind == "prompt_turn")
+            .filter(|kind| *kind == "prompt_request")
             .count();
         let _ = wait_for_event_count(
             runtime.state_stream_url(),
-            "prompt_turn",
-            t1_prompt_turn_count + 1,
+            "prompt_request",
+            t1_prompt_request_count + 1,
             Duration::from_secs(10),
         )
         .await
-        .context("second prompt's prompt_turn must land in the log")?;
+        .context("second prompt's prompt_request must land in the log")?;
 
         // T2 snapshot.
         let t2_events = read_all_events(runtime.state_stream_url()).await?;
@@ -263,11 +257,11 @@ async fn harness_append_order_is_stable_under_continued_writes() -> Result<()> {
         }
 
         // Sanity-check via the count_events helper.
-        let final_prompt_turn_count =
-            count_events(runtime.state_stream_url(), "prompt_turn").await?;
+        let final_prompt_request_count =
+            count_events(runtime.state_stream_url(), "prompt_request").await?;
         assert!(
-            final_prompt_turn_count >= t1_prompt_turn_count + 1,
-            "INVARIANT (Harness): final prompt_turn count must be strictly greater than \
+            final_prompt_request_count >= t1_prompt_request_count + 1,
+            "INVARIANT (Harness): final prompt_request count must be strictly greater than \
              the T1 count"
         );
 

@@ -149,10 +149,9 @@ async fn update_rust_state_fixture_snapshot() -> Result<()> {
             }
         }
 
-        if body.contains("\"type\":\"prompt_turn\"")
-            && body.contains("\"type\":\"session\"")
-            && body.contains("\"type\":\"chunk\"")
-            && body.contains("\"type\":\"child_session_edge\"")
+        if body.contains("\"type\":\"prompt_request\"")
+            && body.contains("\"type\":\"session_v2\"")
+            && body.contains("\"type\":\"chunk_v2\"")
         {
             break;
         }

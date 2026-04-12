@@ -8,7 +8,6 @@ use fireline_session::{
 use reqwest::Client as HttpClient;
 use tracing::{info, instrument};
 
-pub mod child_session_edge;
 pub mod load_coordinator;
 pub mod primitive;
 

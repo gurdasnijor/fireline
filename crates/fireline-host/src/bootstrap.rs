@@ -26,9 +26,7 @@ use fireline_harness::{
     build_host_topology_registry, emit_host_instance_started, emit_host_instance_stopped,
     emit_host_spec_persisted, ensure_named_streams,
 };
-use fireline_orchestration::{
-    child_session_edge::ChildSessionEdgeWriter, load_coordinator::LoadCoordinatorComponent,
-};
+use fireline_orchestration::load_coordinator::LoadCoordinatorComponent;
 use fireline_resources::MountedResource;
 use fireline_session::{
     ActiveTurnIndex, PersistedHostSpec, ProvisionSpec, SandboxProviderRequest, SessionIndex,
@@ -192,9 +190,6 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         state_producer: state_producer.clone(),
         peer_registry: peer_registry.clone(),
         active_turn_lookup: std::sync::Arc::new(active_turn_index.clone()),
-        child_session_edge_sink: std::sync::Arc::new(ChildSessionEdgeWriter::new(
-            state_producer.clone(),
-        )),
         mounted_resources: config.mounted_resources.clone(),
     });
 

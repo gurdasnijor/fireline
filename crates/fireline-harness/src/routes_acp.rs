@@ -68,7 +68,7 @@ async fn acp_websocket_handler(
     };
 
     ws.on_upgrade(move |socket| async move {
-        let logical_connection_id = format!("conn:{}", Uuid::new_v4());
+        let connection_id = format!("conn:{}", Uuid::new_v4());
         let mut components = (app.base_components_factory)();
         let resolved_topology = match app.topology_registry.build(&app.topology) {
             Ok(resolved_topology) => resolved_topology,
@@ -85,7 +85,7 @@ async fn acp_websocket_handler(
             app.host_key.clone(),
             app.host_id.clone(),
             app.node_id.clone(),
-            logical_connection_id,
+            connection_id,
         )) as BoxedTraceWriter);
         trace_writers.extend(resolved_topology.trace_writers);
         let conductor = build_conductor_with_terminal(

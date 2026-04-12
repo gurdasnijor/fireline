@@ -19,7 +19,7 @@ use fireline_session::{HostDescriptor, PersistedHostSpec};
 use sacp_conductor::trace::{TraceEvent, WriteEvent};
 use serde::Serialize;
 
-use crate::state_projector::{StateProjector, host_instance_started, host_instance_stopped};
+use crate::state_projector::StateProjector;
 
 pub type BoxedTraceWriter = Box<dyn WriteEvent + Send>;
 
@@ -51,7 +51,7 @@ impl DurableStreamTracer {
     pub fn new(
         producer: Producer,
         host_id: impl Into<String>,
-        logical_connection_id: impl Into<String>,
+        connection_id: impl Into<String>,
     ) -> Self {
         let host_id = host_id.into();
         Self::new_with_host_context(
@@ -59,7 +59,7 @@ impl DurableStreamTracer {
             host_id.clone(),
             host_id,
             "node:unknown",
-            logical_connection_id,
+            connection_id,
         )
     }
 
@@ -68,9 +68,9 @@ impl DurableStreamTracer {
         host_key: impl Into<String>,
         host_id: impl Into<String>,
         node_id: impl Into<String>,
-        logical_connection_id: impl Into<String>,
+        connection_id: impl Into<String>,
     ) -> Self {
-        let projector = StateProjector::new(host_key, host_id, node_id, logical_connection_id);
+        let projector = StateProjector::new(host_key, host_id, node_id, connection_id);
         for event in projector.initial_events() {
             producer.append_json(&event);
         }
@@ -104,13 +104,37 @@ struct StateEnvelope<T> {
     value: T,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum RuntimeInstanceStatus {
+    Running,
+    Stopped,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeInstanceRow {
+    instance_id: String,
+    #[serde(rename = "runtimeName")]
+    host_name: String,
+    status: RuntimeInstanceStatus,
+    created_at: i64,
+    updated_at: i64,
+}
+
 pub async fn emit_host_instance_started(
     producer: &Producer,
     host_id: &str,
     host_name: &str,
     created_at: i64,
 ) -> anyhow::Result<()> {
-    producer.append_json(&host_instance_started(host_id, host_name, created_at));
+    producer.append_json(&runtime_instance_event(
+        host_id,
+        host_name,
+        created_at,
+        RuntimeInstanceStatus::Running,
+        "insert",
+    ));
     producer.flush().await?;
     Ok(())
 }
@@ -121,7 +145,13 @@ pub async fn emit_host_instance_stopped(
     host_name: &str,
     created_at: i64,
 ) -> anyhow::Result<()> {
-    producer.append_json(&host_instance_stopped(host_id, host_name, created_at));
+    producer.append_json(&runtime_instance_event(
+        host_id,
+        host_name,
+        created_at,
+        RuntimeInstanceStatus::Stopped,
+        "update",
+    ));
     // Explicit flush is load-bearing for stream-as-truth: without it, the
     // stopped envelope can be lost when the runtime process exits before
     // the producer's buffered writes have propagated. That divergence was
@@ -131,6 +161,39 @@ pub async fn emit_host_instance_stopped(
     // shared state stream.
     producer.flush().await?;
     Ok(())
+}
+
+fn runtime_instance_event(
+    host_id: &str,
+    host_name: &str,
+    created_at: i64,
+    status: RuntimeInstanceStatus,
+    operation: &'static str,
+) -> serde_json::Value {
+    serde_json::to_value(StateEnvelope {
+        entity_type: "runtime_instance",
+        key: host_id.to_string(),
+        headers: StateHeaders { operation },
+        value: RuntimeInstanceRow {
+            instance_id: host_id.to_string(),
+            host_name: host_name.to_string(),
+            status,
+            created_at,
+            updated_at: if operation == "insert" {
+                created_at
+            } else {
+                now_ms()
+            },
+        },
+    })
+    .expect("serialize runtime_instance envelope")
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(std::time::Duration::ZERO)
+        .as_millis() as i64
 }
 
 pub async fn emit_host_spec_persisted(

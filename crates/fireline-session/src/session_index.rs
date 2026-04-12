@@ -67,7 +67,7 @@ impl SessionIndex {
         };
 
         match envelope.entity_type() {
-            Some("session") => match operation {
+            Some("session") | Some("session_v2") => match operation {
                 ChangeOperation::Insert | ChangeOperation::Update => {
                     let Some(value) = envelope.value.as_ref() else {
                         return Ok(());
@@ -145,11 +145,8 @@ mod tests {
               "runtimeKey":"runtime:1",
               "runtimeId":"runtime-id",
               "nodeId":"node:local",
-              "logicalConnectionId":"conn:1",
               "state":"active",
               "supportsLoadSession":true,
-              "traceId":"trace-1",
-              "parentPromptTurnId":"turn-1",
               "createdAt":1,
               "updatedAt":2,
               "lastSeenAt":3
@@ -204,11 +201,8 @@ mod tests {
               "runtimeKey":"runtime:1",
               "runtimeId":"runtime-id",
               "nodeId":"node:local",
-              "logicalConnectionId":"conn:1",
               "state":"active",
               "supportsLoadSession":true,
-              "traceId":"trace-1",
-              "parentPromptTurnId":"turn-1",
               "createdAt":1,
               "updatedAt":2,
               "lastSeenAt":3

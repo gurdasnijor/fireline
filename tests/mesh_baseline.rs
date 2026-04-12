@@ -198,46 +198,10 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
             }
         }
 
-        let parent = find_prompt_turn(&body_a, |text| text.contains("\"tool\":\"prompt_peer\""));
-        let child = find_prompt_turn(&body_b, |text| text.contains("hello across mesh"));
-        let edge = find_child_session_edge(&body_a);
+        let parent = find_prompt_request(&body_a, |text| text.contains("\"tool\":\"prompt_peer\""));
+        let child = find_prompt_request(&body_b, |text| text.contains("hello across mesh"));
 
-        if let (Some(parent), Some(child), Some(edge)) = (parent, child, edge) {
-            assert_eq!(
-                child.parent_prompt_turn_id.as_deref(),
-                Some(parent.prompt_turn_id.as_str()),
-                "child prompt turn should point at the parent prompt turn: {body_b}"
-            );
-            assert_eq!(
-                child.trace_id.as_deref(),
-                parent.trace_id.as_deref(),
-                "child prompt turn should inherit the parent trace id: {body_b}"
-            );
-            assert_eq!(
-                edge.parent_host_id, handle_a.host_id,
-                "child_session_edge should point at the parent runtime: {body_a}"
-            );
-            assert_eq!(
-                edge.parent_session_id, parent.session_id,
-                "child_session_edge should point at the parent session: {body_a}"
-            );
-            assert_eq!(
-                edge.parent_prompt_turn_id, parent.prompt_turn_id,
-                "child_session_edge should point at the parent turn: {body_a}"
-            );
-            assert_eq!(
-                edge.child_host_id, handle_b.host_id,
-                "child_session_edge should point at the child runtime: {body_a}"
-            );
-            assert_eq!(
-                edge.child_session_id, child.session_id,
-                "child_session_edge should point at the remote child session: {body_a}"
-            );
-            assert_eq!(
-                edge.trace_id.as_deref(),
-                parent.trace_id.as_deref(),
-                "child_session_edge should carry the parent trace id: {body_a}"
-            );
+        if parent.is_some() && child.is_some() {
             break;
         }
 
@@ -249,20 +213,20 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
     }
 
     assert!(
-        body_b.contains("\"type\":\"prompt_turn\""),
-        "remote peer runtime should record the cross-runtime prompt as a prompt_turn: {body_b}"
+        body_b.contains("\"type\":\"prompt_request\""),
+        "remote peer runtime should record the cross-runtime prompt as a prompt_request: {body_b}"
     );
     assert!(
-        find_prompt_turn(&body_a, |text| text.contains("\"tool\":\"prompt_peer\"")).is_some(),
-        "missing parent prompt turn in runtime A: {body_a}"
+        find_prompt_request(&body_a, |text| text.contains("\"tool\":\"prompt_peer\"")).is_some(),
+        "missing parent prompt_request in runtime A: {body_a}"
     );
     assert!(
-        find_prompt_turn(&body_b, |text| text.contains("hello across mesh")).is_some(),
-        "missing child prompt turn in runtime B: {body_b}"
+        find_prompt_request(&body_b, |text| text.contains("hello across mesh")).is_some(),
+        "missing child prompt_request in runtime B: {body_b}"
     );
     assert!(
-        find_child_session_edge(&body_a).is_some(),
-        "missing child_session_edge in runtime A: {body_a}"
+        !body_a.contains("\"type\":\"child_session_edge\""),
+        "Phase 3 deletes child_session_edge emission: {body_a}"
     );
 
     handle_a.shutdown().await?;
@@ -272,26 +236,14 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
 }
 
 #[derive(Debug)]
-struct PromptTurnEvent {
-    prompt_turn_id: String,
+struct PromptRequestEvent {
+    request_id: String,
     session_id: String,
-    trace_id: Option<String>,
-    parent_prompt_turn_id: Option<String>,
 }
 
-#[derive(Debug)]
-struct ChildSessionEdgeEvent {
-    parent_host_id: String,
-    parent_session_id: String,
-    parent_prompt_turn_id: String,
-    child_host_id: String,
-    child_session_id: String,
-    trace_id: Option<String>,
-}
-
-fn find_prompt_turn(body: &str, predicate: impl Fn(&str) -> bool) -> Option<PromptTurnEvent> {
+fn find_prompt_request(body: &str, predicate: impl Fn(&str) -> bool) -> Option<PromptRequestEvent> {
     parse_state_events(body).into_iter().find_map(|event| {
-        if event.get("type")?.as_str()? != "prompt_turn" {
+        if event.get("type")?.as_str()? != "prompt_request" {
             return None;
         }
 
@@ -301,38 +253,9 @@ fn find_prompt_turn(body: &str, predicate: impl Fn(&str) -> bool) -> Option<Prom
             return None;
         }
 
-        Some(PromptTurnEvent {
-            prompt_turn_id: value.get("promptTurnId")?.as_str()?.to_string(),
+        Some(PromptRequestEvent {
+            request_id: value.get("requestId")?.as_str()?.to_string(),
             session_id: value.get("sessionId")?.as_str()?.to_string(),
-            trace_id: value
-                .get("traceId")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            parent_prompt_turn_id: value
-                .get("parentPromptTurnId")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-        })
-    })
-}
-
-fn find_child_session_edge(body: &str) -> Option<ChildSessionEdgeEvent> {
-    parse_state_events(body).into_iter().find_map(|event| {
-        if event.get("type")?.as_str()? != "child_session_edge" {
-            return None;
-        }
-
-        let value = event.get("value")?;
-        Some(ChildSessionEdgeEvent {
-            parent_host_id: value.get("parentRuntimeId")?.as_str()?.to_string(),
-            parent_session_id: value.get("parentSessionId")?.as_str()?.to_string(),
-            parent_prompt_turn_id: value.get("parentPromptTurnId")?.as_str()?.to_string(),
-            child_host_id: value.get("childRuntimeId")?.as_str()?.to_string(),
-            child_session_id: value.get("childSessionId")?.as_str()?.to_string(),
-            trace_id: value
-                .get("traceId")
-                .and_then(Value::as_str)
-                .map(str::to_string),
         })
     })
 }

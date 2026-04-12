@@ -109,20 +109,16 @@ async fn minimal_vertical_slice_prompts_and_emits_state_events() -> Result<()> {
     }
 
     assert!(
-        body.contains("\"type\":\"connection\""),
-        "state stream should contain connection rows: {body}"
+        body.contains("\"type\":\"prompt_request\""),
+        "state stream should contain canonical prompt_request rows: {body}"
     );
     assert!(
-        body.contains("\"type\":\"prompt_turn\""),
-        "state stream should contain prompt turns: {body}"
+        body.contains("\"type\":\"session_v2\""),
+        "state stream should contain canonical session_v2 rows: {body}"
     );
     assert!(
-        body.contains("\"type\":\"pending_request\""),
-        "state stream should contain pending request rows: {body}"
-    );
-    assert!(
-        body.contains("\"type\":\"session\""),
-        "state stream should contain session rows: {body}"
+        body.contains("\"type\":\"chunk_v2\""),
+        "state stream should contain canonical chunk_v2 rows: {body}"
     );
 
     conductor_task.abort();
