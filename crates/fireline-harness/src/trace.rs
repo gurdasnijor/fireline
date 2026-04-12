@@ -15,7 +15,7 @@
 use std::io;
 
 use durable_streams::{Client as DurableStreamsClient, Producer};
-use fireline_session::{PersistedHostSpec, HostDescriptor};
+use fireline_session::{HostDescriptor, PersistedHostSpec};
 use sacp_conductor::trace::{TraceEvent, WriteEvent};
 use serde::Serialize;
 
@@ -70,8 +70,7 @@ impl DurableStreamTracer {
         node_id: impl Into<String>,
         logical_connection_id: impl Into<String>,
     ) -> Self {
-        let projector =
-            StateProjector::new(host_key, host_id, node_id, logical_connection_id);
+        let projector = StateProjector::new(host_key, host_id, node_id, logical_connection_id);
         for event in projector.initial_events() {
             producer.append_json(&event);
         }
@@ -105,17 +104,15 @@ struct StateEnvelope<T> {
     value: T,
 }
 
-pub fn emit_host_instance_started(
+pub async fn emit_host_instance_started(
     producer: &Producer,
     host_id: &str,
     host_name: &str,
     created_at: i64,
-) {
-    producer.append_json(&host_instance_started(
-        host_id,
-        host_name,
-        created_at,
-    ));
+) -> anyhow::Result<()> {
+    producer.append_json(&host_instance_started(host_id, host_name, created_at));
+    producer.flush().await?;
+    Ok(())
 }
 
 pub async fn emit_host_instance_stopped(
@@ -124,11 +121,7 @@ pub async fn emit_host_instance_stopped(
     host_name: &str,
     created_at: i64,
 ) -> anyhow::Result<()> {
-    producer.append_json(&host_instance_stopped(
-        host_id,
-        host_name,
-        created_at,
-    ));
+    producer.append_json(&host_instance_stopped(host_id, host_name, created_at));
     // Explicit flush is load-bearing for stream-as-truth: without it, the
     // stopped envelope can be lost when the runtime process exits before
     // the producer's buffered writes have propagated. That divergence was

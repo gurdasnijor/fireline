@@ -31,8 +31,8 @@ use fireline_orchestration::{
 };
 use fireline_resources::MountedResource;
 use fireline_session::{
-    ActiveTurnIndex, ProvisionSpec, PersistedHostSpec, StateMaterializer,
-    StateMaterializerTask, SandboxProviderRequest, SessionIndex,
+    ActiveTurnIndex, PersistedHostSpec, ProvisionSpec, SandboxProviderRequest, SessionIndex,
+    StateMaterializer, StateMaterializerTask,
 };
 use fireline_tools::{
     DEFAULT_TENANT_ID, DeploymentDiscoveryEvent, PeerRegistry, StreamDeploymentPeerRegistry,
@@ -272,12 +272,9 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         .await
         .context("emit host_spec_persisted from direct-host bootstrap")?;
 
-    emit_host_instance_started(
-        &state_producer,
-        &host_id,
-        &host_name,
-        host_created_at,
-    );
+    emit_host_instance_started(&state_producer, &host_id, &host_name, host_created_at)
+        .await
+        .context("flush runtime_instance_started from bootstrap")?;
     emit_deployment_event(
         &deployment_producer,
         &DeploymentDiscoveryEvent::HostRegistered {
