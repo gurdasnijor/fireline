@@ -27,14 +27,19 @@ ACP (`@agentclientprotocol/sdk`) is a third-party import. Fireline never wraps i
 Everything starts with three independent, serializable values:
 
 ```typescript
+// Fireline — composition
 import { agent, sandbox, middleware, compose } from '@fireline/client'
+// Fireline — middleware helpers (serializable specs, not closures)
+import { trace, approve, budget } from '@fireline/client/middleware'
+// Fireline — resource-ref helpers
+import { localPath } from '@fireline/client/resources'
 
 // An Agent — the ACP-speaking process to run
 const myAgent = agent(['npx', '-y', '@anthropic-ai/claude-code-acp'])
 
 // A Sandbox — the execution environment
 const mySandbox = sandbox({
-  resources: [{ source_ref: { kind: 'localPath', host_id: 'self', path: '~/project' }, mount_path: '/workspace' }],
+  resources: [localPath('~/project', '/workspace')],
   envVars: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 })
 
@@ -106,6 +111,28 @@ interface StartOptions {
 }
 ```
 
+### Export structure
+
+```
+@fireline/client              compose, agent, sandbox, middleware, peer, fanout, pipe, Sandbox
+@fireline/client/middleware   trace, approve, budget, inject, peer (middleware-level)
+@fireline/client/resources    localPath, streamBlob, gitRepo, ociImage, httpUrl
+@fireline/state               createFirelineDB, FirelineDB, useLiveQuery (re-exported from @tanstack/react-db)
+```
+
+### Resource-ref convenience helpers (`@fireline/client/resources`)
+
+```typescript
+// Each returns a ResourceRef — { source_ref, mount_path, read_only? }
+function localPath(path: string, mountPath: string, readOnly?: boolean): ResourceRef
+function streamBlob(stream: string, key: string, mountPath: string): ResourceRef
+function gitRepo(url: string, ref: string, mountPath: string): ResourceRef
+function ociImage(image: string, path: string, mountPath: string): ResourceRef
+function httpUrl(url: string, mountPath: string): ResourceRef
+```
+
+These are thin constructors over `ResourceRef`. They exist so examples read cleanly; callers can also construct the literal objects.
+
 ---
 
 ## 3. Type-level composition for multi-agent topologies
@@ -113,6 +140,13 @@ interface StartOptions {
 ### Single agent — `compose`
 
 ```typescript
+// Fireline
+import { compose, agent, sandbox, middleware } from '@fireline/client'
+import { trace, approve } from '@fireline/client/middleware'
+import { localPath } from '@fireline/client/resources'
+
+const codebase = localPath('~/projects/frontend', '/workspace', true)
+
 const reviewer = compose(
   sandbox({ resources: [codebase] }),
   middleware([trace(), approve({ scope: 'tool_calls' })]),
@@ -126,6 +160,13 @@ The `.as(name)` method gives the harness a compile-time name. This name is used 
 ### Multi-agent with peering — `peer`
 
 ```typescript
+// Fireline
+import { compose, agent, sandbox, middleware, peer } from '@fireline/client'
+import { trace, approve } from '@fireline/client/middleware'
+import { localPath } from '@fireline/client/resources'
+
+const codebase = localPath('~/projects/frontend', '/workspace', true)
+
 const reviewer = compose(
   sandbox({ resources: [codebase] }),
   middleware([trace(), approve({ scope: 'tool_calls' })]),
@@ -250,57 +291,121 @@ The **type system distinguishes them**: `Middleware` is a value inside `middlewa
 ### 6.1 Local agent dev
 
 ```typescript
+// Fireline
+import { compose, agent, sandbox, middleware } from '@fireline/client'
+import { trace } from '@fireline/client/middleware'
+import { localPath } from '@fireline/client/resources'
+// ACP (third-party)
+import { ClientSideConnection, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
+
 const handle = await compose(
-  sandbox({ resources: [{ source_ref: { kind: 'localPath', host_id: 'self', path: '.' }, mount_path: '/workspace' }] }),
+  sandbox({ resources: [localPath('.', '/workspace')] }),
   middleware([trace()]),
   agent(['node', 'agent.js']),
 ).start({ serverUrl: 'http://localhost:4440', name: 'dev-agent' })
 
-const conn = await acpConnect(handle.acp.url)
+// ACP session — third-party SDK, not Fireline
+const ws = new WebSocket(handle.acp.url)
+const conn = new ClientSideConnection(/* handler */, createWebSocketStream(ws))
+await conn.initialize({ protocolVersion: PROTOCOL_VERSION, clientInfo: { name: 'dev', version: '0.0.1' }, clientCapabilities: {} })
 const { sessionId } = await conn.newSession({ cwd: '/workspace' })
+await conn.prompt({ sessionId, prompt: [{ type: 'text', text: 'Review the README' }] })
 ```
 
 ### 6.2 Cloud deployment — same code, different URL
 
 ```typescript
+// Fireline
+import { compose, agent, sandbox, middleware } from '@fireline/client'
+import { trace, approve } from '@fireline/client/middleware'
+import { streamBlob } from '@fireline/client/resources'
+
+// Same composition, different serverUrl. That's the whole migration.
 const handle = await compose(
-  sandbox({ provider: 'docker', resources: [streamBlob('resources:prod', 'codebase')] }),
+  sandbox({ provider: 'docker', resources: [streamBlob('resources:prod', 'codebase', '/workspace')] }),
   middleware([trace(), approve({ scope: 'tool_calls' })]),
   agent(['claude-code-acp']),
 ).start({ serverUrl: 'https://fireline.prod.internal' })
 ```
 
-### 6.3 Slackbot — webhook-driven, stateless
+### 6.3 Slackbot — fire-and-forget prompt, stream-based observation
 
 ```typescript
+// Fireline
+import { compose, agent, sandbox, middleware } from '@fireline/client'
+import { trace } from '@fireline/client/middleware'
+import { createFirelineDB } from '@fireline/state'
+// ACP (third-party)
+import { ClientSideConnection, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
+// User's integration (NOT Fireline)
+import { App } from '@slack/bolt'
+
+const app = new App({ token: process.env.SLACK_BOT_TOKEN!, signingSecret: process.env.SLACK_SIGNING_SECRET! })
+
 app.event('app_mention', async ({ event, say }) => {
+  // 1. Provision a sandbox
   const handle = await compose(
     sandbox({}),
     middleware([trace()]),
     agent(['claude-code-acp']),
   ).start({ serverUrl: process.env.FIRELINE_URL!, name: `slack-${event.ts}` })
 
-  const conn = await acpConnect(handle.acp.url)
+  // 2. Fire the prompt — don't await, observation is via the stream
+  const ws = new WebSocket(handle.acp.url)
+  const conn = new ClientSideConnection(/* handler */, createWebSocketStream(ws))
+  await conn.initialize({ protocolVersion: PROTOCOL_VERSION, clientInfo: { name: 'slackbot', version: '0.0.1' }, clientCapabilities: {} })
   const { sessionId } = await conn.newSession({ cwd: '/' })
-  const response = await conn.prompt({ sessionId, prompt: [{ type: 'text', text: event.text }] })
-  await say(formatResponse(response))
+  conn.prompt({ sessionId, prompt: [{ type: 'text', text: event.text }] })  // fire-and-forget
+
+  // 3. Observe completion + permissions via @fireline/state (the ONLY subscription interface)
+  const db = createFirelineDB({ stateStreamUrl: handle.state.url })
+  await db.preload()
+  db.collections.promptTurns.subscribe((turns) => {
+    const completed = turns.find(t => t.sessionId === sessionId && t.completedAt)
+    if (completed) {
+      say(`Agent finished: ${completed.stopReason}`)  // say() is Slack Bolt's reply helper
+    }
+  })
+  db.collections.permissions.subscribe((perms) => {
+    const pending = perms.find(p => p.sessionId === sessionId && p.state === 'pending')
+    if (pending) {
+      say(`Agent needs approval: ${pending.title ?? 'permission request'}`)
+    }
+  })
 })
 ```
 
 ### 6.4 Background agent — fire and forget
 
 ```typescript
+// Fireline
+import { compose, agent, sandbox, middleware } from '@fireline/client'
+import { trace, approve } from '@fireline/client/middleware'
+import { gitRepo } from '@fireline/client/resources'
+
+// User's variables
+const repoUrl = 'https://github.com/org/repo'
+const branch = 'main'
+const taskId = 'task-42'
+
 await compose(
-  sandbox({ resources: [gitRepo(repoUrl, branch)], labels: { task: taskId } }),
+  sandbox({ resources: [gitRepo(repoUrl, branch, '/workspace')], labels: { task: taskId } }),
   middleware([trace(), approve({ scope: 'all' })]),
   agent(['claude-code-acp']),
 ).start({ serverUrl: 'https://fireline.prod.internal', name: `task-${taskId}` })
-// User monitors via @fireline/state — no blocking
+// User monitors via @fireline/state in a dashboard — no blocking here
 ```
 
 ### 6.5 Multi-agent review pipeline
 
 ```typescript
+// Fireline
+import { compose, agent, sandbox, middleware, pipe } from '@fireline/client'
+import { trace, approve } from '@fireline/client/middleware'
+import { localPath } from '@fireline/client/resources'
+
+const codebase = localPath('~/projects/frontend', '/workspace', true)  // read-only
+
 const reviewer = compose(
   sandbox({ resources: [codebase] }),
   middleware([trace(), approve({ scope: 'tool_calls' })]),
@@ -313,24 +418,38 @@ const writer = compose(
   agent(['claude-code-acp']),
 ).as('writer')
 
-const handles = await pipe(reviewer, writer).start({ serverUrl })
-// reviewer runs first; writer picks up from the shared stream
+const handles = await pipe(reviewer, writer).start({ serverUrl: 'http://localhost:4440' })
+// reviewer runs first; writer picks up from the shared tenant stream
 ```
 
 ### 6.6 Reactive observation — zero polling
 
 ```typescript
+// Fireline — state observation
+import { createFirelineDB } from '@fireline/state'
+// TanStack DB (peer dependency of @fireline/state)
+import { useLiveQuery } from '@tanstack/react-db'
+import { eq } from '@tanstack/db'
+
+// handle obtained from a prior compose(...).start() call
 const db = createFirelineDB({ stateStreamUrl: handle.state.url })
 const turns = useLiveQuery(q =>
   q.from({ t: db.collections.promptTurns }).where(({ t }) => eq(t.sessionId, sessionId))
 )
-// The stream IS the API. No fetch. No setInterval.
+// The stream IS the API. No fetch. No setInterval. React re-renders as events arrive.
 ```
 
 ### 6.7 Multi-agent topology — one stream, full visibility
 
 ```typescript
-const handles = await peer(reviewer, notifier).start({ serverUrl })
+// Fireline
+import { compose, agent, sandbox, middleware, peer } from '@fireline/client'
+import { trace } from '@fireline/client/middleware'
+import { createFirelineDB } from '@fireline/state'
+
+// reviewer and notifier defined as in §6.5
+const handles = await peer(reviewer, notifier).start({ serverUrl: 'http://localhost:4440' })
+
 // Both agents write to the same tenant stream — one subscription sees everything
 const db = createFirelineDB({ stateStreamUrl: handles.reviewer.state.url })
 // db.collections.sessions → reviewer's AND notifier's sessions
@@ -346,6 +465,9 @@ const db = createFirelineDB({ stateStreamUrl: handles.reviewer.state.url })
 The durable-streams service is the single shared hub. ALL agents in a topology — whether single-harness, peered, fanned-out, or pipelined — write to the **same** tenant stream. `createFirelineDB` pointed at that stream already sees everything: every agent's sessions, every turn, every chunk, and the `child_session_edge` events that trace the peering graph across agents.
 
 ```typescript
+// Fireline — state observation
+import { createFirelineDB } from '@fireline/state'
+
 const db = createFirelineDB({ stateStreamUrl: 'http://streams.internal/v1/stream/tenant-demo' })
 // Sees reviewer's sessions, notifier's sessions, the peer edges between them — all in one reactive view
 ```
@@ -355,9 +477,15 @@ The topology changes the **call graph** (which agents can peer-call each other),
 **No Orchestrator class.** Orchestration IS stream subscription. If a session needs advancing (e.g., a pending approval resolved), the subscriber reacts:
 
 ```typescript
+// Fireline — state observation
+import { createFirelineDB } from '@fireline/state'
+// Fireline — stream write helpers (for external event appends like approval responses)
+import { appendApprovalResolved } from '@fireline/client/events'
+
 db.collections.permissions.subscribe((perms) => {
   for (const perm of perms.filter(p => p.state === 'pending')) {
-    approvePermission(db.stateStreamUrl, perm.requestId)
+    // appendApprovalResolved is a thin wrapper over a durable-streams producer append
+    appendApprovalResolved({ streamUrl: db.stateStreamUrl, sessionId: perm.sessionId, requestId: perm.requestId, allow: true })
   }
 })
 ```
