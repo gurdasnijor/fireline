@@ -1,12 +1,12 @@
 // Fireline
-import { Sandbox, agent, compose, sandbox } from '@fireline/client'
+import { agent, compose, middleware, sandbox } from '@fireline/client'
 import { trace } from '@fireline/client/middleware'
+import { localPath } from '@fireline/client/resources'
 import { createFirelineDB } from '@fireline/state'
 
 // User code
 import { openNodeAcpConnection } from '../shared/acp-node.js'
-import { localPathResource } from '../_shared/resources.js'
-import { waitFor } from '../_shared/wait.js'
+import { waitForRows } from '../shared/state-subscribe.js'
 
 const localUrl = process.env.FIRELINE_LOCAL_URL ?? 'http://127.0.0.1:4440'
 const remoteUrl = process.env.FIRELINE_REMOTE_URL ?? 'http://127.0.0.1:5440'
@@ -15,17 +15,17 @@ const agentCommand = (
   process.env.AGENT_COMMAND ?? '../../target/debug/fireline-testy-load'
 ).split(' ')
 
-const config = compose(
+const harness = compose(
   sandbox({
-    resources: [localPathResource(process.env.WORKSPACE_PATH ?? process.cwd())],
+    resources: [localPath(process.env.WORKSPACE_PATH ?? process.cwd(), '/workspace', true)],
     labels: { demo: 'session-migration' },
   }),
-  [trace({ includeMethods: ['session/new', 'session/load', 'session/prompt'] })],
+  middleware([trace({ includeMethods: ['session/new', 'session/load', 'session/prompt'] })]),
   agent(agentCommand),
 )
 
-const localHandle = await new Sandbox({ serverUrl: localUrl }).provision({
-  ...config,
+const localHandle = await harness.start({
+  serverUrl: localUrl,
   name: 'session-migration-local',
   stateStream,
 })
@@ -41,8 +41,8 @@ const { sessionId } = await localAcp.connection.newSession({ cwd: '/workspace', 
 await localAcp.connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'turn 1 on localhost' }] })
 await localAcp.connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'turn 2 on localhost' }] })
 
-const remoteHandle = await new Sandbox({ serverUrl: remoteUrl }).provision({
-  ...config,
+const remoteHandle = await harness.start({
+  serverUrl: remoteUrl,
   name: 'session-migration-remote',
   stateStream,
 })
@@ -54,13 +54,10 @@ const remoteAcp = await openNodeAcpConnection(
 await remoteAcp.connection.loadSession({ sessionId, cwd: '/workspace', mcpServers: [] })
 await remoteAcp.connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'turn 3 on remote' }] })
 
-await waitFor(
-  () =>
-    db.collections.promptTurns.toArray.filter(
-      (turn) => turn.sessionId === sessionId && turn.state === 'completed',
-    ).length >= 3
-      ? true
-      : undefined,
+await waitForRows(
+  db.collections.promptTurns,
+  (turns) =>
+    turns.filter((turn) => turn.sessionId === sessionId && turn.state === 'completed').length >= 3,
   5_000,
 )
 

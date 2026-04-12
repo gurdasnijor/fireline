@@ -6,7 +6,7 @@
 
 Most agent platforms bind conversation state to one process, one VM, or one proprietary session endpoint. Fireline splits the system into three planes:
 
-- control plane: provision with `Sandbox.provision()`
+- control plane: provision with `compose(...).start()`
 - session plane: talk ACP to whatever sandbox is live now
 - observation plane: durable stream is the source of truth
 
@@ -19,6 +19,8 @@ That means a sandbox can die, move, or be reprovisioned on another server while 
 3. Provision the same harness on `https://remote:4440` with the **same** `stateStream`
 4. Call ACP `session/load` on the remote sandbox
 5. Continue the same conversation and inspect one durable state view that spans both hosts
+
+The code uses the proposal surface from [`docs/proposals/client-api-redesign.md`](../../docs/proposals/client-api-redesign.md): `compose(sandbox(), middleware([...]), agent()).start(...)`.
 
 ## Prerequisites
 

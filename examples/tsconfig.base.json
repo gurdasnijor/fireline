@@ -4,6 +4,7 @@
     "lib": ["ES2022", "DOM"],
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -12,10 +13,10 @@
     "types": ["node"],
     "baseUrl": ".",
     "paths": {
-      "@fireline/client": ["../packages/client/src/index.ts"],
+      "@fireline/client": ["./shared/fireline-client.ts"],
       "@fireline/client/admin": ["../packages/client/src/admin.ts"],
-      "@fireline/client/middleware": ["../packages/client/src/middleware.ts"],
-      "@fireline/client/resources": ["../packages/client/src/resources.ts"],
+      "@fireline/client/middleware": ["./shared/fireline-middleware.ts"],
+      "@fireline/client/resources": ["./shared/fireline-resources.ts"],
       "@fireline/state": ["../packages/state/src/index.ts"]
     }
   }
