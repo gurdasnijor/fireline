@@ -14,7 +14,7 @@ use anyhow::{Context, Result, anyhow};
 use durable_streams::{Client as DsClient, Offset};
 use fireline_harness::TopologySpec;
 use fireline_host::bootstrap::{BootstrapConfig, BootstrapHandle, start};
-use fireline_resources::{FsOpRecord, RuntimeStreamFileRecord};
+use fireline_resources::{FsOpRecord, StreamFsFileRecord};
 use fireline_resources::{LocalPathMounter, ResourceMounter, ResourceRef};
 use fireline_session::{PersistedHostSpec, HostDescriptor, HostStatus, SessionRecord};
 use futures::{SinkExt, StreamExt};
@@ -1188,7 +1188,7 @@ where
 // - `SessionRecord` — from `fireline_session`
 // - `PersistedHostSpec` — from `fireline_session`
 // - `FsOpRecord` — from `fireline_resources`
-// - `RuntimeStreamFileRecord` — same
+// - `StreamFsFileRecord` — same
 //
 // Tests get typed access to every load-bearing state entity without
 // reimplementing the projector, which is exactly what the second-round
@@ -1202,7 +1202,7 @@ pub(crate) enum DecodedStateEntity {
     Session(SessionRecord),
     RuntimeSpec(PersistedHostSpec),
     FsOp(FsOpRecord),
-    RuntimeStreamFile(RuntimeStreamFileRecord),
+    StreamFsFile(StreamFsFileRecord),
     /// Entity type was recognized as a string but no typed decoder exists,
     /// or the envelope was an operation (delete/insert) without a full
     /// value. Holds the raw value for custom decoding in the test.
@@ -1252,8 +1252,8 @@ impl StateEnvelope {
                 }),
             "runtime_stream_file" => value
                 .as_ref()
-                .and_then(|v| serde_json::from_value::<RuntimeStreamFileRecord>(v.clone()).ok())
-                .map(DecodedStateEntity::RuntimeStreamFile)
+                .and_then(|v| serde_json::from_value::<StreamFsFileRecord>(v.clone()).ok())
+                .map(DecodedStateEntity::StreamFsFile)
                 .or_else(|| {
                     Some(DecodedStateEntity::Unknown {
                         entity_type: entity_type.to_string(),
@@ -1284,10 +1284,10 @@ impl StateEnvelope {
         }
     }
 
-    /// Convenience: decode into `RuntimeStreamFileRecord`.
-    pub(crate) fn as_runtime_stream_file(&self) -> Option<RuntimeStreamFileRecord> {
+    /// Convenience: decode into `StreamFsFileRecord`.
+    pub(crate) fn as_stream_fs_file(&self) -> Option<StreamFsFileRecord> {
         match self.decode()? {
-            DecodedStateEntity::RuntimeStreamFile(record) => Some(record),
+            DecodedStateEntity::StreamFsFile(record) => Some(record),
             _ => None,
         }
     }

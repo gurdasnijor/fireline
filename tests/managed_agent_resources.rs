@@ -35,7 +35,7 @@ use anyhow::{Context, Result};
 use fireline_harness::{TopologyComponentSpec, TopologySpec};
 use fireline_resources::{
     FileBackend, LocalFileBackend, LocalPathMounter, MountedResource, ResourceMounter, ResourceRef,
-    ResourceSourceRef, RuntimeStreamFileBackend,
+    ResourceSourceRef, StreamFsFileBackend,
 };
 use managed_agent_suite::{
     DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec, create_session,
@@ -184,7 +184,7 @@ async fn resources_physical_mount_is_shell_visible_inside_runtime() -> Result<()
 /// The scripted agent parses the command and issues an ACP
 /// `fs/write_text_file` request against its client connection.
 /// Fireline's `FsBackendComponent` intercepts the request, writes
-/// through the `RuntimeStreamFileBackend`, and emits an `fs_op`
+/// through the `StreamFsFileBackend`, and emits an `fs_op`
 /// envelope to the durable state stream.
 ///
 /// Observable evidence: an `fs_op` envelope is visible on the stream
@@ -262,7 +262,7 @@ async fn resources_fs_backend_captures_write_as_durable_event() -> Result<()> {
 /// `LocalRuntimeHarness` here; in production it would be any shared
 /// durable-streams deployment).
 ///
-/// Action: construct two independent `RuntimeStreamFileBackend`
+/// Action: construct two independent `StreamFsFileBackend`
 /// instances that both point at the same stream URL — simulating two
 /// separate runtime processes attaching the same `SessionLogFileBackend`
 /// to the same stream. Write via backend A, then read via backend B.
@@ -289,8 +289,8 @@ async fn resources_session_log_backend_supports_cross_runtime_reads() -> Result<
 
     let result = async {
         let stream_url = runtime.state_stream_url().to_string();
-        let backend_a = RuntimeStreamFileBackend::new(stream_url.clone());
-        let backend_b = RuntimeStreamFileBackend::new(stream_url);
+        let backend_a = StreamFsFileBackend::new(stream_url.clone());
+        let backend_b = StreamFsFileBackend::new(stream_url);
 
         let path = Path::new("/scratch/cross-runtime.txt");
         let payload = b"hello from backend A, visible to backend B via the shared stream";

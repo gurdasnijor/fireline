@@ -5,7 +5,7 @@ use anyhow::{Context, Result, anyhow};
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, DurableStream, Producer};
 use fireline_resources::{
     FileBackend, FsBackendComponent, FsBackendConfig, LocalFileBackend, MountedResource,
-    RuntimeStreamFileBackend,
+    StreamFsFileBackend,
 };
 use fireline_tools::attach::AttachToolComponent;
 use fireline_tools::directory::PeerRegistry;
@@ -293,7 +293,7 @@ pub fn build_runtime_topology_registry(context: ComponentContext) -> TopologyReg
                     FsBackendConfig::Local => {
                         Arc::new(LocalFileBackend::new(context.mounted_resources.clone()))
                     }
-                    FsBackendConfig::RuntimeStream => Arc::new(RuntimeStreamFileBackend::new(
+                    FsBackendConfig::StreamFs => Arc::new(StreamFsFileBackend::new(
                         context.state_stream_url.clone(),
                     )),
                 };

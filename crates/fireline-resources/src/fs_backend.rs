@@ -1,7 +1,7 @@
 //! ACP filesystem backend component.
 //!
 //! This is intentionally narrower than Durable Streams' experimental
-//! `stream-fs` package. `RuntimeStreamFileBackend` is a single-runtime,
+//! `stream-fs` package. `StreamFsFileBackend` is a single-host,
 //! single-writer artifact log backed by one Fireline state stream. It is not a
 //! collaborative filesystem: no rename, no directory metadata, no multi-writer
 //! conflict resolution, and no attempt to present stronger semantics than
@@ -31,7 +31,8 @@ pub trait FileBackend: Send + Sync {
 #[serde(tag = "backend", rename_all = "snake_case")]
 pub enum FsBackendConfig {
     Local,
-    RuntimeStream,
+    #[serde(rename = "runtime_stream")]
+    StreamFs,
 }
 
 impl FsBackendConfig {
@@ -39,8 +40,8 @@ impl FsBackendConfig {
         Self::Local
     }
 
-    pub fn runtime_stream() -> Self {
-        Self::RuntimeStream
+    pub fn stream_fs() -> Self {
+        Self::StreamFs
     }
 }
 
@@ -208,17 +209,17 @@ impl FileBackend for LocalFileBackend {
 }
 
 #[derive(Debug, Clone)]
-pub struct RuntimeStreamFileBackend {
+pub struct StreamFsFileBackend {
     state_stream_url: String,
 }
 
 /// Backwards-compatible alias kept for the executable spec and docs.
 ///
 /// This is **not** Durable Streams' upstream `stream-fs`. It is the much more
-/// constrained single-runtime backend described in the module docs above.
-pub type SessionLogFileBackend = RuntimeStreamFileBackend;
+/// constrained single-host backend described in the module docs above.
+pub type SessionLogFileBackend = StreamFsFileBackend;
 
-impl RuntimeStreamFileBackend {
+impl StreamFsFileBackend {
     pub fn new(state_stream_url: impl Into<String>) -> Self {
         Self {
             state_stream_url: state_stream_url.into(),
@@ -227,11 +228,11 @@ impl RuntimeStreamFileBackend {
 }
 
 #[async_trait]
-impl FileBackend for RuntimeStreamFileBackend {
+impl FileBackend for StreamFsFileBackend {
     async fn read(&self, path: &Path) -> Result<Vec<u8>> {
         let Some(record) = latest_stream_file_record(&self.state_stream_url, path).await? else {
             return Err(anyhow!(
-                "runtime stream file '{}' not found in {}",
+                "stream-fs file '{}' not found in {}",
                 path.display(),
                 self.state_stream_url
             ));
@@ -241,7 +242,7 @@ impl FileBackend for RuntimeStreamFileBackend {
 
     async fn write(&self, path: &Path, content: &[u8]) -> Result<()> {
         let content = String::from_utf8(content.to_vec())
-            .with_context(|| format!("runtime stream file '{}' must be utf-8", path.display()))?;
+            .with_context(|| format!("stream-fs file '{}' must be utf-8", path.display()))?;
         let producer = state_stream_producer(&self.state_stream_url, "runtime-stream-file");
         producer.append_json(&StateEnvelope {
             entity_type: "runtime_stream_file",
@@ -249,7 +250,7 @@ impl FileBackend for RuntimeStreamFileBackend {
             headers: StateHeaders {
                 operation: "update",
             },
-            value: Some(RuntimeStreamFileRecord {
+            value: Some(StreamFsFileRecord {
                 path: path_key(path),
                 content,
                 ts_ms: now_ms(),
@@ -314,13 +315,13 @@ fn append_fs_op_event(producer: &Producer, session_id: &str, path: &Path, conten
 async fn latest_stream_file_record(
     state_stream_url: &str,
     path: &Path,
-) -> Result<Option<RuntimeStreamFileRecord>> {
+) -> Result<Option<StreamFsFileRecord>> {
     let mut latest = None;
     for envelope in read_state_envelopes(state_stream_url).await? {
         if envelope.entity_type == "runtime_stream_file"
             && let Some(value) = envelope.value
         {
-            let record: RuntimeStreamFileRecord =
+            let record: StreamFsFileRecord =
                 serde_json::from_value(value).context("decode runtime stream file record")?;
             if record.path == path_key(path) {
                 latest = Some(record);
@@ -334,7 +335,7 @@ async fn latest_stream_file_record(
             let record: FsOpRecord =
                 serde_json::from_value(value).context("decode fs op record")?;
             if record.path == path_key(path) && record.op == "write" {
-                latest = Some(RuntimeStreamFileRecord {
+                latest = Some(StreamFsFileRecord {
                     path: record.path,
                     content: record.content,
                     ts_ms: record.ts_ms,
@@ -422,7 +423,7 @@ struct StateEnvelope<T> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RuntimeStreamFileRecord {
+pub struct StreamFsFileRecord {
     pub path: String,
     pub content: String,
     pub ts_ms: i64,
