@@ -259,15 +259,26 @@ Required green checks: Rust workspace and peer-routing integration tests proving
 **Rollback**
 - Revert the peer-routing subscriber PR only.
 
-## Phase 6: Wake-Timer Subscriber
+## Phase 6: Wake and Deployment Subscribers
 
 **Invariant mapping**
 - `DS-TBD-50 AgentBoundTimerFiresAtMostOncePerKey`
 - `DS-TBD-51 ReplayRestoresPendingTimerWaits`
+- `WakeOnReadyIsNoop` from `verification/spec/managed_agents.tla`
+- `WakeOnStoppedChangesRuntimeId` from `verification/spec/managed_agents.tla`
+- `WakeOnStoppedPreservesSessionBinding` from `verification/spec/managed_agents.tla`
+- `ConcurrentWakeSingleWinner` from `verification/spec/managed_agents.tla`
+- `SessionDurableAcrossRuntimeDeath` from `verification/spec/managed_agents.tla`
 
 **Scope**
 - Add the agent-bound timer subscriber from [durable-subscriber.md §5.5](./durable-subscriber.md#55-waketimersubscriber).
 - Limit the first cut to agent-bound timers keyed by `PromptKey(SessionId, RequestId)`.
+- Add `AlwaysOnDeploymentSubscriber` as an active subscriber profile for the always-on sandbox policy:
+  - event: `deployment_wake_requested`
+  - key: `SessionId` (deployment identity)
+  - completion: `sandbox_provisioned` (with runtime id)
+  - mode: active
+- Treat `AlwaysOnDeploymentSubscriber` as glue over the existing wake/provision path, not as a new semantic primitive. The subscriber translates boot-time scan or heartbeat wake requests into the already-modeled wake state machine.
 - Explicitly defer infrastructure-only cluster timers until a separate infra-only contract exists.
 
 **Preconditions**
@@ -280,20 +291,22 @@ gh pr checks --watch
 gh run list --limit 5 --json databaseId,displayTitle,status,conclusion,url
 gh run watch <databaseId>
 ```
-Required green checks: Rust workspace and timer-focused replay/resume tests added in the phase PR.
+Required green checks: Rust workspace plus wake/deployment replay, resume, and single-winner tests added in the phase PR.
 
 **Risks**
 - Accidentally mixing infra-only scheduler state with agent-bound completions.
 - Double-firing after restart if cursor/replay semantics are wrong.
 - Turning timers into a second workflow substrate instead of another subscriber profile.
+- Re-implementing the wake state machine inside the subscriber instead of delegating to the existing provision/wake path.
 
 **Done when**
 - Agent-bound timers append `timer_fired` completions keyed by canonical ACP identifiers.
 - Replay restores unresolved waits without double-firing.
+- `AlwaysOnDeploymentSubscriber` drives `lifecycle.alwaysOn = true` deployments through `deployment_wake_requested -> sandbox_provisioned` using the existing wake/provision substrate and the listed TLA wake invariants as its semantic base.
 - Infrastructure-only timers remain out of scope and undocumented as supported behavior.
 
 **Rollback**
-- Revert the timer-subscriber PR only.
+- Revert the wake/deployment-subscriber PR only.
 
 ## Phase 7: TypeScript Middleware Surface
 
@@ -378,6 +391,7 @@ Cross-check this list against `docs/proposals/durable-subscriber-verification.md
 - [ ] Phase 4 proves auto-approve emits the same canonical completion envelope as the passive approval path.
 - [ ] Phase 5 proves peer completion remains caller-local and cross-session lineage remains trace-only.
 - [ ] Phase 6 proves agent-bound timers replay safely and do not double-fire.
+- [ ] Phase 6 proves `AlwaysOnDeploymentSubscriber` relies on the existing wake invariants rather than introducing a second deployment-lifecycle primitive.
 - [ ] Phase 7 proves the TS helper exposes only canonical key strategies and stays compatible with [durable-promises.md](./durable-promises.md).
 - [ ] Phase 8 proves no migration shim or legacy completion-key surface remains.
 
@@ -391,6 +405,7 @@ Architect should confirm all of the following before execution starts:
 - [ ] The approval gate remains the reference consumer until Phase 2 is complete and verified.
 - [ ] Peer routing in Phase 5 does not depend on deleted lineage structures or reintroduce them indirectly.
 - [ ] Wake timers in Phase 6 are explicitly limited to agent-bound timers; infra-only timers remain deferred.
+- [ ] `AlwaysOnDeploymentSubscriber` is treated as a DurableSubscriber profile over the existing wake/provision path, not as a separate primitive.
 - [ ] The Phase 7 TS surface is narrow enough to stay compatible with the future imperative API in [durable-promises.md](./durable-promises.md).
 - [ ] The CI gates named in each phase are feasible with existing GitHub Actions or are explicitly added in the same PR that needs them.
 
