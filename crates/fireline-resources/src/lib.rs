@@ -3,6 +3,7 @@
 pub mod fs_backend;
 pub mod index;
 pub mod mounter;
+pub mod publisher;
 pub mod registry;
 pub mod resource;
 
@@ -13,6 +14,7 @@ pub use index::{
     ResourceUpdatedEvent,
 };
 pub use mounter::{LocalPathMounter, MountedResource, ResourceMounter, prepare_resources};
+pub use publisher::ResourcePublisher;
 pub use registry::{
     ResourceRegistry, ResourceWatcher, StreamResourceRegistry, Subscription,
 };
