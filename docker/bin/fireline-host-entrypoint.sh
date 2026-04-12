@@ -14,6 +14,11 @@ fi
 : "${FIRELINE_CONTROL_PLANE_PROVIDER:=local}"
 : "${FIRELINE_DURABLE_STREAMS_URL:=http://fireline-streams:7474/v1/stream}"
 
+if [[ -n "${FIRELINE_EMBEDDED_SPEC_PATH:-}" ]]; then
+  exec /opt/fireline-bootstrap/node_modules/.bin/tsx \
+    /opt/fireline-bootstrap/docker/bin/fireline-embedded-spec-bootstrap.ts
+fi
+
 args=(
   /usr/local/bin/fireline
   --control-plane

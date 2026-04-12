@@ -150,3 +150,63 @@ jobs:
           done
           curl -fsS http://127.0.0.1:4441/healthz | grep -q '^ok$'
           curl -fsS http://127.0.0.1:7475/healthz | grep -q '^ok$'
+
+      - name: Smoke test embedded-spec boot exposes ACP on the expected port
+        run: |
+          mkdir -p .tmp/fireline-embedded-spec
+          chmod 0777 .tmp/fireline-embedded-spec
+          cleanup() {
+            docker rm -f fireline-embedded-spec-smoke >/dev/null 2>&1 || true
+            rm -rf .tmp/fireline-embedded-spec
+          }
+          trap cleanup EXIT
+          docker build \
+            --file docker/fireline-host-quickstart.Dockerfile \
+            --build-arg SPEC=docker/specs/embedded-smoke-spec.json \
+            --tag fireline-host-quickstart:embedded-smoke \
+            .
+          docker run -d \
+            --name fireline-embedded-spec-smoke \
+            -p 4442:4440 \
+            -p 7476:7474 \
+            -v "$PWD/.tmp/fireline-embedded-spec:/var/lib/fireline" \
+            fireline-host-quickstart:embedded-smoke
+          for _ in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:4442/healthz >/dev/null && \
+               curl -fsS http://127.0.0.1:7476/healthz >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:4442/healthz | grep -q '^ok$'
+          curl -fsS http://127.0.0.1:7476/healthz | grep -q '^ok$'
+          node <<'EOF'
+          const url = 'ws://127.0.0.1:4442/acp'
+          let opened = false
+          const timeout = setTimeout(() => {
+            console.error(`timed out opening ${url}`)
+            process.exit(1)
+          }, 10_000)
+          const ws = new WebSocket(url)
+          ws.addEventListener('open', () => {
+            opened = true
+            console.log(`opened ${url}`)
+            clearTimeout(timeout)
+            process.exit(0)
+          })
+          ws.addEventListener('close', () => {
+            if (!opened) {
+              clearTimeout(timeout)
+              console.error(`closed before open: ${url}`)
+              process.exit(1)
+            }
+          })
+          ws.addEventListener('error', (event) => {
+            if (opened) {
+              return
+            }
+            clearTimeout(timeout)
+            console.error(`failed to open ${url}:`, event.error ?? event.message ?? event)
+            process.exit(1)
+          })
+          EOF
