@@ -54,6 +54,7 @@ use async_trait::async_trait;
 use durable_streams::{Client as DurableStreamsClient, Producer};
 use fireline_tools::CredentialRef;
 use lru::LruCache;
+use sacp::schema::SessionId;
 use tokio::sync::RwLock;
 use zeroize::Zeroizing;
 
@@ -107,7 +108,7 @@ pub trait CredentialResolver: Send + Sync {
     async fn resolve(
         &self,
         credential_ref: &CredentialRef,
-        session_id: &str,
+        session_id: &SessionId,
     ) -> Result<SecretValue, CredentialResolverError>;
 }
 
@@ -144,7 +145,7 @@ pub enum CredentialResolverError {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct SessionCacheKey {
-    session_id: String,
+    session_id: SessionId,
     rule_index: usize,
 }
 
@@ -525,10 +526,12 @@ captured post-injection tool outputs, not from raw secret material.
 Proposed Rust event type:
 
 ```rust
+use sacp::schema::SessionId;
+
 #[derive(serde::Serialize)]
 struct CredentialInjectedEvent {
     kind: &'static str,
-    session_id: String,
+    session_id: SessionId,
     credential_ref_name: String,
     target_kind: &'static str,
     resolved_at_ms: u64,
