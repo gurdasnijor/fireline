@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "types": ["node"],
+    "typeRoots": [
+      "../../packages/client/node_modules/@types",
+      "../../packages/browser-harness/node_modules/@types"
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "@agentclientprotocol/sdk": ["../../packages/client/node_modules/@agentclientprotocol/sdk"],
+      "@durable-streams/client": ["../../packages/client/node_modules/@durable-streams/client"],
+      "@fireline/client": ["../../packages/client/src/index.ts"],
+      "@fireline/client/admin": ["../../packages/client/src/admin.ts"],
+      "@fireline/client/events": ["../../packages/client/src/events.ts"],
+      "@fireline/client/middleware": ["../../packages/client/src/middleware.ts"],
+      "@fireline/client/resources": ["../../packages/client/src/resources.ts"],
+      "@fireline/state": ["../../packages/state/src/index.ts"],
+      "@slack/bolt": ["../shared/slack-bolt.d.ts"],
+      "ws": ["../../packages/client/node_modules/@types/ws/index.d.ts"]
+    }
+  },
+  "include": ["../shared/*.ts", "../shared/*.d.ts", "./**/*.ts"]
+}
