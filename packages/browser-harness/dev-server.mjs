@@ -123,15 +123,10 @@ const server = createServer(async (req, res) => {
 
       const resolved = await client.catalog.resolveAgent(agentId)
       currentRuntime = await createRuntime({
-        provider: 'local',
-        host: '127.0.0.1',
-        port: 4437,
         name: 'browser-harness',
-        durableStreamsUrl,
-        stateStream: 'fireline-harness-state',
-        peerDirectoryPath,
-        topology: { components: [] },
         agentCommand: resolved.command,
+        stateStream: 'fireline-harness-state',
+        topology: { components: [] },
       })
 
       sendJson(res, 200, { runtime: currentRuntime })
@@ -257,6 +252,8 @@ async function startControlPlane() {
       '127.0.0.1',
       '--port',
       '4440',
+      '--durable-streams-url',
+      durableStreamsUrl,
       '--fireline-bin',
       firelineBin,
       '--runtime-registry-path',

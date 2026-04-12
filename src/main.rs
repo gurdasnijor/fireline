@@ -275,6 +275,9 @@ async fn run_control_plane_host(cli: Cli, host: IpAddr) -> Result<()> {
         ControlPlaneProvider::Local => ProviderMode::Local,
         ControlPlaneProvider::Docker => ProviderMode::Docker,
     };
+    let durable_streams_url = cli
+        .durable_streams_url
+        .context("--durable-streams-url is required in control-plane mode")?;
 
     control_plane::run_control_plane(ControlPlaneConfig {
         host,
@@ -289,7 +292,7 @@ async fn run_control_plane_host(cli: Cli, host: IpAddr) -> Result<()> {
         prefer_push: cli.prefer_push,
         heartbeat_scan_interval: Duration::from_millis(cli.heartbeat_scan_interval_ms),
         stale_timeout: Duration::from_millis(cli.stale_timeout_ms),
-        shared_stream_base_url: cli.shared_stream_base_url,
+        durable_streams_url,
         docker_build_context: cli.docker_build_context,
         dockerfile: cli.dockerfile,
         docker_image: cli.docker_image,

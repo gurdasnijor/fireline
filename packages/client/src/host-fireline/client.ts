@@ -53,15 +53,11 @@ export function createFirelineHost(opts: FirelineHostOptions): Host {
     async provision(spec) {
       const runtimeName = readMetadataString(spec.metadata, 'name') ?? `fireline-ts-${crypto.randomUUID()}`
       const stateStream = readMetadataString(spec.metadata, 'stateStream')
-      const explicitPort = readMetadataNumber(spec.metadata, 'port')
 
       const descriptor = await requestControlPlane<FirelineRuntimeDescriptor>(baseUrl, '/v1/runtimes', {
         token,
         method: 'POST',
         body: JSON.stringify({
-          provider: 'local',
-          host: '127.0.0.1',
-          port: explicitPort ?? 0,
           name: runtimeName,
           agentCommand: spec.agentCommand ?? [],
           topology: spec.topology ?? { components: [] },
@@ -226,13 +222,6 @@ function readMetadataString(
   return typeof value === 'string' ? value : undefined
 }
 
-function readMetadataNumber(
-  metadata: ProvisionSpec['metadata'] | undefined,
-  key: string,
-): number | undefined {
-  const value = metadata?.[key]
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
-}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {

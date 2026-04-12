@@ -1,21 +1,52 @@
+use std::net::IpAddr;
+use std::path::PathBuf;
+
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use fireline_resources::ResourceRef;
 use fireline_sandbox::RuntimeHost;
 use fireline_session::{
-    CreateRuntimeSpec, HeartbeatReport, RuntimeDescriptor, RuntimeRegistration, RuntimeStatus,
+    CreateRuntimeSpec, HeartbeatReport, RuntimeDescriptor, RuntimeRegistration,
+    RuntimeProviderRequest, RuntimeStatus, TopologySpec,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::{RuntimeTokenClaims, RuntimeTokenStore, require_runtime_bearer};
 use crate::heartbeat::HeartbeatTracker;
+
+/// Host-side infrastructure config — never sent by clients.
+#[derive(Clone, Debug)]
+pub struct HostInfraConfig {
+    pub host: IpAddr,
+    pub durable_streams_url: String,
+    pub peer_directory_path: Option<PathBuf>,
+}
 
 #[derive(Clone)]
 pub struct AppState {
     pub runtime_host: RuntimeHost,
     pub heartbeat_tracker: HeartbeatTracker,
     pub token_store: RuntimeTokenStore,
+    pub infra: HostInfraConfig,
+}
+
+/// Client-facing provision request — semantic intent only.
+/// Infrastructure details (host, port, provider, durable-streams URL)
+/// are injected by the Host from its own config, never from the client.
+/// Aligned with industry patterns (Daytona, E2B, microsandbox).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProvisionRequest {
+    pub name: String,
+    #[serde(default)]
+    pub agent_command: Vec<String>,
+    #[serde(default)]
+    pub resources: Vec<ResourceRef>,
+    pub state_stream: Option<String>,
+    #[serde(default)]
+    pub topology: TopologySpec,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -61,8 +92,23 @@ async fn get_runtime(
 
 async fn provision_runtime(
     State(state): State<AppState>,
-    Json(spec): Json<CreateRuntimeSpec>,
+    Json(request): Json<ProvisionRequest>,
 ) -> Result<(StatusCode, Json<RuntimeDescriptor>), ControlPlaneError> {
+    let spec = CreateRuntimeSpec {
+        runtime_key: None,
+        node_id: None,
+        provider: RuntimeProviderRequest::Local,
+        host: state.infra.host,
+        port: 0,
+        name: request.name,
+        agent_command: request.agent_command,
+        durable_streams_url: state.infra.durable_streams_url.clone(),
+        resources: request.resources,
+        state_stream: request.state_stream,
+        stream_storage: None,
+        peer_directory_path: state.infra.peer_directory_path.clone(),
+        topology: request.topology,
+    };
     let runtime = state.runtime_host.provision(spec).await?;
     Ok((StatusCode::CREATED, Json(runtime)))
 }

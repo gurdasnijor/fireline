@@ -436,7 +436,6 @@ function SessionHarness({
         metadata: {
           name: 'browser-harness',
           stateStream: STATE_STREAM_NAME,
-          port: 4437,
         },
       })
 

@@ -12,7 +12,7 @@ use fireline_sandbox::{
 use crate::auth::RuntimeTokenStore;
 use crate::heartbeat::HeartbeatTracker;
 use crate::local_provider::ChildProcessRuntimeLauncher;
-use crate::router::{AppState, build_router};
+use crate::router::{AppState, HostInfraConfig, build_router};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProviderMode {
@@ -34,7 +34,7 @@ pub struct ControlPlaneConfig {
     pub prefer_push: bool,
     pub heartbeat_scan_interval: Duration,
     pub stale_timeout: Duration,
-    pub shared_stream_base_url: Option<String>,
+    pub durable_streams_url: String,
     pub docker_build_context: Option<PathBuf>,
     pub dockerfile: PathBuf,
     pub docker_image: String,
@@ -113,6 +113,11 @@ pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
         runtime_host,
         heartbeat_tracker,
         token_store,
+        infra: HostInfraConfig {
+            host: config.host,
+            durable_streams_url: config.durable_streams_url.clone(),
+            peer_directory_path: config.peer_directory_path.clone(),
+        },
     });
 
     tracing::info!(addr = %bound_addr, "fireline control plane listening");
