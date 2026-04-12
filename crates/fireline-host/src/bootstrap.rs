@@ -409,6 +409,6 @@ fn host_node_info(node_id: &str) -> Map<String, Value> {
 fn chrono_like_now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .expect("time went backwards")
+        .unwrap_or(std::time::Duration::ZERO)
         .as_millis() as i64
 }

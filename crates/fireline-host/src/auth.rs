@@ -91,7 +91,7 @@ fn extract_bearer_token(headers: &HeaderMap) -> Result<&str, ControlPlaneError> 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .expect("time went backwards")
+        .unwrap_or(std::time::Duration::ZERO)
         .as_millis() as i64
 }
 

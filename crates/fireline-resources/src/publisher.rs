@@ -155,6 +155,6 @@ fn sanitize_producer_component(value: &str) -> String {
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .expect("time went backwards")
+        .unwrap_or(std::time::Duration::ZERO)
         .as_millis() as i64
 }

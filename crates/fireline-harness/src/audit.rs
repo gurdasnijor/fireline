@@ -232,7 +232,7 @@ fn format_request_id(id: &serde_json::Value) -> String {
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("time went backwards")
+        .unwrap_or(std::time::Duration::ZERO)
         .as_millis() as i64
 }
 
