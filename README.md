@@ -230,6 +230,39 @@ The session is the stream, not the sandbox. Both hosts read and write the same d
 ---
 
 <picture>
+  <img alt="Durable Wait" src="assets/durable-wait.svg" width="100%">
+</picture>
+
+## Durable waits — approvals that outlive everything
+
+Your personal assistant agent is running in the cloud. You ask it to check your inbox. The `approve()` middleware pauses the agent and writes a `permission_request` to the durable stream. You close your laptop and walk away.
+
+The sandbox times out after 15 minutes. The container is recycled. The agent process is gone.
+
+Five hours later, you open the dashboard on your phone. The pending approval is right there — it's a durable stream event, not an in-memory callback. You tap "approve." The resolution lands on the stream. A new sandbox provisions, calls `session/load`, replays the stream, sees the approval, and the agent reads your email and sends you the summary.
+
+```typescript
+// Fire-and-forget personal assistant
+const handle = await compose(
+  sandbox({ provider: 'cloud' }),
+  middleware([ trace(), approve({ scope: 'tool_calls' }), secretsProxy({...}) ]),
+  agent(['claude-code-acp']),
+).start({ serverUrl: 'https://prod.fireline.dev' })
+
+// Prompt and walk away — the stream remembers everything
+conn.prompt({ message: 'Check my inbox for the Acme contract and summarize it' })
+
+// Hours later, from a different device:
+// 1. Dashboard shows pending approval (it's a stream event, not a callback)
+// 2. You approve
+// 3. New sandbox provisions, replays stream, agent continues
+```
+
+The stream outlives the sandbox, the process, the network connection, and your attention span. That's what durable means.
+
+---
+
+<picture>
   <img alt="Multi-Agent Topology" src="assets/multi-agent-topology.svg" width="100%">
 </picture>
 

@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 620">
+  <rect width="900" height="620" fill="#0b1020" rx="12"/>
+
+  <!-- Title -->
+  <text x="450" y="34" text-anchor="middle" fill="#e2e8f0" font-family="ui-monospace, monospace" font-size="18" font-weight="600">Durable Wait</text>
+  <text x="450" y="54" text-anchor="middle" fill="#64748b" font-family="ui-monospace, monospace" font-size="11">The agent sleeps. The sandbox dies. Hours pass. The user approves. The agent wakes up.</text>
+
+  <!-- Timeline axis -->
+  <line x1="60" y1="85" x2="840" y2="85" stroke="#1e293b" stroke-width="2"/>
+
+  <!-- Time markers -->
+  <text x="100" y="80" text-anchor="middle" fill="#475569" font-family="ui-monospace, monospace" font-size="9">9:00 AM</text>
+  <line x1="100" y1="85" x2="100" y2="92" stroke="#475569" stroke-width="1.5"/>
+
+  <text x="280" y="80" text-anchor="middle" fill="#475569" font-family="ui-monospace, monospace" font-size="9">9:02 AM</text>
+  <line x1="280" y1="85" x2="280" y2="92" stroke="#475569" stroke-width="1.5"/>
+
+  <text x="420" y="80" text-anchor="middle" fill="#dc2626" font-family="ui-monospace, monospace" font-size="9">9:15 AM</text>
+  <line x1="420" y1="85" x2="420" y2="92" stroke="#dc2626" stroke-width="1.5"/>
+
+  <text x="580" y="80" text-anchor="middle" fill="#475569" font-family="ui-monospace, monospace" font-size="9">2:30 PM</text>
+  <line x1="580" y1="85" x2="580" y2="92" stroke="#475569" stroke-width="1.5"/>
+
+  <text x="740" y="80" text-anchor="middle" fill="#22c55e" font-family="ui-monospace, monospace" font-size="9">2:31 PM</text>
+  <line x1="740" y1="85" x2="740" y2="92" stroke="#22c55e" stroke-width="1.5"/>
+
+  <!-- Step 1: User messages agent -->
+  <rect x="40" y="105" width="180" height="90" rx="8" fill="#0f172a" stroke="#3b82f6" stroke-width="1.5"/>
+  <rect x="40" y="105" width="180" height="22" rx="8" fill="#3b82f6" fill-opacity="0.2"/>
+  <text x="130" y="120" text-anchor="middle" fill="#60a5fa" font-family="ui-monospace, monospace" font-size="9" font-weight="600">User prompts agent</text>
+  <text x="55" y="142" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">"Check my inbox for</text>
+  <text x="55" y="155" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9"> the contract from</text>
+  <text x="55" y="168" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9"> Acme Corp and</text>
+  <text x="55" y="181" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9"> summarize it"</text>
+
+  <!-- Arrow -->
+  <line x1="220" y1="150" x2="240" y2="150" stroke="#475569" stroke-width="1"/>
+  <polygon points="238,147 244,150 238,153" fill="#475569"/>
+
+  <!-- Step 2: Agent needs email access -->
+  <rect x="245" y="105" width="160" height="90" rx="8" fill="#0f172a" stroke="#f59e0b" stroke-width="1.5"/>
+  <rect x="245" y="105" width="160" height="22" rx="8" fill="#f59e0b" fill-opacity="0.2"/>
+  <text x="325" y="120" text-anchor="middle" fill="#fbbf24" font-family="ui-monospace, monospace" font-size="9" font-weight="600">approve() suspends</text>
+  <text x="260" y="142" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">tool: gmail_read</text>
+  <text x="260" y="155" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">scope: inbox</text>
+  <text x="260" y="168" fill="#fbbf24" font-family="ui-monospace, monospace" font-size="9">permission_request</text>
+  <text x="260" y="181" fill="#fbbf24" font-family="ui-monospace, monospace" font-size="9">  written to stream</text>
+
+  <!-- Step 3: Sandbox dies (the dramatic moment) -->
+  <rect x="415" y="105" width="130" height="90" rx="8" fill="#140a0a" stroke="#dc2626" stroke-width="1.5"/>
+  <rect x="415" y="105" width="130" height="22" rx="8" fill="#dc2626" fill-opacity="0.2"/>
+  <text x="480" y="120" text-anchor="middle" fill="#fca5a5" font-family="ui-monospace, monospace" font-size="9" font-weight="600">Sandbox dies</text>
+  <text x="430" y="142" fill="#dc2626" font-family="ui-monospace, monospace" font-size="9">Container</text>
+  <text x="430" y="155" fill="#dc2626" font-family="ui-monospace, monospace" font-size="9">recycled.</text>
+  <text x="430" y="168" fill="#dc2626" font-family="ui-monospace, monospace" font-size="9">Process gone.</text>
+  <text x="430" y="181" fill="#64748b" font-family="ui-monospace, monospace" font-size="9">No agent running.</text>
+
+  <!-- Dead zone (hours pass) -->
+  <rect x="555" y="120" width="2" height="60" rx="1" fill="#1e293b"/>
+  <rect x="562" y="120" width="2" height="60" rx="1" fill="#1e293b"/>
+  <rect x="569" y="120" width="2" height="60" rx="1" fill="#1e293b"/>
+  <text x="563" y="112" text-anchor="middle" fill="#475569" font-family="ui-monospace, monospace" font-size="8">5.5 hours</text>
+
+  <!-- Step 4: User comes back online -->
+  <rect x="580" y="105" width="130" height="90" rx="8" fill="#0f172a" stroke="#22c55e" stroke-width="1.5"/>
+  <rect x="580" y="105" width="130" height="22" rx="8" fill="#22c55e" fill-opacity="0.2"/>
+  <text x="645" y="120" text-anchor="middle" fill="#22c55e" font-family="ui-monospace, monospace" font-size="9" font-weight="600">User approves</text>
+  <text x="595" y="142" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">Opens dashboard.</text>
+  <text x="595" y="155" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">Sees pending</text>
+  <text x="595" y="168" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">request from</text>
+  <text x="595" y="181" fill="#22c55e" font-family="ui-monospace, monospace" font-size="9">5 hours ago.</text>
+
+  <!-- Arrow -->
+  <line x1="710" y1="150" x2="720" y2="150" stroke="#475569" stroke-width="1"/>
+  <polygon points="718,147 724,150 718,153" fill="#475569"/>
+
+  <!-- Step 5: Agent resumes -->
+  <rect x="725" y="105" width="135" height="90" rx="8" fill="#0f172a" stroke="#8b5cf6" stroke-width="1.5"/>
+  <rect x="725" y="105" width="135" height="22" rx="8" fill="#8b5cf6" fill-opacity="0.2"/>
+  <text x="793" y="120" text-anchor="middle" fill="#a78bfa" font-family="ui-monospace, monospace" font-size="9" font-weight="600">Agent resumes</text>
+  <text x="740" y="142" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">session/load</text>
+  <text x="740" y="155" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">New sandbox.</text>
+  <text x="740" y="168" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">Replays stream.</text>
+  <text x="740" y="181" fill="#a78bfa" font-family="ui-monospace, monospace" font-size="9">Reads email.</text>
+
+  <!-- The Durable Stream — center of the diagram -->
+  <rect x="40" y="215" width="820" height="120" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1"/>
+  <text x="450" y="237" text-anchor="middle" fill="#e2e8f0" font-family="ui-monospace, monospace" font-size="12" font-weight="600">Durable Stream</text>
+  <text x="450" y="253" text-anchor="middle" fill="#475569" font-family="ui-monospace, monospace" font-size="9">Append-only. Replayable. The source of truth that outlives everything.</text>
+
+  <!-- Stream events as log entries -->
+  <rect x="60" y="265" width="185" height="18" rx="3" fill="#1e293b"/>
+  <text x="70" y="278" fill="#60a5fa" font-family="ui-monospace, monospace" font-size="8">off:0  session_created  9:00</text>
+
+  <rect x="255" y="265" width="150" height="18" rx="3" fill="#1e293b"/>
+  <text x="265" y="278" fill="#60a5fa" font-family="ui-monospace, monospace" font-size="8">off:1  prompt  9:00</text>
+
+  <rect x="415" y="265" width="210" height="18" rx="3" fill="#1e293b"/>
+  <text x="425" y="278" fill="#fbbf24" font-family="ui-monospace, monospace" font-size="8">off:2  permission_request  9:02</text>
+
+  <rect x="60" y="290" width="230" height="18" rx="3" fill="#1e293b"/>
+  <text x="70" y="303" fill="#dc2626" font-family="ui-monospace, monospace" font-size="8">off:3  sandbox_terminated  9:15</text>
+
+  <!-- Gap representing hours -->
+  <text x="310" y="303" fill="#475569" font-family="ui-monospace, monospace" font-size="8">...</text>
+  <text x="350" y="303" fill="#475569" font-family="ui-monospace, monospace" font-size="8">5 hours pass</text>
+  <text x="470" y="303" fill="#475569" font-family="ui-monospace, monospace" font-size="8">...</text>
+
+  <rect x="500" y="290" width="240" height="18" rx="3" fill="#1e293b"/>
+  <text x="510" y="303" fill="#22c55e" font-family="ui-monospace, monospace" font-size="8">off:4  permission_resolved  14:30</text>
+
+  <rect x="60" y="315" width="220" height="18" rx="3" fill="#1e293b"/>
+  <text x="70" y="328" fill="#a78bfa" font-family="ui-monospace, monospace" font-size="8">off:5  session_resumed  14:31</text>
+
+  <rect x="290" y="315" width="220" height="18" rx="3" fill="#1e293b"/>
+  <text x="300" y="328" fill="#a78bfa" font-family="ui-monospace, monospace" font-size="8">off:6  tool_executed  14:31</text>
+
+  <rect x="520" y="315" width="220" height="18" rx="3" fill="#1e293b"/>
+  <text x="530" y="328" fill="#a78bfa" font-family="ui-monospace, monospace" font-size="8">off:7  response  14:31</text>
+
+  <!-- Key insight box -->
+  <rect x="60" y="355" width="780" height="70" rx="8" fill="#0f172a" stroke="#22c55e" stroke-width="1"/>
+  <text x="80" y="378" fill="#22c55e" font-family="ui-monospace, monospace" font-size="11" font-weight="600">Why this works:</text>
+  <text x="80" y="396" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="10">The permission_request at offset:2 is not a callback. It's not a WebSocket message. It's not in memory.</text>
+  <text x="80" y="412" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="10">It's a durable event on an append-only log. It will be there tomorrow. It will be there next week.</text>
+
+  <!-- Code example -->
+  <rect x="60" y="440" width="780" height="160" rx="8" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <text x="80" y="462" fill="#64748b" font-family="ui-monospace, monospace" font-size="10">// Your personal assistant — fire and forget</text>
+  <text x="80" y="480" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="10">const handle = await compose(</text>
+  <text x="80" y="496" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="10">  sandbox({ provider: 'cloud' }),</text>
+  <text x="80" y="512" fill="#fbbf24" font-family="ui-monospace, monospace" font-size="10">  middleware([ trace(), approve({ scope: 'tool_calls' }), secretsProxy({...}) ]),</text>
+  <text x="80" y="528" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="10">  agent(['claude-code-acp'])</text>
+  <text x="80" y="544" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="10">).start({ serverUrl: 'https://prod.fireline.dev' })</text>
+
+  <text x="80" y="568" fill="#64748b" font-family="ui-monospace, monospace" font-size="10">// Close your laptop. The request waits. Approve from your phone at 2 AM. Agent resumes.</text>
+
+  <!-- Bottom tagline -->
+  <text x="450" y="612" text-anchor="middle" fill="#475569" font-family="ui-monospace, monospace" font-size="9">The stream outlives the sandbox, the process, the connection, and your attention span.</text>
+</svg>

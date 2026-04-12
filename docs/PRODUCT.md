@@ -57,6 +57,8 @@ This means your 3am batch job doesn't lose 4 hours of work when a container recy
 
 **You have 50 agents running in parallel.** One dashboard, powered by a single stream subscription, shows all of them — active sessions, pending approvals, token budgets, completion status. No per-agent polling. No custom WebSocket wiring. The stream carries everything.
 
+**Your personal assistant needs approval while you're offline.** You ask your cloud agent to check your inbox. The agent needs Gmail access — the approval middleware suspends it and writes a permission request to the durable stream. You close your laptop and go to lunch. The sandbox times out and is recycled. Five hours later, you open the dashboard on your phone and see the pending request. You tap "approve." A new sandbox provisions, replays the stream, sees the approval, reads your email, and sends you the summary. The agent didn't lose a single byte of context — the stream remembered everything the sandbox forgot.
+
 **You move your agent from dev to production.** Same agent definition. Same middleware. Same resource mounts. Different server URL. That's the entire migration. Your staging environment and your production environment run the same code — the only difference is where the sandboxes are provisioned and which durable stream they write to.
 
 ---
@@ -81,6 +83,10 @@ This means your 3am batch job doesn't lose 4 hours of work when a container recy
 
 <picture>
   <img alt="Secrets Isolation" src="../assets/secrets-isolation.svg" width="100%">
+</picture>
+
+<picture>
+  <img alt="Durable Wait" src="../assets/durable-wait.svg" width="100%">
 </picture>
 
 ## Under the hood
