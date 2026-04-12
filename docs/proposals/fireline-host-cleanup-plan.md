@@ -61,12 +61,13 @@ Rationale:
 | **C1** | Delete dead surfaces | lane 1 + Category C | **low** | 1–2 | — | **maybe** |
 | **C2** | Collapse direct-host path | lane 2 | **medium** | 2–3 | C1 (safer with dead code gone first) | **yes** |
 | **C3** | Delete `/v1/auth/runtime-token` + `auth.rs` prep | lane 4 (part) | **low-medium** | 1 | C1 | **maybe** |
-| **C4** | Relocate `ControlPlanePeerRegistry` to `fireline-tools` | lane 5 | **low** | 1 | C1 | **maybe** |
+| **C4** | Peer registry collapse + stream-backed `StreamDeploymentPeerRegistry` | lane 5 (rescoped) | **medium** | 3–4 | C1 + `cross-host-discovery.md` landed | **maybe** |
+| **C4b** | Resource discovery collapse + `StreamResourceMounter` | new | **medium** | 2–3 | C1 + `resource-discovery.md` landed | **maybe** |
 | **CB** | Naming drift — `create_runtime` → `provision_runtime` etc. | Category B | **low** | 1–2 | interleaves any time after C2 | **maybe** |
-| **C5** | Stream-as-truth flip + delete `heartbeat.rs` + `HeartbeatTracker` + stale scanner + `/register` + `/heartbeat` + `auth.rs` residue + `ControlPlanePeerRegistry` | lane 3 (+ completes lane 4 + lane 5) | **high** | 4–6 (multi-step) | C1, C2, C3, C4 | **yes** |
+| **C5** | Stream-as-truth flip + delete `heartbeat.rs` + `HeartbeatTracker` + stale scanner + `/register` + `/heartbeat` + `auth.rs` residue | lane 3 (+ completes lane 4) | **high** | 4–6 (multi-step) | C1, C2, C3, C4 | **yes** |
 | **C6** | Rewrite or inline `bootstrap.rs` | lane 6 | **high** | 1–2 | C2, C5 | **yes** |
 
-**Total estimated commits:** 11–17 across all phases. Plan to hold a cleanup PR branch for each phase; do not mix phases in one commit.
+**Total estimated commits:** 15–22 across all phases (C4 and C4b added ~4–7 commits to the original estimate). Plan to hold a cleanup PR branch for each phase; do not mix phases in one commit.
 
 ## Ordering rationale
 
@@ -184,34 +185,77 @@ The dispatch's suggested ordering (C1 → C2 → C3 → C4 → CB interleave →
 
 ---
 
-## Phase C4 — Relocate `ControlPlanePeerRegistry` to `fireline-tools`
+## Phase C4 — Peer registry collapse + stream-backed replacement
 
-**Scope.** Move `control_plane_peer_registry.rs` out of `fireline-host` into `fireline-tools` as `HttpRuntimePeerRegistry`. This is a placement + naming fix, not a semantic change.
+> **Blocked by:** [`docs/proposals/cross-host-discovery.md`](./cross-host-discovery.md) landed on `origin/main` AND user confirmation that `LocalPeerDirectory` is deleted without a dev fallback. (User already confirmed: *"no fallback — it's an architecture violation."*)
 
-**Exact files touched** (from audit Q2 + §Category A):
+**Scope.** Delete both `ControlPlanePeerRegistry` and `LocalPeerDirectory`. Replace with a new `StreamDeploymentPeerRegistry` backed by a durable-stream projection of the `hosts:tenant-<id>` stream. This is no longer a mechanical relocation — it's a net-new implementation with a net-deletion of two legacy peer-discovery paths.
 
-| File | Action | Audit reference |
-|---|---|---|
-| `crates/fireline-host/src/control_plane_peer_registry.rs:1-82` | move to `crates/fireline-tools/src/registries/http_runtime.rs` (or similar); rename the type to `HttpRuntimePeerRegistry` | audit:42–50, 177 |
-| `crates/fireline-host/src/bootstrap.rs:150-155` | update the import path when `bootstrap` constructs the registry in push mode | audit:45 |
-| `crates/fireline-host/src/lib.rs` | remove the `pub mod control_plane_peer_registry` declaration | follows |
-| `crates/fireline-tools/src/lib.rs` | add `pub mod registries` (or wherever the relocation lands) + export the renamed type | follows |
-| `crates/fireline-runtime/src/control_plane_peer_registry.rs` | delete the compatibility shim (if present) | audit:214 |
+**Exact files touched:**
+
+| File | Action |
+|---|---|
+| `crates/fireline-tools/src/peer/directory.rs::LocalPeerDirectory` | **delete** — the TOML-on-disk peer registry is an architecture violation under the cross-host-discovery proposal; no fallback, no dev mode |
+| `crates/fireline-host/src/control_plane_peer_registry.rs::ControlPlanePeerRegistry` | **delete** — the HTTP-backed `GET /v1/runtimes` adapter is replaced by the stream-backed registry |
+| `crates/fireline-tools/src/peer/stream.rs::StreamDeploymentPeerRegistry` | **NEW** — implements `PeerRegistry` trait, backed by durable-stream projection over the `hosts:tenant-<id>` stream. Shape specified in [`./cross-host-discovery.md`](./cross-host-discovery.md). |
+| `crates/fireline-tools/src/peer/mod.rs` | `pub mod stream;` replaces `pub mod directory;` (or both coexist for one interim commit if staged that way) |
+| `crates/fireline-host/src/bootstrap.rs` | swap peer registry wiring from `LocalPeerDirectory` / `ControlPlanePeerRegistry` to the new stream-backed impl |
+| `crates/fireline-host/src/lib.rs` | remove `pub mod control_plane_peer_registry` declaration |
+| `crates/fireline-runtime/src/control_plane_peer_registry.rs` | delete compatibility shim (if present post-restructure) |
+| `LocalPeerDirectory::default_path()` callers in `src/main.rs`, `src/bin/agents.rs`, `tests/` | delete the caller sites + any tests that construct a `LocalPeerDirectory` |
+| `--peer-directory-path` CLI flag in `src/main.rs` and `fireline-control-plane` | delete — there is no peer-directory file anymore |
 
 **Done-when checklist:**
 
-- [ ] `grep -rn 'control_plane_peer_registry\|ControlPlanePeerRegistry' crates/fireline-host/src/` → empty (beyond any transitional `pub use` if one is needed)
-- [ ] `grep -rn 'HttpRuntimePeerRegistry' crates/fireline-tools/src/` → at least one definition match
+- [ ] `grep -rn 'LocalPeerDirectory\|local_peer_directory\|peer_directory_path\|PeerDirectoryPath\|peers\.toml' crates/ src/ tests/` → empty
+- [ ] `grep -rn 'ControlPlanePeerRegistry\|control_plane_peer_registry' crates/ src/` → empty
+- [ ] `grep -rn 'StreamDeploymentPeerRegistry' crates/fireline-tools/src/` → at least one definition match with a `PeerRegistry` trait impl
 - [ ] `cargo check --workspace` green
-- [ ] Managed-agent suite green — push-mode tests exercise this path and must still work
+- [ ] Managed-agent suite green — push-mode tests that exercised the old peer discovery path are either updated to use the stream-backed registry or deleted as no-longer-meaningful
+- [ ] Bootstrap in push mode constructs `StreamDeploymentPeerRegistry` and passes it to `PeerComponent`; `PeerComponent::list_peers()` returns entries derived from the durable stream, not from an HTTP poll or a TOML file
 
-**Risk: LOW.** Pure move + rename. The type is already an adapter implementing `fireline_tools::directory::PeerRegistry` (audit:43), so moving it into the crate it's adapting for is a placement correction, not a semantic change.
+**Risk: MEDIUM.** This is no longer just a move — it's a net-new `PeerRegistry` implementation that reads from a durable stream. The stream schema depends on `cross-host-discovery.md` which hasn't landed yet. If the proposal's stream shape changes, the impl changes. The risk is bounded by the `PeerRegistry` trait contract: as long as the new satisfier returns `Vec<Peer>` from `list_peers()` and `Option<Peer>` from `lookup_peer()`, the rest of the system doesn't care where the data came from.
 
-**Re-scope consideration:** if the interval between C4 and C5 is short (same day, both in the same PR sweep), **skip C4 and fold the relocation into C5 as a delete-not-move**. The justification for C4 as a standalone phase is "relocate now, delete later" — and if "later" is "next hour," there's no point in the intermediate commit. Decide at dispatch time based on how long C5 is going to take.
+**Conflicts-with-w13-9i: maybe.** `crates/fireline-tools/src/peer/` is a directory workspace:13 moved during the restructure; confirm the current layout before starting.
 
-**Conflicts-with-w13-9i: maybe.** Any file move in the `fireline-host` → `fireline-tools` direction is exactly the kind of thing workspace:13 might already be doing as part of the restructure.
+**Estimated commits:** 3–4.
+1. Add `StreamDeploymentPeerRegistry` scaffolding in `crates/fireline-tools/src/peer/stream.rs` (empty `PeerRegistry` trait impl returning `Ok(vec![])` / `Ok(None)`)
+2. Implement the stream projection — subscribe to `hosts:tenant-<id>`, materialize `Peer` entries from `runtime_endpoints` envelopes
+3. Swap bootstrap wiring in `crates/fireline-host/src/bootstrap.rs` + delete the `--peer-directory-path` CLI flag
+4. Delete `LocalPeerDirectory` + `ControlPlanePeerRegistry` + their callers + all `peers.toml` references
 
-**Estimated commits:** 1 (rename-heavy).
+---
+
+## Phase C4b — Resource discovery collapse
+
+> **Blocked by:** [`docs/proposals/resource-discovery.md`](./resource-discovery.md) landed on `origin/main`.
+
+**Scope.** Delete the assumption that resources are "local paths only" and add a `StreamResourceRegistry` in `fireline-resources` (or `fireline-tools` — the resource-discovery proposal decides placement). Wire into `FsBackendComponent` so that resource lookup crosses Host boundaries via the `resources:tenant-<id>` stream.
+
+This phase is a sibling of C4: C4 collapses peer discovery from file/HTTP to stream-backed; C4b collapses resource discovery the same way. Both share the same durable-streams-as-discovery-plane insight.
+
+**Exact files touched** (specifics depend on `resource-discovery.md`):
+
+| File | Action |
+|---|---|
+| `crates/fireline-resources/src/mounter.rs` or wherever `LocalPathMounter` is the sole mounter | add a `StreamResourceMounter` sibling that resolves `DurableStreamBlob`-backed refs by reading the `resources:tenant-<id>` stream |
+| `crates/fireline-resources/src/fs_backend.rs` (or `fireline-host/src/bootstrap.rs`) | wire the new mounter into the resource-resolution chain alongside `LocalPathMounter` |
+| Any code that assumes `ResourceRef::LocalPath` is the only variant in production | handle the `DurableStreamBlob` variant or error explicitly |
+| `crates/fireline-resources/src/lib.rs` | export the new `StreamResourceMounter` (or `StreamResourceRegistry` — naming per the proposal) |
+
+**Done-when checklist:**
+
+- [ ] A `ResourceRef::DurableStreamBlob { stream, key }` variant can be round-tripped through the mounter chain — `provision` with a `DurableStreamBlob` ref on a Host connected to a shared durable-streams service resolves the blob and mounts it in the sandbox
+- [ ] `cargo check --workspace` green
+- [ ] At least one integration test demonstrates cross-Host resource resolution: Host A publishes a resource blob, Host B provisions with a `DurableStreamBlob` ref pointing at it, the content arrives in the sandbox
+
+**Risk: MEDIUM.** Net-new implementation that depends on a proposal not yet landed. The risk is bounded by the `ResourceMounter` trait contract: the new mounter only needs to satisfy the same `mount(ResourceRef, runtime_key) → Option<MountedResource>` shape that `LocalPathMounter` already satisfies.
+
+**Conflicts-with-w13-9i: maybe.** `crates/fireline-resources/` was recently created by the restructure; confirm layout before starting.
+
+**Estimated commits:** 2–3. The specifics depend on `resource-discovery.md`; this plan only reserves the phase slot.
+
+**Note:** C4b does NOT delete `LocalPathMounter`. Local-path resources remain valid for single-Host development mode. What C4b does is *add* the stream-backed resource mounter so cross-Host resource resolution works. This is unlike C4 (which *deletes* `LocalPeerDirectory` entirely without a fallback) because `LocalPathMounter` is not an architecture violation — it's a legitimate single-Host case.
 
 ---
 
