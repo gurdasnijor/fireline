@@ -157,3 +157,27 @@ agent-client-protocol-test.workspace = true
 [[bin]]
 name = "fireline"
 path = "src/main.rs"
+
+[[bin]]
+name = "fireline-dashboard"
+path = "src/bin/dashboard.rs"
+
+[[bin]]
+name = "fireline-agents"
+path = "src/bin/agents.rs"
+
+[[bin]]
+name = "fireline-testy"
+path = "src/bin/testy.rs"
+
+[[bin]]
+name = "fireline-testy-load"
+path = "src/bin/testy_load.rs"
+
+[[bin]]
+name = "fireline-testy-fs"
+path = "src/bin/testy_fs.rs"
+
+[[bin]]
+name = "fireline-testy-prompt"
+path = "src/bin/testy_prompt.rs"
