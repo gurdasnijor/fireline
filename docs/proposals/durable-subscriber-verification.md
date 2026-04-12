@@ -25,8 +25,8 @@ These invariant IDs are the stable proof targets later execution phases must cit
 | ID | Invariant | Meaning | Enforced by |
 |---|---|---|---|
 | `DSV-00 VerificationPlanExists` | Phase-0 binding gate | This document exists before implementation and later phases cite invariant IDs from it instead of inventing new wording ad hoc. | Docs gate, architect review |
-| `DSV-01 CompletionKeyUnique` | Same-key completion uniqueness | Two passive subscribers or awakeables keyed identically resolve together exactly once; duplicate completion appends are semantic no-ops. | TLA+, Stateright, fixtures, E2E |
-| `DSV-02 ReplayIdempotent` | Live path equals replay path | Replaying a stream containing a passive wait plus its resolution yields the same final state as the live path. | TLA+, Stateright, fixtures, E2E |
+| `DSV-01 CompletionKeyUnique` | Same-key completion uniqueness | Two passive subscribers or awakeables keyed identically resolve together exactly once; duplicate completion appends are semantic no-ops. This also covers `DeploymentSpecSubscriber` keyed by `SessionId` when Tier C spec-stream boot lands. | TLA+, Stateright, fixtures, E2E |
+| `DSV-02 ReplayIdempotent` | Live path equals replay path | Replaying a stream containing a passive wait plus its resolution yields the same final state as the live path. This also covers replay of `deployment_spec_published -> spec_loaded` for `DeploymentSpecSubscriber`. | TLA+, Stateright, fixtures, E2E |
 | `DSV-03 RetryBounded` | Active retries terminate | Active subscribers retry at most `N` times, then transition to dead-letter; no infinite retry loop is representable. | TLA+, Stateright, audits, E2E |
 | `DSV-04 DeadLetterTerminal` | Dead-letter is terminal | Once a subscriber instance is dead-lettered, no further delivery attempts, completions, or cursor advances occur for that registration. | TLA+, Stateright, audits, E2E |
 | `DSV-05 TraceContextPropagated` | Trace continuity across side effects | Every outbound side effect carries source `_meta.traceparent`; `tracestate` and `baggage` follow when present; completion envelopes preserve the same context. | TLA+, Stateright, audits, E2E |
@@ -120,6 +120,10 @@ What it forbids:
 - one same-key waiter completing while another same-key waiter remains blocked
 - active and passive consumers inventing separate completion identities for the same logical wait
 
+Tier C note:
+
+- `DeploymentSpecSubscriber` is covered by the same uniqueness bar. Two registrations keyed by the same deployment `SessionId` must converge on one logical `spec_loaded` outcome, and duplicate `deployment_spec_published` handling must not materialize the same deployment twice.
+
 #### `DSV-02 ReplayIdempotent`
 
 What it requires:
@@ -133,6 +137,10 @@ What it forbids:
 - replay minting a fresh logical wait
 - replay consuming a later duplicate completion differently than the live path
 - live and replay disagreeing about whether the key is `Waiting`, `Completed`, `TimedOut`, or `DeadLettered`
+
+Tier C note:
+
+- `DeploymentSpecSubscriber` replay is not special-cased. Replaying a spec stream containing `deployment_spec_published` and `spec_loaded` must converge to the same materialized deployment state as the live path, with no duplicate sandbox provisioning or divergent compose reconstruction.
 
 #### `DSV-03 RetryBounded`
 

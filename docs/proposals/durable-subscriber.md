@@ -437,6 +437,30 @@ Slack, email, GitHub, and similar integrations all follow the same rule as webho
 - completion written back to the agent stream
 - retry/dead-letter state stored in the infrastructure stream
 
+### 5.7 DeploymentSpecSubscriber
+
+- profile: `DeploymentSpecSubscriber`
+- event: `deployment_spec_published`
+- completion: `spec_loaded`
+- key: `SessionId` (deployment identity)
+- mode: passive (subscribes to the spec stream and wakes when a new spec arrives)
+
+This profile is Tier C only and is not required for the Tier A MVP.
+
+Use case:
+
+- host subscribes to the spec stream and wakes when `deployment_spec_published` arrives
+- the host reconstructs the live compose spec from that stream, provisions the sandbox, and records `spec_loaded`
+- no HTTP control plane is introduced; spec publication remains a durable-stream append
+
+Cross-reference:
+
+- [hosted-deploy-surface-decision.md](./hosted-deploy-surface-decision.md) defines the tiered deployment model and makes this profile the Tier C spec-stream boot path
+
+Observability:
+
+- handling still emits the standard `fireline.subscriber.handle` span described in [observability-integration.md](./observability-integration.md); `DeploymentSpecSubscriber` does not define a separate tracing primitive
+
 ---
 
 ## 6. TypeScript Middleware Surface

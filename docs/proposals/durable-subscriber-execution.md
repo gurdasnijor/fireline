@@ -3,7 +3,7 @@
 > Status: execution plan
 > Date: 2026-04-12
 > Scope: Rust subscriber substrate, approval refactor, active subscriber profiles, TypeScript middleware surface
-> Blocker: implementation Phases 1-8 are blocked on [acp-canonical-identifiers-execution.md Phase 5](./acp-canonical-identifiers-execution.md#phase-5-delete-activeturnindex-and-child_session_edge). Phase 0 may land earlier because it is docs-only.
+> Blocker: every implementation phase after Phase 0 is blocked on [acp-canonical-identifiers-execution.md Phase 5](./acp-canonical-identifiers-execution.md#phase-5-delete-activeturnindex-and-child_session_edge). Phase 0 may land earlier because it is docs-only.
 
 This document is the rollout plan for [durable-subscriber.md](./durable-subscriber.md). It is intentionally operational: each phase is small enough to land on `main`, must be revertable on its own, and uses CI as the binding gate per the current shared-worktree contention rules.
 
@@ -14,7 +14,7 @@ The execution order assumes the canonical identifier contract is already in forc
 1. Land directly on `main` as short-lived PRs. Do not build a long-lived subscriber branch.
 2. One phase per PR. Do not mix trait extraction, approval migration, and new subscriber profiles in the same rollout slice.
 3. CI-first only. Per the v2 contention rules in [docs/status/orchestration-status.md](../status/orchestration-status.md), use GitHub Actions as the sole binding gate for code phases. Do not treat local cargo runs as authoritative.
-4. Phase 0 is the only allowed pre-blocker phase. It is docs-only and exists to give the later phases stable invariant IDs. Phases 1-8 do not start until canonical-identifiers Phase 5 is green on `main`.
+4. Phase 0 is the only allowed pre-blocker phase. It is docs-only and exists to give the later phases stable invariant IDs. Every implementation phase after Phase 0 waits until canonical-identifiers Phase 5 is green on `main`.
 5. Preserve behavior during migration. The approval gate remains the semantic reference implementation until its trait-backed replacement proves the same durability, replay, timeout, and concurrent-isolation guarantees.
 6. Subscriber bookkeeping stays in the infrastructure plane. Agent-plane completions, keys, and trace context must remain canonical ACP-shaped throughout the rollout.
 
@@ -25,6 +25,7 @@ Use an additive, profile-by-profile migration:
 - Phase 1 adds the Rust substrate and registration points without changing behavior.
 - Phase 2 ports the existing approval gate onto that substrate while keeping the current approval semantics and tests intact.
 - Phases 3-6 add new subscriber profiles one at a time, all opt-in and configuration-gated.
+- Phase 6A defers `DeploymentSpecSubscriber` to Tier C spec-stream boot; it is not required for the Tier A MVP.
 - Phase 7 exposes the TypeScript helper only after the Rust substrate and the first subscriber profiles are stable.
 - Phase 8 removes temporary adapters and migration shims only after all earlier phases are green and the verification doc confirms the steady-state surface.
 
@@ -279,6 +280,7 @@ Required green checks: Rust workspace and peer-routing integration tests proving
   - completion: `sandbox_provisioned` (with runtime id)
   - mode: active
 - Treat `AlwaysOnDeploymentSubscriber` as glue over the existing wake/provision path, not as a new semantic primitive. The subscriber translates boot-time scan or heartbeat wake requests into the already-modeled wake state machine.
+- Keep `DeploymentSpecSubscriber` out of this phase. It is a Tier C spec-stream profile and lands, if at all, in Phase 6A rather than the Tier A MVP path.
 - Explicitly defer infrastructure-only cluster timers until a separate infra-only contract exists.
 
 **Preconditions**
@@ -307,6 +309,44 @@ Required green checks: Rust workspace plus wake/deployment replay, resume, and s
 
 **Rollback**
 - Revert the wake/deployment-subscriber PR only.
+
+## Phase 6A: DeploymentSpecSubscriber (Tier C Deferred)
+
+**Invariant mapping**
+- `DSV-01 CompletionKeyUnique`
+- `DSV-02 ReplayIdempotent`
+
+**Scope**
+- Add the passive deployment-spec profile from [durable-subscriber.md §5.7](./durable-subscriber.md#57-deploymentspecsubscriber) when Tier C spec-stream boot is in scope.
+- Subscribe to the spec stream, wake on `deployment_spec_published`, and key the registration by `SessionId` as deployment identity.
+- Record `spec_loaded` after the host reconstructs the live compose spec and provisions the sandbox from that stream.
+- Keep deployment publication on durable-streams. Do not add or imply an HTTP control plane.
+- This phase is Tier C only and is not required for the Tier A MVP.
+
+**Preconditions**
+- Phase 6 complete, so the existing deployment wake/provision path is already stable.
+- [hosted-deploy-surface-decision.md](./hosted-deploy-surface-decision.md) remains the binding deployment-surface model.
+
+**Gate command list (CI)**
+```bash
+gh pr checks --watch
+gh run list --limit 5 --json databaseId,displayTitle,status,conclusion,url
+gh run watch <databaseId>
+```
+Required green checks: Rust workspace plus deployment-spec replay/idempotency tests proving no duplicate materialization on repeated or replayed spec publication.
+
+**Risks**
+- Materializing the same deployment twice under replay or duplicate append.
+- Minting a second deployment identity surface instead of reusing `SessionId`.
+- Backsliding into an HTTP control-plane design the tiered deployment decision explicitly rejects.
+
+**Done when**
+- `DeploymentSpecSubscriber` exists as a passive subscriber profile keyed by `SessionId`.
+- Replayed or duplicated `deployment_spec_published` events converge on one logical `spec_loaded` outcome per deployment identity.
+- Tier C spec-stream boot remains documented as deferred and non-blocking for the Tier A MVP.
+
+**Rollback**
+- Revert the DeploymentSpecSubscriber PR only.
 
 ## Phase 7: TypeScript Middleware Surface
 
@@ -392,6 +432,7 @@ Cross-check this list against `docs/proposals/durable-subscriber-verification.md
 - [ ] Phase 5 proves peer completion remains caller-local and cross-session lineage remains trace-only.
 - [ ] Phase 6 proves agent-bound timers replay safely and do not double-fire.
 - [ ] Phase 6 proves `AlwaysOnDeploymentSubscriber` relies on the existing wake invariants rather than introducing a second deployment-lifecycle primitive.
+- [ ] Phase 6A proves `DeploymentSpecSubscriber` stays within `DSV-01` / `DSV-02`, does not duplicate materialization under replay, and remains Tier C only.
 - [ ] Phase 7 proves the TS helper exposes only canonical key strategies and stays compatible with [durable-promises.md](./durable-promises.md).
 - [ ] Phase 8 proves no migration shim or legacy completion-key surface remains.
 
@@ -400,12 +441,13 @@ Cross-check this list against `docs/proposals/durable-subscriber-verification.md
 Architect should confirm all of the following before execution starts:
 
 - [ ] Phase 0 is assigned or landed so the `DS-TBD-*` placeholders can be replaced with real invariant IDs.
-- [ ] The blocker is honored: Phases 1-8 do not start before canonical-identifiers Phase 5 is green on `main`.
+- [ ] The blocker is honored: every implementation phase after Phase 0 waits for canonical-identifiers Phase 5 to be green on `main`.
 - [ ] Each phase boundary is clean enough to revert independently without reverting another phase.
 - [ ] The approval gate remains the reference consumer until Phase 2 is complete and verified.
 - [ ] Peer routing in Phase 5 does not depend on deleted lineage structures or reintroduce them indirectly.
 - [ ] Wake timers in Phase 6 are explicitly limited to agent-bound timers; infra-only timers remain deferred.
 - [ ] `AlwaysOnDeploymentSubscriber` is treated as a DurableSubscriber profile over the existing wake/provision path, not as a separate primitive.
+- [ ] `DeploymentSpecSubscriber` remains a Tier C follow-on and does not block the Tier A MVP path.
 - [ ] The Phase 7 TS surface is narrow enough to stay compatible with the future imperative API in [durable-promises.md](./durable-promises.md).
 - [ ] The CI gates named in each phase are feasible with existing GitHub Actions or are explicitly added in the same PR that needs them.
 
