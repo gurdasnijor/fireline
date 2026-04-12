@@ -19,6 +19,9 @@ dist/
 .env
 .env.local
 .tmp/
+deploy/observability/betterstack.env
+deploy/observability/*.env
+!deploy/observability/*.env.example
 
 # TLC model-checker output
 states/
