@@ -8,7 +8,7 @@
 
 - Audited all 21 files in `docs/proposals/`.
 - Active drift against `acp-canonical-identifiers.md`: `durable-subscriber.md`, `platform-sdk-api-design.md`, `client-api-redesign.md`, `unified-materialization.md`, and `secrets-injection-component.md`.
-- Merge/deprecate candidate: `webhook-support.md` is now structurally subsumed by `durable-subscriber.md`.
+- `webhook-support.md` is superseded by `durable-subscriber.md` §5.2 "Webhook Delivery Profile".
 - Normative but already aligned: `acp-canonical-identifiers.md`, `acp-canonical-identifiers-execution.md`, and `acp-canonical-identifiers-verification.md` contain forbidden tokens only in removal, migration, or verification contexts.
 - Historical-only hits: `runtime-host-split.md` and `crate-restructure-manifest.md` mention old synthetic-id machinery, but both are explicitly superseded.
 
@@ -77,7 +77,7 @@ These docs contain hits, but only as history or superseded architecture:
 - `durable-promises.md`
   - depends on `durable-subscriber.md`
 - `webhook-support.md`
-  - should be folded into `durable-subscriber.md` as the webhook delivery profile
+  - superseded by `durable-subscriber.md` §5.2 "Webhook Delivery Profile"
 
 ### 2.3 Client and SDK chain
 
@@ -130,13 +130,13 @@ These docs contain hits, but only as history or superseded architecture:
 | `secrets-injection-component.md` | Harness-level secret resolution and injection model. | deployment | Drift: plain `String` session ids |
 | `stream-fs-spike.md` | Narrow spike for `StreamFs` as a discoverable resource mount. | resource discovery, cross-host discovery | Aligned |
 | `unified-materialization.md` | Shared durable-stream projection abstraction for read models. | should depend on canonical ids | Drift: `ActiveTurnIndex` target model |
-| `webhook-support.md` | Host-side webhook forwarding proposal. | durable stream subscription substrate | Candidate merge into `durable-subscriber` |
+| `webhook-support.md` | Historical webhook-forwarding proposal. | durable stream subscription substrate | Superseded by `durable-subscriber.md` §5.2 |
 
 ## 4. Merge and Deprecation Recommendations
 
-### 4.1 Merge `webhook-support.md` into `durable-subscriber.md`
+### 4.1 `webhook-support.md` is superseded
 
-Recommendation: deprecate `webhook-support.md` as a standalone design doc and fold its useful content into `durable-subscriber.md` as the concrete `WebhookSubscriber` profile.
+Recommendation: keep `webhook-support.md` only as a historical reference and treat `durable-subscriber.md` §5.2 "Webhook Delivery Profile" as the live source of truth.
 
 Reason:
 
@@ -271,15 +271,14 @@ They should remain clearly labeled historical/superseded, but they do not need c
   `session_id: SessionId`
 - Priority: `design`
 
-### 5.6 `webhook-support.md` — Merge / Deprecate
+### 5.6 `webhook-support.md` — SUPERSEDED
 
-- `1-15`
-  Replace the standalone TL;DR with:
-  `This doc is superseded in mechanism by durable-subscriber.md. Webhook delivery is an active DurableSubscriber profile, not a separate primitive.`
-- `70-83`, `173`, `217`, `231`
-  Replace `webhook_forwarder` language with `WebhookSubscriber`.
-- Alternative: deprecate the doc entirely and move its delivery-specific sections into `durable-subscriber.md`.
-- Priority: `design`
+- Status:
+  superseded by `durable-subscriber.md` §5.2 "Webhook Delivery Profile"
+- Historical handling:
+  retain the file with a superseded banner only; do not continue editing it as a live design doc
+- Priority:
+  complete
 
 ## 6. Suggested Dispatch Order
 
@@ -288,6 +287,6 @@ They should remain clearly labeled historical/superseded, but they do not need c
 3. `client-api-redesign.md`
 4. `unified-materialization.md`
 5. `secrets-injection-component.md`
-6. `webhook-support.md` merge or deprecation
+6. `webhook-support.md` supersession cleanup
 
 That order keeps the root identity and workflow substrate ahead of the client-surface rewrites that depend on them.

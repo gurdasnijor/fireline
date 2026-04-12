@@ -304,6 +304,90 @@ Webhook side effects must:
 - include the same values in payload `_meta` when the body is ACP-shaped JSON
 - write delivery completion back to the agent stream
 
+#### Webhook Delivery Profile
+
+`WebhookSubscriber` is the concrete webhook-delivery profile for the generic subscriber substrate.
+
+Client helper:
+
+```ts
+webhook({
+  target: 'slack-approvals',
+  events: ['permission_request'],
+})
+```
+
+Recommended TypeScript shape:
+
+```ts
+export interface WebhookMiddleware {
+  readonly kind: 'webhook'
+  readonly target?: string
+  readonly url?: string
+  readonly events: readonly (string | { readonly type: string; readonly kind?: string })[]
+}
+```
+
+Rules:
+
+- `target` is the preferred production form
+- `url` is allowed for local/dev parity
+- string selectors match `value.kind` first and fall back to envelope `type`
+- object selectors are the escape hatch for exact `type` / `kind` matching
+
+Topology lowering:
+
+```ts
+{
+  name: 'webhook_subscriber',
+  config: {
+    target: 'slack-approvals',
+    events: ['permission_request'],
+  },
+}
+```
+
+This is still just a `WebhookSubscriber` profile behind the host-side subscriber driver. The topology layer is configuration only; the durable behavior comes from the shared subscriber substrate.
+
+Host target config should remain host-owned so secrets and endpoint policy do not leak into serialized agent specs.
+
+Recommended host config shape:
+
+```toml
+[webhooks.targets.slack-approvals]
+url = "https://hooks.slack.com/services/..."
+timeout_ms = 5000
+max_attempts = 8
+headers = { "X-Fireline-Source" = "approval-gate" }
+cursor_stream = "subscribers:webhook:slack-approvals"
+```
+
+Required fields and semantics:
+
+- `url`: outbound destination
+- `headers`: static host-owned headers
+- `timeout_ms`: per-attempt timeout
+- `max_attempts`: bounded retry cap before dead-lettering in the infrastructure plane
+- `cursor_stream`: durable-stream location for the last acknowledged delivery cursor
+
+Delivery semantics:
+
+- contract is at-least-once
+- the subscriber reads the agent-plane stream, filters matching envelopes, and `POST`s them outward
+- it advances the cursor only after a `2xx` response
+- retry and dead-letter bookkeeping live in the infrastructure plane
+- delivery completion writes `webhook_delivered` back to the agent stream keyed by `PromptKey` or `ToolKey`
+
+Cursor persistence is not a new database. It is another durable stream owned by the subscriber driver. On restart, the driver rebuilds the last acknowledged offset from `cursor_stream` and resumes from there.
+
+Trace propagation is mandatory:
+
+- outbound POSTs must include W3C trace headers derived from `_meta.traceparent`, `_meta.tracestate`, and `_meta.baggage`
+- if the webhook payload is ACP-shaped JSON, the same values must also be mirrored in payload `_meta`
+- any follow-up completion written back into Fireline must preserve the same trace context
+
+This preserves the webhook-support proposal's full API surface while grounding it in the canonical subscriber model: the webhook is an active subscriber profile, the completion key stays canonical and caller-local, and cross-system lineage is owned by ACP `_meta` trace context rather than Fireline-specific ids.
+
 ### 5.3 AutoApproveSubscriber
 
 - event: `permission_request`

@@ -1,5 +1,7 @@
 # Webhook Support Using Existing Fireline Primitives
 
+> **SUPERSEDED** by [`./durable-subscriber.md`](./durable-subscriber.md) §5.2 "Webhook Delivery Profile". Retained for historical reference only.
+
 ## TL;DR
 
 Fireline does not need a new broker, queue, or webhook service.
