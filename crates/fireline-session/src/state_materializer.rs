@@ -19,13 +19,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::Result;
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use durable_streams::{Client, LiveMode, Offset};
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::sync::Notify;
-use tokio::task::JoinHandle;
+use tokio::sync::{Mutex, Notify};
+use tokio::task::{AbortHandle, JoinHandle};
 use tracing::{debug, warn};
 
 /// A change event from the state stream. Matches the state-protocol
@@ -73,7 +73,8 @@ pub struct StateMaterializer {
 pub struct StateMaterializerTask {
     up_to_date: Arc<Notify>,
     is_up_to_date: Arc<AtomicBool>,
-    handle: JoinHandle<()>,
+    abort_handle: AbortHandle,
+    handle: Arc<Mutex<JoinHandle<Result<()>>>>,
 }
 
 impl StateMaterializer {
@@ -89,13 +90,15 @@ impl StateMaterializer {
         let notify = up_to_date.clone();
         let ready = is_up_to_date.clone();
         let handle = tokio::spawn(async move {
-            consume_state_stream(url, materializer, notify, ready).await;
+            consume_state_stream(url, materializer, notify, ready).await
         });
+        let abort_handle = handle.abort_handle();
 
         StateMaterializerTask {
             up_to_date,
             is_up_to_date,
-            handle,
+            abort_handle,
+            handle: Arc::new(Mutex::new(handle)),
         }
     }
 
@@ -196,13 +199,35 @@ fn is_supported_operation(operation: &str) -> bool {
 impl StateMaterializerTask {
     pub async fn preload(&self) -> Result<()> {
         while !self.is_up_to_date.load(Ordering::SeqCst) {
-            self.up_to_date.notified().await;
+            tokio::select! {
+                _ = self.up_to_date.notified() => {}
+                join_result = async {
+                    let mut handle = self.handle.lock().await;
+                    (&mut *handle).await
+                } => {
+                    match join_result {
+                        Ok(Ok(())) => {
+                            return Err(anyhow!(
+                                "state materializer worker exited before reaching the live edge"
+                            ));
+                        }
+                        Ok(Err(error)) => {
+                            return Err(error)
+                                .context("state materializer worker exited before preload completed");
+                        }
+                        Err(error) => {
+                            return Err(anyhow::Error::from(error))
+                                .context("join state materializer worker before preload completed");
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
 
     pub fn abort(self) {
-        self.handle.abort();
+        self.abort_handle.abort();
     }
 }
 
@@ -211,7 +236,7 @@ async fn consume_state_stream(
     materializer: StateMaterializer,
     up_to_date: Arc<Notify>,
     is_up_to_date: Arc<AtomicBool>,
-) {
+) -> Result<()> {
     let client = Client::new();
     let stream = client.stream(&url);
 
@@ -224,7 +249,8 @@ async fn consume_state_stream(
         Ok(reader) => reader,
         Err(error) => {
             warn!(error = %error, "build runtime materializer stream reader");
-            return;
+            return Err(anyhow::Error::from(error))
+                .context("build runtime materializer stream reader");
         }
     };
 
@@ -240,11 +266,12 @@ async fn consume_state_stream(
                     up_to_date.notify_waiters();
                 }
             }
-            Ok(None) => return,
+            Ok(None) => return Ok(()),
             Err(error) => {
                 warn!(error = %error, "runtime materializer stream read error");
                 if !error.is_retryable() {
-                    return;
+                    return Err(anyhow::Error::from(error))
+                        .context("runtime materializer stream read error");
                 }
             }
         }
@@ -420,5 +447,27 @@ mod tests {
         let events = projection.events.lock().unwrap().clone();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, "session");
+    }
+
+    #[tokio::test]
+    async fn preload_errors_if_worker_exits_before_live_edge() {
+        let handle = tokio::spawn(async { Ok::<(), anyhow::Error>(()) });
+        let task = StateMaterializerTask {
+            up_to_date: Arc::new(Notify::new()),
+            is_up_to_date: Arc::new(AtomicBool::new(false)),
+            abort_handle: handle.abort_handle(),
+            handle: Arc::new(tokio::sync::Mutex::new(handle)),
+        };
+
+        let error = task
+            .preload()
+            .await
+            .expect_err("preload should fail when the worker exits before the live edge");
+        assert!(
+            error
+                .to_string()
+                .contains("exited before reaching the live edge"),
+            "expected live-edge exit error, got: {error:#}"
+        );
     }
 }
