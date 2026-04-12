@@ -57,7 +57,8 @@ pub use attach::AttachToolComponent;
 pub use peer::PeerComponent;
 pub use peer::lookup;
 pub use peer::stream::{
-    DEFAULT_TENANT_ID, DeploymentDiscoveryEvent, DeploymentIndex, HostEntry, RuntimeEntry,
+    DEFAULT_TENANT_ID, DeploymentDiscoveryEvent, DeploymentIndex, HostEntry,
+    ProvisionedHostEntry,
     StreamDeploymentPeerRegistry, deployment_stream_url,
 };
 pub use peer::{Peer, PeerRegistry};

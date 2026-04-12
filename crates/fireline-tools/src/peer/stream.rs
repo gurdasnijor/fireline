@@ -33,21 +33,24 @@ pub enum DeploymentDiscoveryEvent {
         host_id: String,
         seen_at_ms: i64,
         load_metrics: Map<String, Value>,
-        runtime_count: i64,
+        #[serde(rename = "runtimeCount")]
+        provisioned_host_count: i64,
     },
     HostDeregistered {
         host_id: String,
         reason: String,
         deregistered_at_ms: i64,
     },
-    RuntimeProvisioned {
+    #[serde(rename = "runtime_provisioned")]
+    HostProvisioned {
         host_id: String,
         host_key: String,
         acp_url: String,
         agent_name: String,
         provisioned_at_ms: i64,
     },
-    RuntimeStopped {
+    #[serde(rename = "runtime_stopped")]
+    HostStopped {
         host_id: String,
         host_key: String,
         stopped_at_ms: i64,
@@ -63,13 +66,13 @@ pub struct HostEntry {
     pub registered_at_ms: i64,
     pub last_seen_ms: i64,
     pub last_heartbeat_metrics: Map<String, Value>,
-    pub runtime_count: usize,
+    pub provisioned_host_count: usize,
     pub node_info: Map<String, Value>,
     pub deregistered_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeEntry {
+pub struct ProvisionedHostEntry {
     pub host_key: String,
     pub host_id: String,
     pub acp_url: String,
@@ -80,7 +83,7 @@ pub struct RuntimeEntry {
 #[derive(Debug, Clone)]
 pub struct DeploymentIndex {
     hosts: HashMap<String, HostEntry>,
-    runtimes: HashMap<String, RuntimeEntry>,
+    provisioned_hosts: HashMap<String, ProvisionedHostEntry>,
     stale_threshold_ms: u64,
 }
 
@@ -94,7 +97,7 @@ impl DeploymentIndex {
     pub fn new(stale_threshold_ms: u64) -> Self {
         Self {
             hosts: HashMap::new(),
-            runtimes: HashMap::new(),
+            provisioned_hosts: HashMap::new(),
             stale_threshold_ms,
         }
     }
@@ -119,7 +122,7 @@ impl DeploymentIndex {
                         registered_at_ms,
                         last_seen_ms: registered_at_ms,
                         last_heartbeat_metrics: Map::new(),
-                        runtime_count: 0,
+                        provisioned_host_count: 0,
                         node_info,
                         deregistered_at_ms: None,
                     },
@@ -129,14 +132,14 @@ impl DeploymentIndex {
                 host_id,
                 seen_at_ms,
                 load_metrics,
-                runtime_count,
+                provisioned_host_count,
             } => {
                 let Some(host) = self.hosts.get_mut(&host_id) else {
                     return;
                 };
                 host.last_seen_ms = seen_at_ms;
                 host.last_heartbeat_metrics = load_metrics;
-                host.runtime_count = runtime_count.max(0) as usize;
+                host.provisioned_host_count = provisioned_host_count.max(0) as usize;
             }
             DeploymentDiscoveryEvent::HostDeregistered {
                 host_id,
@@ -147,10 +150,10 @@ impl DeploymentIndex {
                     return;
                 };
                 host.deregistered_at_ms = Some(deregistered_at_ms);
-                self.runtimes
-                    .retain(|_, runtime| runtime.host_id != host_id);
+                self.provisioned_hosts
+                    .retain(|_, host| host.host_id != host_id);
             }
-            DeploymentDiscoveryEvent::RuntimeProvisioned {
+            DeploymentDiscoveryEvent::HostProvisioned {
                 host_id,
                 host_key,
                 acp_url,
@@ -160,9 +163,9 @@ impl DeploymentIndex {
                 if !self.hosts.contains_key(&host_id) {
                     return;
                 }
-                self.runtimes.insert(
+                self.provisioned_hosts.insert(
                     host_key.clone(),
-                    RuntimeEntry {
+                    ProvisionedHostEntry {
                         host_key,
                         host_id,
                         acp_url,
@@ -171,16 +174,16 @@ impl DeploymentIndex {
                     },
                 );
             }
-            DeploymentDiscoveryEvent::RuntimeStopped {
+            DeploymentDiscoveryEvent::HostStopped {
                 host_id,
                 host_key,
                 ..
             } => {
-                let Some(runtime) = self.runtimes.get(&host_key) else {
+                let Some(host) = self.provisioned_hosts.get(&host_key) else {
                     return;
                 };
-                if runtime.host_id == host_id {
-                    self.runtimes.remove(&host_key);
+                if host.host_id == host_id {
+                    self.provisioned_hosts.remove(&host_key);
                 }
             }
         }
@@ -190,8 +193,8 @@ impl DeploymentIndex {
         self.hosts.get(host_id)
     }
 
-    pub fn runtime(&self, host_key: &str) -> Option<&RuntimeEntry> {
-        self.runtimes.get(host_key)
+    pub fn provisioned_host(&self, host_key: &str) -> Option<&ProvisionedHostEntry> {
+        self.provisioned_hosts.get(host_key)
     }
 
     pub fn host_is_fresh(&self, host_id: &str, now_ms: i64) -> bool {
@@ -202,12 +205,12 @@ impl DeploymentIndex {
             && now_ms.saturating_sub(host.last_seen_ms) < self.stale_threshold_ms as i64
     }
 
-    pub fn list_fresh_runtime_peers(&self, now_ms: i64) -> Vec<Peer> {
+    pub fn list_fresh_host_peers(&self, now_ms: i64) -> Vec<Peer> {
         let mut peers: Vec<Peer> = self
-            .runtimes
+            .provisioned_hosts
             .values()
-            .filter(|runtime| self.host_is_fresh(&runtime.host_id, now_ms))
-            .filter_map(|runtime| self.peer_for_runtime(runtime))
+            .filter(|host| self.host_is_fresh(&host.host_id, now_ms))
+            .filter_map(|host| self.peer_for_host(host))
             .collect();
         peers.sort_by(|left, right| {
             left.agent_name
@@ -218,19 +221,19 @@ impl DeploymentIndex {
     }
 
     pub fn lookup_fresh_peer(&self, agent_name: &str, now_ms: i64) -> Option<Peer> {
-        self.list_fresh_runtime_peers(now_ms)
+        self.list_fresh_host_peers(now_ms)
             .into_iter()
             .find(|peer| peer.agent_name == agent_name)
     }
 
-    fn peer_for_runtime(&self, runtime: &RuntimeEntry) -> Option<Peer> {
-        let host = self.hosts.get(&runtime.host_id)?;
+    fn peer_for_host(&self, provisioned_host: &ProvisionedHostEntry) -> Option<Peer> {
+        let host = self.hosts.get(&provisioned_host.host_id)?;
         Some(Peer {
-            host_id: runtime.host_key.clone(),
-            agent_name: runtime.agent_name.clone(),
-            acp_url: runtime.acp_url.clone(),
+            host_id: provisioned_host.host_key.clone(),
+            agent_name: provisioned_host.agent_name.clone(),
+            acp_url: provisioned_host.acp_url.clone(),
             state_stream_url: Some(host.state_stream_url.clone()),
-            registered_at_ms: runtime.provisioned_at_ms,
+            registered_at_ms: provisioned_host.provisioned_at_ms,
         })
     }
 }
@@ -332,7 +335,7 @@ impl Drop for StreamDeploymentPeerRegistry {
 impl PeerRegistry for StreamDeploymentPeerRegistry {
     async fn list_peers(&self) -> Result<Vec<Peer>> {
         self.wait_until_ready().await;
-        Ok(self.index.read().await.list_fresh_runtime_peers(now_ms()))
+        Ok(self.index.read().await.list_fresh_host_peers(now_ms()))
     }
 
     async fn lookup_peer(&self, agent_name: &str) -> Result<Option<Peer>> {
@@ -442,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn host_and_runtime_become_visible_after_registration() {
+    fn host_and_provisioned_host_become_visible_after_registration() {
         let mut index = DeploymentIndex::new(30_000);
         index.apply(DeploymentDiscoveryEvent::HostRegistered {
             host_id: "host:a".to_string(),
@@ -452,7 +455,7 @@ mod tests {
             registered_at_ms: 100,
             node_info: empty_map(),
         });
-        index.apply(DeploymentDiscoveryEvent::RuntimeProvisioned {
+        index.apply(DeploymentDiscoveryEvent::HostProvisioned {
             host_id: "host:a".to_string(),
             host_key: "runtime:alpha".to_string(),
             acp_url: "ws://host-a/acp".to_string(),
@@ -460,7 +463,7 @@ mod tests {
             provisioned_at_ms: 120,
         });
 
-        let peers = index.list_fresh_runtime_peers(130);
+        let peers = index.list_fresh_host_peers(130);
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].host_id, "runtime:alpha");
         assert_eq!(peers[0].agent_name, "alpha");
@@ -471,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn host_deregister_removes_hosted_runtimes() {
+    fn host_deregister_removes_provisioned_hosts() {
         let mut index = DeploymentIndex::new(30_000);
         index.apply(DeploymentDiscoveryEvent::HostRegistered {
             host_id: "host:a".to_string(),
@@ -481,7 +484,7 @@ mod tests {
             registered_at_ms: 100,
             node_info: empty_map(),
         });
-        index.apply(DeploymentDiscoveryEvent::RuntimeProvisioned {
+        index.apply(DeploymentDiscoveryEvent::HostProvisioned {
             host_id: "host:a".to_string(),
             host_key: "runtime:alpha".to_string(),
             acp_url: "ws://host-a/acp".to_string(),
@@ -494,11 +497,11 @@ mod tests {
             deregistered_at_ms: 130,
         });
 
-        assert!(index.list_fresh_runtime_peers(131).is_empty());
+        assert!(index.list_fresh_host_peers(131).is_empty());
     }
 
     #[test]
-    fn runtime_stop_only_affects_current_owner() {
+    fn host_stop_only_affects_current_owner() {
         let mut index = DeploymentIndex::new(30_000);
         index.apply(DeploymentDiscoveryEvent::HostRegistered {
             host_id: "host:a".to_string(),
@@ -516,30 +519,30 @@ mod tests {
             registered_at_ms: 100,
             node_info: empty_map(),
         });
-        index.apply(DeploymentDiscoveryEvent::RuntimeProvisioned {
+        index.apply(DeploymentDiscoveryEvent::HostProvisioned {
             host_id: "host:a".to_string(),
             host_key: "runtime:alpha".to_string(),
             acp_url: "ws://host-a/acp".to_string(),
             agent_name: "alpha".to_string(),
             provisioned_at_ms: 120,
         });
-        index.apply(DeploymentDiscoveryEvent::RuntimeProvisioned {
+        index.apply(DeploymentDiscoveryEvent::HostProvisioned {
             host_id: "host:b".to_string(),
             host_key: "runtime:alpha".to_string(),
             acp_url: "ws://host-b/acp".to_string(),
             agent_name: "alpha".to_string(),
             provisioned_at_ms: 140,
         });
-        index.apply(DeploymentDiscoveryEvent::RuntimeStopped {
+        index.apply(DeploymentDiscoveryEvent::HostStopped {
             host_id: "host:a".to_string(),
             host_key: "runtime:alpha".to_string(),
             stopped_at_ms: 150,
         });
 
-        let runtime = index
-            .runtime("runtime:alpha")
-            .expect("runtime should remain");
-        assert_eq!(runtime.host_id, "host:b");
+        let host = index
+            .provisioned_host("runtime:alpha")
+            .expect("provisioned host should remain");
+        assert_eq!(host.host_id, "host:b");
     }
 
     #[test]
@@ -553,7 +556,7 @@ mod tests {
             registered_at_ms: 100,
             node_info: empty_map(),
         });
-        index.apply(DeploymentDiscoveryEvent::RuntimeProvisioned {
+        index.apply(DeploymentDiscoveryEvent::HostProvisioned {
             host_id: "host:a".to_string(),
             host_key: "runtime:alpha".to_string(),
             acp_url: "ws://host-a/acp".to_string(),
@@ -561,7 +564,7 @@ mod tests {
             provisioned_at_ms: 101,
         });
 
-        assert_eq!(index.list_fresh_runtime_peers(105).len(), 1);
-        assert!(index.list_fresh_runtime_peers(111).is_empty());
+        assert_eq!(index.list_fresh_host_peers(105).len(), 1);
+        assert!(index.list_fresh_host_peers(111).is_empty());
     }
 }

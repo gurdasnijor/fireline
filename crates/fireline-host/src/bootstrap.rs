@@ -23,7 +23,7 @@ use axum::routing::get;
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, DurableStream, Producer};
 use fireline_harness::{
     AcpRouteState, ComponentContext, SharedTerminal, TopologySpec, audit_stream_names,
-    build_runtime_topology_registry, emit_runtime_instance_started, emit_runtime_instance_stopped,
+    build_host_topology_registry, emit_host_instance_started, emit_host_instance_stopped,
     emit_host_spec_persisted, ensure_named_streams,
 };
 use fireline_orchestration::{
@@ -69,8 +69,8 @@ pub struct BootstrapHandle {
     pub acp_url: String,
     pub state_stream_url: String,
     host_key: String,
-    runtime_name: String,
-    runtime_created_at: i64,
+    host_name: String,
+    host_created_at: i64,
     state_producer: Producer,
     deployment_producer: Producer,
     state_materializer_task: StateMaterializerTask,
@@ -87,14 +87,14 @@ impl BootstrapHandle {
 
         emit_deployment_event(
             &self.deployment_producer,
-            &DeploymentDiscoveryEvent::RuntimeStopped {
+            &DeploymentDiscoveryEvent::HostStopped {
                 host_id: self.host_id.clone(),
                 host_key: self.host_key.clone(),
                 stopped_at_ms: chrono_like_now_ms(),
             },
         )
         .await
-        .context("flush runtime_stopped on shutdown")?;
+        .context("flush host_stopped on shutdown")?;
 
         emit_deployment_event(
             &self.deployment_producer,
@@ -107,14 +107,14 @@ impl BootstrapHandle {
         .await
         .context("flush host_deregistered on shutdown")?;
 
-        emit_runtime_instance_stopped(
+        emit_host_instance_stopped(
             &self.state_producer,
             &self.host_id,
-            &self.runtime_name,
-            self.runtime_created_at,
+            &self.host_name,
+            self.host_created_at,
         )
         .await
-        .context("flush runtime_instance_stopped on shutdown")?;
+        .context("flush host_instance_stopped on shutdown")?;
 
         self.state_materializer_task.abort();
 
@@ -132,13 +132,13 @@ impl BootstrapHandle {
 }
 
 pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
-    let runtime_uuid = Uuid::new_v4();
+    let host_uuid = Uuid::new_v4();
     let host_key = config.host_key;
-    let host_id = format!("fireline:{}:{runtime_uuid}", config.name);
-    let runtime_created_at = chrono_like_now_ms();
+    let host_id = format!("fireline:{}:{host_uuid}", config.name);
+    let host_created_at = chrono_like_now_ms();
     let state_stream = config
         .state_stream
-        .unwrap_or_else(|| format!("fireline-state-{runtime_uuid}"));
+        .unwrap_or_else(|| format!("fireline-state-{host_uuid}"));
 
     let listener = TcpListener::bind(SocketAddr::new(config.host, config.port)).await?;
     let local_addr = listener
@@ -150,19 +150,19 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     let stream_base_url = config.durable_streams_url.trim_end_matches('/').to_string();
     let state_stream_url = format!("{stream_base_url}/{state_stream}");
     let host_stream_url = deployment_stream_url(&stream_base_url, DEFAULT_TENANT_ID);
-    let runtime_name = config.name.clone();
+    let host_name = config.name.clone();
 
     let stream_client = DurableStreamsClient::new();
     let mut state_stream_handle = stream_client.stream(&state_stream_url);
     state_stream_handle.set_content_type("application/json");
     let state_producer = state_stream_handle
-        .producer(format!("state-writer-{runtime_uuid}"))
+        .producer(format!("state-writer-{host_uuid}"))
         .content_type("application/json")
         .build();
     let mut host_stream_handle = stream_client.stream(&host_stream_url);
     host_stream_handle.set_content_type("application/json");
     let deployment_producer = host_stream_handle
-        .producer(format!("deployment-discovery-{runtime_uuid}"))
+        .producer(format!("deployment-discovery-{host_uuid}"))
         .content_type("application/json")
         .build();
     let node_id = config.node_id;
@@ -183,7 +183,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     let peer_registry: std::sync::Arc<dyn PeerRegistry> = std::sync::Arc::new(
         StreamDeploymentPeerRegistry::new(stream_base_url.clone(), DEFAULT_TENANT_ID),
     );
-    let topology_registry = build_runtime_topology_registry(ComponentContext {
+    let topology_registry = build_host_topology_registry(ComponentContext {
         host_key: host_key.clone(),
         host_id: host_id.clone(),
         node_id: node_id.clone(),
@@ -199,7 +199,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     });
 
     let app_state = AcpRouteState {
-        conductor_name: runtime_name.clone(),
+        conductor_name: host_name.clone(),
         host_key: host_key.clone(),
         node_id: node_id.clone(),
         host_id: host_id.clone(),
@@ -258,7 +258,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
             provider: SandboxProviderRequest::Local,
             host: config.host,
             port: local_addr.port(),
-            name: runtime_name.clone(),
+            name: host_name.clone(),
             agent_command: agent_command_for_spec,
             durable_streams_url: stream_base_url.clone(),
             resources: Vec::new(),
@@ -272,11 +272,11 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         .await
         .context("emit host_spec_persisted from direct-host bootstrap")?;
 
-    emit_runtime_instance_started(
+    emit_host_instance_started(
         &state_producer,
         &host_id,
-        &runtime_name,
-        runtime_created_at,
+        &host_name,
+        host_created_at,
     );
     emit_deployment_event(
         &deployment_producer,
@@ -285,7 +285,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
             acp_url: acp_url.clone(),
             state_stream_url: state_stream_url.clone(),
             capabilities: host_capabilities(),
-            registered_at_ms: runtime_created_at,
+            registered_at_ms: host_created_at,
             node_info: host_node_info(&node_id),
         },
     )
@@ -293,16 +293,16 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     .context("flush host_registered from bootstrap")?;
     emit_deployment_event(
         &deployment_producer,
-        &DeploymentDiscoveryEvent::RuntimeProvisioned {
+        &DeploymentDiscoveryEvent::HostProvisioned {
             host_id: host_id.clone(),
             host_key: host_key.clone(),
             acp_url: acp_url.clone(),
-            agent_name: runtime_name.clone(),
-            provisioned_at_ms: runtime_created_at,
+            agent_name: host_name.clone(),
+            provisioned_at_ms: host_created_at,
         },
     )
     .await
-    .context("flush runtime_provisioned from bootstrap")?;
+    .context("flush host_provisioned from bootstrap")?;
     let deployment_heartbeat_task = tokio::spawn(run_host_heartbeat_loop(
         deployment_producer.clone(),
         host_id.clone(),
@@ -315,8 +315,8 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         acp_url,
         state_stream_url,
         host_key,
-        runtime_name,
-        runtime_created_at,
+        host_name,
+        host_created_at,
         state_producer,
         deployment_producer,
         state_materializer_task,
@@ -382,7 +382,7 @@ async fn run_host_heartbeat_loop(producer: Producer, host_id: String) {
                 host_id: host_id.clone(),
                 seen_at_ms: chrono_like_now_ms(),
                 load_metrics: Map::new(),
-                runtime_count: 1,
+                provisioned_host_count: 1,
             },
         )
         .await

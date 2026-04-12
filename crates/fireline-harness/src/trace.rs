@@ -19,7 +19,7 @@ use fireline_session::{PersistedHostSpec, HostDescriptor};
 use sacp_conductor::trace::{TraceEvent, WriteEvent};
 use serde::Serialize;
 
-use crate::state_projector::{StateProjector, runtime_instance_started, runtime_instance_stopped};
+use crate::state_projector::{StateProjector, host_instance_started, host_instance_stopped};
 
 pub type BoxedTraceWriter = Box<dyn WriteEvent + Send>;
 
@@ -54,7 +54,7 @@ impl DurableStreamTracer {
         logical_connection_id: impl Into<String>,
     ) -> Self {
         let host_id = host_id.into();
-        Self::new_with_runtime_context(
+        Self::new_with_host_context(
             producer,
             host_id.clone(),
             host_id,
@@ -63,7 +63,7 @@ impl DurableStreamTracer {
         )
     }
 
-    pub fn new_with_runtime_context(
+    pub fn new_with_host_context(
         producer: Producer,
         host_key: impl Into<String>,
         host_id: impl Into<String>,
@@ -105,28 +105,28 @@ struct StateEnvelope<T> {
     value: T,
 }
 
-pub fn emit_runtime_instance_started(
+pub fn emit_host_instance_started(
     producer: &Producer,
     host_id: &str,
-    runtime_name: &str,
+    host_name: &str,
     created_at: i64,
 ) {
-    producer.append_json(&runtime_instance_started(
+    producer.append_json(&host_instance_started(
         host_id,
-        runtime_name,
+        host_name,
         created_at,
     ));
 }
 
-pub async fn emit_runtime_instance_stopped(
+pub async fn emit_host_instance_stopped(
     producer: &Producer,
     host_id: &str,
-    runtime_name: &str,
+    host_name: &str,
     created_at: i64,
 ) -> anyhow::Result<()> {
-    producer.append_json(&runtime_instance_stopped(
+    producer.append_json(&host_instance_stopped(
         host_id,
-        runtime_name,
+        host_name,
         created_at,
     ));
     // Explicit flush is load-bearing for stream-as-truth: without it, the

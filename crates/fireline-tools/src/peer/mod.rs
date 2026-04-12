@@ -19,7 +19,8 @@ pub(crate) mod transport;
 
 pub use mcp_server::tool_descriptors;
 pub use stream::{
-    DEFAULT_TENANT_ID, DeploymentDiscoveryEvent, DeploymentIndex, HostEntry, RuntimeEntry,
+    DEFAULT_TENANT_ID, DeploymentDiscoveryEvent, DeploymentIndex, HostEntry,
+    ProvisionedHostEntry,
     StreamDeploymentPeerRegistry, deployment_stream_url,
 };
 

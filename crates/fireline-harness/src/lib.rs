@@ -4,8 +4,8 @@ pub mod approval;
 pub mod audit;
 pub mod budget;
 pub mod context;
+mod host_topology;
 pub mod routes_acp;
-mod runtime_topology;
 pub mod secrets;
 pub mod shared_terminal;
 pub mod state_projector;
@@ -30,9 +30,9 @@ pub use shared_terminal::{AttachError, SharedTerminal, SharedTerminalAttachment}
 pub use topology::{
     ComponentContext, ProxyComponentInstance, ResolvedTopology, TopologyComponentSpec,
     TopologyRegistry, TopologyRegistryBuilder, TopologySpec, TraceWriterInstance,
-    audit_stream_names, build_runtime_topology_registry, ensure_named_streams,
+    audit_stream_names, build_host_topology_registry, ensure_named_streams,
 };
 pub use trace::{
     BoxedTraceWriter, CompositeTraceWriter, DurableStreamTracer, emit_host_endpoints_persisted,
-    emit_runtime_instance_started, emit_runtime_instance_stopped, emit_host_spec_persisted,
+    emit_host_instance_started, emit_host_instance_stopped, emit_host_spec_persisted,
 };

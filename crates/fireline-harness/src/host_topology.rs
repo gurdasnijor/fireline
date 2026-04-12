@@ -155,7 +155,7 @@ pub async fn ensure_named_streams(stream_base_url: &str, stream_names: &[String]
     Ok(())
 }
 
-pub fn build_runtime_topology_registry(context: ComponentContext) -> TopologyRegistry {
+pub fn build_host_topology_registry(context: ComponentContext) -> TopologyRegistry {
     TopologyRegistry::builder()
         .register_component("peer_mcp", {
             let context = context.clone();

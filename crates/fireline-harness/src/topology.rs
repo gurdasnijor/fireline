@@ -7,8 +7,8 @@ use sacp::{Conductor, DynConnectTo};
 use sacp_conductor::trace::WriteEvent;
 use serde_json::Value;
 
-pub use crate::runtime_topology::{
-    ComponentContext, audit_stream_names, build_runtime_topology_registry, ensure_named_streams,
+pub use crate::host_topology::{
+    ComponentContext, audit_stream_names, build_host_topology_registry, ensure_named_streams,
 };
 
 pub type ProxyComponentInstance = DynConnectTo<Conductor>;

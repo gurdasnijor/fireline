@@ -43,7 +43,7 @@ enum PendingRequestState {
 #[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
 #[serde(rename_all = "snake_case")]
-enum RuntimeInstanceState {
+enum HostInstanceState {
     Running,
     Paused,
     Stopped,
@@ -125,10 +125,11 @@ enum PendingRequestDirection {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct RuntimeInstanceRow {
+struct HostInstanceRow {
     instance_id: String,
-    runtime_name: String,
-    status: RuntimeInstanceState,
+    #[serde(rename = "runtimeName")]
+    host_name: String,
+    status: HostInstanceState,
     created_at: i64,
     updated_at: i64,
 }
@@ -573,30 +574,30 @@ impl StateProjector {
     }
 }
 
-pub fn runtime_instance_started(
+pub fn host_instance_started(
     host_id: &str,
-    runtime_name: &str,
+    host_name: &str,
     created_at: i64,
 ) -> StateChange {
-    let row = RuntimeInstanceRow {
+    let row = HostInstanceRow {
         instance_id: host_id.to_string(),
-        runtime_name: runtime_name.to_string(),
-        status: RuntimeInstanceState::Running,
+        host_name: host_name.to_string(),
+        status: HostInstanceState::Running,
         created_at,
         updated_at: created_at,
     };
     state_change("runtime_instance", host_id, "insert", Some(&row))
 }
 
-pub fn runtime_instance_stopped(
+pub fn host_instance_stopped(
     host_id: &str,
-    runtime_name: &str,
+    host_name: &str,
     created_at: i64,
 ) -> StateChange {
-    let row = RuntimeInstanceRow {
+    let row = HostInstanceRow {
         instance_id: host_id.to_string(),
-        runtime_name: runtime_name.to_string(),
-        status: RuntimeInstanceState::Stopped,
+        host_name: host_name.to_string(),
+        status: HostInstanceState::Stopped,
         created_at,
         updated_at: now_ms(),
     };

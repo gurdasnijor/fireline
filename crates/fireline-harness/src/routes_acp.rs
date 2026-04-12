@@ -73,14 +73,14 @@ async fn acp_websocket_handler(
         let resolved_topology = match app.topology_registry.build(&app.topology) {
             Ok(resolved_topology) => resolved_topology,
             Err(error) => {
-                tracing::warn!(error = %error, "failed to build runtime topology components");
+                tracing::warn!(error = %error, "failed to build host topology components");
                 return;
             }
         };
         components.extend(resolved_topology.proxy_components);
 
         let mut trace_writers = Vec::with_capacity(1 + resolved_topology.trace_writers.len());
-        trace_writers.push(Box::new(DurableStreamTracer::new_with_runtime_context(
+        trace_writers.push(Box::new(DurableStreamTracer::new_with_host_context(
             app.state_producer.clone(),
             app.host_key.clone(),
             app.host_id.clone(),
