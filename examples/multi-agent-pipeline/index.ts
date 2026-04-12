@@ -8,7 +8,6 @@ import { createFirelineDB } from '@fireline/state'
 
 // User code
 import { openNodeAcpConnection } from '../shared/acp-node.js'
-import { waitForRows } from '../shared/state-subscribe.js'
 
 const serverUrl = process.env.FIRELINE_URL ?? 'http://127.0.0.1:4440'
 const agentCommand = (
@@ -63,16 +62,35 @@ await writer.close()
 db.close()
 
 async function waitForOutput(db: ReturnType<typeof createFirelineDB>, sessionId: string) {
-  const turns = await waitForRows(
-    db.collections.promptTurns,
-    (rows) => rows.some((row) => row.sessionId === sessionId && row.state === 'completed'),
-    5_000,
-  )
-  const turnIds = turns.filter((row) => row.sessionId === sessionId).map((row) => row.promptTurnId)
-  const chunks = await waitForRows(
-    db.collections.chunks,
-    (rows) => rows.some((row) => turnIds.includes(row.promptTurnId)),
-    5_000,
-  )
-  return chunks.filter((row) => turnIds.includes(row.promptTurnId)).map((row) => row.content).join('')
+  return new Promise<string>((resolve, reject) => {
+    let turns = db.collections.promptTurns.toArray
+    let chunks = db.collections.chunks.toArray
+    const timeout = setTimeout(() => {
+      turnSub.unsubscribe()
+      chunkSub.unsubscribe()
+      reject(new Error(`timed out waiting for output for session ${sessionId}`))
+    }, 5_000)
+    const maybeResolve = () => {
+      const completed = turns.find((row) => row.sessionId === sessionId && row.state === 'completed')
+      if (!completed) return
+      const text = chunks
+        .filter((row) => row.promptTurnId === completed.promptTurnId)
+        .map((row) => row.content)
+        .join('')
+      if (!text) return
+      clearTimeout(timeout)
+      turnSub.unsubscribe()
+      chunkSub.unsubscribe()
+      resolve(text)
+    }
+    const turnSub = db.collections.promptTurns.subscribeChanges(() => {
+      turns = db.collections.promptTurns.toArray
+      maybeResolve()
+    })
+    const chunkSub = db.collections.chunks.subscribeChanges(() => {
+      chunks = db.collections.chunks.toArray
+      maybeResolve()
+    })
+    maybeResolve()
+  })
 }

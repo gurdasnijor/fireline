@@ -8,7 +8,6 @@ import { createFirelineDB } from '@fireline/state'
 
 // User code
 import { openNodeAcpConnection } from '../shared/acp-node.js'
-import { waitForRows } from '../shared/state-subscribe.js'
 
 const localUrl = process.env.FIRELINE_LOCAL_URL ?? 'http://127.0.0.1:4440'
 const remoteUrl = process.env.FIRELINE_REMOTE_URL ?? 'http://127.0.0.1:5440'
@@ -36,6 +35,7 @@ await db.preload()
 
 const localAcp = await openNodeAcpConnection(localHandle.acp.url, 'session-migration-local')
 const { sessionId } = await localAcp.connection.newSession({ cwd: '/workspace', mcpServers: [] })
+const completedTurns = waitForCompletedTurns(db, sessionId, 3)
 await localAcp.connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'turn 1 on localhost' }] })
 await localAcp.connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'turn 2 on localhost' }] })
 
@@ -47,13 +47,7 @@ const remoteHandle = await harness.start({
 const remoteAcp = await openNodeAcpConnection(remoteHandle.acp.url, 'session-migration-remote')
 await remoteAcp.connection.loadSession({ sessionId, cwd: '/workspace', mcpServers: [] })
 await remoteAcp.connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'turn 3 on remote' }] })
-
-await waitForRows(
-  db.collections.promptTurns,
-  (turns) =>
-    turns.filter((turn) => turn.sessionId === sessionId && turn.state === 'completed').length >= 3,
-  5_000,
-)
+await completedTurns
 
 console.log(
   JSON.stringify(
@@ -74,3 +68,26 @@ console.log(
 await localAcp.close()
 await remoteAcp.close()
 db.close()
+
+function waitForCompletedTurns(
+  db: ReturnType<typeof createFirelineDB>,
+  sessionId: string,
+  count: number,
+) {
+  return new Promise<(typeof db.collections.promptTurns.toArray)>((resolve, reject) => {
+    const check = () => {
+      const rows = db.collections.promptTurns.toArray
+      const completed = rows.filter((turn) => turn.sessionId === sessionId && turn.state === 'completed')
+      if (completed.length < count) return
+      clearTimeout(timeout)
+      subscription.unsubscribe()
+      resolve(rows)
+    }
+    const timeout = setTimeout(() => {
+      subscription.unsubscribe()
+      reject(new Error('timed out waiting for migrated session turns'))
+    }, 5_000)
+    const subscription = db.collections.promptTurns.subscribeChanges(check)
+    check()
+  })
+}

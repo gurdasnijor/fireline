@@ -54,7 +54,10 @@ const handle = await compose(
 })
 ```
 
-In the compiled example, `middleware([...])` and `.start(...)` are thin example-local ergonomics layered on top of the landed `@fireline/client` surface (`compose(...)` plus `new Sandbox({ serverUrl }).provision(...)`). The architectural point is the same: the composed harness is provider-agnostic, and the provider changes only the execution backend.
+The compiled example now uses the proposal surface directly: `compose(...)`,
+`middleware([...])`, and `.start(...)`. The architectural point is the same:
+the composed harness is provider-agnostic, and the provider changes only the
+execution backend.
 
 ## State observation
 

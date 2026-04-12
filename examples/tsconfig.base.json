@@ -15,6 +15,7 @@
     "paths": {
       "@fireline/client": ["../packages/client/src/index.ts"],
       "@fireline/client/admin": ["../packages/client/src/admin.ts"],
+      "@fireline/client/events": ["../packages/client/src/events.ts"],
       "@fireline/client/middleware": ["../packages/client/src/middleware.ts"],
       "@fireline/client/resources": ["../packages/client/src/resources.ts"],
       "@fireline/state": ["../packages/state/src/index.ts"]

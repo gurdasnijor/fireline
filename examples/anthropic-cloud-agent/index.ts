@@ -1,13 +1,4 @@
-import {
-  Sandbox,
-  agent,
-  compose as composeHarness,
-  sandbox,
-  type AgentConfig,
-  type Middleware as FirelineMiddleware,
-  type SandboxDefinition,
-  type SandboxHandle,
-} from '@fireline/client'
+import { agent, compose, middleware, sandbox, type SandboxHandle } from '@fireline/client'
 import { approve, budget, trace } from '@fireline/client/middleware'
 import { createFirelineDB, type FirelineDB } from '@fireline/state'
 
@@ -20,33 +11,6 @@ export type StartOptions = {
 export type StartedAnthropicCloudAgent = {
   readonly handle: SandboxHandle
   readonly db: FirelineDB
-}
-
-// Example-local sugar so the demo reads like the higher-level product pitch:
-// compose(...).start(...) and middleware([...]).
-export function middleware<const T extends readonly FirelineMiddleware[]>(entries: T): T {
-  return entries
-}
-
-export function compose(
-  sandboxConfig: SandboxDefinition,
-  chain: readonly FirelineMiddleware[],
-  agentConfig: AgentConfig,
-) {
-  const config = composeHarness(sandboxConfig, chain, agentConfig)
-
-  return {
-    config,
-    async start(options: StartOptions): Promise<SandboxHandle> {
-      return new Sandbox({
-        serverUrl: options.serverUrl,
-        token: options.token,
-      }).provision({
-        ...config,
-        name: options.name,
-      })
-    },
-  }
 }
 
 export async function startAnthropicCloudAgent(

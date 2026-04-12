@@ -4,9 +4,21 @@
   "type": "module",
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.18.2",
+    "@slack/bolt": "^4.7.0",
+    "@tanstack/db": "^0.6.4",
+    "@tanstack/react-db": "^0.1.82",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "use-acp": "^0.2.6",
     "ws": "^8.20.0"
   },
   "devDependencies": {
-    "@types/ws": "^8.18.1"
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^5.1.0",
+    "typescript": "^5.6.0",
+    "vite": "^8.0.8"
   }
 }

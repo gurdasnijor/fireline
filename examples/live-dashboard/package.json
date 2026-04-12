@@ -7,6 +7,7 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
+    "@fireline/state": "file:../../packages/state",
     "@tanstack/db": "^0.6.4",
     "@tanstack/react-db": "^0.1.82",
     "react": "^19.2.5",

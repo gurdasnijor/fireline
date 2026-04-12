@@ -11,7 +11,6 @@ import { join } from 'node:path'
 
 // User code
 import { openNodeAcpConnection } from '../shared/acp-node.js'
-import { waitForRows } from '../shared/state-subscribe.js'
 
 const serverUrl = process.env.FIRELINE_URL ?? 'http://127.0.0.1:4440'
 const workspace = await mkdtemp(join(tmpdir(), 'fireline-context-'))
@@ -36,28 +35,16 @@ const db = createFirelineDB({ stateStreamUrl: handle.state.url })
 await db.preload()
 const acp = await openNodeAcpConnection(handle.acp.url, 'context-injection')
 const { sessionId } = await acp.connection.newSession({ cwd: '/workspace', mcpServers: [] })
+const result = waitForContextResult(db, sessionId)
 await acp.connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'What is the codename?' }] })
-
-const turns = await waitForRows(
-  db.collections.promptTurns,
-  (rows) => rows.some((row) => row.sessionId === sessionId && row.state === 'completed'),
-  5_000,
-)
-const chunks = await waitForRows(
-  db.collections.chunks,
-  (rows) => rows.some((row) => turns.some((turn) => turn.promptTurnId === row.promptTurnId)),
-  5_000,
-)
+const { rawPrompt, agentVisiblePrompt } = await result
 
 console.log(
   JSON.stringify(
     {
       message: 'the proxy chain changed the prompt before the agent saw it',
-      rawPrompt: turns.find((row) => row.sessionId === sessionId)?.text,
-      agentVisiblePrompt: chunks
-        .filter((row) => turns.some((turn) => turn.promptTurnId === row.promptTurnId))
-        .map((row) => row.content)
-        .join(''),
+      rawPrompt,
+      agentVisiblePrompt,
     },
     null,
     2,
@@ -66,3 +53,37 @@ console.log(
 
 await acp.close()
 db.close()
+
+function waitForContextResult(db: ReturnType<typeof createFirelineDB>, sessionId: string) {
+  return new Promise<{ rawPrompt: string | null; agentVisiblePrompt: string }>((resolve, reject) => {
+    let turns = db.collections.promptTurns.toArray
+    let chunks = db.collections.chunks.toArray
+    const timeout = setTimeout(() => {
+      turnSub.unsubscribe()
+      chunkSub.unsubscribe()
+      reject(new Error('timed out waiting for context-injection output'))
+    }, 5_000)
+    const maybeResolve = () => {
+      const completed = turns.find((row) => row.sessionId === sessionId && row.state === 'completed')
+      if (!completed) return
+      const text = chunks
+        .filter((row) => row.promptTurnId === completed.promptTurnId)
+        .map((row) => row.content)
+        .join('')
+      if (!text) return
+      clearTimeout(timeout)
+      turnSub.unsubscribe()
+      chunkSub.unsubscribe()
+      resolve({ rawPrompt: completed.text ?? null, agentVisiblePrompt: text })
+    }
+    const turnSub = db.collections.promptTurns.subscribeChanges(() => {
+      turns = db.collections.promptTurns.toArray
+      maybeResolve()
+    })
+    const chunkSub = db.collections.chunks.subscribeChanges(() => {
+      chunks = db.collections.chunks.toArray
+      maybeResolve()
+    })
+    maybeResolve()
+  })
+}
