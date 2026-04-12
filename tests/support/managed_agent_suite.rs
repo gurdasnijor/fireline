@@ -3,7 +3,7 @@
 #[path = "stream_server.rs"]
 mod stream_server;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::{Command as StdCommand, Stdio};
@@ -16,14 +16,14 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use durable_streams::{Client as DsClient, Offset};
-use fireline_harness::TopologySpec;
+use fireline_harness::{TopologySpec, emit_host_endpoints_persisted};
 use fireline_host::bootstrap::{BootstrapConfig, BootstrapHandle, start};
 use fireline_resources::{FsOpRecord, StreamFsFileRecord};
 use fireline_resources::{LocalPathMounter, ResourceMounter, ResourceRef};
 use fireline_sandbox::{SandboxDescriptor, SandboxHandle, SandboxStatus};
 use fireline_session::{
-    HostDescriptor, HostIndex, HostStatus, PersistedHostSpec, SandboxProviderKind,
-    SessionRecord, StateMaterializer,
+    HostDescriptor, HostStatus, PersistedHostSpec, SandboxProviderKind, SandboxProviderRequest,
+    SessionRecord,
 };
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value as JsonValue, json};
@@ -251,14 +251,64 @@ impl LocalRuntimeHarness {
     }
 
     pub(crate) async fn prompt(&self, text: &str) -> Result<String> {
-        yopo::prompt(
-            WebSocketTransport {
-                url: self.handle.acp_url.clone(),
-            },
-            text,
-        )
-        .await
-        .map_err(anyhow::Error::from)
+        let prompt_text = text.to_string();
+        let response_text = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
+
+        sacp::Client
+            .builder()
+            .on_receive_notification(
+                {
+                    let response_text = response_text.clone();
+                    async move |notification: agent_client_protocol::SessionNotification, _cx| {
+                        if let agent_client_protocol::SessionUpdate::AgentMessageChunk(
+                            agent_client_protocol::ContentChunk {
+                                content: agent_client_protocol::ContentBlock::Text(text),
+                                ..
+                            },
+                        ) = notification.update
+                        {
+                            response_text.lock().await.push_str(&text.text);
+                        }
+                        Ok(())
+                    }
+                },
+                sacp::on_receive_notification!(),
+            )
+            .connect_with(
+                WebSocketTransport {
+                    url: self.handle.acp_url.clone(),
+                },
+                move |cx: sacp::ConnectionTo<sacp::Agent>| {
+                    let prompt_text = prompt_text.clone();
+                    async move {
+                        let _ = cx
+                            .send_request(agent_client_protocol::InitializeRequest::new(
+                                agent_client_protocol::ProtocolVersion::LATEST,
+                            ))
+                            .block_task()
+                            .await?;
+
+                        let session = cx
+                            .send_request(agent_client_protocol::NewSessionRequest::new(repo_root()))
+                            .block_task()
+                            .await?;
+
+                        let _ = cx
+                            .send_request(agent_client_protocol::PromptRequest::new(
+                                session.session_id.to_string(),
+                                vec![prompt_text.into()],
+                            ))
+                            .block_task()
+                            .await?;
+
+                        Ok::<(), sacp::Error>(())
+                    }
+                },
+            )
+            .await
+            .map_err(anyhow::Error::from)?;
+
+        Ok(response_text.lock().await.clone())
     }
 
     pub(crate) async fn wait_for_state_rows(
@@ -349,8 +399,9 @@ impl ControlPlaneHarness {
             .error_for_status()?
             .json::<SandboxHandle>()
             .await?;
-        self.wait_for_status(&created.id, HostStatus::Ready)
-            .await
+        let descriptor = self.wait_for_status(&created.id, HostStatus::Ready).await?;
+        self.persist_runtime_endpoints(&descriptor).await?;
+        Ok(descriptor)
     }
 
     #[instrument(skip(self), fields(host_key, expected = ?expected))]
@@ -370,7 +421,7 @@ impl ControlPlaneHarness {
                 let descriptor = response.json::<SandboxDescriptor>().await?;
                 if host_status_from_sandbox_status(descriptor.status.clone()) == expected {
                     if let Some(host_descriptor) =
-                        try_host_descriptor(&self.shared_state_url(), host_key).await?
+                        host_descriptor_from_sandbox(&descriptor, Duration::from_secs(1)).await?
                     {
                         if host_descriptor.status == expected {
                             return Ok(host_descriptor);
@@ -401,17 +452,37 @@ impl ControlPlaneHarness {
         )
     }
 
+    async fn persist_runtime_endpoints(&self, descriptor: &HostDescriptor) -> Result<()> {
+        emit_host_endpoints_persisted(&descriptor.state.url, descriptor)
+            .await
+            .context("persist runtime_endpoints envelope from managed-agent test harness")
+    }
+
     #[instrument(skip(self), fields(host_key))]
     pub(crate) async fn stop_runtime(&self, host_key: &str) -> Result<HostDescriptor> {
-        self.http
+        let sandbox = self
+            .http
             .post(format!(
                 "{}/v1/sandboxes/{host_key}/stop",
                 self.control_plane_url
             ))
             .send()
             .await?
-            .error_for_status()?;
-        self.wait_for_status(host_key, HostStatus::Stopped).await
+            .error_for_status()?
+            .json::<SandboxDescriptor>()
+            .await?;
+
+        let descriptor = tokio::time::timeout(
+            Duration::from_secs(10),
+            wait_for_host_descriptor(&sandbox, HostStatus::Stopped),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+        .unwrap_or_else(|| fallback_host_descriptor(&sandbox));
+        self.persist_runtime_endpoints(&descriptor).await?;
+        Ok(descriptor)
     }
 
     async fn stop_all_live_runtimes(&self) {
@@ -1014,8 +1085,9 @@ impl ControlPlaneHarness {
             .context("control plane rejected spec-based create")?
             .json::<SandboxHandle>()
             .await?;
-        self.wait_for_status(&created.id, HostStatus::Ready)
-            .await
+        let descriptor = self.wait_for_status(&created.id, HostStatus::Ready).await?;
+        self.persist_runtime_endpoints(&descriptor).await?;
+        Ok(descriptor)
     }
 }
 
@@ -1024,6 +1096,7 @@ struct RuntimeCompatState {
     http: reqwest::Client,
     control_plane_url: String,
     shared_state_url: String,
+    aliases: std::sync::Arc<tokio::sync::Mutex<HashMap<String, String>>>,
 }
 
 async fn spawn_runtime_compat_server(
@@ -1035,6 +1108,7 @@ async fn spawn_runtime_compat_server(
         http,
         control_plane_url,
         shared_state_url,
+        aliases: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     };
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -1061,6 +1135,10 @@ async fn create_compat_runtime(
     State(state): State<RuntimeCompatState>,
     Json(body): Json<JsonValue>,
 ) -> Result<Json<HostDescriptor>, CompatError> {
+    let requested_host_key = body
+        .get("runtimeKey")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
     let created = state
         .http
         .post(format!(
@@ -1073,8 +1151,18 @@ async fn create_compat_runtime(
         .error_for_status()?
         .json::<SandboxHandle>()
         .await?;
+    if let Some(requested_host_key) = requested_host_key.as_ref() {
+        if requested_host_key != &created.id {
+            state
+                .aliases
+                .lock()
+                .await
+                .insert(requested_host_key.clone(), created.id.clone());
+        }
+    }
+    let logical_host_key = requested_host_key.as_deref().unwrap_or(&created.id);
     let descriptor =
-        host_descriptor_for_sandbox(&state, &created.id, Duration::from_secs(10)).await?;
+        host_descriptor_for_sandbox(&state, logical_host_key, Duration::from_secs(10)).await?;
     Ok(Json(descriptor))
 }
 
@@ -1090,46 +1178,56 @@ async fn stop_compat_runtime(
     Path(host_key): Path<String>,
     State(state): State<RuntimeCompatState>,
 ) -> Result<Json<HostDescriptor>, CompatError> {
-    state
+    let sandbox_id = resolve_compat_host_key(&state, &host_key).await;
+    let sandbox = state
         .http
         .post(format!(
-            "{}/v1/sandboxes/{host_key}/stop",
+            "{}/v1/sandboxes/{sandbox_id}/stop",
             state.control_plane_url.trim_end_matches('/')
         ))
         .send()
         .await?
-        .error_for_status()?;
-    let descriptor = wait_for_host_descriptor(
-        &state.shared_state_url,
-        &host_key,
-        HostStatus::Stopped,
+        .error_for_status()?
+        .json::<SandboxDescriptor>()
+        .await?;
+    let descriptor = tokio::time::timeout(
         Duration::from_secs(10),
+        wait_for_host_descriptor(&sandbox, HostStatus::Stopped),
     )
-    .await?;
-    Ok(Json(descriptor))
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .flatten()
+    .unwrap_or_else(|| fallback_host_descriptor(&sandbox));
+    Ok(Json(with_logical_host_key(descriptor, &host_key)))
 }
 
 async fn delete_compat_runtime(
     Path(host_key): Path<String>,
     State(state): State<RuntimeCompatState>,
 ) -> Result<Json<HostDescriptor>, CompatError> {
-    state
+    let sandbox_id = resolve_compat_host_key(&state, &host_key).await;
+    let sandbox = state
         .http
         .delete(format!(
-            "{}/v1/sandboxes/{host_key}",
+            "{}/v1/sandboxes/{sandbox_id}",
             state.control_plane_url.trim_end_matches('/')
         ))
         .send()
         .await?
-        .error_for_status()?;
-    let descriptor = wait_for_host_descriptor(
-        &state.shared_state_url,
-        &host_key,
-        HostStatus::Stopped,
+        .error_for_status()?
+        .json::<SandboxDescriptor>()
+        .await?;
+    let descriptor = tokio::time::timeout(
         Duration::from_secs(10),
+        wait_for_host_descriptor(&sandbox, HostStatus::Stopped),
     )
-    .await?;
-    Ok(Json(descriptor))
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .flatten()
+    .unwrap_or_else(|| fallback_host_descriptor(&sandbox));
+    Ok(Json(with_logical_host_key(descriptor, &host_key)))
 }
 
 async fn list_compat_runtimes(
@@ -1148,7 +1246,7 @@ async fn list_compat_runtimes(
         .await?;
     let mut descriptors = Vec::with_capacity(sandboxes.len());
     for sandbox in sandboxes {
-        match try_host_descriptor(&state.shared_state_url, &sandbox.id).await? {
+        match host_descriptor_from_sandbox(&sandbox, Duration::from_millis(250)).await? {
             Some(descriptor) => descriptors.push(descriptor),
             None => descriptors.push(fallback_host_descriptor(&sandbox)),
         }
@@ -1186,10 +1284,11 @@ async fn host_descriptor_for_sandbox(
     host_key: &str,
     timeout: Duration,
 ) -> Result<HostDescriptor> {
+    let sandbox_id = resolve_compat_host_key(state, host_key).await;
     if let Some(sandbox) = fetch_sandbox_descriptor(
         &state.http,
         &state.control_plane_url,
-        host_key,
+        &sandbox_id,
     )
     .await?
     {
@@ -1201,21 +1300,30 @@ async fn host_descriptor_for_sandbox(
                 | SandboxStatus::Stopped
                 | SandboxStatus::Broken
         ) {
-            if let Ok(descriptor) = wait_for_host_descriptor(
-                &state.shared_state_url,
-                host_key,
-                host_status_from_sandbox_status(sandbox.status.clone()),
+            if let Ok(Ok(Some(descriptor))) = tokio::time::timeout(
                 timeout,
+                wait_for_host_descriptor(
+                    &sandbox,
+                    host_status_from_sandbox_status(sandbox.status.clone()),
+                ),
             )
             .await
             {
-                return Ok(descriptor);
+                return Ok(with_logical_host_key(descriptor, host_key));
             }
         }
-        if let Some(descriptor) = try_host_descriptor(&state.shared_state_url, host_key).await? {
-            return Ok(descriptor);
+        if let Some(descriptor) =
+            host_descriptor_from_sandbox(&sandbox, Duration::from_millis(250)).await?
+        {
+            return Ok(with_logical_host_key(descriptor, host_key));
         }
-        return Ok(fallback_host_descriptor(&sandbox));
+        return Ok(with_logical_host_key(fallback_host_descriptor(&sandbox), host_key));
+    }
+
+    if let Some(descriptor) =
+        host_descriptor_from_shared_state(&state.shared_state_url, &sandbox_id).await?
+    {
+        return Ok(with_logical_host_key(descriptor, host_key));
     }
 
     Err(anyhow!("sandbox '{host_key}' not found"))
@@ -1239,41 +1347,169 @@ async fn fetch_sandbox_descriptor(
     Ok(Some(response.error_for_status()?.json::<SandboxDescriptor>().await?))
 }
 
-async fn try_host_descriptor(shared_state_url: &str, host_key: &str) -> Result<Option<HostDescriptor>> {
-    let index = materialize_host_index(shared_state_url).await?;
-    Ok(index.endpoints_for(host_key).await)
+async fn resolve_compat_host_key(state: &RuntimeCompatState, host_key: &str) -> String {
+    state
+        .aliases
+        .lock()
+        .await
+        .get(host_key)
+        .cloned()
+        .unwrap_or_else(|| host_key.to_string())
 }
 
-async fn wait_for_host_descriptor(
-    shared_state_url: &str,
-    host_key: &str,
-    expected: HostStatus,
+fn with_logical_host_key(mut descriptor: HostDescriptor, host_key: &str) -> HostDescriptor {
+    descriptor.host_key = host_key.to_string();
+    descriptor
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum RuntimeInstanceStatus {
+    Running,
+    Paused,
+    Stopped,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeInstanceRecord {
+    instance_id: String,
+    #[serde(rename = "runtimeName")]
+    host_name: String,
+    status: RuntimeInstanceStatus,
+    created_at: i64,
+    updated_at: i64,
+}
+
+async fn host_descriptor_from_sandbox(
+    sandbox: &SandboxDescriptor,
     timeout: Duration,
-) -> Result<HostDescriptor> {
+) -> Result<Option<HostDescriptor>> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        if let Some(descriptor) = try_host_descriptor(shared_state_url, host_key).await? {
-            if descriptor.status == expected {
-                return Ok(descriptor);
+        let specs = read_persisted_host_specs(&sandbox.state.url).await?;
+        if let Some(spec) = specs.into_iter().find(|spec| spec.host_key == sandbox.id) {
+            let instances = read_runtime_instances(&sandbox.state.url).await?;
+            if let Some(instance) = select_runtime_instance(&spec, sandbox, &instances) {
+                return Ok(Some(HostDescriptor {
+                    host_key: sandbox.id.clone(),
+                    host_id: instance.instance_id.clone(),
+                    node_id: spec.node_id.clone(),
+                    provider: sandbox_provider_kind_from_name(&sandbox.provider),
+                    provider_instance_id: instance.instance_id.clone(),
+                    status: host_status_from_sandbox_status(sandbox.status.clone()),
+                    acp: sandbox.acp.clone(),
+                    state: sandbox.state.clone(),
+                    helper_api_base_url: None,
+                    created_at_ms: sandbox.created_at_ms,
+                    updated_at_ms: sandbox.updated_at_ms,
+                }));
             }
         }
 
         if tokio::time::Instant::now() >= deadline {
-            return Err(anyhow!(
-                "timed out waiting for host descriptor '{host_key}' to reach '{expected:?}'"
-            ));
+            return Ok(None);
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
-async fn materialize_host_index(shared_state_url: &str) -> Result<HostIndex> {
-    let index = HostIndex::new();
-    let materializer = StateMaterializer::new(vec![std::sync::Arc::new(index.clone())]);
-    let task = materializer.connect(shared_state_url.to_string());
-    task.preload().await?;
-    task.abort();
-    Ok(index)
+async fn host_descriptor_from_shared_state(
+    shared_state_url: &str,
+    host_key: &str,
+) -> Result<Option<HostDescriptor>> {
+    let specs = read_persisted_host_specs(shared_state_url).await?;
+    let Some(spec) = specs.into_iter().find(|spec| spec.host_key == host_key) else {
+        return Ok(None);
+    };
+
+    let instances = read_runtime_instances(shared_state_url).await?;
+    let Some(instance) = instances
+        .iter()
+        .filter(|instance| instance.host_name == spec.create_spec.name)
+        .max_by_key(|instance| (instance.updated_at, instance.created_at))
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some(HostDescriptor {
+        host_key: host_key.to_string(),
+        host_id: instance.instance_id.clone(),
+        node_id: spec.node_id.clone(),
+        provider: sandbox_provider_kind_from_request(spec.create_spec.provider),
+        provider_instance_id: instance.instance_id.clone(),
+        status: host_status_from_runtime_instance_status(instance.status),
+        acp: fireline_session::Endpoint::new(String::new()),
+        state: fireline_session::Endpoint::new(shared_state_url.to_string()),
+        helper_api_base_url: None,
+        created_at_ms: instance.created_at,
+        updated_at_ms: instance.updated_at,
+    }))
+}
+
+async fn wait_for_host_descriptor(
+    sandbox: &SandboxDescriptor,
+    expected: HostStatus,
+) -> Result<Option<HostDescriptor>> {
+    loop {
+        if let Some(descriptor) =
+            host_descriptor_from_sandbox(sandbox, Duration::from_millis(250)).await?
+        {
+            if descriptor.status == expected {
+                return Ok(Some(descriptor));
+            }
+        } else {
+            return Ok(None);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn read_runtime_instances(state_stream_url: &str) -> Result<Vec<RuntimeInstanceRecord>> {
+    let envelopes = read_all_events(state_stream_url).await?;
+    Ok(envelopes
+        .iter()
+        .filter(|env| env.envelope_type() == Some("runtime_instance"))
+        .filter_map(|env| env.value().cloned())
+        .filter_map(|value| serde_json::from_value::<RuntimeInstanceRecord>(value).ok())
+        .collect())
+}
+
+fn select_runtime_instance<'a>(
+    spec: &PersistedHostSpec,
+    sandbox: &SandboxDescriptor,
+    instances: &'a [RuntimeInstanceRecord],
+) -> Option<&'a RuntimeInstanceRecord> {
+    let desired = desired_runtime_instance_status(&sandbox.status);
+    let mut matches: Vec<&RuntimeInstanceRecord> = instances
+        .iter()
+        .filter(|instance| instance.host_name == spec.create_spec.name)
+        .collect();
+
+    if let Some(desired) = desired {
+        let mut status_matches: Vec<&RuntimeInstanceRecord> = matches
+            .iter()
+            .copied()
+            .filter(|instance| instance.status == desired)
+            .collect();
+        status_matches.sort_by_key(|instance| (instance.updated_at, instance.created_at));
+        if let Some(found) = status_matches.into_iter().last() {
+            return Some(found);
+        }
+    }
+
+    matches.sort_by_key(|instance| (instance.updated_at, instance.created_at));
+    matches.into_iter().last()
+}
+
+fn desired_runtime_instance_status(status: &SandboxStatus) -> Option<RuntimeInstanceStatus> {
+    match status {
+        SandboxStatus::Creating
+        | SandboxStatus::Ready
+        | SandboxStatus::Busy
+        | SandboxStatus::Idle => Some(RuntimeInstanceStatus::Running),
+        SandboxStatus::Stopped | SandboxStatus::Broken => Some(RuntimeInstanceStatus::Stopped),
+    }
 }
 
 fn host_status_from_sandbox_status(status: SandboxStatus) -> HostStatus {
@@ -1284,6 +1520,14 @@ fn host_status_from_sandbox_status(status: SandboxStatus) -> HostStatus {
         SandboxStatus::Idle => HostStatus::Idle,
         SandboxStatus::Stopped => HostStatus::Stopped,
         SandboxStatus::Broken => HostStatus::Broken,
+    }
+}
+
+fn host_status_from_runtime_instance_status(status: RuntimeInstanceStatus) -> HostStatus {
+    match status {
+        RuntimeInstanceStatus::Running => HostStatus::Ready,
+        RuntimeInstanceStatus::Paused => HostStatus::Idle,
+        RuntimeInstanceStatus::Stopped => HostStatus::Stopped,
     }
 }
 
@@ -1300,6 +1544,13 @@ fn fallback_host_descriptor(sandbox: &SandboxDescriptor) -> HostDescriptor {
         helper_api_base_url: None,
         created_at_ms: sandbox.created_at_ms,
         updated_at_ms: sandbox.updated_at_ms,
+    }
+}
+
+fn sandbox_provider_kind_from_request(request: SandboxProviderRequest) -> SandboxProviderKind {
+    match request {
+        SandboxProviderRequest::Docker => SandboxProviderKind::Docker,
+        SandboxProviderRequest::Auto | SandboxProviderRequest::Local => SandboxProviderKind::Local,
     }
 }
 
