@@ -5,30 +5,7 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum ResourceRef {
-    LocalPath {
-        path: PathBuf,
-        mount_path: PathBuf,
-    },
-    GitRemote {
-        repo_url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reference: Option<String>,
-        mount_path: PathBuf,
-    },
-    S3 {
-        bucket: String,
-        prefix: String,
-        mount_path: PathBuf,
-    },
-    Gcs {
-        bucket: String,
-        prefix: String,
-        mount_path: PathBuf,
-    },
-}
+use crate::{ResourceRef, ResourceSourceRef};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -63,9 +40,10 @@ impl ResourceMounter for LocalPathMounter {
         resource: &ResourceRef,
         _runtime_key: &str,
     ) -> Result<Option<MountedResource>> {
-        let ResourceRef::LocalPath { path, mount_path } = resource else {
+        let ResourceSourceRef::LocalPath { path, .. } = &resource.source_ref else {
             return Ok(None);
         };
+        let mount_path = &resource.mount_path;
 
         if !mount_path.is_absolute() {
             return Err(anyhow!(
@@ -79,7 +57,7 @@ impl ResourceMounter for LocalPathMounter {
         Ok(Some(MountedResource {
             host_path,
             mount_path: mount_path.clone(),
-            read_only: true,
+            read_only: resource.read_only,
         }))
     }
 }
@@ -112,11 +90,16 @@ pub async fn prepare_resources(
 }
 
 fn resource_label(resource: &ResourceRef) -> &'static str {
-    match resource {
-        ResourceRef::LocalPath { .. } => "local_path",
-        ResourceRef::GitRemote { .. } => "git_remote",
-        ResourceRef::S3 { .. } => "s3",
-        ResourceRef::Gcs { .. } => "gcs",
+    match &resource.source_ref {
+        ResourceSourceRef::LocalPath { .. } => "local_path",
+        ResourceSourceRef::S3 { .. } => "s3",
+        ResourceSourceRef::Gcs { .. } => "gcs",
+        ResourceSourceRef::DockerVolume { .. } => "docker_volume",
+        ResourceSourceRef::DurableStreamBlob { .. } => "durable_stream_blob",
+        ResourceSourceRef::StreamFs { .. } => "stream_fs",
+        ResourceSourceRef::OciImageLayer { .. } => "oci_image_layer",
+        ResourceSourceRef::GitRepo { .. } => "git_repo",
+        ResourceSourceRef::HttpUrl { .. } => "http_url",
     }
 }
 
@@ -125,7 +108,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{LocalPathMounter, ResourceMounter};
-    use crate::ResourceRef;
+    use crate::{ResourceRef, ResourceSourceRef};
 
     #[tokio::test]
     async fn local_path_mounter_canonicalizes_host_path() {
@@ -139,9 +122,13 @@ mod tests {
 
         let mounted = LocalPathMounter::new()
             .mount(
-                &ResourceRef::LocalPath {
-                    path: root.join(".").join("hello.txt"),
+                &ResourceRef {
+                    source_ref: ResourceSourceRef::LocalPath {
+                        host_id: "host-local".to_string(),
+                        path: root.join(".").join("hello.txt"),
+                    },
                     mount_path: PathBuf::from("/work/hello.txt"),
+                    read_only: true,
                 },
                 "runtime:test",
             )

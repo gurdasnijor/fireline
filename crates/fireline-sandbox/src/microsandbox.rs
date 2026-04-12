@@ -2,9 +2,9 @@
 //!
 //! Boots a hardware-isolated microVM per provisioned sandbox via
 //! [`microsandbox::Sandbox::create_detached`], mounts caller-supplied
-//! [`ResourceRef::LocalPath`] resources as bind volumes, runs tool
-//! calls via [`microsandbox::Sandbox::exec_stream`], and releases the
-//! VM on [`Sandbox::release`].
+//! local-path resources as bind volumes, runs tool calls via
+//! [`microsandbox::Sandbox::exec_stream`], and releases the VM on
+//! [`Sandbox::release`].
 //!
 //! See `docs/proposals/runtime-host-split.md` §7.4 for why this is a
 //! [`Sandbox`] and not a [`fireline_conductor::primitives::Host`]
@@ -25,20 +25,21 @@
 //!
 //! ## Resource handling
 //!
-//! The v1 implementation understands [`ResourceRef::LocalPath`] and
-//! turns each into a `.volume(guest_path, |m| m.bind(host_path))`
-//! builder call. Other [`ResourceRef`] variants (`GitRemote`, `S3`,
-//! `Gcs`) are currently rejected with a descriptive error — mirroring
-//! how [`crate::fs_backend`] handles the unsupported cases — rather
-//! than silently dropped. Adding them is a follow-up aligned with
-//! [`fireline_conductor::runtime::ResourceMounter`] symmetry.
+//! The v1 implementation understands
+//! [`fireline_resources::ResourceSourceRef::LocalPath`] and turns each
+//! into a `.volume(guest_path, |m| m.bind(host_path))` builder call.
+//! Other source variants are currently rejected with a descriptive
+//! error — mirroring how [`crate::fs_backend`] handles the unsupported
+//! cases — rather than silently dropped. Adding them is a follow-up
+//! aligned with [`fireline_conductor::runtime::ResourceMounter`]
+//! symmetry.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use fireline_resources::ResourceRef;
+use fireline_resources::{ResourceRef, ResourceSourceRef};
 use microsandbox::{NetworkPolicy, Sandbox as MsbSandbox};
 use serde_json::{Value as JsonValue, json};
 use tokio::sync::Mutex;
@@ -147,26 +148,35 @@ impl Sandbox for MicrosandboxSandbox {
         }
 
         for resource in resources {
-            match resource {
-                ResourceRef::LocalPath { path, mount_path } => {
-                    let guest = mount_path.to_string_lossy().into_owned();
+            match &resource.source_ref {
+                ResourceSourceRef::LocalPath { path, .. } => {
+                    let guest = resource.mount_path.to_string_lossy().into_owned();
                     let host = path.clone();
                     builder = builder.volume(guest, move |m| m.bind(host));
                 }
-                ResourceRef::GitRemote { .. } => {
+                ResourceSourceRef::GitRepo { .. } => {
                     return Err(anyhow!(
-                        "MicrosandboxSandbox: ResourceRef::GitRemote is not yet supported; \
+                        "MicrosandboxSandbox: ResourceSourceRef::GitRepo is not yet supported; \
                          pre-clone the repo on the host and pass it as a LocalPath instead",
                     ));
                 }
-                ResourceRef::S3 { .. } => {
+                ResourceSourceRef::S3 { .. } => {
                     return Err(anyhow!(
-                        "MicrosandboxSandbox: ResourceRef::S3 is not yet supported",
+                        "MicrosandboxSandbox: ResourceSourceRef::S3 is not yet supported",
                     ));
                 }
-                ResourceRef::Gcs { .. } => {
+                ResourceSourceRef::Gcs { .. } => {
                     return Err(anyhow!(
-                        "MicrosandboxSandbox: ResourceRef::Gcs is not yet supported",
+                        "MicrosandboxSandbox: ResourceSourceRef::Gcs is not yet supported",
+                    ));
+                }
+                ResourceSourceRef::DockerVolume { .. }
+                | ResourceSourceRef::DurableStreamBlob { .. }
+                | ResourceSourceRef::StreamFs { .. }
+                | ResourceSourceRef::OciImageLayer { .. }
+                | ResourceSourceRef::HttpUrl { .. } => {
+                    return Err(anyhow!(
+                        "MicrosandboxSandbox: this resource source is not yet supported",
                     ));
                 }
             }
@@ -181,11 +191,7 @@ impl Sandbox for MicrosandboxSandbox {
         Ok(SandboxHandle::new(id, MICROSANDBOX_SANDBOX_KIND))
     }
 
-    async fn execute(
-        &self,
-        handle: &SandboxHandle,
-        call: ToolCall,
-    ) -> Result<ToolCallResult> {
+    async fn execute(&self, handle: &SandboxHandle, call: ToolCall) -> Result<ToolCallResult> {
         let guard = self.live.lock().await;
         let sandbox = guard.get(&handle.id).ok_or_else(|| {
             anyhow!(
