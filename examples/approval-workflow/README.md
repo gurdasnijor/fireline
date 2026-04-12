@@ -27,6 +27,12 @@ const handle = await compose(
 
 That is the product surface. The rest of the demo is ordinary glue around the durable approval event: send a notification out, receive a decision back, call `handle.resolvePermission(...)`, continue the run.
 
+## The Primitive Behind This Example
+
+Conceptually, this demo is the approval-gate reference case for `DurableSubscriber::Passive`: the agent emits `permission_request`, the workflow waits on `PromptKey(SessionId, RequestId)`, and the external decision completes that wait with `approval_resolved`. The concrete webhook hop in this example is one delivery shape of the broader subscriber substrate described in [docs/proposals/durable-subscriber.md](../../docs/proposals/durable-subscriber.md), especially the webhook-oriented material in [§5.2 WebhookSubscriber](../../docs/proposals/durable-subscriber.md#52-webhooksubscriber) and its Webhook Delivery Profile.
+
+The important point is that the README's code is the current, real Fireline API surface, not a speculative rewrite. `handle.resolvePermission(...)` is today's approval-specific resolver for the same passive completion model. The proposal in [docs/proposals/durable-promises.md](../../docs/proposals/durable-promises.md) gives this mental model a more ergonomic name: awakeables. In that framing, the paused approval is an imperative `await` over the same durable completion key, but this example deliberately stays on the shipping `@fireline/client` APIs.
+
 ## Run It
 
 ```bash
