@@ -1,441 +1,429 @@
-# Client API Redesign — Sandbox as Anthropic Primitive
+# Client API Redesign — Full Primitive Surface
 
-> **Status:** architectural proposal (revised — narrowed to match the Anthropic primitive table)
-> **Replaces:** the current multi-layer TS client in `packages/client/src/` (Host + Sandbox + Orchestrator + multiple satisfier modules)
+> **Status:** architectural proposal (full-scope — covers `@fireline/client`, `@fireline/state`, ACP, and stream-db composition)
+> **Replaces:** the current multi-layer TS client surface
 > **Companion:** [`./sandbox-provider-model.md`](./sandbox-provider-model.md) — the Rust-side provider model
-> **Related:**
-> - [`./client-primitives.md`](./client-primitives.md) — the v2 design this proposal supersedes at the Host/Sandbox boundary
-> - [`../explorations/managed-agents-mapping.md`](../explorations/managed-agents-mapping.md) — the Anthropic primitive table (Session, Orchestration, Harness, Sandbox, Resources, Tools)
-> - Current TS client: `packages/client/src/` (~15 modules, 40+ exported types)
+> **Grounded in:**
+> - [`../explorations/managed-agents-mapping.md`](../explorations/managed-agents-mapping.md) — the Anthropic primitive table
+> - [Flamecast guides](https://flamecast.mintlify.app) — local agents, cloud agents, slackbot, webhooks
+> - [stream-db](https://durablestreams.com/stream-db) — the reactive layer over durable-streams
+> - [Ramp Inspect](https://builders.ramp.com/post/why-we-built-our-background-agent) — the background agent pattern
 
 ---
 
-## 1. TL;DR — two methods, matching the Anthropic primitive table
+## 1. Package architecture
 
-Anthropic's managed-agents post defines the Sandbox primitive as:
+Two packages. They stay separate. Each owns one plane.
 
+| Package | Owns | Plane |
+|---|---|---|
+| `@fireline/client` | Sandbox lifecycle + declarative config | **Control plane** — provision, execute, compose topology |
+| `@fireline/state` | Reactive state observation | **Data plane** — stream-db over durable-streams, TanStack DB live queries |
+
+They compose through `SandboxHandle`:
+
+```typescript
+import { Sandbox } from '@fireline/client'
+import { createFirelineDB } from '@fireline/state'
+
+const sandbox = new Sandbox({ serverUrl: 'http://localhost:4440' })
+const handle = await sandbox.provision({ name: 'my-agent', agentCommand: [...] })
+
+// Control plane gave you the handle.
+// Data plane uses handle.state to subscribe.
+const db = createFirelineDB({ stateStreamUrl: handle.state.url })
 ```
-provision({resources}) → execute(name, input) → String
+
+**Why not merge?** Because `@fireline/state` is useful without `@fireline/client`. A dashboard that only reads state from a durable stream doesn't need to provision sandboxes. A CLI that only provisions doesn't need TanStack DB. The two planes are independently useful.
+
+ACP (`@agentclientprotocol/sdk`) is a third-party package the user imports directly. Fireline never wraps it. The `SandboxHandle.acp` endpoint tells you where to connect; the ACP SDK tells you how to talk. No side channels.
+
+---
+
+## 2. The primitive client surfaces
+
+The Anthropic managed-agent table defines six primitives. Each one maps to a specific surface — a method, a config field, or a separate plane:
+
+| # | Primitive | Client surface | Where it lives |
+|---|---|---|---|
+| 1 | **Session** | Not a client verb. Sessions are ACP-plane via `handle.acp`. | `@agentclientprotocol/sdk` — `ClientSideConnection.newSession()` |
+| 2 | **Orchestration** | `wake(session_id) → void` — separate primitive. | `@fireline/client` — standalone `Orchestrator` interface (unchanged from current) |
+| 3 | **Harness** | Not a client surface. Runs inside the sandbox, server-side. | The conductor proxy chain inside the `fireline` binary |
+| 4 | **Sandbox** | `provision(config) → SandboxHandle`, `execute(handle, input) → string` | `@fireline/client` — the `Sandbox` class |
+| 5 | **Resources** | Declarative config field: `SandboxConfig.resources: ResourceRef[]` | `@fireline/client` — `SandboxConfig` type |
+| 6 | **Tools** | Declarative config field: `SandboxConfig.topology` carries tool registrations via combinator helpers | `@fireline/client` — combinator system in `core/` |
+
+**Three primitives are methods** (Sandbox: `provision` + `execute`; Orchestration: `wake`).
+**Two primitives are config fields** (Resources, Tools — declared in `SandboxConfig`, interpreted server-side).
+**Two primitives are separate planes** (Session via ACP, Harness server-side).
+**Zero primitives require polling or status checks** — the durable stream IS the observation layer.
+
+### The Sandbox primitive
+
+```typescript
+class Sandbox {
+  constructor(opts: { serverUrl: string; token?: string; startupTimeoutMs?: number })
+
+  /** Provision — hand me a place where an agent can run. */
+  provision(config: SandboxConfig): Promise<SandboxHandle>
+
+  /** Execute — run a command inside it. Returns stdout. */
+  execute(handle: SandboxHandle, input: string): Promise<string>
+}
+
+interface SandboxHandle {
+  readonly id: string
+  readonly acp: Endpoint      // connect here for ACP sessions
+  readonly state: Endpoint    // subscribe here for durable state
+}
 ```
 
-*"Any executor configured once and called many times as a tool."*
+Two methods. The handle carries the two endpoints the caller needs to reach the other planes.
 
-The client surface matches:
+### The Orchestration primitive
+
+```typescript
+interface Orchestrator {
+  wakeOne(session_id: string): Promise<void>
+  start(): Promise<void>
+  stop(): Promise<void>
+}
+
+function whileLoopOrchestrator(opts: {
+  handler: (session_id: string) => Promise<void>
+  registry: SessionRegistry
+  pollIntervalMs?: number
+}): Orchestrator
+```
+
+Unchanged from the current `@fireline/client/orchestration`. `wake` is a separate primitive from `Sandbox` — they compose but don't merge.
+
+---
+
+## 3. The state observation layer
+
+**The stream IS the observation layer.** No `sandbox.status()` polling. No `host.wake()` checking. The developer subscribes to the durable stream via `@fireline/state` and gets a reactive view of everything happening inside the sandbox.
+
+```typescript
+import { createFirelineDB } from '@fireline/state'
+import { useLiveQuery } from '@tanstack/react-db'
+import { eq } from '@tanstack/db'
+
+const db = createFirelineDB({ stateStreamUrl: handle.state.url })
+await db.preload()  // replays from beginning, then stays connected for live updates
+
+// Reactive queries — update automatically as the stream advances
+function AgentDashboard({ sessionId }: { sessionId: string }) {
+  const turns = useLiveQuery(q =>
+    q.from({ turns: db.collections.promptTurns })
+      .where(({ turns }) => eq(turns.sessionId, sessionId))
+  )
+
+  const permissions = useLiveQuery(q =>
+    q.from({ perms: db.collections.permissions })
+      .where(({ perms }) => eq(perms.sessionId, sessionId))
+      .where(({ perms }) => eq(perms.state, 'pending'))
+  )
+
+  const chunks = useLiveQuery(q =>
+    q.from({ chunks: db.collections.chunks })
+      .where(({ chunks }) => eq(chunks.promptTurnId, currentTurnId))
+  )
+
+  return (
+    <>
+      <TurnList turns={turns} />
+      <ChunkStream chunks={chunks} />
+      <PendingPermissions permissions={permissions} />
+    </>
+  )
+}
+```
+
+**This is stream-db in action.** `createFirelineDB` is a thin wrapper around `createStreamDB` from `@durable-streams/state` with Fireline's schema pre-wired. TanStack DB provides differential dataflow — queries update incrementally as new events arrive on the stream. No polling. No `setInterval`. No manual refetch.
+
+**What `@fireline/state` provides (today — unchanged):**
+
+| Collection | Entity type | Primary key | What it shows |
+|---|---|---|---|
+| `sessions` | `session` | `sessionId` | Active sessions with runtime key, state, timestamps |
+| `promptTurns` | `prompt_turn` | `promptTurnId` | Each prompt/response turn with state, stop reason |
+| `chunks` | `chunk` | `chunkId` | Streaming content blocks per turn |
+| `connections` | `connection` | `logicalConnectionId` | ACP connection lifecycle |
+| `permissions` | `permission` | `requestId` | Permission requests and resolutions |
+| `childSessionEdges` | `child_session_edge` | `edgeId` | Cross-agent call lineage |
+| `runtimeInstances` | `runtime_instance` | `instanceId` | Sandbox process lifecycle |
+| `pendingRequests` | `pending_request` | `requestId` | In-flight ACP requests |
+
+Plus derived collections: `createSessionTurnsCollection`, `createActiveTurnsCollection`, `createPendingPermissionsCollection`, `createTurnChunksCollection`, etc.
+
+---
+
+## 4. Declarative composition
+
+Resources, tools, topology, and secrets all compose **declaratively** in `SandboxConfig`. Nothing is imperative. Nothing requires a second API call after `provision`.
+
+```typescript
+import { topology, durableTrace, approvalGate, contextInjection, peer, budget } from '@fireline/client/core'
+
+const config: SandboxConfig = {
+  name: 'reviewer-agent',
+  agentCommand: ['npx', '-y', '@anthropic-ai/claude-code-acp'],
+
+  // TOPOLOGY — combinator chain interpreted by the conductor inside the sandbox
+  topology: topology(
+    durableTrace(),                                         // observe: log every effect
+    contextInjection([{ kind: 'workspace_file', path: '/workspace/README.md' }]),  // mapEffect: prepend context
+    approvalGate({ scope: 'tool_calls', timeoutMs: 60_000 }),  // suspend: require approval for tool calls
+    budget({ tokens: 500_000 }),                            // filter: hard budget cap
+    peer(['agent:slack-notifier']),                          // substitute: route peer calls
+  ),
+
+  // RESOURCES — what to mount inside the sandbox
+  resources: [
+    { source_ref: { kind: 'localPath', host_id: 'self', path: '~/projects/frontend' }, mount_path: '/workspace', read_only: true },
+    { source_ref: { kind: 'durableStreamBlob', stream: 'resources:tenant-demo', key: 'shared-config' }, mount_path: '/config' },
+    { source_ref: { kind: 'gitRepo', url: 'https://github.com/org/repo', ref: 'main', path: '/' }, mount_path: '/reference' },
+  ],
+
+  // ENVIRONMENT — injected into the agent process
+  envVars: {
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY!,
+    WORKSPACE_ROOT: '/workspace',
+  },
+
+  // LABELS — for operator lookup and pool reuse
+  labels: { team: 'frontend', env: 'dev' },
+}
+
+const handle = await sandbox.provision(config)
+```
+
+**Everything the sandbox needs to run is in one declarative object.** The server interprets the topology, mounts the resources, injects the env vars, and starts the agent. The client sends one POST and gets back a handle. This matches Ramp Inspect's insight: *"agents should never be limited by missing context or tools, but only by model intelligence itself"* — so we front-load all context into the config.
+
+---
+
+## 5. Use case mapping
+
+Seven external references, seven code examples. Each under 15 lines. Each touches at most 2 packages.
+
+### 5.1 Local agent dev loop ([Flamecast: local-agents](https://flamecast.mintlify.app/guides/local-agents))
 
 ```typescript
 import { Sandbox } from '@fireline/client'
 
 const sandbox = new Sandbox({ serverUrl: 'http://localhost:4440' })
-
-// provision — hand me a place where an agent can run
 const handle = await sandbox.provision({
-  name: 'my-agent',
-  agentCommand: ['npx', '-y', '@anthropic-ai/claude-agent-sdk'],
-  topology: topology(durableTrace(), approvalGate({ scope: 'tool_calls' })),
+  name: 'dev-agent',
+  agentCommand: ['node', 'agent.js'],
+  resources: [{ source_ref: { kind: 'localPath', host_id: 'self', path: '.' }, mount_path: '/workspace' }],
 })
 
-// execute — run a command inside it
-const result = await sandbox.execute(handle, 'ls -la /workspace')
-console.log(result) // stdout string
+// ACP session — standard SDK, no wrapper
+const conn = await acpConnect(handle.acp.url)
+const { sessionId } = await conn.newSession({ cwd: '/workspace' })
+await conn.prompt({ sessionId, prompt: [{ type: 'text', text: 'Review the README' }] })
+```
 
-// ACP sessions — SEPARATE PLANE, not on Sandbox
-import { ClientSideConnection, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
-const ws = new WebSocket(handle.acp.url)
-const connection = new ClientSideConnection(handler, createWebSocketStream(ws))
-await connection.initialize({ protocolVersion: PROTOCOL_VERSION, clientInfo: { name: 'my-app', version: '0.0.1' }, clientCapabilities: { fs: { readTextFile: false } } })
-const { sessionId } = await connection.newSession({ cwd: '/' })
-await connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'Hello' }] })
+### 5.2 Cloud deployment ([Flamecast: cloud-agents](https://flamecast.mintlify.app/guides/cloud-agents))
 
-// State observation — SEPARATE PLANE, not on Sandbox
+```typescript
+// Same code, different server URL. That's the whole migration.
+const sandbox = new Sandbox({ serverUrl: 'https://fireline.prod.internal:4440' })
+const handle = await sandbox.provision({
+  name: 'cloud-agent',
+  agentCommand: ['npx', '-y', '@anthropic-ai/claude-code-acp'],
+  provider: 'docker',  // or 'microsandbox' — server picks if omitted
+  resources: [{ source_ref: { kind: 'durableStreamBlob', stream: 'resources:tenant-prod', key: 'codebase' }, mount_path: '/workspace' }],
+})
+```
+
+### 5.3 Custom agent build ([Flamecast: build-your-own-agent](https://flamecast.mintlify.app/guides/build-your-own-agent))
+
+```typescript
+// Your agent implements ACP. Fireline provisions + manages it.
+const handle = await sandbox.provision({
+  name: 'my-custom-agent',
+  agentCommand: ['./my-agent', '--port', '9100'],
+  topology: topology(durableTrace(), approvalGate({ scope: 'all' })),
+})
+// That's it. Fireline handles ACP handshake, session management, durable tracing.
+```
+
+### 5.4 Slackbot integration ([Flamecast: slackbot](https://flamecast.mintlify.app/guides/slackbot))
+
+```typescript
+import { Sandbox } from '@fireline/client'
+
+const sandbox = new Sandbox({ serverUrl: process.env.FIRELINE_URL! })
+
+app.event('app_mention', async ({ event }) => {
+  const handle = await sandbox.provision({ name: `slack-${event.ts}`, agentCommand: ['claude-code-acp'] })
+  const conn = await acpConnect(handle.acp.url)
+  const { sessionId } = await conn.newSession({ cwd: '/' })
+  const response = await conn.prompt({ sessionId, prompt: [{ type: 'text', text: event.text }] })
+  await say(formatResponse(response))
+})
+```
+
+### 5.5 Webhook-driven orchestration ([Flamecast RFC: webhooks](https://flamecast.mintlify.app/rfcs/webhooks))
+
+```typescript
+import { Sandbox } from '@fireline/client'
 import { createFirelineDB } from '@fireline/state'
+
+const sandbox = new Sandbox({ serverUrl: process.env.FIRELINE_URL! })
+const handle = await sandbox.provision({ name: 'webhook-agent', agentCommand: [...] })
+
+// Subscribe to permission requests via the durable stream — NO POLLING
 const db = createFirelineDB({ stateStreamUrl: handle.state.url })
+await db.preload()
+db.collections.permissions.subscribe((perms) => {
+  for (const perm of perms.filter(p => p.state === 'pending')) {
+    // POST webhook to the client's callback URL
+    fetch(callbackUrl, { method: 'POST', body: JSON.stringify(perm) })
+  }
+})
 ```
 
-**Two methods.** `provision` and `execute`. Everything else is orthogonal:
-
-- **Sessions** → ACP plane via `handle.acp` (`ClientSideConnection` from `@agentclientprotocol/sdk`)
-- **State observation** → durable stream via `handle.state` (`@fireline/state`)
-- **Orchestration** → `wake(session_id)` is a separate primitive, not on Sandbox
-- **Listing / finding / admin** → operator concern, not the primitive interface (see §3)
-
----
-
-## 2. The Sandbox primitive
+### 5.6 Background agent ([Ramp: why-we-built-our-background-agent](https://builders.ramp.com/post/why-we-built-our-background-agent))
 
 ```typescript
-/**
- * The Sandbox primitive from Anthropic's managed-agent taxonomy.
- *
- * "Any executor configured once and called many times as a tool."
- *
- * Two methods: provision (create a sandbox) and execute (run a
- * command inside it). The returned SandboxHandle carries ACP and
- * state-stream endpoints so callers can reach the ACP plane (for
- * sessions) and the state plane (for durable stream observation)
- * without the Sandbox primitive knowing about either.
- *
- * This class is a thin HTTP client. It holds a server URL and
- * sends requests. It does not hold sandbox state, track sessions,
- * or manage connections. It is the primitive, not the management
- * surface.
- */
-class Sandbox {
-  constructor(opts: SandboxOptions)
+import { Sandbox } from '@fireline/client'
 
-  /**
-   * Provision a sandbox — hand me a place where an agent can run.
-   *
-   * Creates a sandbox on the server, waits for it to become ready,
-   * and returns a handle carrying the ACP and state-stream endpoints.
-   */
-  provision(config: SandboxConfig): Promise<SandboxHandle>
+const sandbox = new Sandbox({ serverUrl: 'https://fireline.prod.internal' })
 
-  /**
-   * Execute a command inside a provisioned sandbox.
-   *
-   * Provider-level exec — bypasses ACP. Useful for setup, health
-   * checks, and tool calls. Returns the stdout of the command.
-   */
-  execute(handle: SandboxHandle, input: string): Promise<string>
-}
-
-interface SandboxOptions {
-  /** Base URL of the Fireline server. */
-  readonly serverUrl: string
-
-  /** Optional bearer token. */
-  readonly token?: string
-
-  /** Startup timeout for polling sandbox readiness (default: 20s). */
-  readonly startupTimeoutMs?: number
-}
-
-interface SandboxHandle {
-  /** Unique sandbox identifier. */
-  readonly id: string
-
-  /** ACP WebSocket endpoint. Open a ClientSideConnection here for sessions. */
-  readonly acp: Endpoint
-
-  /** Durable state stream endpoint. Subscribe with @fireline/state. */
-  readonly state: Endpoint
-}
-
-interface SandboxConfig {
-  /** Human-readable name. */
-  name?: string
-
-  /** Agent binary + args to run inside the sandbox. */
-  agentCommand?: readonly string[]
-
-  /** OCI image for container/VM providers. Ignored by local subprocess. */
-  image?: string
-
-  /** Topology (combinator chain) for the conductor. */
-  topology?: Topology
-
-  /** Resources to mount inside the sandbox. */
-  resources?: readonly ResourceRef[]
-
-  /** Environment variables visible to the agent process. */
-  envVars?: Readonly<Record<string, string>>
-
-  /** Labels for operator-level lookup. Not used by the primitive. */
-  labels?: Readonly<Record<string, string>>
-
-  /** Explicit state stream name. Auto-generated if omitted. */
-  stateStream?: string
-
-  /** Provider hint. Auto-select if omitted. */
-  provider?: string
-}
+// Fire-and-forget: provision → prompt → walk away
+const handle = await sandbox.provision({
+  name: `inspect-${taskId}`,
+  agentCommand: ['claude-code-acp'],
+  resources: [{ source_ref: { kind: 'gitRepo', url: repoUrl, ref: branch, path: '/' }, mount_path: '/workspace' }],
+  labels: { task: taskId, user: userId },
+})
+const conn = await acpConnect(handle.acp.url)
+const { sessionId } = await conn.newSession({ cwd: '/workspace' })
+await conn.prompt({ sessionId, prompt: [{ type: 'text', text: taskDescription }] })
+// User monitors progress via @fireline/state in a dashboard — no blocking
 ```
 
-**That's the entire primitive surface.** Two methods, three types. The `Sandbox` class, `SandboxHandle`, and `SandboxConfig`.
-
-**Why `execute` returns `string`, not `ExecutionResult`:** the Anthropic primitive definition is `execute(name, input) → String`. The primitive is "call a tool, get a string back." A richer `ExecutionResult` with `exitCode`, `stderr`, `durationMs`, `timedOut` is an operator extension (see §3) — useful, but not the primitive contract. If a caller needs structured results, they use the operator extension's `executeDetailed()` method.
-
-**Why `SandboxHandle` carries `acp` + `state` endpoints:** these are how the caller reaches the two other planes (ACP for sessions, durable-streams for state) without the Sandbox primitive knowing about either. The Sandbox provisions a runtime; the handle tells you where to find it. No side channels. No leaky abstractions.
-
----
-
-## 3. Operator extensions — `SandboxAdmin`
-
-The primitive is two methods. But the browser harness, CLI tools, and operator dashboards need more: listing, finding, destroying, status-checking, health-probing. Those are **operator concerns**, not primitive concerns. They live on a separate interface:
+### 5.7 Reactive agent pattern (reactive UI observing agent work)
 
 ```typescript
-/**
- * Operator extensions for sandbox lifecycle management.
- *
- * NOT part of the Anthropic primitive surface. These methods are
- * for dev tools, browser harnesses, operator CLIs, and admin
- * dashboards. They hit the same server but expose the management
- * surface that the primitive deliberately excludes.
- */
-interface SandboxAdmin {
-  /** Look up a sandbox by id. */
-  get(id: string): Promise<SandboxDescriptor | null>
+import { createFirelineDB } from '@fireline/state'
+import { useLiveQuery } from '@tanstack/react-db'
 
-  /** List sandboxes, optionally filtered by labels. */
-  list(labels?: Readonly<Record<string, string>>): Promise<SandboxDescriptor[]>
-
-  /** Find a sandbox by labels, or provision one if none match. */
-  findOrCreate(config: SandboxConfig): Promise<SandboxHandle>
-
-  /** Destroy a sandbox. Idempotent. */
-  destroy(id: string): Promise<void>
-
-  /** Current lifecycle status. */
-  status(id: string): Promise<SandboxStatus>
-
-  /** Execute with full structured result (exitCode, stderr, etc.). */
-  executeDetailed(id: string, command: string, opts?: ExecuteOptions): Promise<ExecutionResult>
-
-  /** Server-level health check. */
-  healthCheck(): Promise<boolean>
+// The agent is already running. The UI just subscribes.
+function AgentMonitor({ stateUrl, sessionId }: Props) {
+  const db = useMemo(() => createFirelineDB({ stateStreamUrl: stateUrl }), [stateUrl])
+  const turns = useLiveQuery(q =>
+    q.from({ t: db.collections.promptTurns }).where(({ t }) => eq(t.sessionId, sessionId))
+  )
+  const chunks = useLiveQuery(q =>
+    q.from({ c: db.collections.chunks }).where(({ c }) => eq(c.promptTurnId, turns[turns.length - 1]?.promptTurnId))
+  )
+  return <StreamingView turns={turns} chunks={chunks} />
 }
-
-type SandboxStatus = 'creating' | 'ready' | 'busy' | 'idle' | 'stopped' | 'broken'
-
-interface SandboxDescriptor {
-  readonly id: string
-  readonly provider: string
-  readonly status: SandboxStatus
-  readonly acp: Endpoint
-  readonly state: Endpoint
-  readonly labels: Readonly<Record<string, string>>
-  readonly createdAtMs: number
-  readonly updatedAtMs: number
-}
-
-interface ExecuteOptions {
-  readonly timeout?: number
-  readonly env?: Readonly<Record<string, string>>
-}
-
-interface ExecutionResult {
-  readonly exitCode: number
-  readonly stdout: string
-  readonly stderr: string
-  readonly durationMs: number
-  readonly timedOut: boolean
-}
+// ZERO fetch calls. ZERO polling. The stream IS the API.
 ```
 
-The `Sandbox` class can optionally expose an `admin` accessor for callers that need management:
-
-```typescript
-const sandbox = new Sandbox({ serverUrl: 'http://localhost:4440' })
-const handle = await sandbox.provision(config)
-
-// Primitive path: execute via the primitive
-const output = await sandbox.execute(handle, 'echo hello')
-
-// Operator path: structured execute, status, destroy
-const result = await sandbox.admin.executeDetailed(handle.id, 'echo hello')
-const status = await sandbox.admin.status(handle.id)
-await sandbox.admin.destroy(handle.id)
-```
-
-This is the same split as `fs` in Node: `fs.readFile()` is the primitive; `fs.stat()`, `fs.readdir()`, `fs.chmod()` are operator extensions. Both exist; they're separated by intent.
+**Every example: ≤15 lines. At most 2 packages (`@fireline/client` + `@fireline/state` or `@agentclientprotocol/sdk`).** The common pattern: `new Sandbox(url)` → `sandbox.provision(config)` → either ACP for sessions or `@fireline/state` for observation. No third path.
 
 ---
 
-## 4. HTTP API mapping
-
-| Method | HTTP | Path | Body | Returns |
-|---|---|---|---|---|
-| **Primitive** | | | | |
-| `sandbox.provision(config)` | `POST` | `/v1/sandboxes` | `SandboxConfig` JSON | `SandboxDescriptor` → mapped to `SandboxHandle` |
-| `sandbox.execute(handle, input)` | `POST` | `/v1/sandboxes/{id}/execute` | `{ command: input }` | `{ stdout: string }` |
-| **Operator extensions** | | | | |
-| `admin.get(id)` | `GET` | `/v1/sandboxes/{id}` | — | `SandboxDescriptor` |
-| `admin.list(labels)` | `GET` | `/v1/sandboxes?label.k=v` | — | `SandboxDescriptor[]` |
-| `admin.findOrCreate(config)` | `POST` | `/v1/sandboxes/find-or-create` | `SandboxConfig` JSON | `SandboxDescriptor` |
-| `admin.destroy(id)` | `DELETE` | `/v1/sandboxes/{id}` | — | `void` |
-| `admin.status(id)` | `GET` | `/v1/sandboxes/{id}` | — | `.status` field |
-| `admin.executeDetailed(id, cmd)` | `POST` | `/v1/sandboxes/{id}/execute` | `{ command, timeout?, env? }` | `ExecutionResult` |
-| `admin.healthCheck()` | `GET` | `/healthz` | — | `boolean` |
-
-**ACP sessions and state observation do NOT go through this HTTP API.** They use `handle.acp.url` (WebSocket) and `handle.state.url` (HTTP+SSE) directly.
-
----
-
-## 5. What gets deleted from `packages/client/`
-
-| Current module | Disposition |
-|---|---|
-| `host.ts` (binary spawner) | **DELETED** |
-| `host/index.ts` (`Host` interface) | **DELETED** — `Host.provision` → `Sandbox.provision`; `Host.wake` → separate Orchestration primitive; `Host.status` → `SandboxAdmin.status`; `Host.stop` → `SandboxAdmin.destroy` |
-| `host-fireline/client.ts` | **REPLACED** by `Sandbox` class (same HTTP calls, narrower interface) |
-| `host-fireline/orchestrator.ts` | Orchestrator moves to standalone export (unchanged) |
-| `host-hosted-api/client.ts` | **DELETED** — `Sandbox` class works against any server URL |
-| `sandbox/index.ts` (old tool-execution interface) | **REPLACED** by `Sandbox.execute` |
-| `sandbox-local/` | **KEPT** as Node-only convenience |
-| `orchestration/` | **KEPT** — orchestration is a separate primitive |
-| `core/` | **KEPT** — pure types |
-| `catalog.ts` | **KEPT** |
-| `acp.ts` / `acp-core.ts` | **KEPT** — consumed by callers directly, not wrapped by Sandbox |
-| `topology.ts` | **KEPT** |
-
-**The `Sandbox` class replaces 4 modules with 1.** Net: ~800 lines deleted, ~150 lines added.
-
----
-
-## 6. What the browser-harness changes to
-
-**Before (current):**
-```typescript
-const host: Host = createFirelineHost({ controlPlaneUrl, sharedStateUrl })
-const handle = await host.provision({ agentCommand, metadata: { name: 'harness' } })
-const status = await host.status(handle)
-const outcome = await host.wake(handle)
-await host.stop(handle)
-
-const ws = new WebSocket('ws://localhost:5173/acp') // hardcoded proxy URL
-```
-
-**After:**
-```typescript
-const sandbox = new Sandbox({ serverUrl: '/cp' })
-const handle = await sandbox.provision({ name: 'harness', agentCommand })
-
-// ACP — from the handle, not hardcoded
-const ws = new WebSocket(handle.acp.url)
-const connection = new ClientSideConnection(handler, createWebSocketStream(ws))
-await connection.initialize(...)
-const { sessionId } = await connection.newSession({ cwd: '/' })
-
-// Operator extensions for the harness UI
-const status = await sandbox.admin.status(handle.id)
-await sandbox.admin.destroy(handle.id)
-```
-
-The browser harness is a dev tool — it uses `sandbox.admin` for status/destroy. But its core flow (provision → connect ACP → prompt) uses only the two primitive methods plus the ACP SDK directly.
-
----
-
-## 7. Comparison to Cased
-
-| Dimension | Cased | Fireline |
-|---|---|---|
-| **Primitive surface** | `create / execute / destroy` (3 methods) | `provision / execute` (2 methods). `destroy` is an operator extension, not the primitive. |
-| **Handle** | `Sandbox` object with id + state + labels | `SandboxHandle` with id + `acp` endpoint + `state` endpoint |
-| **Execution** | `sandbox.execute(cmd) → ExecutionResult` | `sandbox.execute(handle, input) → string` (primitive); `admin.executeDetailed(id, cmd) → ExecutionResult` (operator) |
-| **Sessions** | Not modeled | ACP plane via `handle.acp.url` — deliberate non-wrapping |
-| **Management** | On the `Sandbox` class: `find`, `get_or_create`, `destroy` | On `SandboxAdmin`: `get`, `list`, `findOrCreate`, `destroy`, `status` — separated from the primitive |
-| **Provider dispatch** | Client-side `SandboxManager` | Server-side `ProviderDispatcher` — client is provider-agnostic |
-| **Pooling** | Client-side `SandboxPool` | Server-side `PooledProvider`; client uses `findOrCreate` |
-
-**What we adopt:** the `provision`/`execute` pattern, the handle-as-return-value shape, label-based lookup, provider-agnostic client.
-
-**What we narrow:** Cased puts management methods (destroy, find, get_or_create) on the primary `Sandbox` class. We separate them into `SandboxAdmin` because the Anthropic primitive table says Sandbox is `provision + execute`, not `provision + execute + destroy + find + status`. The operator surface exists — it's just not the primitive.
-
----
-
-## 8. Migration plan
-
-### Phase M1 — Ship the `Sandbox` class alongside the old surface (1 day)
-
-Add `packages/client/src/sandbox-v2.ts` exporting `Sandbox` class + `SandboxAdmin` + types. Export via `@fireline/client/v2`:
-
-```typescript
-import { Sandbox } from '@fireline/client/v2'
-```
-
-The `Sandbox` class targets the existing `/v1/runtimes` endpoints (renamed `/v1/sandboxes` is a server-side change that happens later). Field mapping is a thin adapter: `POST /v1/runtimes` body stays the same, response `HostDescriptor` is mapped to `SandboxHandle`.
-
-**Zero server changes.** The v2 client is a 150-line adapter over the existing API.
-
-### Phase M2 — Rewire the browser harness (half day)
-
-`packages/browser-harness/src/app.tsx` switches from `createFirelineHost` to `new Sandbox(...)`. The harness uses `sandbox.provision()` for launch, `sandbox.admin.status()` / `sandbox.admin.destroy()` for the control buttons, and `new ClientSideConnection(...)` with `handle.acp.url` for the ACP session.
-
-### Phase M3 — Update tests (1 day)
-
-| Test file | Change |
-|---|---|
-| `test/host.test.ts` | Rewrite: `new Sandbox(...)` → `sandbox.provision()` → `sandbox.execute()` → `sandbox.admin.destroy()` |
-| `test/host-hosted-api.test.ts` | Merge into `host.test.ts` — `new Sandbox({ serverUrl: remote })` works against any server |
-| `test/sandbox-local.test.ts` | Unchanged |
-| `test/catalog.test.ts` | Unchanged |
-| `test/topology.test.ts` | Unchanged |
-| `test/acp.test.ts` | Unchanged |
-| `test/tier5-smoke.browser.test.ts` | Update to match M2's new harness shape |
-
-### Phase M4 — Delete the v1 surface (half day)
-
-Move `sandbox-v2.ts` to `sandbox-client.ts` (or `client.ts`). Delete: `host.ts`, `host/`, `host-fireline/`, `host-hosted-api/`, `sandbox/` (old tool-execution interface). Update `index.ts` exports. Remove `/v2` subpath after one release.
-
-### Phase M5 — Server-side endpoint rename (separate)
-
-After the Rust-side provider model Phase P6 renames endpoints to `/v1/sandboxes`, the TS `Sandbox` class switches path constants. One-line change.
-
-**Total: ~3 days across M1-M4.**
-
----
-
-## 9. Test strategy
-
-### New tests
-
-1. **`test/sandbox-client.test.ts`** — unit tests for the `Sandbox` class. Mock fetch: `provision()` → `POST /v1/runtimes` returns descriptor, `execute()` → `POST /v1/runtimes/{id}/execute` returns stdout. Verify the `SandboxHandle` carries correct `acp` + `state` endpoints. ~50 lines.
-
-2. **`test/sandbox-admin.test.ts`** — unit tests for operator extensions. Mock fetch: `get`, `list`, `destroy`, `status`, `executeDetailed`, `healthCheck`. ~80 lines.
-
-3. **`test/sandbox-integration.test.ts`** — integration test replacing `host.test.ts`. Spawns real binaries. Full lifecycle: `sandbox.provision()` → `sandbox.execute('echo hello')` → `new ClientSideConnection(handle.acp.url)` → `connection.newSession()` → `connection.prompt(...)` → `sandbox.admin.destroy(handle.id)`. ~120 lines.
-
-### What this proves
-
-- `sandbox-client.test.ts` → primitive works against mock (fast, no cargo)
-- `sandbox-admin.test.ts` → operator extensions work (fast, no cargo)
-- `sandbox-integration.test.ts` → full stack end-to-end (slow, needs cargo build)
-
-Every test except the integration test runs without Rust binaries. This is a material improvement: today `test/host.test.ts` requires `cargo build` in `beforeAll`.
-
----
-
-## Appendix: type mapping — old → new
-
-| Old type | New type | Notes |
-|---|---|---|
-| `Host` interface (4 methods) | `Sandbox` class (2 methods) | `provision` stays; `wake/status/stop` move to Orchestration or SandboxAdmin |
-| `HostHandle` | `SandboxHandle` | Same fields minus `kind` (provider-agnostic at the client) |
-| `HostStatus` (discriminated union) | `SandboxStatus` (string enum on admin) | Slimmed — the primitive doesn't expose status |
-| `WakeOutcome` | deleted | Wake is Orchestration, not Sandbox |
-| `ProvisionSpec` | `SandboxConfig` | Renamed, same fields |
-| `FirelineHostOptions` | `SandboxOptions` | `controlPlaneUrl` → `serverUrl`; `sharedStateUrl` → deleted (server-side) |
-| `FirelineClient` (proposed in prior revision) | deleted | Was a management surface; management moved to `SandboxAdmin` |
-| `createFirelineHost()` | `new Sandbox(...)` | Class, not factory function |
-| `createHostedApiHost()` | `new Sandbox({ serverUrl: remoteUrl })` | Same class, different URL |
-| `Sandbox` interface (old, tool execution) | merged into `Sandbox.execute()` | Structured tool calls → `admin.executeDetailed()` |
-
-## Appendix: module layout — old → new
+## 6. What gets deleted / what stays / what's new
 
 ```
 packages/client/src/                    packages/client/src/
-├── host.ts              DELETED        ├── sandbox-client.ts   NEW (Sandbox class + SandboxAdmin)
-├── host/                DELETED        ├── sandbox-types.ts    NEW (SandboxConfig, SandboxHandle, etc.)
-├── host-fireline/       DELETED        │
+├── host.ts              DELETED        ├── sandbox.ts          NEW (Sandbox class — 2 methods)
+├── host/                DELETED        ├── admin.ts            NEW (SandboxAdmin — operator extensions)
+├── host-fireline/       DELETED        ├── types.ts            NEW (SandboxConfig, SandboxHandle, etc.)
 ├── host-hosted-api/     DELETED        │
 ├── sandbox/             MERGED         │
 │                                       │
-├── core/                KEPT           ├── core/               KEPT
-├── orchestration/       KEPT           ├── orchestration/      KEPT
-├── sandbox-local/       KEPT           ├── sandbox-local/      KEPT
+├── core/                KEPT           ├── core/               KEPT (combinators, ResourceRef, etc.)
+├── orchestration/       KEPT           ├── orchestration/      KEPT (Orchestrator, whileLoopOrchestrator)
+├── sandbox-local/       KEPT           ├── sandbox-local/      KEPT (Node subprocess for tools)
 ├── catalog.ts           KEPT           ├── catalog.ts          KEPT
 ├── acp.ts               KEPT           ├── acp.ts              KEPT
 ├── acp-core.ts          KEPT           ├── acp-core.ts         KEPT
 ├── acp.browser.ts       KEPT           ├── acp.browser.ts      KEPT
-├── browser.ts           KEPT           ├── browser.ts          KEPT
 ├── topology.ts          KEPT           ├── topology.ts         KEPT
 └── index.ts             UPDATED        └── index.ts            UPDATED
+
+packages/state/src/                     packages/state/src/
+└── (unchanged)                         └── (unchanged)
 ```
 
-## Appendix: why two methods, not three
+`@fireline/state` is untouched. It already does the right thing: stream-db + TanStack DB live queries over the durable stream. The redesign just makes the composition explicit: `handle.state.url` → `createFirelineDB({ stateStreamUrl })` → `useLiveQuery(...)`.
 
-Cased's `Sandbox` has three core methods: `create`, `execute`, `destroy`. The Anthropic primitive table has two: `provision`, `execute`. The difference is `destroy`.
+---
 
-We follow Anthropic: `destroy` is an operator concern, not a primitive concern. The primitive's contract is *"configure once, call many times."* Cleanup is the operator's job — they decide when a sandbox is no longer needed, they call `admin.destroy()`, and the server handles teardown. The primitive user shouldn't have to think about lifecycle cleanup; that's what the Orchestration primitive and the operator surface are for.
+## 7. Migration plan
 
-If the user forgets to destroy, the server's idle-timeout or TTL policy handles it. The primitive is stateless; the management surface is not. Keeping them separate is the whole point.
+### M1 — Ship the `Sandbox` class alongside old surface (1 day)
+
+Add `sandbox.ts`, `admin.ts`, `types.ts`. Export via `@fireline/client/v2`. The `Sandbox` class targets the existing `/v1/runtimes` endpoints with field mapping. Zero server changes.
+
+### M2 — Rewire browser harness (half day)
+
+Replace `createFirelineHost` with `new Sandbox(...)`. The harness's `SessionHarness` component uses `sandbox.provision()` for launch, `sandbox.admin.destroy()` for cleanup, and `@agentclientprotocol/sdk` directly for ACP sessions (which it already does today — the only change is where the ACP URL comes from: `handle.acp.url` instead of a hardcoded proxy constant).
+
+### M3 — Update tests (1 day)
+
+Rewrite `host.test.ts` to use the `Sandbox` class. Merge `host-hosted-api.test.ts` (same class, different URL). Add `sandbox.test.ts` (unit, mock fetch) and `sandbox-integration.test.ts` (integration, real binaries).
+
+### M4 — Delete old surface (half day)
+
+Move v2 exports to the package root. Delete `host.ts`, `host/`, `host-fireline/`, `host-hosted-api/`, `sandbox/` (old). Update `index.ts`.
+
+### M5 — Server-side endpoint rename `/v1/runtimes` → `/v1/sandboxes` (separate)
+
+One-line path constant change in `sandbox.ts` after the Rust rename.
+
+**Total: ~3 days.**
+
+---
+
+## 8. Composition with other proposals
+
+| Proposal | How it composes with the client API |
+|---|---|
+| **Cross-host discovery** ([`./cross-host-discovery.md`](./cross-host-discovery.md)) | A `RemoteApiProvider` reads the `hosts:tenant-<id>` stream to discover sandbox servers. The client doesn't change — `new Sandbox({ serverUrl: discoveredUrl })` works against any server. |
+| **Resource discovery** ([`./resource-discovery.md`](./resource-discovery.md)) | `SandboxConfig.resources` carries `DurableStreamBlob` and `StreamFs` refs. The server's provider resolves them at provision time. The client sends declarative intent; the server does the fetching. |
+| **Secrets injection** ([`./deployment-and-remote-handoff.md`](./deployment-and-remote-handoff.md) §5) | `SandboxConfig.envVars` carries secret values. A future `SecretsInjectionComponent` (a Harness combinator) strips real secrets and replaces them with placeholders at the conductor layer. The client sends secrets in the config; the combinator decides what the agent actually sees. |
+| **Stream-FS** ([`./stream-fs-spike.md`](./stream-fs-spike.md)) | `ResourceRef { kind: 'streamFs', source_ref, revision, mode }` in `SandboxConfig.resources`. The server's `DurableStreamMounter` resolves the snapshot. From the client's perspective, it's just another `ResourceRef` variant. |
+| **Sandbox provider model** ([`./sandbox-provider-model.md`](./sandbox-provider-model.md)) | The `Sandbox` class is the TS client for the Rust `ProviderDispatcher`. `provision()` → `POST /v1/sandboxes` → `ProviderDispatcher::provision()` → whichever `SandboxProvider` impl (Local, Docker, Microsandbox, Remote) the server is configured with. Provider selection is server-side, invisible to the client. |
+| **TLA verification** (`verification/spec/`) | The primitives the client exposes are the ones the TLA spec checks. `sandbox.provision()` exercises `ProvisionReturnsReachableRuntime`. ACP `connection.newSession()` exercises `SessionDurableAcrossRuntimeDeath`. The stream observation layer exercises `SessionAppendOnly`. The client API is the user-facing projection of formally-verified invariants. |
+
+---
+
+## Appendix: the operator surface — `SandboxAdmin`
+
+The primitive is two methods. Operators, dev tools, and dashboards need more. Those live on `SandboxAdmin`:
+
+```typescript
+interface SandboxAdmin {
+  get(id: string): Promise<SandboxDescriptor | null>
+  list(labels?: Record<string, string>): Promise<SandboxDescriptor[]>
+  findOrCreate(config: SandboxConfig): Promise<SandboxHandle>
+  destroy(id: string): Promise<void>
+  status(id: string): Promise<SandboxStatus>
+  executeDetailed(id: string, command: string, opts?: ExecuteOptions): Promise<ExecutionResult>
+  healthCheck(): Promise<boolean>
+}
+
+// Accessed via sandbox.admin
+const sandbox = new Sandbox({ serverUrl })
+await sandbox.admin.destroy(handle.id)
+const all = await sandbox.admin.list({ team: 'frontend' })
+```
+
+This is a separate interface, not the primitive. The browser harness uses it. The CLI uses it. Agent code does not.
+
+## Appendix: why `@fireline/state` stays separate
+
+`@fireline/state` is a **read-only reactive view** over a durable stream. It has zero knowledge of sandboxes, provision, or lifecycle. Its input is a URL; its output is TanStack DB collections. That's a fundamentally different concern from `@fireline/client` (which sends HTTP requests to a server).
+
+Merging them would force every state-observation consumer to pull in the sandbox lifecycle code, and every sandbox-lifecycle caller to pull in TanStack DB. Neither dependency makes sense for the other's use case. The two packages compose through `SandboxHandle.state.url` — the control plane gives you the endpoint, the data plane subscribes to it.
+
+This is the same split as Ramp Inspect's architecture: *"the API creates sessions; a separate Durable Object holds the state; clients observe the state reactively."* In our case: `@fireline/client` creates sandboxes; `@fireline/state` observes the stream. The handle is the join point.
