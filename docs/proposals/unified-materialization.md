@@ -1,412 +1,177 @@
-# Unified Materialization for Durable-Streams Projections
+# Unified Materialization for Fireline Session Projections
 
-## §1. The Current State
+## TL;DR
 
-Fireline currently has four files participating in durable-streams materialization:
+Fireline now has one explicit projection contract for durable-streams-backed
+read models:
 
-- `crates/fireline-session/src/state_materializer.rs`
-- `crates/fireline-session/src/session_index.rs`
-- `crates/fireline-session/src/host_index.rs`
-- `crates/fireline-session/src/active_turn_index.rs`
+- `crates/fireline-session/src/projection.rs` defines the shared
+  `StateEnvelope`, `StateHeaders`, `ChangeOperation`, `ControlKind`, and
+  `StreamProjection` trait.
+- `crates/fireline-session/src/state_materializer.rs` owns the single
+  subscribe -> replay -> live-tail loop and fans decoded envelopes out to
+  `Vec<Arc<dyn StreamProjection>>`.
+- `SessionIndex`, `HostIndex`, and `ActiveTurnIndex` now implement
+  `StreamProjection::apply()` directly instead of each carrying their own
+  private envelope model and projection interface.
 
-The first important clarification is that these are not four independent stream readers anymore. `state_materializer.rs` already owns the single subscribe/replay/live-tail loop. The other three files are projection implementations layered on top of it.
+This keeps one stream reader per state stream, one protocol model for the
+reader side, and one trait for in-memory projections.
 
-That means the current duplication is subtler than "four separate subscribers":
+## Problem
 
-- `StateMaterializer` owns transport concerns: connect, replay from beginning, live-tail, `preload()`, JSON-array chunk parsing, control-message classification, and fanout to projections.
-- `SessionIndex`, `HostIndex`, and `ActiveTurnIndex` each re-implement their own event routing, operation matching, row deserialization, delete semantics, and reset behavior.
-- `ActiveTurnIndex` also mixes two concerns: projected state and waiter coordination.
-- `trace.rs` and `state_projector.rs` define their own local `StateEnvelope` shapes on the write side instead of sharing the read-side protocol model.
+Before this change, Fireline already had a shared `StateMaterializer`, but the
+abstraction stopped halfway.
 
-So the real problem is not that Fireline has no abstraction. It already has one. The problem is that the abstraction stops halfway:
+- `state_materializer.rs` owned transport concerns: connect, replay from the
+  beginning, live-tail, chunk parsing, and fanout.
+- `session_index.rs`, `host_index.rs`, and `active_turn_index.rs` each
+  reimplemented their own state-envelope handling, operation matching, row
+  deserialization, delete semantics, and reset logic.
+- The projection trait itself lived inside `state_materializer.rs`, which made
+  the transport layer the de facto owner of the projection contract.
 
-- transport lifecycle is unified
-- projected state shape is not
-- protocol envelope types are not shared
-- waiter/read-notification behavior is embedded inside a specific projection
-- write-side and read-side protocol modeling can drift independently
+That meant new projections kept copying the same pattern:
 
-There is also some naming drift:
+1. Match on entity type.
+2. Match on operation.
+3. Deserialize the row.
+4. Mutate local maps.
+5. Clear local state on `reset`.
 
-- `StateMaterializer` is really a projection runtime, not just a decoder
-- `StateProjection` is async and state-owning, which makes each projection carry its own locking strategy
-- the "index" types are really materialized read models
+The code worked, but the shared projection boundary was implicit rather than
+obvious.
 
-Today this yields a design that works, but forces every new projection to copy the same pattern:
+## Implemented Design
 
-1. Define internal `HashMap` state behind `Arc<RwLock<_>>`.
-2. Match on `entity_type`.
-3. Match again on `headers.operation`.
-4. Deserialize rows ad hoc.
-5. Implement `reset()` by clearing local maps.
-6. Add any projection-specific signaling out of band.
+### 1. Shared protocol model in `projection.rs`
 
-That is why the code feels fragmented even though the subscriber loop is already centralized.
-
-## §2. The Abstraction
-
-The next step should not be "add another generic materializer." It should be to formalize the one we already have around a typed projection trait:
+`projection.rs` now defines the reader-side protocol model that Fireline
+materializers consume:
 
 ```rust
-pub trait StreamProjection<S>: Send + Sync + 'static {
-    fn name(&self) -> &'static str;
-    fn initial_state(&self) -> S;
-    fn project(&self, state: &mut S, event: &StateEvent) -> anyhow::Result<()>;
+pub trait StreamProjection: Send + Sync {
+    fn apply(&self, envelope: &StateEnvelope) -> Result<()>;
 
-    fn reset(&self, state: &mut S) -> anyhow::Result<()> {
-        *state = self.initial_state();
+    fn reset(&self) -> Result<()> {
         Ok(())
     }
 }
 ```
 
-With supporting shared protocol types:
-
-```rust
-pub enum StateEvent {
-    Change(StateChange),
-    Control(StateControl),
-}
-
-pub struct StateChange {
-    pub entity_type: String,
-    pub key: String,
-    pub value: Option<serde_json::Value>,
-    pub old_value: Option<serde_json::Value>,
-    pub headers: ChangeHeaders,
-}
-
-pub struct ChangeHeaders {
-    pub operation: Operation,
-    pub txid: Option<String>,
-    pub timestamp: Option<String>,
-}
-
-pub struct StateControl {
-    pub control: ControlKind,
-    pub offset: Option<String>,
-}
-```
-
-And a shared runtime:
-
-```rust
-pub struct ProjectionRuntime {
-    projections: Vec<Arc<dyn ErasedProjection>>,
-}
-```
-
-The key design choice is that `project()` should mutate `&mut S` synchronously. The current `StateProjection` trait is async because each index owns its own locks. That pushes synchronization down into every projection and scatters lifecycle concerns across the codebase. A unified materialization layer should invert that:
-
-- the runtime owns stream transport and replay lifecycle
-- the runtime owns synchronization around projected state
-- the projection is just a pure-ish event-to-state mutator
-
-In practice the reusable building block becomes:
-
-```rust
-pub struct MaterializedProjection<P, S> {
-    projection: P,
-    state: Arc<tokio::sync::RwLock<S>>,
-}
-```
-
-Each concrete read model then becomes a typed wrapper:
-
-- `SessionIndex = MaterializedProjection<SessionProjection, SessionState>`
-- `HostIndex = MaterializedProjection<HostProjection, HostState>`
-- `ActiveTurnIndex = MaterializedProjection<ActiveTurnProjection, ActiveTurnState>`
-
-This preserves the current one-reader fanout topology while removing the repeated envelope handling logic.
-
-### One `connect()` + `preload()` pattern
-
-The current `StateMaterializerTask::preload()` behavior is the correct nucleus. Keep that pattern, but make it the public runtime contract:
-
-- `connect(url)` starts one durable-streams reader for one stream
-- `preload()` waits until the runtime reaches the live edge
-- `snapshot()` reads the current projected state
-- `abort()` stops the reader task
-
-That gives every projection the same lifecycle semantics without every projection needing its own transport wrapper.
-
-### Where `ActiveTurnIndex` waiters belong
-
-`ActiveTurnIndex` is the one projection that is not just "state plus query methods." It also contains waiter coordination. That should move out of the core projection state.
-
-The clean split is:
-
-- `ActiveTurnProjection` owns only `ActiveTurnState`
-- `ActiveTurnLookup` or `ActiveTurnWaiters` layers notifications on top of state updates
-
-Waiters are not durable state. They are runtime-local read helpers. Treating them as part of the projection itself is what makes `ActiveTurnIndex` look structurally different from the others.
-
-## §3. Alignment with `STATE-PROTOCOL`
-
-Fireline is broadly aligned with the upstream state protocol, but only with the minimal subset.
-
-What is correct today:
-
-- `state_materializer.rs` expects `application/json` chunks to arrive as JSON arrays. That matches `PROTOCOL.md` section 7.1, which requires JSON-mode GET responses to return a JSON array of messages.
-- change events use the correct core shape: `type`, `key`, `headers.operation`, `value`
-- control events use the correct core shape: `headers.control`, optionally `headers.offset`
-- `trace.rs`/`state_projector.rs` emit ordinary change messages rather than inventing a Fireline-specific wrapper
-
-Where Fireline drifts:
-
-1. The read model drops optional protocol fields.
-
-`RawStateEnvelope` and `RawStateHeaders` only model:
-
-- `type`
-- `key`
-- `value`
-- `headers.operation`
-
-The upstream protocol also allows:
-
-- `old_value`
-- `headers.txid`
-- `headers.timestamp`
-
-Dropping those fields does not make current events invalid, but it means Fireline cannot preserve or exploit protocol features that the spec explicitly reserves.
-
-2. `reset` is only half implemented.
-
-The protocol says a `reset` control message tells clients to clear materialized state and restart from the indicated offset. Fireline clears projections, but it does not restart from `headers.offset`. It continues with the existing live reader. That is functional drift, not just unused metadata.
-
-3. Snapshot controls are treated as comments.
-
-`snapshot-start` and `snapshot-end` are logged and ignored. That is not a protocol violation, but it means `preload()` has no notion of "consistent snapshot boundary." It only knows "reader reached `up_to_date` once."
-
-4. Fireline has no shared protocol type across write and read paths.
-
-The same envelope shape is modeled independently in:
-
-- `fireline-session/src/state_materializer.rs`
-- `fireline-harness/src/trace.rs`
-- `fireline-harness/src/state_projector.rs`
-
-That is the biggest protocol-maintenance risk in the current design.
-
-### Recommendation
-
-Introduce one shared `StateEvent` model in `fireline-session` and make both reader-side and writer-side code depend on it. `trace.rs` should emit that type. `state_materializer.rs` should parse that type. The protocol should exist once in code.
-
-## §4. Alignment with durable-streams `client-rust`
-
-Fireline is using the Rust client correctly in the narrow sense, but not completely in the operational sense.
-
-### What is already good
-
-- `StateMaterializer` uses the official client rather than hand-rolling HTTP/SSE.
-- It reads from `Offset::Beginning`, which is correct for rebuilding in-memory state from the authoritative stream.
-- It uses live tailing after replay, which matches the intended catch-up then tail model.
-- The writer side uses `Producer.append_json()` and `flush()` for the lifecycle-sensitive helper writes.
-
-### What is missing or underused
-
-1. No checkpoint/resume strategy.
-
-The client API is built around saving `chunk.next_offset` and resuming from it later. Fireline always starts from `Offset::Beginning`. That is acceptable for small streams and runtime-local caches, but it is still the simplest possible usage of the client.
-
-2. No explicit reconnection policy above the iterator.
-
-The upstream iterator already handles a useful amount of transport behavior:
-
-- SSE fallback to long-poll when SSE is unsupported
-- cursor tracking
-- SSE reconnect by re-establishing the stream on the next call
-
-Fireline benefits from that, but its outer loop still treats retryable errors as "immediately call `next_chunk()` again" with no backoff, no rebuild, and no escalation path for repeated transient failure. That is thin error handling, not a full materialization runtime policy.
-
-3. `LiveMode::Sse` is narrower than the documented happy path.
-
-The client README shows `LiveMode::Auto` as the normal consumer surface. Fireline hard-codes `LiveMode::Sse`. The iterator does have fallback behavior, so this is not catastrophic, but `Auto` better expresses intent: "prefer SSE, but use the supported live mode."
-
-4. No client configuration surface.
-
-`Client::builder()` supports:
-
-- default headers
-- dynamic header providers
-- timeout configuration
-- retry configuration
-
-`StateMaterializer` uses `Client::new()` directly. That means auth headers, request tuning, and future transport policy all live outside the abstraction.
-
-5. Retry handling is incomplete for protocol-level recovery.
-
-`OffsetGone`, auth failures, and repeated 5xx/429 conditions are not surfaced as materializer states with recovery policy. They are just loop outcomes. A real projection runtime should expose states like:
-
-- replaying
-- live
-- degraded
-- reset-required
-- failed
-
-### Recommendation
-
-Keep using the official client, but wrap it more deliberately:
-
-- use `Client::builder()` and inject headers/timeouts explicitly
-- prefer `LiveMode::Auto`
-- persist optional checkpoints when replay cost becomes non-trivial
-- add bounded backoff and health state around retryable failures
-- treat `reset`/`OffsetGone` as first-class recovery paths, not generic errors
-
-## §5. `trace.rs` Instrumentation
-
-`crates/fireline-harness/src/trace.rs` is mostly emitting valid `STATE-PROTOCOL` change messages.
-
-That is true for:
-
-- `emit_host_spec_persisted`
-- `emit_host_endpoints_persisted`
-- the `StateProjector`-derived changes forwarded by `DurableStreamTracer::write_event`
-
-The common emitted shape is:
-
-```json
-{
-  "type": "...",
-  "key": "...",
-  "headers": { "operation": "insert|update|delete" },
-  "value": { ... }
-}
-```
-
-That is valid protocol shape for change events.
-
-The divergences are these:
-
-1. The implementation only targets the minimal subset.
-
-It never emits:
-
-- `old_value`
-- `headers.txid`
-- `headers.timestamp`
-
-That is acceptable today, but it means the code should not claim to model the full protocol.
-
-2. The protocol model is duplicated.
-
-`trace.rs` has its own `StateEnvelope<T>`. `state_projector.rs` has another. `state_materializer.rs` has a read-side `RawStateEnvelope`. This is the main source of future drift.
-
-3. Write durability semantics are uneven.
-
-`emit_host_instance_started`, `emit_host_instance_stopped`, `emit_host_spec_persisted`, and `emit_host_endpoints_persisted` flush explicitly. The ordinary `write_event()` path appends without flushing each event. That is a reasonable batching choice, but it means "format correctness" and "durable visibility timing" are not the same property.
-
-4. Fireline uses semantic operation labels inconsistently.
-
-`runtime_spec` is always emitted as `insert`, and `runtime_endpoints` is always emitted as `update`. Those choices may be operationally harmless, but they are domain semantics layered on the protocol, not protocol requirements. The unified abstraction should make those policy choices explicit.
-
-### Recommendation
-
-Move all change-envelope construction behind a shared helper, for example:
-
-```rust
-state::change("runtime_endpoints", key, Operation::Update, value)
-state::control(ControlKind::Reset, Some(offset))
-```
-
-Then `trace.rs` stops being a second protocol definition.
-
-## §6. Migration Plan
-
-The migration should be incremental and keep the existing one-reader topology intact.
-
-### Phase 1: Normalize protocol types
-
-Create one shared state-protocol module in `fireline-session`:
-
-- `StateEvent`
-- `StateChange`
-- `StateControl`
-- `Operation`
+The same module also defines the envelope types:
+
+- `StateEnvelope`
+- `StateHeaders`
+- `ChangeOperation`
 - `ControlKind`
 
-Update:
+This is the single reader-side shape that projections operate on.
 
-- `state_materializer.rs` to parse that model
-- `trace.rs` to emit that model
-- `state_projector.rs` to construct that model
+### 2. `StateMaterializer` stays the transport/runtime
 
-This is the highest-leverage cleanup because it removes write/read drift.
+`StateMaterializer` still owns:
 
-### Phase 2: Replace `StateProjection` with typed `StreamProjection<S>`
+- building the durable-streams reader
+- replaying from `Offset::Beginning`
+- following the live tail
+- parsing JSON-array chunks
+- decoding each item into `StateEnvelope`
+- classifying change vs control messages
+- broadcasting each decoded envelope to all registered projections
 
-Introduce:
+That part of the design was already correct, so it stayed in place. The change
+was to make its projection dependency explicit and reusable instead of private
+to the file.
 
-- `StreamProjection<S>`
-- `MaterializedProjection<P, S>`
-- `ProjectionRuntime`
+### 3. Indexes are now plain projections
 
-Keep `StateMaterializerTask::preload()` behavior, but rename the surrounding types to reflect what they really are.
+`SessionIndex`, `HostIndex`, and `ActiveTurnIndex` each now implement
+`StreamProjection` directly.
 
-### Phase 3: Port the current indices
+Each projection keeps its own narrow in-memory state and only owns the logic
+specific to its entity families:
 
-Port each read model one by one:
+- `SessionIndex` projects `session` and `runtime_spec`
+- `HostIndex` projects `runtime_spec`, `runtime_instance`, and
+  `runtime_endpoints`
+- `ActiveTurnIndex` projects `prompt_turn`
 
-1. `SessionIndex`
-2. `HostIndex`
-3. `ActiveTurnIndex`
+`ActiveTurnIndex` still includes runtime-local waiter coordination on top of
+the projection state. That is acceptable for now because the durable-state
+application path is still unified through `StreamProjection::apply()`.
 
-Each port should:
+## Alignment with Durable Streams `STATE-PROTOCOL`
 
-- move deserialization into `project(&mut S, event)`
-- move shared reset behavior to `initial_state()`
-- remove per-projection `Arc<RwLock<_>>` ownership from the projection logic
+The shared `StateEnvelope` matches the upstream protocol fields Fireline needs
+from `packages/state/STATE-PROTOCOL.md`:
 
-### Phase 4: Pull waiter logic out of projected state
+- change messages:
+  - `type`
+  - `key`
+  - `value`
+  - `old_value`
+  - `headers.operation`
+  - `headers.txid`
+  - `headers.timestamp`
+- control messages:
+  - `headers.control`
+  - `headers.offset`
 
-Split `ActiveTurnIndex` into:
+The implementation now explicitly models those optional fields instead of
+dropping them at deserialize time. That keeps Fireline aligned with the wire
+format even when a given projection only uses `type`, `key`, `value`, and
+`headers.operation` today.
 
-- `ActiveTurnProjection`
-- `ActiveTurnNotifier` or `ActiveTurnLookup`
+`StateMaterializer` handles the protocol like this:
 
-That keeps the projection abstraction clean and prevents future indices from embedding runtime-local signaling into the materialized state layer.
+- change messages are fanned out to every projection via `apply()`
+- `snapshot-start` and `snapshot-end` are observed passively
+- `reset` clears each projection through `StreamProjection::reset()`
 
-### Phase 5: Add runtime health and recovery policy
+One important limit remains: Fireline observes `headers.offset` on reset but
+does not yet rebuild the reader from that offset. This proposal only unifies
+the projection abstraction; it does not add reset-seek recovery semantics.
 
-Extend the projection runtime with explicit lifecycle states:
+## Migration from the Previous Layout
 
-- replaying
-- live
-- degraded
-- failed
+The old structure looked like this:
 
-Handle:
+- `state_materializer.rs`: transport + private trait + private envelope types
+- `session_index.rs`: local projection logic
+- `host_index.rs`: local projection logic
+- `active_turn_index.rs`: local projection logic + waiters
 
-- retryable transport errors with bounded backoff
-- `reset` by restarting from the indicated offset
-- `OffsetGone` as a forced rebuild case
+The new structure is:
 
-### Phase 6: Delete the ad hoc names
+- `projection.rs`: shared protocol types + shared `StreamProjection` trait
+- `state_materializer.rs`: transport and fanout only
+- `session_index.rs`: session projection
+- `host_index.rs`: host projection
+- `active_turn_index.rs`: active-turn projection plus waiters
 
-After the typed abstraction is in place:
+This is a smaller refactor than a fully generic materialization framework, but
+it is the correct cut for the codebase today:
 
-- rename `StateMaterializer` to `ProjectionRuntime` or `StreamMaterializer`
-- rename `StateProjection` to `StreamProjection`
-- keep `SessionIndex`/`HostIndex` as public read-model names, but make them wrappers over the shared runtime
+- transport stays centralized
+- protocol modeling is shared
+- projection behavior is explicit
+- each read model keeps only its entity-specific logic
 
-## Recommendation
+## Why This Shape
 
-Fireline should not build a brand-new materializer system. It should finish the one it already started.
+The main reason not to over-generalize further is that Fireline already has a
+working one-reader materializer runtime. The missing piece was not another
+runtime abstraction; it was a shared contract that made the projections look
+like projections.
 
-The correct end state is:
+This implementation is intentionally conservative:
 
-- one shared durable-streams reader per stream
-- one shared protocol model used by readers and writers
-- one typed projection trait for event-to-state mutation
-- one shared `connect()` + `preload()` lifecycle
-- thin, typed read models on top
+- no new generic state container
+- no erased typed-state framework
+- no writer-side protocol unification in this commit
+- no reset offset re-seek behavior
 
-That preserves the good part of the current architecture, namely the single replay/live-tail loop, while removing the duplicated projection boilerplate and the write/read protocol drift that will otherwise keep recurring.
-
-## References
-
-- Durable Streams base protocol: <https://github.com/durable-streams/durable-streams/blob/main/PROTOCOL.md>
-- Durable Streams state protocol: <https://github.com/durable-streams/durable-streams/blob/main/packages/state/STATE-PROTOCOL.md>
-- Durable Streams Rust client: <https://github.com/durable-streams/durable-streams/tree/main/packages/client-rust>
+Those can be layered later if they become necessary. The immediate win is that
+new in-memory indexes now have one obvious way to plug into the durable state
+stream.
