@@ -2,11 +2,11 @@
 
 > Status: gap-analysis + follow-on design
 > Date: 2026-04-12
-> Scope: `packages/fireline/` production-readiness work after the shipped `run` command
+> Scope: `packages/fireline/` production-readiness work after the shipped `run` command, reshaped against the tiered deploy model in [`hosted-deploy-surface-decision.md`](./hosted-deploy-surface-decision.md) (`77e007d`)
 
-This is a small gap document, not a full subsystem execution plan. The base CLI already exists in `packages/fireline/`. The remaining work is to close the production gap: remote deploy, packaging, interactive REPL, and always-on deployment wiring.
+This is a small gap document, not a full subsystem execution plan. The base CLI already exists in `packages/fireline/`. The remaining work is to close the production gap around OCI packaging, target-native deployment ergonomics, Tier C spec publishing, and the small operator conveniences that still sit behind stubs.
 
-The hosted target for `fireline deploy` is described by [hosted-fireline-deployment.md](./hosted-fireline-deployment.md). This doc focuses on the CLI-side closing work needed to target that hosted instance cleanly.
+The hosted runtime model lives in [hosted-fireline-deployment.md](./hosted-fireline-deployment.md). This doc is only about the CLI surface needed to target that model cleanly.
 
 ## 1. Current State
 
@@ -25,112 +25,134 @@ The hosted target for `fireline deploy` is described by [hosted-fireline-deploym
 
 What is notably not shipped:
 
-- no `deploy` subcommand
+- no `build` subcommand
+- no `deploy` thin wrapper for target-native tooling
+- no `push` command for Tier C spec-stream publishing
 - no published platform binary packages
-- `--repl` is a stub that only prints a message
-- no hosted-instance discovery or auth story
-- no always-on deployment wiring
-- no real automated CLI tests yet; `packages/fireline/package.json` still has `"test": "echo 'no tests yet'"` and only carries a `test-fixtures/minimal-spec.ts` helper
+- `--repl` is still a stub that only prints a message
+- no real automated CLI tests yet; `packages/fireline/package.json` still has `"test": "echo 'no tests yet'"`
 
 ## 2. Gap
 
-### 2.1 `fireline deploy <file>`
+### 2.1 `fireline build <file>`
 
-The CLI can start a local control plane, but it cannot push a spec to a hosted Fireline instance. That blocks the core production path: author locally, deploy remotely, reconnect later.
+The CLI can boot a local control plane, but it cannot yet produce the Tier A artifact: an OCI build context with the deployment spec embedded at build time.
 
-### 2.2 Platform binary packaging
+### 2.2 `fireline deploy --to <platform>`
+
+The tiered deploy decision removed any Fireline-owned deploy HTTP surface. What remains useful is a thin wrapper around target-native tooling such as `fly deploy`, `docker push`, `kubectl apply`, or equivalent platform commands.
+
+### 2.3 `fireline push <file> --to <stream-url>`
+
+Tier C needs a CLI verb, but not for Phase 1. Once `DeploymentSpecSubscriber` exists, the CLI should be able to append a spec resource to durable-streams. That is a stream write, not a deploy API.
+
+### 2.4 Platform binary packaging
 
 `resolve-binary.ts` already knows the desired packaging scheme, but the platform packages are still lookup stubs. Today `npx fireline` works only against a locally built Rust workspace.
 
-### 2.3 `--repl`
+### 2.5 `--repl`
 
 The flag exists, but it does not connect to ACP or provide an interactive prompt loop. The current behavior is only "print the ACP URL and wait."
 
-### 2.4 Always-on deployment wiring
+### 2.6 `alwaysOn`
 
-The CLI has no way to tell a hosted instance that a deployment should stay warm. Per [durable-subscriber-execution.md](./durable-subscriber-execution.md), this should lower to `AlwaysOnDeploymentSubscriber`, not invent a second lifecycle mechanism.
+`alwaysOn` is no longer a CLI lifecycle flag. It belongs in compose-spec metadata and flows through whichever tier consumes the spec:
 
-### 2.5 Hosted-instance discovery and auth
+- Tier A: embedded in the OCI image and read on boot
+- Tier C: appended as part of the spec resource and read by `DeploymentSpecSubscriber`
 
-There is no deploy target resolution, config file, or token handling. A remote deploy command needs a concrete answer to:
-
-- which Fireline host receives the spec?
-- how does the CLI authenticate?
-- where does a team encode staging vs production?
+The CLI should pass that metadata through. It should not grow a separate lifecycle surface for it.
 
 ## 3. Proposed Design
 
-### 3.1 `deploy` command
+### 3.1 `fireline build <file.ts>`
 
-Add a new subcommand:
+Add a codegen-first subcommand:
 
 ```bash
-fireline deploy <file.ts> --remote <url> [--name <name>] [--provider <provider>] [--always-on]
+fireline build <file.ts> [--target <platform>] [--out <dir>]
 ```
 
 Behavior:
 
 1. Load the default-exported Harness exactly like `run`.
-2. Serialize the spec plus deploy metadata.
-3. Send it to the hosted instance over HTTP.
-4. Print the returned deployment id, ACP endpoint, and state endpoint.
-5. If `--repl` is set, connect to ACP and open an interactive loop.
+2. Serialize the compose spec into the hosted deployment manifest.
+3. Write an OCI build context that embeds the spec into the hosted Fireline image layer.
+4. If `--target` is provided, optionally scaffold target-specific config such as `fly.toml`, `Dockerfile`, or `k8s.yaml`.
+5. Print artifact locations and stop.
 
-MVP request shape:
+Constraints:
 
-```json
-{
-  "name": "reviewer",
-  "spec": { "...": "serialized Harness" },
-  "providerOverride": "docker",
-  "lifecycle": { "alwaysOn": false }
-}
+- no network calls
+- no registry push
+- no platform deploy invocation
+- no Fireline deploy HTTP
+
+Phase 1 stops here on purpose. The build verb should stand on its own before any wrapper deploy UX exists.
+
+### 3.2 `fireline deploy <file.ts> --to <platform>`
+
+Add an optional thin wrapper:
+
+```bash
+fireline deploy <file.ts> --to <platform>
 ```
 
-MVP endpoint:
+Behavior:
 
-```text
-PUT /v1/deployments/{name}
-Authorization: Bearer <token>
+1. Run `fireline build`.
+2. Resolve a platform adapter or plugin for `<platform>`.
+3. Hand the generated OCI image reference and scaffolded config to target-native tooling.
+4. Stream the native tool output back to the user.
+
+This is explicitly not a Fireline protocol. It is a convenience wrapper over platform-native deployment commands.
+
+Adapter shape to document, implementation deferred:
+
+- `prepare(buildOutput): Promise<PreparedDeploy>`
+- `exec(preparedDeploy): Promise<number>`
+- optional config scaffolding hooks per platform
+
+Examples:
+
+- Fly.io: `fly deploy`
+- Docker: `docker build` / `docker push` / `docker run`
+- Kubernetes: `kubectl apply`
+
+### 3.3 `fireline push <file.ts> --to <stream-url>`
+
+Add a deferred Tier C verb:
+
+```bash
+fireline push <file.ts> --to <stream-url>
 ```
 
-This is intentionally narrow. The exact hosted API can align later with the dedicated hosted-deployment proposal, but the CLI needs one concrete contract to target.
+Behavior:
 
-### 3.2 Hosted target resolution and auth
+1. Load and serialize the compose spec.
+2. Wrap it in the Tier C resource envelope expected by `DeploymentSpecSubscriber`.
+3. Append it to the target durable stream.
+4. Print the stream resource and append result.
 
-Phase 1 should require explicit `--remote`. Phase 4 adds project config.
+Initial resolution should stay explicit:
 
-Proposed resolution order once Phase 4 lands:
+- require `--to <stream-url>`
+- use durable-streams auth, not a Fireline deploy token
+- defer named targets in `fireline.config.ts` until Tier C is live
 
-1. `--remote <url>`
-2. `--target <name>` from `fireline.config.ts`
-3. `defaultTarget` from `fireline.config.ts`
-4. error
+### 3.4 `alwaysOn` treatment
 
-Proposed auth resolution order:
+`alwaysOn` is part of spec metadata, not a CLI lifecycle bit.
 
-1. `--token <token>`
-2. target config `auth.tokenFromEnv`
-3. `FIRELINE_TOKEN`
-4. unauthenticated request only for localhost / explicitly insecure targets
+That means:
 
-Minimal config shape:
+- `fireline build` embeds whatever the compose spec declares
+- `fireline deploy --to <platform>` passes that embedded metadata through unchanged
+- `fireline push` appends the same metadata in the Tier C resource envelope
 
-```ts
-export default {
-  defaultTarget: 'production',
-  targets: {
-    production: {
-      host: 'https://agents.example.com',
-      auth: { tokenFromEnv: 'FIRELINE_TOKEN' },
-    },
-  },
-}
-```
+If the CLI later offers a convenience override, it must rewrite spec metadata before build or push. It must not invent a second lifecycle contract.
 
-This keeps the CLI aligned with [deployment-and-remote-handoff.md](./deployment-and-remote-handoff.md): config owns environment selection; flags are overrides and diagnostics.
-
-### 3.3 Platform binary packaging
+### 3.5 Platform binary packaging
 
 Keep the existing `resolve-binary.ts` lookup order, but make step 2 real:
 
@@ -146,107 +168,100 @@ Each optional package should contain:
 - `bin/fireline-streams`
 - a tiny `package.json`
 
-`@fireline/cli` then lists them as `optionalDependencies`, matching the esbuild/Turbo pattern already assumed by `resolve-binary.ts`.
+`@fireline/cli` then lists them as `optionalDependencies`, matching the lookup contract already assumed by `resolve-binary.ts`.
 
-### 3.4 `--repl`
+### 3.6 `--repl`
 
 `--repl` should become a real ACP shell, not a placeholder.
 
 Proposed behavior:
 
-- after `run` or `deploy`, call `agent.connect('fireline-cli')`
+- after `run`, connect to ACP
 - read prompt lines from stdin
-- send them over ACP as prompt requests
+- send them as prompt requests
 - stream assistant text to stdout
 - `Ctrl+C` exits the REPL and then runs the normal teardown path
 
 This should stay intentionally small. It is a debug/operator convenience, not a full TUI.
 
-### 3.5 `--always-on`
-
-Add `--always-on` to `deploy`, but define it as a deploy-time policy bit, not client-side lifecycle logic.
-
-Behavior:
-
-- CLI includes `lifecycle.alwaysOn = true` in the deploy request
-- hosted Fireline persists that desired policy with the deployment
-- hosted Fireline lowers the policy to `AlwaysOnDeploymentSubscriber`
-- boot-time scan / heartbeat emits `deployment_wake_requested`
-- the subscriber drives the existing wake/provision path until `sandbox_provisioned`
-
-The CLI does not poll, retry, or supervise the deployment itself. It only declares the desired policy.
-
 ## 4. Phased Rollout
 
-### Phase 1: `fireline deploy` MVP
+### Phase 1: `fireline build` codegen only
 
-Scope:
+**Scope**
 
-- add `deploy`
-- require `--remote`
-- support `--name` and `--provider`
-- push spec over HTTP
-- print deployment endpoints
+- Gate note: depends on [`hosted-deploy-surface-decision.md`](./hosted-deploy-surface-decision.md) (`77e007d`)
+- Add `build`
+- Load the compose spec exactly like `run`
+- Generate the embedded-spec OCI build context
+- Optionally scaffold target-specific config files
+- Keep the command fully offline
 
-Out of scope:
+**Out of scope**
 
-- `--always-on`
-- config-file target resolution
-- REPL
+- `deploy --to <platform>`
+- `push`
+- `--repl`
 
-### Phase 2: Platform binary packaging
+### Phase 2: `fireline deploy --to <platform>`
 
-Scope:
+**Scope**
 
-- add optional platform packages
-- wire `@fireline/cli` `optionalDependencies`
-- add CI cross-compile + package publish matrix
-- add install-time smoke tests for `npx fireline --help`
+- Add a thin wrapper over `build`
+- Define the platform adapter / plugin interface
+- Start with one or two concrete adapters once the Tier A hosted MVP is green
 
-### Phase 3: Always-on wiring
+**Gate**
 
-Scope:
+- Tier A MVP from [hosted-fireline-deployment.md](./hosted-fireline-deployment.md) is green
+- The wrapper delegates to a native platform tool rather than a Fireline deploy endpoint
 
-- add `--always-on` to `deploy`
-- send `lifecycle.alwaysOn` to hosted Fireline
-- hosted instance lowers that bit to `AlwaysOnDeploymentSubscriber`
+### Phase 3: `fireline push`
 
-Non-goal:
+**Scope**
 
-- no new lifecycle primitive in the CLI or hosted API
+- Add Tier C spec serialization
+- Append to durable-streams with explicit `--to <stream-url>`
+- Wire the command to `DeploymentSpecSubscriber`
 
-### Phase 4: `--repl` + hosted-instance auth
+**Gate**
 
-Scope:
+- Tier A MVP from [hosted-fireline-deployment.md](./hosted-fireline-deployment.md) is green
+- `DeploymentSpecSubscriber` exists and is replay-safe
 
-- implement ACP-backed REPL
-- add `--token`
-- add `fireline.config.ts` target resolution
-- add `--target <name>`
-- wire env-token lookup
+### Phase 4: Packaging + REPL polish
 
-This phase is last because it sits on top of the already-working local and remote launch paths.
+**Scope**
+
+- Publish platform binary packages
+- Add install-time smoke coverage for `npx fireline --help`
+- Turn `--repl` into a real ACP shell
+- Add config polish only where it reduces repeated platform or stream flags
+
+This phase stays last because it sits on top of already-working local, build, deploy-wrapper, and push flows.
 
 ## 5. Validation Checklist
 
 - [ ] `fireline run` behavior remains unchanged
-- [ ] `fireline deploy <file> --remote <url>` can deploy a serialized Harness over HTTP
-- [ ] `--always-on` is transmitted as deployment policy only
-- [ ] always-on lowering references `AlwaysOnDeploymentSubscriber`, not a second primitive
-- [ ] platform packages make `npx fireline` work without local `cargo build`
+- [ ] `fireline build <file>` is codegen only and makes no network calls
+- [ ] `fireline build` embeds the spec into the Tier A OCI image path
+- [ ] `fireline deploy --to <platform>` is documented as a thin wrapper over target-native tooling
+- [ ] `fireline push` is documented as a Tier C durable-streams append, not a deploy API
+- [ ] No Fireline deploy HTTP endpoints remain in this proposal
+- [ ] `alwaysOn` is treated as spec metadata, not a CLI lifecycle flag
+- [ ] platform packages make `npx fireline` work without a local Rust build
 - [ ] `--repl` opens an ACP session instead of printing a stub message
-- [ ] target resolution and token lookup are deterministic and documented
 - [ ] `packages/fireline/README.md` and [docs/guide/cli.md](../guide/cli.md) are updated when phases land
 
 ## 6. Architect Review Checklist
 
-- [ ] `deploy` stays thin and does not become a second configuration language
-- [ ] `--always-on` is treated as policy input to hosted Fireline, not client-side supervision
-- [ ] the hosted deploy API shape is narrow enough to evolve with the in-flight hosted deployment work
-- [ ] platform packaging matches the already-shipped `resolve-binary.ts` lookup contract
-- [ ] `--repl` remains a debug shell, not a large terminal subsystem
-- [ ] config-file target resolution stays aligned with [deployment-and-remote-handoff.md](./deployment-and-remote-handoff.md)
-- [ ] hosted deploy semantics stay consistent with [hosted-fireline-deployment.md](./hosted-fireline-deployment.md)
+- [ ] Does `build` stay a codegen step rather than becoming a second configuration language?
+- [ ] Does `deploy --to <platform>` stay a thin wrapper over target-native tooling?
+- [ ] Does `push` remain an honest durable-streams append rather than a hidden control plane?
+- [ ] Is `alwaysOn` clearly treated as spec metadata rather than CLI lifecycle state?
+- [ ] Does platform packaging still match the already-shipped `resolve-binary.ts` lookup contract?
+- [ ] Does `--repl` remain a debug shell, not a large terminal subsystem?
+- [ ] Do the staged CLI phases stay consistent with [hosted-fireline-deployment.md](./hosted-fireline-deployment.md)?
 
 ## References
 
@@ -254,8 +269,7 @@ This phase is last because it sits on top of the already-working local and remot
 - [packages/fireline/src/resolve-binary.ts](../../packages/fireline/src/resolve-binary.ts)
 - [packages/fireline/README.md](../../packages/fireline/README.md)
 - [docs/guide/cli.md](../guide/cli.md)
-- [declarative-agent-api-design.md](./declarative-agent-api-design.md)
-- [deployment-and-remote-handoff.md](./deployment-and-remote-handoff.md)
+- [hosted-deploy-surface-decision.md](./hosted-deploy-surface-decision.md)
 - [hosted-fireline-deployment.md](./hosted-fireline-deployment.md)
 - [durable-subscriber.md](./durable-subscriber.md)
 - [durable-subscriber-execution.md](./durable-subscriber-execution.md)
