@@ -35,7 +35,7 @@ use anyhow::{Context, Result};
 use fireline_harness::{TopologyComponentSpec, TopologySpec};
 use fireline_resources::{
     FileBackend, LocalFileBackend, LocalPathMounter, MountedResource, ResourceMounter, ResourceRef,
-    RuntimeStreamFileBackend,
+    ResourceSourceRef, RuntimeStreamFileBackend,
 };
 use managed_agent_suite::{
     DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec, create_session,
@@ -67,9 +67,13 @@ async fn resources_local_path_mounter_maps_source_to_mount() -> Result<()> {
     let mounter = LocalPathMounter::new();
     let mounted = mounter
         .mount(
-            &ResourceRef::LocalPath {
-                path: source_dir.clone(),
+            &ResourceRef {
+                source_ref: ResourceSourceRef::LocalPath {
+                    host_id: String::new(),
+                    path: source_dir.clone(),
+                },
                 mount_path: PathBuf::from("/workspace"),
+                read_only: true,
             },
             "runtime:resources-local-path",
         )

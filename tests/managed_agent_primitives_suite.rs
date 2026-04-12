@@ -27,6 +27,7 @@ use durable_streams::Client as DsClient;
 use fireline_harness::{TopologyComponentSpec, TopologySpec};
 use fireline_resources::{
     FsBackendComponent, LocalFileBackend, LocalPathMounter, ResourceMounter, ResourceRef,
+    ResourceSourceRef,
 };
 use fireline_session::RuntimeStatus;
 use managed_agent_suite::{
@@ -269,9 +270,13 @@ async fn managed_agent_resources_physical_mount_acceptance_contract() -> Result<
         let mounter = LocalPathMounter::new();
         let mounted = mounter
             .mount(
-                &ResourceRef::LocalPath {
-                    path: source_dir.clone(),
+                &ResourceRef {
+                    source_ref: ResourceSourceRef::LocalPath {
+                        host_id: String::new(),
+                        path: source_dir.clone(),
+                    },
                     mount_path: PathBuf::from("/workspace"),
+                    read_only: true,
                 },
                 "runtime:managed-agent-physical-mount",
             )
