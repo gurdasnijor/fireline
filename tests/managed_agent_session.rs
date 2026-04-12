@@ -541,7 +541,7 @@ async fn session_materialized_state_agrees_with_raw_stream() -> Result<()> {
             .list()
             .await
             .into_iter()
-            .map(|record| record.session_id)
+            .map(|record| record.session_id.to_string())
             .collect();
 
         // Oracle B: the typed raw decoder. `read_session_records` reads every
@@ -552,7 +552,7 @@ async fn session_materialized_state_agrees_with_raw_stream() -> Result<()> {
         let raw_records = read_session_records(runtime.state_stream_url()).await?;
         let raw_ids: HashSet<String> = raw_records
             .iter()
-            .map(|record| record.session_id.clone())
+            .map(|record| record.session_id.to_string())
             .collect();
 
         assert!(
