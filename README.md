@@ -31,30 +31,13 @@ const handle = await compose(
 ## Quick start
 
 ```bash
-# Build the Fireline server
-cargo build -p fireline -p fireline-host
-
-# Start the server
-target/debug/fireline --control-plane --port 4440 --durable-streams-url http://localhost:8787/v1/stream
-
-# In another terminal — provision an agent and talk to it
-npx ts-node <<'EOF'
-import { compose, agent, sandbox, middleware } from '@fireline/client'
-import { trace } from '@fireline/client/middleware'
-import { ClientSideConnection, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
-
-const handle = await compose(
-  sandbox({}),
-  middleware([trace()]),
-  agent(['npx', '-y', '@anthropic-ai/claude-code-acp']),
-).start({ serverUrl: 'http://localhost:4440' })
-
-const conn = new ClientSideConnection(handler, createWebSocketStream(new WebSocket(handle.acp.url)))
-await conn.initialize({ protocolVersion: PROTOCOL_VERSION, clientInfo: { name: 'quickstart', version: '0.0.1' }, clientCapabilities: {} })
-const { sessionId } = await conn.newSession({ cwd: '/' })
-const response = await conn.prompt({ sessionId, prompt: [{ type: 'text', text: 'Hello from Fireline!' }] })
-EOF
+git clone https://github.com/fireline/fireline && cd fireline
+pnpm install
+pnpm --filter @fireline/browser-harness dev
+# Open http://localhost:5173 — click Launch Agent
 ```
+
+One command builds the Rust server, starts an embedded durable-streams service, boots the control plane, and opens a browser harness. No Docker. No external services.
 
 ---
 
