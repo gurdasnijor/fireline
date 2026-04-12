@@ -55,7 +55,6 @@ pub mod smithery;
 
 pub use attach::AttachToolComponent;
 pub use peer::PeerComponent;
-pub use peer::directory::{Directory, LocalPeerDirectory};
 pub use peer::lookup;
 pub use peer::stream::{
     DEFAULT_TENANT_ID, DeploymentDiscoveryEvent, DeploymentIndex, HostEntry, RuntimeEntry,

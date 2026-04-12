@@ -15,6 +15,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -33,12 +34,17 @@ use fireline_session::{
     ActiveTurnIndex, CreateRuntimeSpec, PersistedRuntimeSpec, RuntimeMaterializer,
     RuntimeMaterializerTask, RuntimeProviderRequest, SessionIndex,
 };
-use fireline_tools::LocalPeerDirectory;
-use fireline_tools::directory::{Peer, PeerRegistry};
+use fireline_tools::{
+    DEFAULT_TENANT_ID, DeploymentDiscoveryEvent, PeerRegistry, StreamDeploymentPeerRegistry,
+    deployment_stream_url,
+};
+use serde_json::{Map, Value};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
+
+const HOST_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct BootstrapConfig {
@@ -62,11 +68,14 @@ pub struct BootstrapHandle {
     pub health_url: String,
     pub acp_url: String,
     pub state_stream_url: String,
+    runtime_key: String,
+    host_id: String,
     runtime_name: String,
     runtime_created_at: i64,
     state_producer: Producer,
-    local_peer_directory_path: Option<PathBuf>,
+    deployment_producer: Producer,
     runtime_materializer_task: RuntimeMaterializerTask,
+    deployment_heartbeat_task: JoinHandle<()>,
     shared_terminal: SharedTerminal,
     shutdown_tx: Option<oneshot::Sender<()>>,
     server_task: JoinHandle<Result<()>>,
@@ -74,11 +83,30 @@ pub struct BootstrapHandle {
 
 impl BootstrapHandle {
     pub async fn shutdown(mut self) -> Result<()> {
-        if let Some(path) = &self.local_peer_directory_path {
-            LocalPeerDirectory::load(path)?
-                .unregister(&self.runtime_id)
-                .context("unregister peer runtime")?;
-        }
+        self.deployment_heartbeat_task.abort();
+        let _ = self.deployment_heartbeat_task.await;
+
+        emit_deployment_event(
+            &self.deployment_producer,
+            &DeploymentDiscoveryEvent::RuntimeStopped {
+                host_id: self.host_id.clone(),
+                runtime_key: self.runtime_key.clone(),
+                stopped_at_ms: chrono_like_now_ms(),
+            },
+        )
+        .await
+        .context("flush runtime_stopped on shutdown")?;
+
+        emit_deployment_event(
+            &self.deployment_producer,
+            &DeploymentDiscoveryEvent::HostDeregistered {
+                host_id: self.host_id.clone(),
+                reason: "graceful_shutdown".to_string(),
+                deregistered_at_ms: chrono_like_now_ms(),
+            },
+        )
+        .await
+        .context("flush host_deregistered on shutdown")?;
 
         emit_runtime_instance_stopped(
             &self.state_producer,
@@ -106,6 +134,7 @@ impl BootstrapHandle {
 
 pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     let runtime_uuid = Uuid::new_v4();
+    let host_id = format!("host:{}", Uuid::new_v4());
     let runtime_key = config.runtime_key;
     let runtime_id = format!("fireline:{}:{runtime_uuid}", config.name);
     let runtime_created_at = chrono_like_now_ms();
@@ -122,6 +151,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     let acp_url = format!("ws://{connect_host_name}:{}/acp", local_addr.port());
     let stream_base_url = config.durable_streams_url.trim_end_matches('/').to_string();
     let state_stream_url = format!("{stream_base_url}/{state_stream}");
+    let host_stream_url = deployment_stream_url(&stream_base_url, DEFAULT_TENANT_ID);
     let runtime_name = config.name.clone();
 
     let stream_client = DurableStreamsClient::new();
@@ -131,26 +161,13 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         .producer(format!("state-writer-{runtime_uuid}"))
         .content_type("application/json")
         .build();
+    let mut host_stream_handle = stream_client.stream(&host_stream_url);
+    host_stream_handle.set_content_type("application/json");
+    let deployment_producer = host_stream_handle
+        .producer(format!("deployment-discovery-{runtime_uuid}"))
+        .content_type("application/json")
+        .build();
     let node_id = config.node_id;
-    let peer_directory_path = config.peer_directory_path;
-    let local_peer_directory = if config.control_plane_url.is_none() {
-        Some(LocalPeerDirectory::load(&peer_directory_path)?)
-    } else {
-        None
-    };
-    let peer_registry: std::sync::Arc<dyn PeerRegistry> = if let Some(control_plane_url) =
-        config.control_plane_url.clone()
-    {
-        std::sync::Arc::new(
-            crate::control_plane_peer_registry::ControlPlanePeerRegistry::new(control_plane_url)?,
-        )
-    } else {
-        std::sync::Arc::new(
-            local_peer_directory
-                .clone()
-                .expect("local peer directory should exist when push mode is disabled"),
-        )
-    };
     let session_index = SessionIndex::new();
     let active_turn_index = ActiveTurnIndex::new();
     let runtime_materializer = RuntimeMaterializer::new(vec![
@@ -162,6 +179,12 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     // consumes the original.
     let agent_command_for_spec = config.agent_command.clone();
     let shared_terminal = SharedTerminal::spawn(config.agent_command).await?;
+    ensure_named_streams(&stream_base_url, &audit_stream_names(&config.topology)?).await?;
+    ensure_stream_exists(&state_stream_handle).await?;
+    ensure_stream_exists(&host_stream_handle).await?;
+    let peer_registry: std::sync::Arc<dyn PeerRegistry> = std::sync::Arc::new(
+        StreamDeploymentPeerRegistry::new(stream_base_url.clone(), DEFAULT_TENANT_ID),
+    );
     let topology_registry = build_runtime_topology_registry(ComponentContext {
         runtime_key: runtime_key.clone(),
         runtime_id: runtime_id.clone(),
@@ -210,8 +233,6 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
             .map_err(anyhow::Error::from)
     });
 
-    ensure_named_streams(&stream_base_url, &audit_stream_names(&config.topology)?).await?;
-    ensure_stream_exists(&state_stream_handle).await?;
     let runtime_materializer_task = runtime_materializer.connect(state_stream_url.clone());
     runtime_materializer_task.preload().await?;
 
@@ -245,7 +266,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
             resources: Vec::new(),
             state_stream: Some(state_stream.clone()),
             stream_storage: None,
-            peer_directory_path: Some(peer_directory_path.clone()),
+            peer_directory_path: None,
             topology: config.topology.clone(),
         },
     );
@@ -259,15 +280,35 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         &runtime_name,
         runtime_created_at,
     );
-    if let Some(directory) = &local_peer_directory {
-        directory.register(Peer {
-            runtime_id: runtime_id.clone(),
-            agent_name: runtime_name.clone(),
+    emit_deployment_event(
+        &deployment_producer,
+        &DeploymentDiscoveryEvent::HostRegistered {
+            host_id: host_id.clone(),
             acp_url: acp_url.clone(),
-            state_stream_url: Some(state_stream_url.clone()),
+            state_stream_url: state_stream_url.clone(),
+            capabilities: host_capabilities(),
             registered_at_ms: runtime_created_at,
-        })?;
-    }
+            node_info: host_node_info(&node_id),
+        },
+    )
+    .await
+    .context("flush host_registered from bootstrap")?;
+    emit_deployment_event(
+        &deployment_producer,
+        &DeploymentDiscoveryEvent::RuntimeProvisioned {
+            host_id: host_id.clone(),
+            runtime_key: runtime_key.clone(),
+            acp_url: acp_url.clone(),
+            agent_name: runtime_name.clone(),
+            provisioned_at_ms: runtime_created_at,
+        },
+    )
+    .await
+    .context("flush runtime_provisioned from bootstrap")?;
+    let deployment_heartbeat_task = tokio::spawn(run_host_heartbeat_loop(
+        deployment_producer.clone(),
+        host_id.clone(),
+    ));
 
     Ok(BootstrapHandle {
         runtime_id,
@@ -275,11 +316,14 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         health_url,
         acp_url,
         state_stream_url,
+        runtime_key,
+        host_id,
         runtime_name,
         runtime_created_at,
         state_producer,
-        local_peer_directory_path: local_peer_directory.map(|_| peer_directory_path),
+        deployment_producer,
         runtime_materializer_task,
+        deployment_heartbeat_task,
         shared_terminal,
         shutdown_tx: Some(shutdown_tx),
         server_task,
@@ -317,6 +361,55 @@ async fn ensure_stream_exists(stream: &DurableStream) -> Result<()> {
             }
         }
     }
+}
+
+async fn emit_deployment_event(
+    producer: &Producer,
+    event: &DeploymentDiscoveryEvent,
+) -> Result<()> {
+    producer.append_json(event);
+    producer
+        .flush()
+        .await
+        .map_err(anyhow::Error::from)
+        .context("flush deployment discovery event")
+}
+
+async fn run_host_heartbeat_loop(producer: Producer, host_id: String) {
+    let mut interval = tokio::time::interval(HOST_HEARTBEAT_INTERVAL);
+    loop {
+        interval.tick().await;
+        if let Err(error) = emit_deployment_event(
+            &producer,
+            &DeploymentDiscoveryEvent::HostHeartbeat {
+                host_id: host_id.clone(),
+                seen_at_ms: chrono_like_now_ms(),
+                load_metrics: Map::new(),
+                runtime_count: 1,
+            },
+        )
+        .await
+        {
+            tracing::warn!(?error, host_id, "flush host_heartbeat");
+        }
+    }
+}
+
+fn host_capabilities() -> Map<String, Value> {
+    Map::from_iter([
+        ("peerCalls".to_string(), Value::Bool(true)),
+        ("sharedState".to_string(), Value::Bool(true)),
+    ])
+}
+
+fn host_node_info(node_id: &str) -> Map<String, Value> {
+    Map::from_iter([
+        ("nodeId".to_string(), Value::String(node_id.to_string())),
+        (
+            "version".to_string(),
+            Value::String(format!("fireline/{}", env!("CARGO_PKG_VERSION"))),
+        ),
+    ])
 }
 
 fn chrono_like_now_ms() -> i64 {

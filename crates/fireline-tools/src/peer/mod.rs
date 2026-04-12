@@ -11,7 +11,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-pub mod directory;
 pub mod lookup;
 pub mod stream;
 
