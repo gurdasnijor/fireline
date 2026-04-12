@@ -1,0 +1,37 @@
+[package]
+name = "fireline-audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Mechanical verification audits for ACP canonical identifier migration"
+
+[features]
+default = []
+strict-audit = []
+
+[lib]
+path = "src/lib.rs"
+test = false
+doctest = false
+
+[[test]]
+name = "forbidden_identifiers"
+path = "tests/forbidden_identifiers.rs"
+harness = false
+
+[[test]]
+name = "plane_disjointness"
+path = "tests/plane_disjointness.rs"
+harness = false
+
+[build-dependencies]
+quote = "1"
+serde.workspace = true
+syn = { version = "2", features = ["full"] }
+toml.workspace = true
+
+[dev-dependencies]
+regex = "1"
+walkdir.workspace = true

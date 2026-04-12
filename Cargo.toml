@@ -9,6 +9,7 @@ members = [
     "crates/fireline-sandbox",
     "crates/fireline-resources",
     "crates/fireline-tools",
+    "verification/audit",
     "verification/stateright",
 ]
 resolver = "2"

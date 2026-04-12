@@ -1,0 +1,47 @@
+[[field]]
+file = "crates/fireline-session/src/lib.rs"
+struct = "SessionRecord"
+field = "session_id"
+expected_type = "sacp::schema::SessionId"
+
+[[field]]
+file = "crates/fireline-harness/src/state_projector.rs"
+struct = "PromptTurnRow"
+field = "session_id"
+expected_type = "sacp::schema::SessionId"
+
+[[field]]
+file = "crates/fireline-harness/src/state_projector.rs"
+struct = "PromptTurnRow"
+field = "request_id"
+expected_type = "sacp::schema::RequestId"
+
+[[field]]
+file = "crates/fireline-harness/src/state_projector.rs"
+struct = "PendingRequestRow"
+field = "request_id"
+expected_type = "sacp::schema::RequestId"
+
+[[field]]
+file = "crates/fireline-harness/src/state_projector.rs"
+struct = "PendingRequestRow"
+field = "session_id"
+expected_type = "Option<sacp::schema::SessionId>"
+
+[[field]]
+file = "crates/fireline-harness/src/approval.rs"
+struct = "PermissionEvent"
+field = "session_id"
+expected_type = "sacp::schema::SessionId"
+
+[[field]]
+file = "crates/fireline-harness/src/approval.rs"
+struct = "PermissionEvent"
+field = "request_id"
+expected_type = "Option<sacp::schema::RequestId>"
+
+[[field]]
+file = "crates/fireline-tools/src/peer/transport.rs"
+struct = "PeerCallResult"
+field = "child_session_id"
+expected_type = "sacp::schema::SessionId"
