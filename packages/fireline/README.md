@@ -1,0 +1,73 @@
+# @fireline/cli
+
+The `fireline` CLI runs declarative agent specs — `npx fireline agent.ts`
+boots a durable-streams server, a Fireline control plane, and provisions
+the sandbox defined by the spec's default export. Any ACP client can
+then connect to the printed URL.
+
+## Usage
+
+```bash
+# The spec file must export a compose(...) value as its default export.
+npx fireline run agent.ts
+
+# Override the control-plane and durable-streams ports
+npx fireline run agent.ts --port 4440 --streams-port 7474
+
+# Name the state stream for resumability
+npx fireline run agent.ts --state-stream my-session
+
+# Override the sandbox provider from the spec
+npx fireline run agent.ts --provider docker
+```
+
+## Spec shape
+
+```typescript
+// agent.ts
+import { agent, compose, middleware, sandbox } from '@fireline/client'
+import { approve, trace } from '@fireline/client/middleware'
+import { localPath } from '@fireline/client/resources'
+
+export default compose(
+  sandbox({ resources: [localPath('.', '/workspace')] }),
+  middleware([trace(), approve({ scope: 'tool_calls' })]),
+  agent(['npx', '-y', '@anthropic-ai/claude-code-acp']),
+)
+```
+
+The file must export the result of `compose(...)` as its default export.
+Imperative code that calls `.start()` at module scope is NOT compatible
+with `fireline run` — that pattern (used by the examples today) should
+be invoked with `npx tsx` directly.
+
+## Known limitations
+
+- The existing examples in `examples/` do not export a default spec; they
+  call `.start()` imperatively at module scope. They still run with
+  `npx tsx examples/<name>/index.ts` (unchanged).
+- `fireline deploy` is not implemented yet — only `run`.
+- The `--repl` flag is a stub. For now, connect any ACP client to the
+  printed ACP URL.
+
+## Binary resolution
+
+The CLI looks for the `fireline` and `fireline-streams` Rust binaries
+in this order:
+
+1. `$FIRELINE_BIN` / `$FIRELINE_STREAMS_BIN` (absolute paths)
+2. Platform-specific optional npm dependency (`@fireline/cli-darwin-arm64`,
+   etc.) — not yet published
+3. `target/debug/<name>` or `target/release/<name>` relative to the
+   workspace root (dev fallback)
+
+For local dev against this workspace, run
+`cargo build --bin fireline --bin fireline-streams` once before invoking
+the CLI.
+
+## Exit codes
+
+- `0` — clean shutdown via explicit completion
+- `1` — error (binary missing, spec invalid, provisioning failed)
+- `130` — shutdown via SIGINT (Ctrl+C)
+- `143` — shutdown via SIGTERM
