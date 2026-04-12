@@ -114,26 +114,35 @@ When an Opus claims an unassigned codex, update this table with the new owner an
 ## Contention rules
 
 > Established 2026-04-12 by Opus 1 + Opus 3 after w19/w21 cargo target lock collision.
+> **Tightened 2026-04-12 14:33 by Opus 1** after observing that `cargo check --workspace` itself contends on the shared `target/` lock.
 
-**Local cargo is for compile verification only. CI is the authoritative test environment.**
+**The shared `target/` directory on the main worktree is single-writer. Code-path codexes do not write to it at all. CI is the authoritative compile + test environment.**
 
 Dispatch contract for every code-path codex:
 
-1. `cargo check --workspace` locally — confirms the code compiles.
-2. If compile succeeds: commit + push.
-3. CI (GitHub Actions) runs the full test suite.
-4. Gate on CI green before advancing the phase. Use `gh run watch` or `gh run list --limit 1`.
+1. Make the code change.
+2. **Skip all local cargo commands.** Do not run `cargo check`, `cargo build`, `cargo test`, or anything else that touches `target/` on the shared worktree.
+3. Commit + push (to a throwaway branch or directly to main per the phase's policy).
+4. CI (GitHub Actions) runs `cargo check --workspace` + full test suite.
+5. Gate on CI green via `gh run list --limit 1 --json status,conclusion,url`, then `gh run watch <run-id>`.
 
-**Do NOT run `cargo test` locally in a dispatched codex.** Parallel codexes share `target/` under the same workspace, which forces `CARGO_TARGET_DIR` isolation hacks and causes lock contention.
+**The entire point of CI-first is that two codexes never run cargo concurrently against the same `target/`.** That is what was causing every "target lock contention" symptom we saw up through w19/w21.
 
-**Implication for the canonical-identifiers execution plan §Working Rules #2:** "green locally and in CI" now means `cargo check` green locally + CI test suite green. The per-phase gate command lists still define *which* tests must pass, but the binding environment is CI, not developer laptops. PM to patch the execution doc wording.
+**Narrow carve-out — isolated `CARGO_TARGET_DIR` (debugging only):**
 
-**Carve-outs (local `cargo test` is allowed):**
+If a codex absolutely must run cargo locally to debug (rare — only when CI iteration is too slow), it **must** use `CARGO_TARGET_DIR=/tmp/fireline-{codex-id}` to isolate itself from the shared `target/`. w19 and w21 did this correctly when they needed to debug. Default assumption: no local cargo. Owning Opus flags any exception in Active cross-Opus notes.
 
-- **Debugging a specific CI failure** that requires iteration faster than a push cycle. Must be a single codex, not parallel. Owning Opus flags in Active cross-Opus notes before starting.
-- **The orchestrating Opus itself** (not a dispatched codex) running a scoped test to investigate a regression. Keep scope narrow; avoid `cargo test --workspace`.
+**Implication for the canonical-identifiers execution plan §Working Rules #2:** "green locally and in CI" now means **"green in CI"** — no local cargo step. Execution doc currently reads "`cargo check` green locally + CI tests green"; needs a follow-up patch to drop the local step.
 
-**Applies to review feedback too:** if a landed PR ran `cargo test --workspace` in its dispatch contract, note the deviation in the landed review. Future dispatches use check-only.
+**For PM dispatches:** doc-only work has no cargo footprint and is always safe-parallel. Only code-path dispatches need the CI-first instructions.
+
+**For Opus 1 phase dispatches:** Opus 1 handles updating their own Phase N prompts to reflect "do not run cargo locally; push and check CI".
+
+**Applies to review feedback too:** if a landed PR ran any local cargo command in its dispatch contract, note the deviation in the landed review. Future dispatches skip local cargo entirely.
+
+## PM follow-up (low priority)
+
+- `docs/proposals/acp-canonical-identifiers-execution.md §Working Rules #2` currently reads `cargo check`-green locally + CI tests green. Under the 14:33 tightening, it should drop the local step — "green in CI" is the bar. Patch when cycles allow.
 
 ## Active cross-Opus notes
 
