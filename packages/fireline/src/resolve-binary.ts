@@ -20,7 +20,7 @@ const PLATFORM_PACKAGES: Record<string, string> = {
 
 export interface BinaryLookup {
   /** Name of the executable. */
-  readonly name: 'fireline' | 'fireline-streams'
+  readonly name: 'fireline' | 'fireline-streams' | 'fireline-agents'
   /** Env var that overrides the lookup. */
   readonly envVar: string
 }

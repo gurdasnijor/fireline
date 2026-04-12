@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 pub const REGISTRY_URL: &str =
     "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
 const CACHE_RELATIVE_PATH: &str = "fireline/agent-catalog.json";
+const INSTALL_ROOT_RELATIVE_PATH: &str = "fireline/agents";
 const USER_AGENT: &str = "fireline-agent-catalog/0.0.1";
 
 #[derive(Debug, Clone)]
@@ -127,6 +128,69 @@ pub struct RemoteAgent {
     pub distribution: Distribution,
 }
 
+impl RemoteAgent {
+    pub fn install_plan(&self) -> Result<InstallPlan> {
+        if let Some(package) = &self.distribution.npx {
+            return Ok(InstallPlan::PackageCommand {
+                launcher: LauncherKind::Npx,
+                package: package.package.clone(),
+                args: package.args.clone(),
+                env: package.env.clone(),
+            });
+        }
+
+        if let Some(package) = &self.distribution.uvx {
+            return Ok(InstallPlan::PackageCommand {
+                launcher: LauncherKind::Uvx,
+                package: package.package.clone(),
+                args: package.args.clone(),
+                env: package.env.clone(),
+            });
+        }
+
+        let platform = current_binary_platform()?;
+        let binary = self
+            .distribution
+            .binary
+            .get(platform.as_str())
+            .ok_or_else(|| anyhow!("agent '{}' has no binary distribution for {platform}", self.id))?;
+
+        Ok(InstallPlan::BinaryArchive {
+            archive: binary.archive.clone(),
+            command: binary.cmd.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallPlan {
+    PackageCommand {
+        launcher: LauncherKind,
+        package: String,
+        args: Vec<String>,
+        env: BTreeMap<String, String>,
+    },
+    BinaryArchive {
+        archive: String,
+        command: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LauncherKind {
+    Npx,
+    Uvx,
+}
+
+impl LauncherKind {
+    pub fn executable(self) -> &'static str {
+        match self {
+            Self::Npx => "npx",
+            Self::Uvx => "uvx",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Distribution {
     #[serde(default)]
@@ -185,6 +249,62 @@ fn default_cache_path() -> Result<PathBuf> {
     let cache_root =
         dirs::cache_dir().ok_or_else(|| anyhow!("resolve OS cache directory for ACP registry"))?;
     Ok(cache_root.join(CACHE_RELATIVE_PATH))
+}
+
+pub fn install_root() -> Result<PathBuf> {
+    let data_root =
+        dirs::data_dir().ok_or_else(|| anyhow!("resolve OS data directory for ACP agents"))?;
+    Ok(data_root.join(INSTALL_ROOT_RELATIVE_PATH))
+}
+
+pub fn install_bin_dir() -> Result<PathBuf> {
+    Ok(install_root()?.join("bin"))
+}
+
+pub fn install_agent_dir(agent_id: &str) -> Result<PathBuf> {
+    Ok(install_root()?.join(agent_id))
+}
+
+pub fn installed_command_path(agent_id: &str) -> Result<PathBuf> {
+    Ok(install_bin_dir()?.join(installed_executable_name(agent_id)))
+}
+
+pub fn is_installed(agent_id: &str) -> Result<bool> {
+    Ok(installed_command_path(agent_id)?.exists())
+}
+
+pub fn current_binary_platform() -> Result<String> {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        "linux" => "linux",
+        "windows" => "windows",
+        other => {
+            return Err(anyhow!(
+                "unsupported OS '{other}' for ACP registry binary resolution"
+            ));
+        }
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "aarch64",
+        "x86_64" => "x86_64",
+        other => {
+            return Err(anyhow!(
+                "unsupported architecture '{other}' for ACP registry binary resolution"
+            ));
+        }
+    };
+    Ok(format!("{os}-{arch}"))
+}
+
+fn installed_executable_name(agent_id: &str) -> String {
+    #[cfg(windows)]
+    {
+        format!("{agent_id}.cmd")
+    }
+    #[cfg(not(windows))]
+    {
+        agent_id.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -279,6 +399,34 @@ mod tests {
 
         assert!(loaded.lookup("amp-acp").is_some());
         assert!(loaded.lookup("missing-agent").is_none());
+    }
+
+    #[test]
+    fn resolves_install_plan_for_npx_agent() {
+        let catalog: AgentCatalog = serde_json::from_str(FIXTURE).unwrap();
+        let agent = catalog.lookup("claude-acp").unwrap();
+
+        let plan = agent.install_plan().unwrap();
+
+        assert_eq!(
+            plan,
+            InstallPlan::PackageCommand {
+                launcher: LauncherKind::Npx,
+                package: "@agentclientprotocol/claude-agent-acp@0.26.0".to_string(),
+                args: vec![],
+                env: BTreeMap::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn installed_command_path_uses_managed_bin_dir() {
+        let path = installed_command_path("pi-acp").unwrap();
+        let rendered = path.to_string_lossy();
+        assert!(
+            rendered.contains("fireline/agents/bin") || rendered.contains("fireline\\agents\\bin"),
+            "managed install path should live under fireline/agents/bin, got {rendered}",
+        );
     }
 
     async fn serve_registry_once(body: &'static str) -> String {

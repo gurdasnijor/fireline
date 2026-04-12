@@ -5,7 +5,8 @@
   "description": "Fireline CLI — run declarative agent specs locally",
   "type": "module",
   "bin": {
-    "fireline": "./bin/fireline.js"
+    "fireline": "./bin/fireline.js",
+    "fireline-agents": "./bin/fireline-agents.js"
   },
   "files": [
     "bin",
