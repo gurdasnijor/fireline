@@ -48,9 +48,9 @@ When ambiguity arises:
 |---|---|---|
 | w10 | **Opus 2 (PM)** | onboarded — owns planning surface |
 | w20 | **Opus 3 (Architect)** | onboarded — has posted Phase 1 review |
-| w12 | Opus 2 → codex | **ACTIVE** — drift-fix #4 (`unified-materialization.md`), submitted at 14:20 |
-| w13 | Opus 2 → codex | **ACTIVE** — drift-fix #5 (`secrets-injection-component.md`), submitted at 14:20 |
-| w17 | Opus 2 → codex | **LANDED** — drift-fix #7 at `1f3c610` (managed-agents-mapping.md ActiveTurnIndex flagged). Also still holds Opus 1's TLA+ probes as background work. |
+| w12 | Opus 2 → codex | **LANDED** — #4 at `bb01ce8`. Recycling for examples/ README refresh. |
+| w13 | Opus 2 → codex | **LANDED** — #5 at `045fbba`. Recycling for demo refresh. |
+| w17 | Opus 2 → codex | **LANDED** — #7 at `1f3c610`. Recycling for proposal-index.md refresh with resolved-status updates. |
 | w15 | Opus 2 → codex | **LANDED** — #6 at `57c144e` (webhook merge + SUPERSEDED banner). Recycling for doc/guide refresh. |
 | w18 | Opus 2 → codex | **LANDED** — #2 at `3fa956e` (canonical ACP ids + plane-separated `fireline.db()`). Recycling for README staleness. |
 | w19 | Opus 2 → codex | **STALLED** — cargo test still running. Redirecting to CI-first directive next. |
@@ -164,6 +164,8 @@ Dispatch contract for every code-path codex:
 
 ## PM dispatch queue (post-w15 landing)
 
+**ALL 7 DRIFT ITEMS LANDED as of 14:24.** Queue below retained for audit trail.
+
 Drift fixes from `docs/proposals/proposal-index.md §6`, priority order:
 
 | # | Priority | Proposal | Drift | Status |
@@ -171,8 +173,8 @@ Drift fixes from `docs/proposals/proposal-index.md §6`, priority order:
 | 1 | Critical | `durable-subscriber.md` | `CrossSessionKey` / `cross_session` completion shape; replace with caller-local `PromptKey(SessionId, RequestId)` / `ToolKey(SessionId, ToolCallId)`; move cross-session causality to `_meta` trace context. Line ranges `66-70`, `154-157`, `321-327`, `393-401`, `447`. | **LANDED at `7551cb5`** (14:03) |
 | 2 | Critical | `platform-sdk-api-design.md` | `string` ACP ids + infra rows (`PromptTurnRow`, `ConnectionRow`, `TerminalRow`, `RuntimeInstanceRow`) in `fireline.db()`. Swap to `sacp::schema` branded types, rename prompt-turn → prompt-request, move infra rows to admin API. Lines `114-115`, `151-198`, `215`, `395-402`. | **LANDED at `3fa956e`** (14:17) |
 | 3 | Critical | `client-api-redesign.md` | `child_session_edge` rows + single-tenant stream as lineage. Switch to prompt-request + `_meta` trace context. Lines `190`, `363`, `422`, `437`, `442-475`. | **LANDED at `12bb7cd`** (14:18) |
-| 4 | Design | `unified-materialization.md` | `ActiveTurnIndex` / `prompt_turn` as steady state. Rewrite around `SessionIndex`/`HostIndex`. Lines `14`, `89-100`. | **dispatched to w12** (14:15) — different file from #2/#3, no conflict |
-| 5 | Design | `secrets-injection-component.md` | Rust `session_id: String` in session-scoped keys + audit events. Type as `sacp::schema::SessionId`. Lines `147`, `531`. | **dispatched to w13** (14:15) |
+| 4 | Design | `unified-materialization.md` | `ActiveTurnIndex` / `prompt_turn` as steady state. Rewrite around `SessionIndex`/`HostIndex`. Lines `14`, `89-100`. | **LANDED at `bb01ce8`** (14:24) |
+| 5 | Design | `secrets-injection-component.md` | Rust `session_id: String` in session-scoped keys + audit events. Type as `sacp::schema::SessionId`. Lines `147`, `531`. | **LANDED at `045fbba`** (14:23) |
 | 7 | Low | `docs/explorations/managed-agents-mapping.md:231` | Marked `ActiveTurnIndex` transitional with pointer to canonical-identifiers.md. | **LANDED at `1f3c610`** (14:22) |
 | 6 | Design | `webhook-support.md` → `durable-subscriber.md` | **MERGE** — absorb `webhook-support.md §6` into `durable-subscriber.md §5.2`; mark SUPERSEDED in `proposal-index.md`. | **LANDED at `57c144e`** (14:12) |
 
