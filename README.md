@@ -30,14 +30,26 @@ const handle = await compose(
 
 ## Quick start
 
-```bash
-git clone https://github.com/fireline/fireline && cd fireline
-pnpm install
-pnpm --filter @fireline/browser-harness dev
-# Open http://localhost:5173 — click Launch Agent
+Give an AI agent access to your codebase, with approval gates and a token budget — in 8 lines:
+
+```typescript
+import { compose, agent, sandbox, middleware } from '@fireline/client'
+import { trace, approve, budget } from '@fireline/client/middleware'
+import { localPath } from '@fireline/client/resources'
+
+const handle = await compose(
+  sandbox({ resources: [localPath('.', '/workspace')] }),
+  middleware([trace(), approve({ scope: 'tool_calls' }), budget({ tokens: 500_000 })]),
+  agent(['npx', '-y', '@anthropic-ai/claude-code-acp']),
+).start({ serverUrl: 'http://localhost:4440' })
+
+// handle.acp.url  → open an ACP session, start prompting
+// handle.state.url → subscribe to live agent activity
 ```
 
-One command builds the Rust server, starts an embedded durable-streams service, boots the control plane, and opens a browser harness. No Docker. No external services.
+The agent runs in an isolated sandbox with your workspace mounted read-only. Every tool call requires your approval. Every effect is logged to a durable stream you can replay, query, or pipe into a dashboard. Kill the sandbox, restart it on a different machine — the session continues from where it left off.
+
+See [examples/](examples/) for more — background agents, Slackbots, multi-agent pipelines, session migration across hosts.
 
 ---
 
