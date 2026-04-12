@@ -9,7 +9,7 @@ This document is the rollout plan for [acp-canonical-identifiers.md](./acp-canon
 ## Working Rules
 
 1. Land directly on `main` as short-lived PRs. Do not build a long-lived refactor branch.
-2. Do not advance to Phase `N+1` until Phase `N` is green locally and in CI.
+2. Do not advance to Phase `N+1` until Phase `N` is `cargo check`-green locally **and** the full test suite is green in CI. Per the CI-first contention rules (see [`docs/status/orchestration-status.md § Contention rules`](../status/orchestration-status.md), established 2026-04-12), dispatched codexes run `cargo check --workspace` only; GitHub Actions is the authoritative test environment. Gate on `gh run watch` / `gh run list --limit 1` before advancing.
 3. Preserve behavior during migration. When a wire shape changes incompatibly, use versioned entity types or dual-read/dual-write adapters until cleanup.
 4. Treat [acp-canonical-identifiers.md §14](./acp-canonical-identifiers.md#14-validation-checklist) and [approval-gate-correctness.md](../reviews/approval-gate-correctness.md) as the current invariant source. Phase 0 creates the missing dedicated verification doc so later phases can cite stable invariant IDs.
 5. One phase per PR. Each PR must be revertable without partially reverting another phase.
