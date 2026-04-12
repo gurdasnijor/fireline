@@ -47,5 +47,7 @@ export type {
   SandboxHandle,
   SandboxProviderConfig,
   SandboxStatus,
+  SecretBinding,
+  SecretsProxyMiddleware,
   StartOptions,
 } from './types.js'
