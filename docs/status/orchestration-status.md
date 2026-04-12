@@ -76,6 +76,41 @@ When an Opus claims an unassigned codex, update this table with the new owner an
 4. Proposal drift fixes can happen in parallel with Phase execution.
 5. **Architect (Opus 3) has veto power** on any landed code that violates core architectural primitives. If Opus 3 flags a regression, the landing is reverted until the architectural issue is resolved.
 
+## Master Roadmap
+
+This is the top-level ordering view across the major proposal tracks. The table
+shows execution order and rough size; the graph shows blocking structure. The
+detailed phase plans still live in the sibling proposal and execution docs.
+
+| Milestone | Phases | Status | Blocked By | Rough effort |
+|---|---|---|---|---|
+| ACP Canonical Identifiers | Phases 0-8 | Active. Phase 1 landed; Phase 1.5 dispatched; Phases 2-8 remain. | Internal phase gates only. | ~8 phases total; roughly 2-5 days per phase |
+| DurableSubscriber implementation | Design only; execution plan pending | Not started. Proposal stable, implementation not yet sequenced. | ACP Canonical Identifiers through Phase 5 | TBD; expected multi-phase implementation, to be formalized by w17 |
+| Durable Promises | Design only; execution plan pending | Not started. Proposal stable, imperative sugar only. | DurableSubscriber implementation | TBD; expected smaller follow-on after subscriber core, to be formalized by w18 |
+| CLI maturity (`npx fireline run` / `deploy`) | Roughly 3-4 phases | Independent track, not yet split into an execution plan. | Compose/start surface stabilization after canonical-identifiers | ~3-4 phases: stdio conductor path, deploy subcommand, binary packaging, polish |
+| Demo polish (`pi-acp-to-openclaw`) | Narrative + polish passes | Roadmap target only. | ACP Canonical Identifiers, DurableSubscriber, Durable Promises, CLI maturity | ~1-2 focused polish phases once blockers land |
+
+```text
+ACP Canonical Identifiers
+  ├──> DurableSubscriber
+  │       └──> Durable Promises
+  ├──> CLI maturity
+  └──────────────────────────────┐
+                                 ├──> Demo polish (pi-acp-to-openclaw)
+DurableSubscriber ───────────────┤
+Durable Promises ────────────────┤
+CLI maturity ────────────────────┘
+```
+
+How to read this roadmap:
+
+- The table is the sequencing view: what lands first, what is active now, and
+  the rough size of each milestone.
+- The graph is the blocking view: which milestones can proceed independently
+  and which ones are downstream of canonical-ids stabilization.
+- The execution detail does not live here. Use the sibling proposal docs for
+  actual phase definitions, verification gates, and task decomposition.
+
 ## Dispatch queues
 
 ### Opus 1 (execution chain)
