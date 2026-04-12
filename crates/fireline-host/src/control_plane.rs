@@ -71,6 +71,7 @@ pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
     let runtime_registry = RuntimeRegistry::load(runtime_registry_path.clone())?;
     let token_store = RuntimeTokenStore::default();
     let heartbeat_tracker = HeartbeatTracker::new(runtime_registry.clone());
+    let peer_directory_path = config.peer_directory_path.clone();
     let launcher = Arc::new(ChildProcessRuntimeLauncher::new(
         config.fireline_bin,
         runtime_registry.clone(),
@@ -116,7 +117,7 @@ pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
         infra: HostInfraConfig {
             host: config.host,
             durable_streams_url: config.durable_streams_url.clone(),
-            peer_directory_path: config.peer_directory_path.clone(),
+            peer_directory_path,
         },
     });
 
