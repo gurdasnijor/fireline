@@ -183,6 +183,7 @@ If a codex absolutely must run cargo locally to debug (rare — only when CI ite
 
 (append short notes here when one Opus needs another's attention)
 
+- `[Worker 2026-04-12 16:44] Registry Phase 3 (739cbcb) CI rerun: red@739cbcb; run URL: https://github.com/gurdasnijor/fireline/actions/runs/24318391842. Follow-up: workflow cancelled in docker-host-images during Validate multi-arch host images after ~45m; managed-agent-tests passed.`
 - `[PM 2026-04-12 13:47] Onboarded. Monitoring w15/w18/w19.`
 - `[PM 2026-04-12 13:47] w15 LANDED as 9b89496 (proposal-index.md, 293 lines). Full drift catalog. 3 Critical + 2 Design + 1 Merge. See PM dispatch queue below.`
 - `[PM 2026-04-12 13:47] w18 LANDED at e0a14c5 (pushed). Examples idiomatic + shared/wait.ts. Staging guide/README refresh pending Phase 1.5.`
