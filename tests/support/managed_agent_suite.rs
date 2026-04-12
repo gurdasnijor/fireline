@@ -11,15 +11,24 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use durable_streams::{Client as DsClient, Offset};
 use fireline_harness::TopologySpec;
 use fireline_host::bootstrap::{BootstrapConfig, BootstrapHandle, start};
 use fireline_resources::{FsOpRecord, StreamFsFileRecord};
 use fireline_resources::{LocalPathMounter, ResourceMounter, ResourceRef};
-use fireline_session::{PersistedHostSpec, HostDescriptor, HostStatus, SessionRecord};
+use fireline_sandbox::{SandboxDescriptor, SandboxHandle, SandboxStatus};
+use fireline_session::{
+    HostDescriptor, HostIndex, HostStatus, PersistedHostSpec, SandboxProviderKind,
+    SessionRecord, StateMaterializer,
+};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value as JsonValue, json};
 use tokio::process::{Child, Command as TokioCommand};
+use tokio::task::JoinHandle;
 use tracing::instrument;
 use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 use uuid::Uuid;
@@ -274,8 +283,10 @@ pub(crate) struct ControlPlaneHarness {
     pub base_url: String,
     pub peer_directory_path: PathBuf,
     pub shared_state_stream_name: String,
+    control_plane_url: String,
     shared_stream_server: stream_server::TestStreamServer,
     child: Child,
+    compat_task: JoinHandle<()>,
 }
 
 impl ControlPlaneHarness {
@@ -286,16 +297,29 @@ impl ControlPlaneHarness {
         let peer_directory_path = temp_path("fireline-managed-agent-peers");
         let shared_state_stream_name = format!("fireline-managed-agent-suite-{}", Uuid::new_v4());
         let shared_stream_server = stream_server::TestStreamServer::spawn().await?;
-        let (child, base_url) =
+        let (child, control_plane_url) =
             spawn_control_plane(&peer_directory_path, &shared_stream_server.base_url).await?;
+        let shared_state_url = format!(
+            "{}/{}",
+            shared_stream_server.base_url.trim_end_matches('/'),
+            shared_state_stream_name
+        );
+        let (base_url, compat_task) = spawn_runtime_compat_server(
+            reqwest::Client::new(),
+            control_plane_url.clone(),
+            shared_state_url,
+        )
+        .await?;
 
         Ok(Self {
             http: reqwest::Client::new(),
             base_url,
+            control_plane_url,
             peer_directory_path,
             shared_state_stream_name,
             shared_stream_server,
             child,
+            compat_task,
         })
     }
 
@@ -310,24 +334,22 @@ impl ControlPlaneHarness {
         name: &str,
         agent_command: &[String],
     ) -> Result<HostDescriptor> {
-        let response = self
+        let created = self
             .http
-            .post(format!("{}/v1/runtimes", self.base_url))
+            .post(format!("{}/v1/sandboxes", self.control_plane_url))
             .json(&json!({
                 "provider": "local",
-                "host": "127.0.0.1",
-                "port": 0,
                 "name": name,
                 "agentCommand": agent_command,
-                "durableStreamsUrl": self.shared_stream_server.base_url,
                 "stateStream": self.shared_state_stream_name,
                 "topology": { "components": [] }
             }))
             .send()
             .await?
-            .error_for_status()?;
-        let created = response.json::<HostDescriptor>().await?;
-        self.wait_for_status(&created.host_key, HostStatus::Ready)
+            .error_for_status()?
+            .json::<SandboxHandle>()
+            .await?;
+        self.wait_for_status(&created.id, HostStatus::Ready)
             .await
     }
 
@@ -341,13 +363,19 @@ impl ControlPlaneHarness {
         loop {
             let response = self
                 .http
-                .get(format!("{}/v1/runtimes/{host_key}", self.base_url))
+                .get(format!("{}/v1/sandboxes/{host_key}", self.control_plane_url))
                 .send()
                 .await?;
             if response.status().is_success() {
-                let descriptor = response.json::<HostDescriptor>().await?;
-                if descriptor.status == expected {
-                    return Ok(descriptor);
+                let descriptor = response.json::<SandboxDescriptor>().await?;
+                if host_status_from_sandbox_status(descriptor.status.clone()) == expected {
+                    if let Some(host_descriptor) =
+                        try_host_descriptor(&self.shared_state_url(), host_key).await?
+                    {
+                        if host_descriptor.status == expected {
+                            return Ok(host_descriptor);
+                        }
+                    }
                 }
             }
 
@@ -376,24 +404,25 @@ impl ControlPlaneHarness {
     #[instrument(skip(self), fields(host_key))]
     pub(crate) async fn stop_runtime(&self, host_key: &str) -> Result<HostDescriptor> {
         self.http
-            .post(format!("{}/v1/runtimes/{host_key}/stop", self.base_url))
+            .post(format!(
+                "{}/v1/sandboxes/{host_key}/stop",
+                self.control_plane_url
+            ))
             .send()
             .await?
-            .error_for_status()?
-            .json::<HostDescriptor>()
-            .await
-            .map_err(anyhow::Error::from)
+            .error_for_status()?;
+        self.wait_for_status(host_key, HostStatus::Stopped).await
     }
 
     async fn stop_all_live_runtimes(&self) {
         let runtimes = match self
             .http
-            .get(format!("{}/v1/runtimes", self.base_url))
+            .get(format!("{}/v1/sandboxes", self.control_plane_url))
             .send()
             .await
         {
             Ok(response) => match response.error_for_status() {
-                Ok(ok) => match ok.json::<Vec<HostDescriptor>>().await {
+                Ok(ok) => match ok.json::<Vec<SandboxDescriptor>>().await {
                     Ok(runtimes) => runtimes,
                     Err(_) => return,
                 },
@@ -405,16 +434,17 @@ impl ControlPlaneHarness {
         for runtime in runtimes {
             if matches!(
                 runtime.status,
-                HostStatus::Stopped | HostStatus::Broken
+                SandboxStatus::Stopped | SandboxStatus::Broken
             ) {
                 continue;
             }
-            let _ = self.stop_runtime(&runtime.host_key).await;
+            let _ = self.stop_runtime(&runtime.id).await;
         }
     }
 
     pub(crate) async fn shutdown(mut self) {
         self.stop_all_live_runtimes().await;
+        self.compat_task.abort();
         shutdown_process(&mut self.child).await;
         self.shared_stream_server.shutdown().await;
     }
@@ -966,31 +996,317 @@ impl ControlPlaneHarness {
 
         let body = json!({
             "provider": "local",
-            "host": "127.0.0.1",
-            "port": 0,
             "name": spec.name,
             "agentCommand": spec.agent_command,
-            "durableStreamsUrl": match &spec.stream_mode {
-                StreamMode::SharedExternal { base_url, .. } => base_url.clone(),
-                StreamMode::Embedded => self.shared_stream_server.base_url.clone(),
-            },
             "stateStream": stream_name,
             "topology": spec.topology,
             "resources": spec.resources,
         });
 
-        let response = self
+        let created = self
             .http
-            .post(format!("{}/v1/runtimes", self.base_url))
+            .post(format!("{}/v1/sandboxes", self.control_plane_url))
             .json(&body)
             .send()
             .await
-            .context("POST /v1/runtimes with spec")?
+            .context("POST /v1/sandboxes with spec")?
             .error_for_status()
-            .context("control plane rejected spec-based create")?;
-        let created = response.json::<HostDescriptor>().await?;
-        self.wait_for_status(&created.host_key, HostStatus::Ready)
+            .context("control plane rejected spec-based create")?
+            .json::<SandboxHandle>()
+            .await?;
+        self.wait_for_status(&created.id, HostStatus::Ready)
             .await
+    }
+}
+
+#[derive(Clone)]
+struct RuntimeCompatState {
+    http: reqwest::Client,
+    control_plane_url: String,
+    shared_state_url: String,
+}
+
+async fn spawn_runtime_compat_server(
+    http: reqwest::Client,
+    control_plane_url: String,
+    shared_state_url: String,
+) -> Result<(String, JoinHandle<()>)> {
+    let state = RuntimeCompatState {
+        http,
+        control_plane_url,
+        shared_state_url,
+    };
+    let app = Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/v1/runtimes", get(list_compat_runtimes).post(create_compat_runtime))
+        .route(
+            "/v1/runtimes/{host_key}",
+            get(get_compat_runtime).delete(delete_compat_runtime),
+        )
+        .route("/v1/runtimes/{host_key}/stop", post(stop_compat_runtime))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("bind runtime-compat listener")?;
+    let addr = listener
+        .local_addr()
+        .context("resolve runtime-compat bound address")?;
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    Ok((format!("http://{addr}"), task))
+}
+
+async fn create_compat_runtime(
+    State(state): State<RuntimeCompatState>,
+    Json(body): Json<JsonValue>,
+) -> Result<Json<HostDescriptor>, CompatError> {
+    let created = state
+        .http
+        .post(format!(
+            "{}/v1/sandboxes",
+            state.control_plane_url.trim_end_matches('/')
+        ))
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<SandboxHandle>()
+        .await?;
+    let descriptor =
+        host_descriptor_for_sandbox(&state, &created.id, Duration::from_secs(10)).await?;
+    Ok(Json(descriptor))
+}
+
+async fn get_compat_runtime(
+    Path(host_key): Path<String>,
+    State(state): State<RuntimeCompatState>,
+) -> Result<Json<HostDescriptor>, CompatError> {
+    let descriptor = host_descriptor_for_sandbox(&state, &host_key, Duration::from_secs(5)).await?;
+    Ok(Json(descriptor))
+}
+
+async fn stop_compat_runtime(
+    Path(host_key): Path<String>,
+    State(state): State<RuntimeCompatState>,
+) -> Result<Json<HostDescriptor>, CompatError> {
+    state
+        .http
+        .post(format!(
+            "{}/v1/sandboxes/{host_key}/stop",
+            state.control_plane_url.trim_end_matches('/')
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    let descriptor = wait_for_host_descriptor(
+        &state.shared_state_url,
+        &host_key,
+        HostStatus::Stopped,
+        Duration::from_secs(10),
+    )
+    .await?;
+    Ok(Json(descriptor))
+}
+
+async fn delete_compat_runtime(
+    Path(host_key): Path<String>,
+    State(state): State<RuntimeCompatState>,
+) -> Result<Json<HostDescriptor>, CompatError> {
+    state
+        .http
+        .delete(format!(
+            "{}/v1/sandboxes/{host_key}",
+            state.control_plane_url.trim_end_matches('/')
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    let descriptor = wait_for_host_descriptor(
+        &state.shared_state_url,
+        &host_key,
+        HostStatus::Stopped,
+        Duration::from_secs(10),
+    )
+    .await?;
+    Ok(Json(descriptor))
+}
+
+async fn list_compat_runtimes(
+    State(state): State<RuntimeCompatState>,
+) -> Result<Json<Vec<HostDescriptor>>, CompatError> {
+    let sandboxes = state
+        .http
+        .get(format!(
+            "{}/v1/sandboxes",
+            state.control_plane_url.trim_end_matches('/')
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Vec<SandboxDescriptor>>()
+        .await?;
+    let mut descriptors = Vec::with_capacity(sandboxes.len());
+    for sandbox in sandboxes {
+        match try_host_descriptor(&state.shared_state_url, &sandbox.id).await? {
+            Some(descriptor) => descriptors.push(descriptor),
+            None => descriptors.push(fallback_host_descriptor(&sandbox)),
+        }
+    }
+    Ok(Json(descriptors))
+}
+
+#[derive(Debug)]
+struct CompatError(anyhow::Error);
+
+impl From<anyhow::Error> for CompatError {
+    fn from(error: anyhow::Error) -> Self {
+        Self(error)
+    }
+}
+
+impl From<reqwest::Error> for CompatError {
+    fn from(error: reqwest::Error) -> Self {
+        Self(anyhow::Error::from(error))
+    }
+}
+
+impl axum::response::IntoResponse for CompatError {
+    fn into_response(self) -> axum::response::Response {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": self.0.to_string() })),
+        )
+            .into_response()
+    }
+}
+
+async fn host_descriptor_for_sandbox(
+    state: &RuntimeCompatState,
+    host_key: &str,
+    timeout: Duration,
+) -> Result<HostDescriptor> {
+    if let Some(sandbox) = fetch_sandbox_descriptor(
+        &state.http,
+        &state.control_plane_url,
+        host_key,
+    )
+    .await?
+    {
+        if matches!(
+            sandbox.status,
+            SandboxStatus::Ready
+                | SandboxStatus::Busy
+                | SandboxStatus::Idle
+                | SandboxStatus::Stopped
+                | SandboxStatus::Broken
+        ) {
+            if let Ok(descriptor) = wait_for_host_descriptor(
+                &state.shared_state_url,
+                host_key,
+                host_status_from_sandbox_status(sandbox.status.clone()),
+                timeout,
+            )
+            .await
+            {
+                return Ok(descriptor);
+            }
+        }
+        if let Some(descriptor) = try_host_descriptor(&state.shared_state_url, host_key).await? {
+            return Ok(descriptor);
+        }
+        return Ok(fallback_host_descriptor(&sandbox));
+    }
+
+    Err(anyhow!("sandbox '{host_key}' not found"))
+}
+
+async fn fetch_sandbox_descriptor(
+    http: &reqwest::Client,
+    control_plane_url: &str,
+    sandbox_id: &str,
+) -> Result<Option<SandboxDescriptor>> {
+    let response = http
+        .get(format!(
+            "{}/v1/sandboxes/{sandbox_id}",
+            control_plane_url.trim_end_matches('/')
+        ))
+        .send()
+        .await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    Ok(Some(response.error_for_status()?.json::<SandboxDescriptor>().await?))
+}
+
+async fn try_host_descriptor(shared_state_url: &str, host_key: &str) -> Result<Option<HostDescriptor>> {
+    let index = materialize_host_index(shared_state_url).await?;
+    Ok(index.endpoints_for(host_key).await)
+}
+
+async fn wait_for_host_descriptor(
+    shared_state_url: &str,
+    host_key: &str,
+    expected: HostStatus,
+    timeout: Duration,
+) -> Result<HostDescriptor> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(descriptor) = try_host_descriptor(shared_state_url, host_key).await? {
+            if descriptor.status == expected {
+                return Ok(descriptor);
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "timed out waiting for host descriptor '{host_key}' to reach '{expected:?}'"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn materialize_host_index(shared_state_url: &str) -> Result<HostIndex> {
+    let index = HostIndex::new();
+    let materializer = StateMaterializer::new(vec![std::sync::Arc::new(index.clone())]);
+    let task = materializer.connect(shared_state_url.to_string());
+    task.preload().await?;
+    task.abort();
+    Ok(index)
+}
+
+fn host_status_from_sandbox_status(status: SandboxStatus) -> HostStatus {
+    match status {
+        SandboxStatus::Creating => HostStatus::Starting,
+        SandboxStatus::Ready => HostStatus::Ready,
+        SandboxStatus::Busy => HostStatus::Busy,
+        SandboxStatus::Idle => HostStatus::Idle,
+        SandboxStatus::Stopped => HostStatus::Stopped,
+        SandboxStatus::Broken => HostStatus::Broken,
+    }
+}
+
+fn fallback_host_descriptor(sandbox: &SandboxDescriptor) -> HostDescriptor {
+    HostDescriptor {
+        host_key: sandbox.id.clone(),
+        host_id: String::new(),
+        node_id: String::new(),
+        provider: sandbox_provider_kind_from_name(&sandbox.provider),
+        provider_instance_id: String::new(),
+        status: host_status_from_sandbox_status(sandbox.status.clone()),
+        acp: sandbox.acp.clone(),
+        state: sandbox.state.clone(),
+        helper_api_base_url: None,
+        created_at_ms: sandbox.created_at_ms,
+        updated_at_ms: sandbox.updated_at_ms,
+    }
+}
+
+fn sandbox_provider_kind_from_name(name: &str) -> SandboxProviderKind {
+    match name {
+        "docker" => SandboxProviderKind::Docker,
+        _ => SandboxProviderKind::Local,
     }
 }
 

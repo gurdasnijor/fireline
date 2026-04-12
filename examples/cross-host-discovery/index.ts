@@ -1,5 +1,5 @@
 // Fireline
-import fireline, { agent, compose, connectAcp, middleware, sandbox, type FirelineDB } from '@fireline/client'
+import fireline, { agent, compose, middleware, sandbox, type FirelineDB } from '@fireline/client'
 import { peer } from '@fireline/client/middleware'
 
 const agentBin = process.env.AGENT_BIN ?? '../../target/debug/fireline-testy'
@@ -11,7 +11,7 @@ const [agentA, agentB] = await Promise.all([
   startHarness('agent-b', serverB),
 ])
 const db = await fireline.db({ stateStreamUrl: agentB.state.url })
-const acp = await connectAcp(agentB.acp, 'cross-host-discovery')
+const acp = await agentB.connect('cross-host-discovery')
 const { sessionId } = await acp.newSession({ cwd: process.cwd(), mcpServers: [] })
 await acp.prompt({ sessionId, prompt: [{ type: 'text', text: toolCall('list_peers') }] })
 const peers = await observeSessionText(db, sessionId, (text) => text.includes('agent-a') && text.includes('agent-b'))

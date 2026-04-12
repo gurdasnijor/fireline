@@ -11,9 +11,10 @@ export function useBackendHealth() {
   const query = useQuery({
     queryKey: ["backend-health"],
     queryFn: async () => {
-      // fetchRuntimes is a lightweight GET that hits the server.
-      // If it throws (network error, 5xx, etc.), React Query marks it as an error.
-      await client.fetchRuntimes();
+      const ok = await client.admin.healthCheck();
+      if (!ok) {
+        throw new Error("Fireline host is unreachable");
+      }
       return { ok: true as const };
     },
     refetchInterval: 10_000,

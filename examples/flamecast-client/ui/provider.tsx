@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { createFirelineDB, type FirelineDB } from "@fireline/state";
+import { db as openFirelineDb, type FirelineDB } from "@fireline/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createFlamecastClient } from "./fireline-client.js";
 import type { FlamecastClient } from "./fireline-client.js";
@@ -24,10 +24,9 @@ export function FlamecastProvider({
     setReady(false);
     setDb(null);
 
-    void client.fetchFirelineConfig().then(async (config) => {
+    void fetchFirelineConfig(baseUrl).then(async (config) => {
       if (cancelled) return;
-      const nextDb = createFirelineDB({ stateStreamUrl: config.stateStreamUrl });
-      await nextDb.preload();
+      const nextDb = await openFirelineDb({ stateStreamUrl: config.stateStreamUrl });
       if (cancelled) {
         nextDb.close();
         return;
@@ -43,7 +42,7 @@ export function FlamecastProvider({
         return null;
       });
     };
-  }, [client]);
+  }, [baseUrl]);
 
   return (
     <QueryClientProvider client={queryClient}>
@@ -66,4 +65,18 @@ export function useFirelineDb(): FirelineDB {
   const db = useContext(FirelineDbContext);
   if (!db) throw new Error("useFirelineDb must be used within <FlamecastProvider>");
   return db;
+}
+
+async function fetchFirelineConfig(baseUrl: string) {
+  const response = await fetch(`${baseUrl.replace(/\/$/, "")}/api/fireline-config`, {
+    headers: { accept: "application/json" },
+  });
+  if (!response.ok) {
+    throw new Error(`request failed (${response.status}) for /api/fireline-config`);
+  }
+  return (await response.json()) as {
+    firelineUrl: string;
+    stateStreamUrl: string;
+    workspaceRoot: string;
+  };
 }

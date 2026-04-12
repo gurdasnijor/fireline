@@ -82,6 +82,7 @@ export interface PromptQueueState {
 
 export interface Session {
   id: string
+  sandboxId?: string
   agentName: string
   spawn: AgentSpawn
   startedAt: string
@@ -112,6 +113,7 @@ export interface RuntimeInstance {
   name: string
   typeName: string
   status: 'running' | 'stopped' | 'paused'
+  sandboxId?: string
   websocketUrl?: string
   acpUrl?: string
   stateStreamUrl?: string

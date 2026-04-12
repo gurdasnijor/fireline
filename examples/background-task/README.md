@@ -13,8 +13,16 @@ This demo shows the Fireline version of background work. You submit a long-runni
 ## The Code
 
 ```ts
-const handle = await compose(sandbox({ envVars }), middleware([trace()]), agent(agentCommand))
-  .start({ serverUrl, name: 'background-task' })
+const handle = await compose(
+  sandbox(),
+  middleware([
+    trace(),
+    secretsProxy({
+      ANTHROPIC_API_KEY: { ref: 'env:ANTHROPIC_API_KEY' },
+    }),
+  ]),
+  agent(agentCommand),
+).start({ serverUrl, name: 'background-task' })
 ```
 
 Fireline does not need a special background-job API here. The durable stream is already the long-lived record.

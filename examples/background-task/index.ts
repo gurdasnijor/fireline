@@ -1,4 +1,4 @@
-import fireline, { agent, compose, connectAcp, middleware, sandbox } from '@fireline/client'
+import fireline, { agent, compose, middleware, sandbox } from '@fireline/client'
 import { secretsProxy, trace } from '@fireline/client/middleware'
 
 const stateStreamUrl = process.env.TASK_STREAM_URL
@@ -21,7 +21,7 @@ const handle = await compose(
   middleware(middlewareChain),
   agent(agentCommand),
 ).start({ serverUrl, name: 'background-task' })
-const acp = await connectAcp(handle.acp, 'background-task')
+const acp = await handle.connect('background-task')
 const { sessionId } = await acp.newSession({ cwd: '/workspace', mcpServers: [] })
 await acp.prompt({ sessionId, prompt: [{ type: 'text', text: process.env.TASK_PROMPT ?? 'Audit this repository overnight and leave a morning summary with the top three risks.' }] })
 console.log(JSON.stringify({ question: 'Can I fire off an agent and check on it later?', taskId: handle.id, sessionId, stateStream: handle.state.url }, null, 2))

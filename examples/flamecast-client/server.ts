@@ -4,13 +4,20 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer as createViteServer } from "vite";
-import { createFirelineDB, type ChunkRow, type FirelineDB, type PermissionRow, type PromptTurnRow } from "../../packages/state/src/index.ts";
-import { compose, agent, middleware, sandbox } from "../../packages/client/src/index.ts";
+import { type ChunkRow, type PermissionRow, type PromptTurnRow } from "../../packages/state/src/index.ts";
+import {
+  agent,
+  appendApprovalResolved,
+  compose,
+  connectAcp,
+  db as openFirelineDb,
+  middleware,
+  sandbox,
+  type FirelineDB,
+} from "../../packages/client/src/index.ts";
 import { SandboxAdmin } from "../../packages/client/src/admin.ts";
 import { approve, trace } from "../../packages/client/src/middleware.ts";
 import { localPath } from "../../packages/client/src/resources.ts";
-import { openNodeAcpConnection } from "./shared/acp-node.ts";
-import { resolveApproval } from "./shared/resolve-approval.ts";
 import type {
   AgentSpawn,
   AgentTemplate,
@@ -49,7 +56,7 @@ type SessionRecord = {
     acp: { url: string };
     state: { url: string };
   };
-  connection: Awaited<ReturnType<typeof openNodeAcpConnection>>;
+  connection: Awaited<ReturnType<typeof connectAcp>>;
   runtimeInstance: string;
   agentTemplateId: string;
   agentName: string;
@@ -61,12 +68,14 @@ type SessionRecord = {
   title?: string;
 };
 
+type ProviderName = "local" | "docker" | "microsandbox" | "anthropic";
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(process.env.FLAMECAST_WORKSPACE ?? process.cwd());
 const firelineUrl = process.env.FIRELINE_URL ?? "http://127.0.0.1:4440";
 const sharedStateStream = process.env.FLAMECAST_STATE_STREAM ?? `flamecast-client-${Date.now()}`;
 const serverPort = Number(process.env.PORT ?? 3001);
-const defaultRuntimeType = "local";
+const defaultRuntimeType: ProviderName = "local";
 const defaultRuntimeInstance = process.env.FLAMECAST_DEFAULT_RUNTIME ?? "workspace";
 const defaultSpawn = parseCommand(
   process.env.AGENT_COMMAND ?? "npx -y @anthropic-ai/claude-code-acp",
@@ -398,7 +407,7 @@ async function ensureRuntime(instanceName: string, typeName: string): Promise<Ru
 
   const handle = await provisionSandbox({
     spawn: defaultSpawn,
-    provider: typeName,
+    provider: typeName as ProviderName,
     labels: {
       demo: "flamecast-client",
       kind: "runtime",
@@ -433,7 +442,7 @@ async function createSession(body: {
 
   const handle = await provisionSandbox({
     spawn: template.spawn,
-    provider: template.runtime.provider ?? defaultRuntimeType,
+    provider: (template.runtime.provider ?? defaultRuntimeType) as ProviderName,
     envVars: template.env,
     labels: {
       demo: "flamecast-client",
@@ -444,9 +453,9 @@ async function createSession(body: {
   });
   await ensureStateDb(handle.state.url);
 
-  const connection = await openNodeAcpConnection(handle.acp.url, `flamecast-session-${Date.now()}`);
+  const connection = await connectAcp(handle.acp, `flamecast-session-${Date.now()}`);
   const cwd = sanitizeCwd(body.cwd ?? workspaceRoot);
-  const session = await connection.connection.newSession({ cwd, mcpServers: [] });
+  const session = await connection.newSession({ cwd, mcpServers: [] });
 
   const record: SessionRecord = {
     sessionId: session.sessionId,
@@ -469,7 +478,7 @@ async function createSession(body: {
 
 async function promptSession(sessionId: string, text: string) {
   const record = requireSession(sessionId);
-  await record.connection.connection.prompt({
+  await record.connection.prompt({
     sessionId,
     prompt: [{ type: "text", text }],
   });
@@ -492,10 +501,14 @@ async function resolveSessionPermission(
   requestId: string,
   body: PermissionResponseBody,
 ) {
-  if (!stateStreamUrl) {
-    throw new Error("state stream is not ready");
-  }
-  await resolveApproval(stateStreamUrl, sessionId, requestId, "optionId" in body);
+  const record = requireSession(sessionId);
+  await appendApprovalResolved({
+    streamUrl: record.handle.state.url,
+    sessionId,
+    requestId,
+    allow: "optionId" in body,
+    resolvedBy: "flamecast-client",
+  });
   return { ok: true };
 }
 
@@ -555,6 +568,7 @@ async function buildSessionResponse(
 
   return {
     id: record.sessionId,
+    sandboxId: record.sandboxId,
     agentName: record.agentName,
     spawn: record.spawn,
     startedAt: record.startedAt,
@@ -574,7 +588,7 @@ async function buildSessionResponse(
     cwd: record.cwd,
     title,
     acpUrl: record.handle.acp.url,
-    stateStreamUrl,
+    stateStreamUrl: record.handle.state.url,
   };
 }
 
@@ -592,9 +606,8 @@ async function ensureStateDb(url: string) {
     return;
   }
   stateStreamUrl = url;
-  stateDb = createFirelineDB({ stateStreamUrl: url });
-  await stateDb.preload();
-  stateDb.collections.permissions.subscribeChanges(() => {
+  stateDb = await openFirelineDb({ stateStreamUrl: url });
+  stateDb.permissions.subscribeChanges(() => {
     void autoApprovePendingPermissions();
   });
 }
@@ -603,7 +616,7 @@ async function autoApprovePendingPermissions() {
   if (!stateDb || !stateStreamUrl) {
     return;
   }
-  for (const permission of stateDb.collections.permissions.toArray) {
+  for (const permission of stateDb.permissions.toArray) {
     if (permission.state !== "pending") {
       continue;
     }
@@ -616,13 +629,19 @@ async function autoApprovePendingPermissions() {
       continue;
     }
     autoApproved.add(key);
-    await resolveApproval(stateStreamUrl, permission.sessionId, permission.requestId, true);
+    await appendApprovalResolved({
+      streamUrl: stateStreamUrl,
+      sessionId: permission.sessionId,
+      requestId: permission.requestId,
+      allow: true,
+      resolvedBy: "flamecast-client:auto-approve",
+    });
   }
 }
 
 async function provisionSandbox(options: {
   spawn: AgentSpawn;
-  provider: string;
+  provider: ProviderName;
   envVars?: Record<string, string>;
   labels: Record<string, string>;
 }) {
@@ -674,9 +693,10 @@ function toRuntimeInstance(runtime: RuntimeRecord): RuntimeInstance {
     name: runtime.instanceName,
     typeName: runtime.typeName,
     status: runtime.status,
+    sandboxId: runtime.handle.id,
     websocketUrl: runtime.handle.acp.url,
     acpUrl: runtime.handle.acp.url,
-    stateStreamUrl,
+    stateStreamUrl: runtime.handle.state.url,
   };
 }
 
@@ -684,7 +704,7 @@ function sessionTurns(sessionId: string): PromptTurnRow[] {
   if (!stateDb) {
     return [];
   }
-  return [...stateDb.collections.promptTurns.toArray]
+  return [...stateDb.promptTurns.toArray]
     .filter((turn) => turn.sessionId === sessionId)
     .sort((left, right) => left.startedAt - right.startedAt);
 }
@@ -693,7 +713,7 @@ function sessionPermissions(sessionId: string): PermissionRow[] {
   if (!stateDb) {
     return [];
   }
-  return [...stateDb.collections.permissions.toArray]
+  return [...stateDb.permissions.toArray]
     .filter((permission) => permission.sessionId === sessionId)
     .sort((left, right) => left.createdAt - right.createdAt);
 }
@@ -703,7 +723,7 @@ function sessionChunks(turns: PromptTurnRow[]): ChunkRow[] {
     return [];
   }
   const turnIds = new Set(turns.map((turn) => turn.promptTurnId));
-  return [...stateDb.collections.chunks.toArray]
+  return [...stateDb.chunks.toArray]
     .filter((chunk) => turnIds.has(chunk.promptTurnId))
     .sort((left, right) =>
       left.promptTurnId === right.promptTurnId

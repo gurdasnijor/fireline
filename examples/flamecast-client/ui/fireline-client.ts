@@ -1,10 +1,9 @@
-import { Sandbox } from '../../../packages/client/src/sandbox.ts'
-import { SandboxAdmin } from '../../../packages/client/src/admin.ts'
+import { Sandbox } from "@fireline/client"
+import { SandboxAdmin } from "@fireline/client/admin"
 import type {
   AgentTemplate,
   FilePreview,
   FileSystemSnapshot,
-  PermissionResponseBody,
   QueuedMessage,
   RegisterAgentTemplateBody,
   RuntimeInfo,
@@ -86,11 +85,6 @@ export interface FlamecastClient {
       }
     }
   }
-  fetchFirelineConfig(): Promise<{
-    firelineUrl: string
-    stateStreamUrl: string
-    workspaceRoot: string
-  }>
   fetchSettings(): Promise<FlamecastSettings>
   updateSettings(patch: Partial<FlamecastSettings>): Promise<FlamecastSettings>
   fetchAgentTemplates(): Promise<AgentTemplate[]>
@@ -111,13 +105,6 @@ export interface FlamecastClient {
     name?: string
   }): Promise<Session>
   terminateSession(id: string): Promise<void>
-  promptSession(id: string, text: string): Promise<Record<string, unknown>>
-  fetchSessionStatus(id: string): Promise<{ processing: boolean; pendingPermission: boolean }>
-  resolvePermission(
-    sessionId: string,
-    requestId: string,
-    body: PermissionResponseBody,
-  ): Promise<Record<string, unknown>>
   fetchSessionSettings(id: string): Promise<SessionSettings>
   updateSessionSettings(id: string, patch: Partial<SessionSettings>): Promise<SessionSettings>
   listMessageQueue(): Promise<QueuedMessage[]>
@@ -221,9 +208,6 @@ export function createFlamecastClient(options: FlamecastClientOptions): Flamecas
         },
       },
     },
-    fetchFirelineConfig() {
-      return request('/api/fireline-config')
-    },
     fetchSettings() {
       return request('/api/settings')
     },
@@ -276,24 +260,6 @@ export function createFlamecastClient(options: FlamecastClientOptions): Flamecas
     },
     async terminateSession(id) {
       await request(`/api/agents/${encodeURIComponent(id)}`, { method: 'DELETE' })
-    },
-    promptSession(id, text) {
-      return request(`/api/agents/${encodeURIComponent(id)}/prompts`, {
-        method: 'POST',
-        body: JSON.stringify({ text }),
-      })
-    },
-    fetchSessionStatus(id) {
-      return request(`/api/agents/${encodeURIComponent(id)}/status`)
-    },
-    resolvePermission(sessionId, requestId, body) {
-      return request(
-        `/api/agents/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(requestId)}`,
-        {
-          method: 'POST',
-          body: JSON.stringify(body),
-        },
-      )
     },
     fetchSessionSettings(id) {
       return request(`/api/agents/${encodeURIComponent(id)}/settings`)

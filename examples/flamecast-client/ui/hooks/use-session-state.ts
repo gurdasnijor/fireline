@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { eq } from "@tanstack/db";
 import { useLiveQuery } from "@tanstack/react-db";
 import { useAcpClient } from "use-acp";
-import type { ChunkRow, PermissionRow, PromptTurnRow } from "@fireline/state";
+import { appendApprovalResolved } from "@fireline/client";
+import {
+  createSessionPermissionsCollection,
+  createSessionTurnsCollection,
+  createTurnChunksCollection,
+  type ChunkRow,
+  type PermissionRow,
+  type PromptTurnRow,
+} from "@fireline/state";
 import type { SessionLog, PendingPermission, PermissionResponseBody } from "../fireline-types.js";
 import { useFirelineDb, useFlamecastClient } from "../provider.js";
 import { sessionLogsToSegments } from "../lib/logs-markdown.js";
@@ -16,16 +23,30 @@ export function useSessionState(sessionId: string, _ws: RuntimeWebSocketHandle) 
   const session = sessionQuery.data;
   const [showAllFiles, setShowAllFiles] = useState(false);
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(session?.fileSystem?.root ?? null);
+  const [sessionChunks, setSessionChunks] = useState<ChunkRow[]>([]);
+  const [chunksReady, setChunksReady] = useState(false);
 
-  const turns = useLiveQuery(
-    (q) => q.from({ t: db.collections.promptTurns }).where(({ t }) => eq(t.sessionId, sessionId)),
+  const sessionTurnsCollection = useMemo(
+    () =>
+      createSessionTurnsCollection({
+        promptTurns: db.promptTurns,
+        sessionId,
+      }),
     [db, sessionId],
   );
+  const sessionPermissionsCollection = useMemo(
+    () =>
+      createSessionPermissionsCollection({
+        permissions: db.permissions,
+        sessionId,
+      }),
+    [db, sessionId],
+  );
+  const turns = useLiveQuery((q) => q.from({ t: sessionTurnsCollection }), [sessionTurnsCollection]);
   const permissions = useLiveQuery(
-    (q) => q.from({ p: db.collections.permissions }).where(({ p }) => eq(p.sessionId, sessionId)),
-    [db, sessionId],
+    (q) => q.from({ p: sessionPermissionsCollection }),
+    [sessionPermissionsCollection],
   );
-  const chunks = useLiveQuery((q) => q.from({ c: db.collections.chunks }), [db]);
 
   const acp = useAcpClient({
     wsUrl: session?.websocketUrl ?? "",
@@ -43,24 +64,49 @@ export function useSessionState(sessionId: string, _ws: RuntimeWebSocketHandle) 
     }
   }, [session?.fileSystem?.root]);
 
-  const sessionTurns = useMemo(
-    () => [...(turns.data ?? [])].sort((left, right) => left.startedAt - right.startedAt),
-    [turns.data],
-  );
-  const turnIds = useMemo(
-    () => new Set(sessionTurns.map((turn) => turn.promptTurnId)),
-    [sessionTurns],
-  );
-  const sessionChunks = useMemo(
-    () =>
-      [...(chunks.data ?? [])]
-        .filter((chunk) => turnIds.has(chunk.promptTurnId))
+  useEffect(() => {
+    const turnRows = turns.data ?? [];
+    const chunkCollections = turnRows.map((turn) =>
+      createTurnChunksCollection({
+        chunks: db.chunks,
+        promptTurnId: turn.promptTurnId,
+      }),
+    );
+
+    const syncChunks = () => {
+      const nextChunks = chunkCollections
+        .flatMap((collection) => [...collection.toArray])
         .sort((left, right) =>
           left.promptTurnId === right.promptTurnId
             ? left.seq - right.seq
             : left.createdAt - right.createdAt,
-        ),
-    [chunks.data, turnIds],
+        );
+      setSessionChunks(nextChunks);
+      setChunksReady(true);
+    };
+
+    setChunksReady(false);
+    if (chunkCollections.length === 0) {
+      setSessionChunks([]);
+      setChunksReady(true);
+      return;
+    }
+
+    syncChunks();
+    const subscriptions = chunkCollections.map((collection) =>
+      collection.subscribeChanges(syncChunks),
+    );
+
+    return () => {
+      for (const subscription of subscriptions) {
+        subscription.unsubscribe();
+      }
+    };
+  }, [db, turns.data]);
+
+  const sessionTurns = useMemo(
+    () => [...(turns.data ?? [])].sort((left, right) => left.startedAt - right.startedAt),
+    [turns.data],
   );
   const sessionPermissions = useMemo(
     () => [...(permissions.data ?? [])].sort((left, right) => left.createdAt - right.createdAt),
@@ -83,9 +129,18 @@ export function useSessionState(sessionId: string, _ws: RuntimeWebSocketHandle) 
 
   const respondToPermission = useCallback(
     (requestId: string, body: PermissionResponseBody) => {
-      void client.resolvePermission(sessionId, requestId, body);
+      if (!session?.stateStreamUrl) {
+        throw new Error("Session state stream is not available yet");
+      }
+      void appendApprovalResolved({
+        streamUrl: session.stateStreamUrl,
+        sessionId,
+        requestId,
+        allow: "optionId" in body,
+        resolvedBy: "flamecast-client",
+      });
     },
-    [client, sessionId],
+    [session?.stateStreamUrl, sessionId],
   );
 
   const prompt = useCallback(
@@ -130,7 +185,7 @@ export function useSessionState(sessionId: string, _ws: RuntimeWebSocketHandle) 
 
   return {
     session,
-    isLoading: sessionQuery.isLoading || turns.isLoading || permissions.isLoading || chunks.isLoading,
+    isLoading: sessionQuery.isLoading || turns.isLoading || permissions.isLoading || !chunksReady,
     connectionState,
     isConnected: connectionState === "connected",
     logs,

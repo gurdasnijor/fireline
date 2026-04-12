@@ -15,8 +15,14 @@ This demo shows the Fireline version of that story. You point an ACP-speaking co
 
 ```ts
 const handle = await compose(
-  sandbox({ resources: [localPath(repoPath, '/workspace')], envVars }),
-  middleware([trace(), approve({ scope: 'tool_calls' })]),
+  sandbox({ resources: [localPath(repoPath, '/workspace')] }),
+  middleware([
+    trace(),
+    approve({ scope: 'tool_calls' }),
+    secretsProxy({
+      ANTHROPIC_API_KEY: { ref: 'env:ANTHROPIC_API_KEY' },
+    }),
+  ]),
   agent(agentCommand),
 ).start({ serverUrl, name: 'code-review-agent' })
 ```

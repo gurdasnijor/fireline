@@ -15,8 +15,12 @@ This demo shows the Fireline answer. The agent reaches for a risky operation, Fi
 
 ```ts
 const handle = await compose(
-  sandbox({ envVars }),
-  middleware([trace(), approve({ scope: 'tool_calls' })]),
+  sandbox({}),
+  middleware([
+    trace(),
+    approve({ scope: 'tool_calls' }),
+    secretsProxy({ ANTHROPIC_API_KEY: { ref: 'env:ANTHROPIC_API_KEY' } }),
+  ]),
   agent(agentCommand),
 ).start({ serverUrl, name: 'approval-workflow' })
 ```

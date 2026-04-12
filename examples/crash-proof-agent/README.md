@@ -15,9 +15,10 @@ This demo shows the opposite story. Fireline treats the durable stream as the se
 
 ```ts
 const first = await harness.start({ serverUrl: primaryUrl, stateStream })
-await new SandboxAdmin({ serverUrl: primaryUrl }).destroy(first.id)
+await first.stop()
 const second = await harness.start({ serverUrl: rescueUrl, stateStream })
-await acp2.connection.loadSession({ sessionId, cwd: '/workspace', mcpServers: [] })
+const acp2 = await second.connect('crash-proof-rescue')
+await acp2.loadSession({ sessionId, cwd: '/workspace', mcpServers: [] })
 ```
 
 That is the core product claim: the restart path is ordinary provisioning plus ordinary ACP session load, because the session never lived inside the crashed box in the first place.
