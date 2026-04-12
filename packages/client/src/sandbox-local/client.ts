@@ -29,12 +29,45 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 
 import type { JsonValue } from '../core/index.js'
-import type {
-  Sandbox,
-  SandboxHandle,
-  SandboxSpec,
-  ToolResult,
-} from '../sandbox/index.js'
+import type { CapabilityRef } from '../core/tool.js'
+
+export type { CapabilityRef } from '../core/tool.js'
+
+export type SandboxHandle = {
+  readonly id: string
+  readonly kind: string
+}
+
+export type SandboxSpec = {
+  readonly runtime_key: string
+  readonly capabilities?: readonly CapabilityRef[]
+  readonly mount_paths?: readonly string[]
+  readonly metadata?: Readonly<Record<string, JsonValue>>
+}
+
+export type ToolCall = {
+  readonly tool_name: string
+  readonly arguments: JsonValue
+  readonly call_id?: string
+}
+
+export type ToolResult =
+  | { readonly kind: 'ok'; readonly value: JsonValue }
+  | { readonly kind: 'error'; readonly message: string }
+
+export type SandboxStatus =
+  | { readonly kind: 'provisioning' }
+  | { readonly kind: 'ready' }
+  | { readonly kind: 'executing'; readonly call_id: string }
+  | { readonly kind: 'stopped' }
+  | { readonly kind: 'error'; readonly message: string }
+
+export interface Sandbox {
+  provision(spec: SandboxSpec): Promise<SandboxHandle>
+  execute(handle: SandboxHandle, call: ToolCall): Promise<ToolResult>
+  status(handle: SandboxHandle): Promise<SandboxStatus>
+  stop(handle: SandboxHandle): Promise<void>
+}
 
 export interface LocalSandboxOptions {
   readonly workerCommand: readonly string[]

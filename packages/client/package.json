@@ -19,29 +19,13 @@
       "types": "./dist/core/index.d.ts",
       "default": "./dist/core/index.js"
     },
-    "./host": {
-      "types": "./dist/host/index.d.ts",
-      "default": "./dist/host/index.js"
-    },
     "./orchestration": {
       "types": "./dist/orchestration/index.d.ts",
       "default": "./dist/orchestration/index.js"
     },
-    "./sandbox": {
-      "types": "./dist/sandbox/index.d.ts",
-      "default": "./dist/sandbox/index.js"
-    },
     "./sandbox-local": {
       "types": "./dist/sandbox-local/index.d.ts",
       "default": "./dist/sandbox-local/index.js"
-    },
-    "./host-fireline": {
-      "types": "./dist/host-fireline/index.d.ts",
-      "default": "./dist/host-fireline/index.js"
-    },
-    "./host-hosted-api": {
-      "types": "./dist/host-hosted-api/index.d.ts",
-      "default": "./dist/host-hosted-api/index.js"
     },
     "./middleware": {
       "types": "./dist/middleware.d.ts",
@@ -63,7 +47,6 @@
     "@durable-streams/client": "^0.2.3",
     "@durable-streams/state": "^0.2.3",
     "@fireline/state": "workspace:*",
-    "@iarna/toml": "^2.2.5",
     "@tanstack/db": "^0.6.4",
     "ws": "^8.18.3"
   },
