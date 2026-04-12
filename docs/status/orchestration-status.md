@@ -111,6 +111,30 @@ When an Opus claims an unassigned codex, update this table with the new owner an
 - **Status updates:** update this doc when ownership shifts, when a phase gate passes, or when a new coordination rule emerges.
 - **Cross-orchestrator communication:** in lieu of direct messaging, use this doc or a small scratch section below ("Active cross-Opus notes") to flag things.
 
+## Contention rules
+
+> Established 2026-04-12 by Opus 1 + Opus 3 after w19/w21 cargo target lock collision.
+
+**Local cargo is for compile verification only. CI is the authoritative test environment.**
+
+Dispatch contract for every code-path codex:
+
+1. `cargo check --workspace` locally — confirms the code compiles.
+2. If compile succeeds: commit + push.
+3. CI (GitHub Actions) runs the full test suite.
+4. Gate on CI green before advancing the phase. Use `gh run watch` or `gh run list --limit 1`.
+
+**Do NOT run `cargo test` locally in a dispatched codex.** Parallel codexes share `target/` under the same workspace, which forces `CARGO_TARGET_DIR` isolation hacks and causes lock contention.
+
+**Implication for the canonical-identifiers execution plan §Working Rules #2:** "green locally and in CI" now means `cargo check` green locally + CI test suite green. The per-phase gate command lists still define *which* tests must pass, but the binding environment is CI, not developer laptops. PM to patch the execution doc wording.
+
+**Carve-outs (local `cargo test` is allowed):**
+
+- **Debugging a specific CI failure** that requires iteration faster than a push cycle. Must be a single codex, not parallel. Owning Opus flags in Active cross-Opus notes before starting.
+- **The orchestrating Opus itself** (not a dispatched codex) running a scoped test to investigate a regression. Keep scope narrow; avoid `cargo test --workspace`.
+
+**Applies to review feedback too:** if a landed PR ran `cargo test --workspace` in its dispatch contract, note the deviation in the landed review. Future dispatches use check-only.
+
 ## Active cross-Opus notes
 
 (append short notes here when one Opus needs another's attention)
