@@ -38,3 +38,21 @@ TASK_STREAM_URL=http://127.0.0.1:7474/streams/state/... pnpm start
 ```
 
 The first run submits the work. The second run is the "check on it later" moment.
+
+## The Primitive Behind This Example
+
+The conceptual foundation here is Fireline's durable-streams substrate plus the
+canonical identity model in
+[acp-canonical-identifiers.md](../../docs/proposals/acp-canonical-identifiers.md).
+
+This example does not need a named `DurableSubscriber` instance to make sense.
+The underlying idea is simpler: the agent's durable state lives on the session
+stream, so the runner process can come and go without becoming the source of
+truth. That is the same observation model the passive durable workflow proposals
+build on in [durable-subscriber.md](../../docs/proposals/durable-subscriber.md)
+and [durable-promises.md](../../docs/proposals/durable-promises.md): the stream
+is the durable record, and local processes are just temporary executors.
+
+So the "background task" story is really "agent outlives the runner" semantics.
+This section is pointing at the target architecture behind that story, not
+claiming the full durable-promises API already exists in the runtime today.

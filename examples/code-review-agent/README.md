@@ -41,3 +41,22 @@ pnpm start
 ```
 
 The script prints a `stateStream` URL. Point `examples/live-monitoring` at that URL and you get the product experience a buyer actually cares about: a code-review agent they can trust.
+
+## The Primitive Behind This Example
+
+The conceptual foundation for this example is the passive durable workflow
+pattern described in [durable-subscriber.md](../../docs/proposals/durable-subscriber.md).
+
+In the target architecture, a tool-call approval flow like this is modeled as a
+`DurableSubscriber::Passive` wait keyed by the canonical ACP prompt-request
+reference `(SessionId, RequestId)`, not by a Fireline-minted review id. The
+approval request is durable because it is written to the session stream, and the
+resolution path is durable because the matching completion is appended back to
+that same stream.
+
+[acp-canonical-identifiers.md](../../docs/proposals/acp-canonical-identifiers.md)
+is the other half of the story: it defines why the stable identity for this
+approval is the ACP prompt request itself. This README is describing the product
+shape that substrate enables, not claiming the fully generalized
+`DurableSubscriber` runtime is already the implementation behind this example
+today.

@@ -35,3 +35,23 @@ pnpm start
 ```
 
 Use two Fireline hosts that share one durable-streams service. The output shows one `sessionId`, two different sandbox ids, and one uninterrupted turn history.
+
+## The Primitive Behind This Example
+
+The durability story behind this demo starts with
+[acp-canonical-identifiers.md](../../docs/proposals/acp-canonical-identifiers.md).
+In the target architecture, the canonical `SessionId` is the durable identity
+for the agent-plane conversation, so rebuild-from-log does not need to mint a
+replacement id after a crash.
+
+That same identity discipline is what makes `session/load` plus stream replay a
+clean recovery path: a new host can reattach to the existing session stream,
+replay the prior events, and resume the same ACP session instead of stitching
+together a new synthetic conversation handle. The durable workflow proposals in
+[durable-subscriber.md](../../docs/proposals/durable-subscriber.md) and
+[durable-promises.md](../../docs/proposals/durable-promises.md) depend on the
+same foundation.
+
+This section is describing the conceptual substrate the demo is aiming at. It
+does not claim that the generalized DurableSubscriber or durable-promises
+primitive is already the literal runtime mechanism for this example today.
