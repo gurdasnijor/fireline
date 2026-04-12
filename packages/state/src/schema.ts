@@ -1,6 +1,11 @@
 import { createStateSchema } from '@durable-streams/state'
 import { z } from 'zod'
-import type { RequestId, SessionId, ToolCallId } from './acp-types.js'
+import type {
+  RequestId,
+  SessionId,
+  SessionUpdate,
+  ToolCallId,
+} from './acp-types.js'
 
 const sessionIdSchema = z.custom<SessionId>(
   (value): value is SessionId => typeof value === 'string',
@@ -15,6 +20,14 @@ const requestIdSchema = z.custom<RequestId>(
 
 const toolCallIdSchema = z.custom<ToolCallId>(
   (value): value is ToolCallId => typeof value === 'string',
+)
+
+const sessionUpdateSchema = z.custom<SessionUpdate>(
+  (value): value is SessionUpdate =>
+    typeof value === 'object' &&
+    value !== null &&
+    'sessionUpdate' in value &&
+    typeof (value as { sessionUpdate?: unknown }).sessionUpdate === 'string',
 )
 
 export const connectionSchema = z.object({
@@ -131,13 +144,11 @@ export const childSessionEdgeSchema = z.object({
 })
 
 export const chunkSchema = z.object({
-  chunkId: z.string(),
+  chunkKey: z.string(),
   sessionId: sessionIdSchema,
-  promptTurnId: z.string(),
-  logicalConnectionId: z.string(),
-  type: z.enum(['text', 'tool_call', 'thinking', 'tool_result', 'error', 'stop']),
-  content: z.string(),
-  seq: z.number(),
+  requestId: requestIdSchema,
+  toolCallId: toolCallIdSchema.optional(),
+  update: sessionUpdateSchema,
   createdAt: z.number(),
 })
 
@@ -204,7 +215,7 @@ export const firelineState = createStateSchema({
 
   chunks: {
     schema: chunkSchema,
-    type: 'chunk',
-    primaryKey: 'chunkId',
+    type: 'chunk_v2',
+    primaryKey: 'chunkKey',
   },
 })

@@ -29,18 +29,22 @@ const baseEnvelopeSchema = z
   })
   .strict()
 
+const legacyChunkSchema = z
+  .object({
+    chunkId: z.string(),
+    sessionId: z.string(),
+    promptTurnId: z.string(),
+    logicalConnectionId: z.string(),
+    type: z.enum(['text', 'tool_call', 'thinking', 'tool_result', 'error', 'stop']),
+    content: z.string(),
+    seq: z.number(),
+    createdAt: z.number(),
+  })
+  .strict()
+
 const strictValueSchemas = {
-  chunk: chunkSchema.strict(),
-  chunk_v2: z
-    .object({
-      sessionId: z.string(),
-      requestId: requestIdSchema,
-      toolCallId: z.string().optional(),
-      type: z.enum(['text', 'tool_call', 'thinking', 'tool_result', 'error', 'stop']),
-      content: z.string(),
-      createdAt: z.number(),
-    })
-    .strict(),
+  chunk: legacyChunkSchema,
+  chunk_v2: chunkSchema.strict(),
   connection: connectionSchema.strict(),
   pending_request: pendingRequestSchema.strict(),
   prompt_request: z

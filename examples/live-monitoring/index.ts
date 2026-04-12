@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import fireline, { type FirelineDB } from '@fireline/client'
-import { eq } from '@tanstack/db'
+import { isToolCallSessionUpdate } from '@fireline/state'
 import { useLiveQuery } from '@tanstack/react-db'
 import { createElement as h, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -40,14 +40,16 @@ function App() {
 function MonitoringView({ db }: { db: FirelineDB }) {
   const sessions = useLiveQuery((q) => q.from({ s: db.sessions }), [db])
   const turns = useLiveQuery((q) => q.from({ t: db.promptTurns }), [db])
-  const approvals = useLiveQuery((q) => q.from({ p: db.permissions }).where(({ p }) => eq(p.state, 'pending')), [db])
-  const toolCalls = useLiveQuery((q) => q.from({ c: db.chunks }).where(({ c }) => eq(c.type, 'tool_call')), [db])
+  const approvals = useLiveQuery((q) => q.from({ p: db.permissions }), [db])
+  const chunks = useLiveQuery((q) => q.from({ c: db.chunks }), [db])
   const acp = useAcpClient({ wsUrl: acpUrl, autoConnect: true, initialSessionId: sessions.data?.[0]?.sessionId ?? null, sessionParams: { cwd: '/workspace', mcpServers: [] } })
   const optionId = acp.pendingPermission?.options[0]?.optionId
+  const pendingApprovals = approvals.data?.filter((row) => row.state === 'pending').length ?? 0
+  const toolCalls = chunks.data?.filter((row) => isToolCallSessionUpdate(row.update)).length ?? 0
 
   return h('main', { style: { fontFamily: 'ui-monospace, monospace', padding: '24px' } }, [
     h('h1', { key: 'h' }, 'Fireline Live Monitoring'),
-    h('pre', { key: 'p' }, JSON.stringify({ sessions: sessions.data?.length ?? 0, turns: turns.data?.length ?? 0, pendingApprovals: approvals.data?.length ?? 0, toolCalls: toolCalls.data?.length ?? 0, latestSession: sessions.data?.[0]?.sessionId ?? null }, null, 2)),
+    h('pre', { key: 'p' }, JSON.stringify({ sessions: sessions.data?.length ?? 0, turns: turns.data?.length ?? 0, pendingApprovals, toolCalls, latestSession: sessions.data?.[0]?.sessionId ?? null }, null, 2)),
     optionId ? h('button', { key: 'b', onClick: () => acp.resolvePermission({ outcome: { outcome: 'selected', optionId } }) }, 'Approve next action') : null,
   ])
 }

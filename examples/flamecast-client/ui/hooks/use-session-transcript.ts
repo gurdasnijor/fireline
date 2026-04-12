@@ -42,18 +42,14 @@ export function useSessionTranscript(sessionId: string) {
     const chunkCollections = turnRows.map((turn) =>
       createTurnChunksCollection({
         chunks: db.chunks,
-        promptTurnId: turn.promptTurnId,
+        requestId: turn.requestId,
       }),
     );
 
     const syncChunks = () => {
       const nextChunks = chunkCollections
         .flatMap((collection) => [...collection.toArray])
-        .sort((left, right) =>
-          left.promptTurnId === right.promptTurnId
-            ? left.seq - right.seq
-            : left.createdAt - right.createdAt,
-        );
+        .sort((left, right) => left.createdAt - right.createdAt);
       setSessionChunks(nextChunks);
       setChunksReady(true);
     };

@@ -1,6 +1,7 @@
 // Fireline
 import fireline, { agent, compose, middleware, sandbox } from '@fireline/client'
 import { peer } from '@fireline/client/middleware'
+import { extractChunkTextPreview } from '@fireline/state'
 import { waitForRows } from '../shared/wait.ts'
 
 const agentBin = process.env.AGENT_BIN ?? '../../target/debug/fireline-testy'
@@ -15,8 +16,15 @@ const db = await fireline.db({ stateStreamUrl: agentB.state.url })
 const acp = await agentB.connect('cross-host-discovery')
 const { sessionId } = await acp.newSession({ cwd: process.cwd(), mcpServers: [] })
 const readSessionText = () => {
-  const turnIds = new Set(db.promptTurns.toArray.filter((turn) => turn.sessionId === sessionId).map((turn) => turn.promptTurnId))
-  return db.chunks.toArray.filter((chunk) => turnIds.has(chunk.promptTurnId)).map((chunk) => chunk.content).join('\n')
+  const requestIds = new Set(
+    db.promptTurns.toArray
+      .filter((turn) => turn.sessionId === sessionId)
+      .map((turn) => turn.requestId),
+  )
+  return db.chunks.toArray
+    .filter((chunk) => requestIds.has(chunk.requestId))
+    .map((chunk) => extractChunkTextPreview(chunk.update))
+    .join('\n')
 }
 await acp.prompt({ sessionId, prompt: [{ type: 'text', text: toolCall('list_peers') }] })
 await waitForRows(db.chunks, () => readSessionText().includes('agent-a') && readSessionText().includes('agent-b'), 10_000)

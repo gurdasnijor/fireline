@@ -1,6 +1,7 @@
 import fireline, { agent, compose, middleware, pipe, sandbox } from '@fireline/client'
 import { trace } from '@fireline/client/middleware'
 import { localPath } from '@fireline/client/resources'
+import { extractChunkTextPreview } from '@fireline/state'
 import { waitForRows } from '../shared/wait.ts'
 
 const serverUrl = process.env.FIRELINE_URL ?? 'http://127.0.0.1:4440'
@@ -18,7 +19,11 @@ const researchTurns = await waitForRows(
   (rows) => rows.some((row) => row.sessionId === research.sessionId && row.state === 'completed'),
   10_000,
 )
-const researchText = db.chunks.toArray.filter((row) => researchTurns.some((turn) => turn.promptTurnId === row.promptTurnId)).map((row) => row.content).join('')
+const researchRequestIds = new Set(researchTurns.map((turn) => turn.requestId))
+const researchText = db.chunks.toArray
+  .filter((row) => researchRequestIds.has(row.requestId))
+  .map((row) => extractChunkTextPreview(row.update))
+  .join('')
 const write = await writer.newSession({ cwd: '/workspace', mcpServers: [] })
 await writer.prompt({ sessionId: write.sessionId, prompt: [{ type: 'text', text: `Turn this research into a one-page brief:\n${researchText}` }] })
 const writerTurns = await waitForRows(
@@ -26,5 +31,14 @@ const writerTurns = await waitForRows(
   (rows) => rows.some((row) => row.sessionId === write.sessionId && row.state === 'completed'),
   10_000,
 )
-console.log(JSON.stringify({ question: 'Can multiple agents collaborate on the same task?', sessions: db.sessions.toArray.map((row) => row.sessionId), graph: db.childSessionEdges.toArray, finalDocument: db.chunks.toArray.filter((row) => writerTurns.some((turn) => turn.promptTurnId === row.promptTurnId)).map((row) => row.content).join('') }, null, 2))
+const writerRequestIds = new Set(writerTurns.map((turn) => turn.requestId))
+console.log(JSON.stringify({
+  question: 'Can multiple agents collaborate on the same task?',
+  sessions: db.sessions.toArray.map((row) => row.sessionId),
+  graph: db.childSessionEdges.toArray,
+  finalDocument: db.chunks.toArray
+    .filter((row) => writerRequestIds.has(row.requestId))
+    .map((row) => extractChunkTextPreview(row.update))
+    .join(''),
+}, null, 2))
 await researcher.close(); await writer.close(); db.close()

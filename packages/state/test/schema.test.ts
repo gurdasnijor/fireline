@@ -35,6 +35,25 @@ describe('firelineState schema', () => {
     expect(event.headers.operation).toBe('insert')
   })
 
+  it('creates a valid canonical chunk insert event', () => {
+    const event = firelineState.chunks.insert({
+      value: {
+        chunkKey: 'chunk:sess-1:req-1:0',
+        sessionId: 'session-1',
+        requestId: 'req-1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'hello' },
+        },
+        createdAt: 1,
+      },
+    })
+
+    expect(event.type).toBe('chunk_v2')
+    expect(event.key).toBe('chunk:sess-1:req-1:0')
+    expect(event.headers.operation).toBe('insert')
+  })
+
   it('creates a valid child-session edge insert event', () => {
     const event = firelineState.childSessionEdges.insert({
       value: {

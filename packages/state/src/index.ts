@@ -4,9 +4,11 @@ export type {
   SessionId,
   RequestId,
   ToolCallId,
+  SessionUpdate,
   PromptRequestRef,
   ToolInvocationRef,
 } from './acp-types.js'
+export { requestIdCollectionKey } from './acp-types.js'
 
 export {
   createFirelineDB,
@@ -41,3 +43,12 @@ export {
   type TurnChunksOptions,
   type SessionPermissionsOptions,
 } from './collections/index.js'
+
+export {
+  extractChunkTextPreview,
+  isToolCallSessionUpdate,
+  sessionUpdateKind,
+  sessionUpdateStatus,
+  sessionUpdateTitle,
+  sessionUpdateToolCallId,
+} from './session-updates.js'

@@ -30,8 +30,8 @@ import type {
   RuntimeInfo,
   RuntimeInstance,
   Session,
-  SessionLog,
 } from "./ui/fireline-types.ts";
+import { buildSessionLogs } from "./ui/lib/build-session-logs.js";
 
 type RuntimeRecord = {
   typeName: string;
@@ -535,7 +535,7 @@ async function buildSessionResponse(
   const turns = sessionTurns(record.sessionId);
   const permissions = sessionPermissions(record.sessionId);
   const chunks = sessionChunks(turns);
-  const logs = buildLogs(turns, chunks, permissions);
+  const logs = buildSessionLogs(turns, chunks, permissions);
   const title = record.title ?? turns.find((turn) => turn.text)?.text ?? record.agentName;
   const pendingPermission = permissions.find((permission) => permission.state === "pending");
   const queueItems = messageQueue
@@ -762,116 +762,10 @@ function sessionChunks(turns: PromptTurnRow[]): ChunkRow[] {
   if (!stateDb) {
     return [];
   }
-  const turnIds = new Set(turns.map((turn) => turn.promptTurnId));
+  const requestIds = new Set(turns.map((turn) => turn.requestId));
   return [...stateDb.chunks.toArray]
-    .filter((chunk) => turnIds.has(chunk.promptTurnId))
-    .sort((left, right) =>
-      left.promptTurnId === right.promptTurnId
-        ? left.seq - right.seq
-        : left.createdAt - right.createdAt,
-    );
-}
-
-function buildLogs(turns: PromptTurnRow[], chunks: ChunkRow[], permissions: PermissionRow[]): SessionLog[] {
-  const logs: SessionLog[] = [];
-  const byTurn = new Map<string, ChunkRow[]>();
-  for (const chunk of chunks) {
-    const list = byTurn.get(chunk.promptTurnId);
-    if (list) {
-      list.push(chunk);
-    } else {
-      byTurn.set(chunk.promptTurnId, [chunk]);
-    }
-  }
-
-  for (const turn of turns) {
-    if (turn.text) {
-      logs.push({
-        timestamp: new Date(turn.startedAt).toISOString(),
-        type: "prompt_sent",
-        data: { text: turn.text },
-      });
-    }
-    for (const chunk of byTurn.get(turn.promptTurnId) ?? []) {
-      if (chunk.type === "text") {
-        logs.push({
-          timestamp: new Date(chunk.createdAt).toISOString(),
-          type: "session_update",
-          data: {
-            sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: chunk.content },
-          },
-        });
-        continue;
-      }
-      if (chunk.type === "tool_call") {
-        const payload = parseJsonObject(chunk.content);
-        logs.push({
-          timestamp: new Date(chunk.createdAt).toISOString(),
-          type: "session_update",
-          data: {
-            sessionUpdate: "tool_call",
-            toolCallId: stringField(payload, "toolCallId", `${turn.promptTurnId}:${chunk.seq}`),
-            title: stringField(payload, "title", stringField(payload, "toolName", "Tool")),
-            status: stringField(payload, "status", "pending"),
-          },
-        });
-        continue;
-      }
-      if (chunk.type === "tool_result") {
-        const payload = parseJsonObject(chunk.content);
-        logs.push({
-          timestamp: new Date(chunk.createdAt).toISOString(),
-          type: "session_update",
-          data: {
-            sessionUpdate: "tool_call_update",
-            toolCallId: stringField(payload, "toolCallId", `${turn.promptTurnId}:${chunk.seq}`),
-            status: stringField(payload, "status", "completed"),
-          },
-        });
-        continue;
-      }
-      if (chunk.type === "thinking") {
-        logs.push({
-          timestamp: new Date(chunk.createdAt).toISOString(),
-          type: "session_update",
-          data: {
-            sessionUpdate: "agent_thought_chunk",
-            content: { type: "text", text: chunk.content },
-          },
-        });
-        continue;
-      }
-      if (chunk.type === "error") {
-        logs.push({
-          timestamp: new Date(chunk.createdAt).toISOString(),
-          type: "error",
-          data: { message: chunk.content },
-        });
-        continue;
-      }
-      logs.push({
-        timestamp: new Date(chunk.createdAt).toISOString(),
-        type: "prompt_completed",
-        data: { promptTurnId: turn.promptTurnId, stopReason: turn.stopReason },
-      });
-    }
-  }
-
-  for (const permission of permissions) {
-    logs.push({
-      timestamp: new Date(permission.createdAt).toISOString(),
-      type: permission.state === "pending" ? "permission_requested" : "permission_responded",
-      data: {
-        requestId: permission.requestId,
-        toolCallId: permission.toolCallId ?? "",
-        title: permission.title ?? "Permission required",
-        outcome: permission.outcome,
-      },
-    });
-  }
-
-  return logs.sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp));
+    .filter((chunk) => requestIds.has(chunk.requestId))
+    .sort((left, right) => left.createdAt - right.createdAt);
 }
 
 function toPendingPermission(permission: PermissionRow): PendingPermission {
@@ -1099,19 +993,6 @@ function contentType(filePath: string): string {
     default:
       return "text/html; charset=utf-8";
   }
-}
-
-function parseJsonObject(value: string): Record<string, unknown> {
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
-}
-
-function stringField(value: Record<string, unknown>, key: string, fallback: string): string {
-  return typeof value[key] === "string" ? (value[key] as string) : fallback;
 }
 
 async function detectGitRoot(currentPath: string): Promise<string | undefined> {

@@ -1,6 +1,7 @@
 import { createLiveQueryCollection } from '@tanstack/db'
 import type { Collection } from '@tanstack/db'
 
+import { requestIdCollectionKey } from '../acp-types.js'
 import type { PermissionRow } from '../schema.js'
 
 export function createPendingPermissionsCollection(
@@ -11,6 +12,6 @@ export function createPendingPermissionsCollection(
       q
         .from({ p: opts.permissions })
         .fn.where(({ p }: { p: PermissionRow }) => p.state === 'pending'),
-    getKey: (row: PermissionRow) => row.requestId,
+    getKey: (row: PermissionRow) => requestIdCollectionKey(row.requestId),
   }) as unknown as Collection<PermissionRow>
 }

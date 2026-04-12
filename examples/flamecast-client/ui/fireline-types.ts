@@ -1,3 +1,5 @@
+import type { RequestId } from "@fireline/state"
+
 export interface AgentSpawn {
   command: string
   args: string[]
@@ -32,7 +34,7 @@ export interface PendingPermissionOption {
 }
 
 export interface PendingPermission {
-  requestId: string
+  requestId: RequestId
   toolCallId: string
   title: string
   kind?: string
@@ -146,7 +148,7 @@ export interface SessionRuntimeInfo {
 }
 
 export interface PermissionRequestEvent {
-  requestId: string
+  requestId: RequestId
   toolCallId: string
   title: string
   kind?: string
@@ -167,12 +169,16 @@ function isPendingPermission(value: unknown): value is PendingPermission {
     return false
   }
   return (
-    typeof value.requestId === 'string' &&
+    isRequestId(value.requestId) &&
     typeof value.toolCallId === 'string' &&
     typeof value.title === 'string' &&
     Array.isArray(value.options) &&
     value.options.every(isPendingPermissionOption)
   )
+}
+
+function isRequestId(value: unknown): value is RequestId {
+  return value === null || typeof value === 'string' || typeof value === 'number'
 }
 
 function isPendingPermissionOption(value: unknown): value is PendingPermissionOption {

@@ -1,12 +1,13 @@
 import fireline, { agent, compose, middleware, sandbox } from '@fireline/client'
 import { approve, secretsProxy, trace } from '@fireline/client/middleware'
+import { requestIdCollectionKey } from '@fireline/state'
 import { createServer, type IncomingMessage } from 'node:http'
 import { waitForRows } from '../shared/wait.ts'
 
 const serverUrl = process.env.FIRELINE_URL ?? 'http://127.0.0.1:4440'
 const webhookUrl = process.env.APPROVAL_WEBHOOK ?? 'http://127.0.0.1:8787/approve'
 const agentCommand = (process.env.AGENT_COMMAND ?? 'npx -y @anthropic-ai/claude-code-acp').split(' ')
-const seen = new Set<string>()
+const seen = new Set<string | number>()
 const middlewareChain = [
   trace(),
   approve({ scope: 'tool_calls' as const }),
@@ -22,7 +23,7 @@ const handle = await compose(
 const broker = createServer(async (req, res) => { if (req.method !== 'POST' || req.url !== new URL(webhookUrl).pathname) return res.writeHead(404).end(); const body = JSON.parse(await readBody(req)) as { sessionId: string; requestId: string }; await handle.resolvePermission(body.sessionId, body.requestId, { allow: true, resolvedBy: 'approval-workflow' }); res.writeHead(202).end('approved') })
 await new Promise<void>((resolve) => broker.listen(Number(new URL(webhookUrl).port || 8787), resolve))
 const db = await fireline.db({ stateStreamUrl: handle.state.url })
-db.permissions.subscribe((rows) => { const pending = rows.find((row) => row.state === 'pending' && !seen.has(row.requestId)); if (!pending) return; seen.add(pending.requestId); void fetch(webhookUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: pending.sessionId, requestId: pending.requestId }) }) })
+db.permissions.subscribe((rows) => { const pending = rows.find((row) => row.state === 'pending' && !seen.has(requestIdCollectionKey(row.requestId))); if (!pending) return; seen.add(requestIdCollectionKey(pending.requestId)); void fetch(webhookUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: pending.sessionId, requestId: pending.requestId }) }) })
 const acp = await handle.connect('approval-workflow')
 const { sessionId } = await acp.newSession({ cwd: '/workspace', mcpServers: [] })
 await acp.prompt({ sessionId, prompt: [{ type: 'text', text: 'Delete the build output with rm -rf dist, but wait for human approval first.' }] })

@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { useLiveQuery } from "@tanstack/react-db";
 import { useQuery } from "@tanstack/react-query";
-import type { SessionRow } from "@fireline/state";
+import type { RequestId, SessionRow } from "@fireline/state";
 import type { PendingPermission, Session } from "../fireline-types.js";
 import { useFirelineDb, useFlamecastClient } from "../provider.js";
 
@@ -47,7 +47,7 @@ function mergeSessions(
   permissions: readonly {
     sessionId: string;
     state: string;
-    requestId: string;
+    requestId: RequestId;
     toolCallId?: string | null;
     title?: string | null;
     options?: PendingPermission["options"];

@@ -4,6 +4,8 @@ import { createCollection, localOnlyCollectionOptions } from '@tanstack/db'
 import type { ChunkRow, PermissionRow, PromptTurnRow } from '../src/schema.js'
 import {
   createConnectionTurnsCollection,
+  extractChunkTextPreview,
+  requestIdCollectionKey,
   createSessionPermissionsCollection,
   createSessionTurnsCollection,
   createTurnChunksCollection,
@@ -20,7 +22,7 @@ function makePromptTurnsCollection() {
 function makeChunksCollection() {
   return createCollection(
     localOnlyCollectionOptions<ChunkRow>({
-      getKey: (row) => row.chunkId,
+      getKey: (row) => row.chunkKey,
     }),
   )
 }
@@ -28,7 +30,7 @@ function makeChunksCollection() {
 function makePermissionsCollection() {
   return createCollection(
     localOnlyCollectionOptions<PermissionRow>({
-      getKey: (row) => row.requestId,
+      getKey: (row) => requestIdCollectionKey(row.requestId),
     }),
   )
 }
@@ -50,15 +52,18 @@ function promptTurn(overrides: Partial<PromptTurnRow> & Pick<PromptTurnRow, 'pro
   }
 }
 
-function chunk(overrides: Partial<ChunkRow> & Pick<ChunkRow, 'chunkId'>): ChunkRow {
+function chunk(overrides: Partial<ChunkRow> & Pick<ChunkRow, 'chunkKey'>): ChunkRow {
   return {
-    chunkId: overrides.chunkId,
+    chunkKey: overrides.chunkKey,
     sessionId: overrides.sessionId ?? 'session-1',
-    promptTurnId: overrides.promptTurnId ?? 'turn-1',
-    logicalConnectionId: overrides.logicalConnectionId ?? 'conn-1',
-    type: overrides.type ?? 'text',
-    content: overrides.content ?? '',
-    seq: overrides.seq ?? 0,
+    requestId: overrides.requestId ?? 'req-1',
+    toolCallId: overrides.toolCallId,
+    update:
+      overrides.update ??
+      ({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+      } as ChunkRow['update']),
     createdAt: overrides.createdAt ?? 0,
   }
 }
@@ -136,17 +141,49 @@ describe('createConnectionTurnsCollection', () => {
 })
 
 describe('createTurnChunksCollection', () => {
-  it('returns only chunks for the target turn, ordered by seq', async () => {
+  it('returns only chunks for the target request, ordered by createdAt', async () => {
     const chunks = makeChunksCollection()
-    chunks.insert(chunk({ chunkId: 'chunk-1', promptTurnId: 'turn-1', seq: 2, content: 'world' }))
-    chunks.insert(chunk({ chunkId: 'chunk-2', promptTurnId: 'turn-1', seq: 1, content: 'hello ' }))
-    chunks.insert(chunk({ chunkId: 'chunk-3', promptTurnId: 'turn-2', seq: 1, content: 'other' }))
+    chunks.insert(
+      chunk({
+        chunkKey: 'chunk-1',
+        requestId: 'req-1',
+        createdAt: 20,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'world' },
+        } as ChunkRow['update'],
+      }),
+    )
+    chunks.insert(
+      chunk({
+        chunkKey: 'chunk-2',
+        requestId: 'req-1',
+        createdAt: 10,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'hello ' },
+        } as ChunkRow['update'],
+      }),
+    )
+    chunks.insert(
+      chunk({
+        chunkKey: 'chunk-3',
+        requestId: 'req-2',
+        createdAt: 5,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'other' },
+        } as ChunkRow['update'],
+      }),
+    )
 
-    const turnChunks = createTurnChunksCollection({ chunks, promptTurnId: 'turn-1' })
+    const turnChunks = createTurnChunksCollection({ chunks, requestId: 'req-1' })
     await turnChunks.preload()
 
-    expect(turnChunks.toArray.map((row) => row.chunkId)).toEqual(['chunk-2', 'chunk-1'])
-    expect(turnChunks.toArray.map((row) => row.content).join('')).toBe('hello world')
+    expect(turnChunks.toArray.map((row) => row.chunkKey)).toEqual(['chunk-2', 'chunk-1'])
+    expect(turnChunks.toArray.map((row) => extractChunkTextPreview(row.update)).join('')).toBe(
+      'hello world',
+    )
   })
 })
 

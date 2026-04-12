@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use sacp::schema::StopReason;
+use sacp::schema::{ContentBlock, SessionUpdate, StopReason};
 use sacp_conductor::trace::{NotificationEvent, RequestEvent, ResponseEvent, TraceEvent};
 use serde::Serialize;
 use serde_json::Value;
@@ -17,17 +17,6 @@ enum PromptRequestState {
     Active,
     Completed,
     Broken,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum ChunkType {
-    Text,
-    ToolCall,
-    Thinking,
-    ToolResult,
-    Error,
-    Stop,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,13 +67,13 @@ struct LegacySessionRow {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ChunkRowV2 {
+    #[serde(rename = "chunkKey")]
+    chunk_key: String,
     session_id: SessionId,
     request_id: RequestId,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<ToolCallId>,
-    #[serde(rename = "type")]
-    chunk_type: ChunkType,
-    content: String,
+    update: SessionUpdate,
     created_at: i64,
 }
 
@@ -99,7 +88,7 @@ struct LegacyChunkRow {
     #[serde(rename = "logicalConnectionId")]
     connection_id: String,
     #[serde(rename = "type")]
-    chunk_type: ChunkType,
+    chunk_type: &'static str,
     content: String,
     seq: i64,
     created_at: i64,
@@ -374,37 +363,8 @@ impl StateProjector {
             return Vec::new();
         };
 
-        let update = notif.params.get("update");
-        let update_type = update
-            .and_then(|value| value.get("sessionUpdate").or_else(|| value.get("type")))
-            .and_then(Value::as_str);
-
-        let (chunk_type, content) = match update_type {
-            Some("agent_message_chunk")
-            | Some("agentMessageChunk")
-            | Some("user_message_chunk")
-            | Some("userMessageChunk") => (
-                ChunkType::Text,
-                update_text_content(update).unwrap_or_default(),
-            ),
-            Some("agent_thought_chunk") | Some("agentThoughtChunk") => (
-                ChunkType::Thinking,
-                update_text_content(update).unwrap_or_default(),
-            ),
-            Some("tool_call") | Some("toolCall") => (
-                ChunkType::ToolCall,
-                update.map(Value::to_string).unwrap_or_default(),
-            ),
-            Some("tool_call_update") | Some("toolCallUpdate") => (
-                ChunkType::ToolResult,
-                update.map(Value::to_string).unwrap_or_default(),
-            ),
-            Some("agent_error") | Some("agentError") => (
-                ChunkType::Error,
-                update.map(Value::to_string).unwrap_or_default(),
-            ),
-            Some("stop") => (ChunkType::Stop, String::new()),
-            _ => return Vec::new(),
+        let Some(update) = session_update_from_notification(notif.params.get("update")) else {
+            return Vec::new();
         };
 
         let prompt_key = prompt_request_key(&prompt_ref);
@@ -416,35 +376,28 @@ impl StateProjector {
         let current_order = *order;
         *order += 1;
         let created_at = now_ms();
-        let tool_call_id = tool_call_id_from_update(update);
+        let tool_call_id = tool_call_id_from_session_update(&update);
+        let chunk_key = chunk_row_key(&prompt_key, tool_call_id.as_ref(), current_order);
         let chunk_v2 = ChunkRowV2 {
+            chunk_key: chunk_key.clone(),
             session_id: prompt_ref.session_id.clone(),
             request_id: prompt_ref.request_id.clone(),
             tool_call_id: tool_call_id.clone(),
-            chunk_type: chunk_type.clone(),
-            content: content.clone(),
+            update: update.clone(),
             created_at,
         };
-        let legacy_chunk = LegacyChunkRow {
-            row_id: Uuid::new_v4().to_string(),
-            session_id: prompt_ref.session_id,
-            prompt_request_key: prompt_key.clone(),
-            connection_id: self.connection_id.clone(),
-            chunk_type,
-            content,
-            seq: current_order,
+        let mut changes = vec![state_change("chunk_v2", &chunk_key, "insert", Some(&chunk_v2))];
+        if let Some(legacy_chunk) = legacy_chunk_row(
+            &prompt_ref,
+            &prompt_key,
+            &self.connection_id,
+            current_order,
             created_at,
-        };
-
-        vec![
-            state_change(
-                "chunk_v2",
-                &chunk_row_key(&prompt_key, tool_call_id.as_ref(), current_order),
-                "insert",
-                Some(&chunk_v2),
-            ),
-            state_change("chunk", &legacy_chunk.row_id, "insert", Some(&legacy_chunk)),
-        ]
+            &update,
+        ) {
+            changes.push(state_change("chunk", &legacy_chunk.row_id, "insert", Some(&legacy_chunk)));
+        }
+        changes
     }
 }
 
@@ -494,14 +447,6 @@ fn prompt_text_preview(params: &Value) -> Option<String> {
         .get("prompt")
         .and_then(Value::as_array)
         .and_then(|blocks| first_text_block(blocks))
-}
-
-fn update_text_content(update: Option<&Value>) -> Option<String> {
-    update
-        .and_then(|value| value.get("content"))
-        .and_then(|content| content.get("text"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
 }
 
 fn first_text_block(blocks: &[Value]) -> Option<String> {
@@ -554,20 +499,75 @@ fn chunk_row_key(prompt_key: &str, tool_call_id: Option<&ToolCallId>, ordinal: i
     }
 }
 
-fn tool_call_id_from_update(update: Option<&Value>) -> Option<ToolCallId> {
-    let raw = update
-        .and_then(|value| value.get("toolCallId").or_else(|| value.get("tool_call_id")))
-        .or_else(|| {
-            update
-                .and_then(|value| value.get("content"))
-                .and_then(|content| {
-                    content
-                        .get("toolCallId")
-                        .or_else(|| content.get("tool_call_id"))
-                })
-        })
-        .and_then(Value::as_str)?;
-    Some(ToolCallId::from(raw.to_string()))
+fn session_update_from_notification(update: Option<&Value>) -> Option<SessionUpdate> {
+    let value = update?.clone();
+    match serde_json::from_value(value.clone()) {
+        Ok(update) => Some(update),
+        Err(error) => {
+            tracing::debug!(
+                ?value,
+                ?error,
+                "state projector dropped session/update payload that was not a canonical ACP SessionUpdate"
+            );
+            None
+        }
+    }
+}
+
+fn tool_call_id_from_session_update(update: &SessionUpdate) -> Option<ToolCallId> {
+    match update {
+        SessionUpdate::ToolCall(tool_call) => Some(tool_call.tool_call_id.clone()),
+        SessionUpdate::ToolCallUpdate(tool_call_update) => Some(tool_call_update.tool_call_id.clone()),
+        _ => None,
+    }
+}
+
+fn legacy_chunk_row(
+    prompt_ref: &PromptRequestRef,
+    prompt_key: &str,
+    connection_id: &str,
+    seq: i64,
+    created_at: i64,
+    update: &SessionUpdate,
+) -> Option<LegacyChunkRow> {
+    let (chunk_type, content) = legacy_chunk_payload(update)?;
+    Some(LegacyChunkRow {
+        row_id: Uuid::new_v4().to_string(),
+        session_id: prompt_ref.session_id.clone(),
+        prompt_request_key: prompt_key.to_string(),
+        connection_id: connection_id.to_string(),
+        chunk_type,
+        content,
+        seq,
+        created_at,
+    })
+}
+
+fn legacy_chunk_payload(update: &SessionUpdate) -> Option<(&'static str, String)> {
+    match update {
+        SessionUpdate::UserMessageChunk(chunk) | SessionUpdate::AgentMessageChunk(chunk) => {
+            Some(("text", content_block_preview(&chunk.content)))
+        }
+        SessionUpdate::AgentThoughtChunk(chunk) => {
+            Some(("thinking", content_block_preview(&chunk.content)))
+        }
+        SessionUpdate::ToolCall(tool_call) => Some((
+            "tool_call",
+            serde_json::to_string(tool_call).unwrap_or_default(),
+        )),
+        SessionUpdate::ToolCallUpdate(tool_call_update) => Some((
+            "tool_result",
+            serde_json::to_string(tool_call_update).unwrap_or_default(),
+        )),
+        _ => None,
+    }
+}
+
+fn content_block_preview(content: &ContentBlock) -> String {
+    match content {
+        ContentBlock::Text(text) => text.text.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
 }
 
 fn stop_reason_from_payload(payload: &Value) -> Option<StopReason> {

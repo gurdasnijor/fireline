@@ -2,14 +2,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLiveQuery } from "@tanstack/react-db";
 import { useAcpClient } from "use-acp";
 import {
+  type ChunkRow,
   createSessionPermissionsCollection,
   createSessionTurnsCollection,
   createTurnChunksCollection,
-  type ChunkRow,
-  type PermissionRow,
-  type PromptTurnRow,
 } from "@fireline/state";
-import type { SessionLog, PendingPermission, PermissionResponseBody } from "../fireline-types.js";
+import type { PendingPermission, PermissionResponseBody } from "../fireline-types.js";
+import { buildSessionLogs } from "../lib/build-session-logs.js";
 import { useFirelineDb, useFlamecastClient } from "../provider.js";
 import { sessionLogsToSegments } from "../lib/logs-markdown.js";
 import { useSession } from "./use-session.js";
@@ -68,18 +67,14 @@ export function useSessionState(sessionId: string, _ws: RuntimeWebSocketHandle) 
     const chunkCollections = turnRows.map((turn) =>
       createTurnChunksCollection({
         chunks: db.chunks,
-        promptTurnId: turn.promptTurnId,
+        requestId: turn.requestId,
       }),
     );
 
     const syncChunks = () => {
       const nextChunks = chunkCollections
         .flatMap((collection) => [...collection.toArray])
-        .sort((left, right) =>
-          left.promptTurnId === right.promptTurnId
-            ? left.seq - right.seq
-            : left.createdAt - right.createdAt,
-        );
+        .sort((left, right) => left.createdAt - right.createdAt);
       setSessionChunks(nextChunks);
       setChunksReady(true);
     };
@@ -208,135 +203,6 @@ export function useSessionState(sessionId: string, _ws: RuntimeWebSocketHandle) 
   };
 }
 
-function buildSessionLogs(
-  turns: PromptTurnRow[],
-  chunks: ChunkRow[],
-  permissions: PermissionRow[],
-): SessionLog[] {
-  const logs: SessionLog[] = [];
-  const chunksByTurn = new Map<string, ChunkRow[]>();
-  for (const chunk of chunks) {
-    const current = chunksByTurn.get(chunk.promptTurnId);
-    if (current) {
-      current.push(chunk);
-    } else {
-      chunksByTurn.set(chunk.promptTurnId, [chunk]);
-    }
-  }
-
-  for (const turn of turns) {
-    if (turn.text) {
-      logs.push({
-        timestamp: new Date(turn.startedAt).toISOString(),
-        type: "prompt_sent",
-        data: { text: turn.text },
-      });
-    }
-
-    const turnChunks = chunksByTurn.get(turn.promptTurnId) ?? [];
-    for (const chunk of turnChunks) {
-      switch (chunk.type) {
-        case "text":
-          logs.push({
-            timestamp: new Date(chunk.createdAt).toISOString(),
-            type: "session_update",
-            data: {
-              sessionUpdate: "agent_message_chunk",
-              content: { type: "text", text: chunk.content },
-            },
-          });
-          break;
-        case "thinking":
-          logs.push({
-            timestamp: new Date(chunk.createdAt).toISOString(),
-            type: "session_update",
-            data: {
-              sessionUpdate: "agent_thought_chunk",
-              content: { type: "text", text: chunk.content },
-            },
-          });
-          break;
-        case "tool_call": {
-          const toolCall = parseChunkJson(chunk.content);
-          logs.push({
-            timestamp: new Date(chunk.createdAt).toISOString(),
-            type: "session_update",
-            data: {
-              sessionUpdate: "tool_call",
-              toolCallId: stringField(toolCall, "toolCallId", `${turn.promptTurnId}:${chunk.seq}`),
-              title: stringField(toolCall, "title", stringField(toolCall, "toolName", "Tool")),
-              status: stringField(toolCall, "status", "pending"),
-            },
-          });
-          break;
-        }
-        case "tool_result": {
-          const toolResult = parseChunkJson(chunk.content);
-          logs.push({
-            timestamp: new Date(chunk.createdAt).toISOString(),
-            type: "session_update",
-            data: {
-              sessionUpdate: "tool_call_update",
-              toolCallId: stringField(toolResult, "toolCallId", `${turn.promptTurnId}:${chunk.seq}`),
-              status: stringField(toolResult, "status", "completed"),
-            },
-          });
-          break;
-        }
-        case "error":
-          logs.push({
-            timestamp: new Date(chunk.createdAt).toISOString(),
-            type: "error",
-            data: { message: chunk.content },
-          });
-          break;
-        case "stop":
-          logs.push({
-            timestamp: new Date(chunk.createdAt).toISOString(),
-            type: "prompt_completed",
-            data: { promptTurnId: turn.promptTurnId, stopReason: turn.stopReason },
-          });
-          break;
-      }
-    }
-  }
-
-  for (const permission of permissions) {
-    logs.push({
-      timestamp: new Date(permission.createdAt).toISOString(),
-      type: permissionLogType(permission),
-      data: {
-        requestId: permission.requestId,
-        toolCallId: permission.toolCallId ?? "",
-        title: permission.title ?? "Permission required",
-        outcome: permission.outcome,
-      },
-    });
-  }
-
-  return logs.sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp));
-}
-
-function permissionLogType(permission: PermissionRow): string {
-  if (permission.state === "pending") {
-    return "permission_requested";
-  }
-  switch (permission.outcome) {
-    case "cancelled":
-      return "permission_cancelled";
-    case "rejected":
-    case "deny":
-      return "permission_rejected";
-    case "approved":
-    case "selected":
-    case "allow_once":
-    case "allow_always":
-      return "permission_approved";
-    default:
-      return "permission_responded";
-  }
-}
-
 function toPendingPermissionRequest(permission: NonNullable<ReturnType<typeof useAcpClient>["pendingPermission"]>): PendingPermission {
   return {
     requestId: permission.deferredId,
@@ -349,24 +215,6 @@ function toPendingPermissionRequest(permission: NonNullable<ReturnType<typeof us
         kind: option.kind,
       })),
   };
-}
-
-function parseChunkJson(value: string): Record<string, unknown> {
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return isRecord(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function stringField(
-  value: Record<string, unknown>,
-  key: string,
-  fallback: string,
-): string {
-  const entry = value[key];
-  return typeof entry === "string" ? entry : fallback;
 }
 
 function mapConnectionState(
@@ -382,8 +230,4 @@ function mapConnectionState(
     default:
       return "disconnected";
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }
