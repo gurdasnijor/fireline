@@ -133,6 +133,7 @@ reqwest.workspace = true
 
 # Filesystem
 dirs.workspace = true
+tar.workspace = true
 
 # IDs
 uuid.workspace = true

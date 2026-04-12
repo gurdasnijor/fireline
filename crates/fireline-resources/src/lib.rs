@@ -10,15 +10,11 @@ pub mod resource;
 pub use fs_backend::*;
 pub use index::{
     ResourceEntry, ResourceEvent, ResourceId, ResourceIndex, ResourceMetadata,
-    ResourceMetadataPatch, ResourcePublishedEvent, ResourceUnpublishedEvent,
-    ResourceUpdatedEvent,
+    ResourceMetadataPatch, ResourcePublishedEvent, ResourceUnpublishedEvent, ResourceUpdatedEvent,
 };
 pub use mounter::{
-    DurableStreamMounter, LocalPathMounter, MountedResource, ResourceMounter,
-    prepare_resources,
+    DurableStreamMounter, LocalPathMounter, MountedResource, ResourceMounter, prepare_resources,
 };
-pub use publisher::ResourcePublisher;
-pub use registry::{
-    ResourceRegistry, ResourceWatcher, StreamResourceRegistry, Subscription,
-};
+pub use publisher::{ResourcePublisher, StreamResourcePublisher};
+pub use registry::{ResourceRegistry, ResourceWatcher, StreamResourceRegistry, Subscription};
 pub use resource::{HostId, PublishedResourceRef, ResourceRef, ResourceSourceRef, StreamFsMode};

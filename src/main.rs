@@ -7,29 +7,59 @@
 //! `fireline` library shim.
 
 use anyhow::{Context, Result};
-use clap::{Parser, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use durable_streams::{Client as DurableStreamsClient, CreateOptions};
 use fireline_harness::TopologySpec;
 use fireline_host::bootstrap::{self, BootstrapConfig};
 use fireline_host::control_plane::{self, ControlPlaneConfig, ProviderMode};
 use fireline_host::control_plane_client::ControlPlaneClient;
-use fireline_resources::MountedResource;
+use fireline_resources::{
+    MountedResource, ResourceMetadata, ResourcePublisher, ResourceSourceRef,
+    StreamResourcePublisher,
+};
 use fireline_sandbox::RuntimeRegistry;
 use fireline_session::{
     Endpoint, HeartbeatMetrics, RuntimeDescriptor, RuntimeProviderKind, RuntimeRegistration,
     RuntimeStatus,
 };
+use sha2::{Digest, Sha256};
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use uuid::Uuid;
 
+const DEFAULT_RESOURCE_TENANT_ID: &str = "default";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum ControlPlaneProvider {
     Local,
     Docker,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+enum FirelineCommand {
+    PublishResource(PublishResourceArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+struct PublishResourceArgs {
+    /// Local file or directory path to publish.
+    path: PathBuf,
+
+    /// Stable resource id to publish under.
+    #[arg(long)]
+    id: String,
+
+    /// Base URL for the external durable-streams service, e.g. `http://127.0.0.1:8787/v1/stream`.
+    #[arg(long)]
+    durable_streams_url: String,
+
+    /// Optional tag to attach to the published resource metadata. Repeat for multiple tags.
+    #[arg(long = "tag")]
+    tags: Vec<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -38,6 +68,9 @@ enum ControlPlaneProvider {
     about = "Fireline runtime substrate for ACP-compatible agents"
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<FirelineCommand>,
+
     /// Bind port for the Fireline host listener.
     #[arg(long, default_value_t = 4437)]
     port: u16,
@@ -59,7 +92,7 @@ struct Cli {
     control_plane: bool,
 
     /// Base URL for the external durable-streams service, e.g. `http://127.0.0.1:8787/v1/stream`.
-    #[arg(long, required_unless_present = "control_plane")]
+    #[arg(long)]
     durable_streams_url: Option<String>,
 
     /// Optional path to write the bound listener address after binding.
@@ -173,6 +206,12 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if let Some(command) = cli.command.clone() {
+        return match command {
+            FirelineCommand::PublishResource(args) => run_publish_resource(args).await,
+        };
+    }
+
     let host: IpAddr = cli.host.parse()?;
     let topology = match cli.topology_json {
         Some(ref json) => serde_json::from_str::<TopologySpec>(json)?,
@@ -258,6 +297,66 @@ async fn run_control_plane_host(cli: Cli, host: IpAddr) -> Result<()> {
     .await
 }
 
+struct PreparedResourceUpload {
+    bytes: Vec<u8>,
+    content_type: String,
+    content_hash: String,
+}
+
+async fn run_publish_resource(args: PublishResourceArgs) -> Result<()> {
+    validate_resource_id(&args.id)?;
+
+    let path = args
+        .path
+        .canonicalize()
+        .with_context(|| format!("resolve resource path {}", args.path.display()))?;
+    let prepared = prepare_resource_upload(&path)?;
+    let blob_key = format!("blob-{}", Uuid::new_v4());
+    let blob_stream_name = format!(
+        "resource-blob:tenant-{}:{}:{}",
+        DEFAULT_RESOURCE_TENANT_ID,
+        sanitize_stream_component(&args.id),
+        blob_key
+    );
+
+    upload_blob_stream(
+        &args.durable_streams_url,
+        &blob_stream_name,
+        &prepared.bytes,
+        &prepared.content_type,
+    )
+    .await?;
+
+    let publisher = StreamResourcePublisher::new(
+        &args.durable_streams_url,
+        DEFAULT_RESOURCE_TENANT_ID,
+        default_resource_publisher_id(),
+    );
+    let source_ref = ResourceSourceRef::DurableStreamBlob {
+        stream: blob_stream_name.clone(),
+        key: blob_key.clone(),
+    };
+    let metadata = ResourceMetadata {
+        size_bytes: Some(prepared.bytes.len() as u64),
+        mime_type: Some(prepared.content_type.clone()),
+        content_hash: Some(prepared.content_hash.clone()),
+        tags: args.tags.clone(),
+        ..ResourceMetadata::default()
+    };
+    publisher
+        .publish_resource(args.id.clone(), source_ref, metadata)
+        .await?;
+
+    println!(
+        "published resource '{}' to '{}' as DurableStreamBlob(stream='{}', key='{}')",
+        args.id,
+        publisher.stream_url(),
+        blob_stream_name,
+        blob_key
+    );
+    Ok(())
+}
+
 async fn run_direct_host(
     cli: Cli,
     host: IpAddr,
@@ -268,10 +367,7 @@ async fn run_direct_host(
     let runtime_key = format!("runtime:{}", Uuid::new_v4());
     let node_id = default_node_id(host);
     let started_at_ms = now_ms();
-    let peer_directory_path = match cli.peer_directory_path {
-        Some(path) => path,
-        None => fireline_tools::LocalPeerDirectory::default_path()?,
-    };
+    let peer_directory_path = cli.peer_directory_path.unwrap_or_default();
     let handle = bootstrap::start(BootstrapConfig {
         host,
         port: cli.port,
@@ -317,10 +413,7 @@ async fn run_managed_runtime(
     runtime_key: String,
     node_id: String,
 ) -> Result<()> {
-    let peer_directory_path = match cli.peer_directory_path {
-        Some(path) => path,
-        None => fireline_tools::LocalPeerDirectory::default_path()?,
-    };
+    let peer_directory_path = cli.peer_directory_path.unwrap_or_default();
     let started_at_ms = now_ms();
     let handle = bootstrap::start(BootstrapConfig {
         host,
@@ -471,4 +564,115 @@ fn parse_provider_kind(value: Option<&str>) -> Result<RuntimeProviderKind> {
             "unsupported runtime provider kind '{other}'"
         )),
     }
+}
+
+fn prepare_resource_upload(path: &Path) -> Result<PreparedResourceUpload> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("read resource metadata {}", path.display()))?;
+    let (bytes, content_type) = if metadata.is_file() {
+        (
+            std::fs::read(path).with_context(|| format!("read file {}", path.display()))?,
+            "application/octet-stream".to_string(),
+        )
+    } else if metadata.is_dir() {
+        (tar_directory(path)?, "application/x-tar".to_string())
+    } else {
+        anyhow::bail!(
+            "resource path '{}' must be a regular file or directory",
+            path.display()
+        );
+    };
+
+    Ok(PreparedResourceUpload {
+        content_hash: sha256_hex(&bytes),
+        bytes,
+        content_type,
+    })
+}
+
+fn tar_directory(path: &Path) -> Result<Vec<u8>> {
+    let root_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("resource");
+    let mut builder = tar::Builder::new(Vec::new());
+    builder
+        .append_dir_all(root_name, path)
+        .with_context(|| format!("archive directory {}", path.display()))?;
+    builder.finish().context("finish tar archive")?;
+    builder.into_inner().context("extract tar archive bytes")
+}
+
+async fn upload_blob_stream(
+    durable_streams_url: &str,
+    blob_stream_name: &str,
+    bytes: &[u8],
+    content_type: &str,
+) -> Result<()> {
+    let client = DurableStreamsClient::new();
+    let stream = client.stream(&join_stream_url(durable_streams_url, blob_stream_name));
+    stream
+        .create_with(
+            CreateOptions::new()
+                .content_type(content_type)
+                .initial_data(bytes.to_vec())
+                .closed(true),
+        )
+        .await
+        .with_context(|| format!("upload blob stream '{blob_stream_name}'"))?;
+    Ok(())
+}
+
+fn default_resource_publisher_id() -> String {
+    if let Ok(value) = std::env::var("FIRELINE_PUBLISHER_ID")
+        && !value.trim().is_empty()
+    {
+        return value;
+    }
+
+    let host = std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "local".to_string());
+    format!("cli:{host}")
+}
+
+fn validate_resource_id(id: &str) -> Result<()> {
+    if id.is_empty() {
+        anyhow::bail!("--id must not be empty");
+    }
+    if id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Ok(());
+    }
+
+    anyhow::bail!("--id must be URL-safe: use only letters, digits, '-', '_' or '.'");
+}
+
+fn sanitize_stream_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => ch,
+            _ => '-',
+        })
+        .collect()
+}
+
+fn join_stream_url(base_url: &str, stream_name: &str) -> String {
+    format!("{}/{}", base_url.trim_end_matches('/'), stream_name)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    hex
 }
