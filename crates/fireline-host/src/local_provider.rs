@@ -5,15 +5,15 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use fireline_sandbox::{
-    HostDescriptor, HostStatus, LocalRuntimeLauncher, ManagedRuntime, MountedResource,
-    ProvisionSpec, RuntimeLaunch, RuntimeRegistry,
+    HostDescriptor, HostStatus, LocalSandboxLauncher, ManagedSandbox, MountedResource,
+    ProvisionSpec, RuntimeRegistry, SandboxLaunch,
 };
 use tokio::process::{Child, Command};
 use tracing::{info, instrument};
 
 use crate::auth::RuntimeTokenStore;
 
-pub struct ChildProcessRuntimeLauncher {
+pub struct ChildProcessSandboxLauncher {
     fireline_bin: PathBuf,
     runtime_registry: RuntimeRegistry,
     runtime_registry_path: PathBuf,
@@ -26,7 +26,7 @@ pub struct ChildProcessRuntimeLauncher {
     poll_interval: Duration,
 }
 
-impl ChildProcessRuntimeLauncher {
+impl ChildProcessSandboxLauncher {
     // The local launcher is assembled from CLI/runtime wiring rather than a config object.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -98,18 +98,18 @@ impl ChildProcessRuntimeLauncher {
 }
 
 #[async_trait]
-impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
+impl LocalSandboxLauncher for ChildProcessSandboxLauncher {
     #[instrument(
         skip(self, spec, mounted_resources),
         fields(host_key, node_id, provider = "local")
     )]
-    async fn launch_local_runtime(
+    async fn launch_local_sandbox(
         &self,
         spec: ProvisionSpec,
         host_key: String,
         node_id: String,
         mounted_resources: Vec<MountedResource>,
-    ) -> Result<RuntimeLaunch> {
+    ) -> Result<SandboxLaunch> {
         let state_stream_name = spec
             .state_stream
             .clone()
@@ -185,7 +185,7 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
         let descriptor = match self.wait_for_runtime_ready(&host_key, &mut child).await {
             Ok(descriptor) => descriptor,
             Err(error) => {
-                let mut runtime = SpawnedRuntime {
+                let mut runtime = SpawnedSandbox {
                     child,
                     stop_timeout: self.stop_timeout,
                 };
@@ -203,13 +203,13 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
             }
         };
 
-        Ok(RuntimeLaunch::ready(
+        Ok(SandboxLaunch::ready(
             descriptor.host_id.clone(),
             descriptor.provider_instance_id.clone(),
             descriptor.acp.clone(),
             descriptor.state.clone(),
             descriptor.helper_api_base_url.clone(),
-            Box::new(SpawnedRuntime {
+            Box::new(SpawnedSandbox {
                 child,
                 stop_timeout: self.stop_timeout,
             }),
@@ -217,12 +217,12 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
     }
 }
 
-struct SpawnedRuntime {
+struct SpawnedSandbox {
     child: Child,
     stop_timeout: Duration,
 }
 
-impl SpawnedRuntime {
+impl SpawnedSandbox {
     async fn try_shutdown(&mut self) -> Result<()> {
         if self.child.try_wait()?.is_some() {
             return Ok(());
@@ -247,7 +247,7 @@ impl SpawnedRuntime {
 }
 
 #[async_trait]
-impl ManagedRuntime for SpawnedRuntime {
+impl ManagedSandbox for SpawnedSandbox {
     async fn shutdown(mut self: Box<Self>) -> Result<()> {
         self.try_shutdown().await
     }

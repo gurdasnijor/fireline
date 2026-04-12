@@ -24,8 +24,8 @@ use walkdir::WalkDir;
 use fireline_resources::{LocalPathMounter, ResourceMounter, prepare_resources};
 
 use crate::provider::{
-    ProvisionSpec, Endpoint, ManagedRuntime, RuntimeLaunch, RuntimeProvider,
-    SandboxProviderKind, RuntimeTokenIssuer,
+    ProvisionSpec, Endpoint, ManagedSandbox, SandboxLaunch, SandboxProvider,
+    SandboxProviderKind, SandboxTokenIssuer,
 };
 
 const CONTAINER_PORT: u16 = 4437;
@@ -44,7 +44,7 @@ pub struct DockerProviderConfig {
 pub struct DockerProvider {
     docker: Docker,
     config: DockerProviderConfig,
-    token_issuer: Arc<dyn RuntimeTokenIssuer>,
+    token_issuer: Arc<dyn SandboxTokenIssuer>,
     mounters: Vec<Arc<dyn ResourceMounter>>,
     image_ready: Mutex<bool>,
 }
@@ -52,7 +52,7 @@ pub struct DockerProvider {
 impl DockerProvider {
     pub fn new(
         config: DockerProviderConfig,
-        token_issuer: Arc<dyn RuntimeTokenIssuer>,
+        token_issuer: Arc<dyn SandboxTokenIssuer>,
     ) -> Result<Self> {
         Ok(Self {
             docker: Docker::connect_with_local_defaults().context("connect to local docker")?,
@@ -109,17 +109,17 @@ impl DockerProvider {
 }
 
 #[async_trait]
-impl RuntimeProvider for DockerProvider {
+impl SandboxProvider for DockerProvider {
     fn kind(&self) -> SandboxProviderKind {
         SandboxProviderKind::Docker
     }
 
-    async fn start(
+    async fn provision(
         &self,
         spec: ProvisionSpec,
         host_key: String,
         node_id: String,
-    ) -> Result<RuntimeLaunch> {
+    ) -> Result<SandboxLaunch> {
         self.ensure_image_ready().await?;
         let mounted_resources =
             prepare_resources(&spec.resources, &self.mounters, &host_key).await?;
@@ -238,13 +238,13 @@ impl RuntimeProvider for DockerProvider {
             .await
             .with_context(|| format!("start docker runtime container {container_name}"))?;
 
-        Ok(RuntimeLaunch {
+        Ok(SandboxLaunch {
             host_id: String::new(),
             provider_instance_id,
             acp: Endpoint::new(advertised_acp_url),
             state: Endpoint::new(advertised_state_stream_url),
             helper_api_base_url: None,
-            runtime: Box::new(DockerManagedRuntime {
+            sandbox: Box::new(DockerManagedSandbox {
                 docker: self.docker.clone(),
                 container_name,
             }),
@@ -252,13 +252,13 @@ impl RuntimeProvider for DockerProvider {
     }
 }
 
-struct DockerManagedRuntime {
+struct DockerManagedSandbox {
     docker: Docker,
     container_name: String,
 }
 
 #[async_trait]
-impl ManagedRuntime for DockerManagedRuntime {
+impl ManagedSandbox for DockerManagedSandbox {
     async fn shutdown(self: Box<Self>) -> Result<()> {
         let _ = self
             .docker

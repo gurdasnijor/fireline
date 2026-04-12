@@ -8,23 +8,23 @@ pub use fireline_session::{
     HostStatus,
 };
 
-pub struct RuntimeLaunch {
+pub struct SandboxLaunch {
     pub host_id: String,
     pub provider_instance_id: String,
     pub acp: Endpoint,
     pub state: Endpoint,
     pub helper_api_base_url: Option<String>,
-    pub runtime: Box<dyn ManagedRuntime>,
+    pub sandbox: Box<dyn ManagedSandbox>,
 }
 
-impl RuntimeLaunch {
+impl SandboxLaunch {
     pub fn ready(
         host_id: String,
         provider_instance_id: String,
         acp: Endpoint,
         state: Endpoint,
         helper_api_base_url: Option<String>,
-        runtime: Box<dyn ManagedRuntime>,
+        sandbox: Box<dyn ManagedSandbox>,
     ) -> Self {
         Self {
             host_id,
@@ -32,39 +32,39 @@ impl RuntimeLaunch {
             acp,
             state,
             helper_api_base_url,
-            runtime,
+            sandbox,
         }
     }
 
-    pub fn starting(runtime: Box<dyn ManagedRuntime>) -> Self {
+    pub fn starting(sandbox: Box<dyn ManagedSandbox>) -> Self {
         Self {
             host_id: String::new(),
             provider_instance_id: String::new(),
             acp: Endpoint::new(""),
             state: Endpoint::new(""),
             helper_api_base_url: None,
-            runtime,
+            sandbox,
         }
     }
 }
 
 #[async_trait]
-pub trait ManagedRuntime: Send {
+pub trait ManagedSandbox: Send {
     async fn shutdown(self: Box<Self>) -> Result<()>;
 }
 
-pub trait RuntimeTokenIssuer: Send + Sync {
+pub trait SandboxTokenIssuer: Send + Sync {
     fn issue(&self, host_key: &str, ttl: Duration) -> String;
 }
 
 #[async_trait]
-pub trait RuntimeProvider: Send + Sync {
+pub trait SandboxProvider: Send + Sync {
     fn kind(&self) -> SandboxProviderKind;
 
-    async fn start(
+    async fn provision(
         &self,
         spec: ProvisionSpec,
         host_key: String,
         node_id: String,
-    ) -> Result<RuntimeLaunch>;
+    ) -> Result<SandboxLaunch>;
 }
