@@ -1,264 +1,285 @@
-# Client API Redesign — Full Primitive Surface
+# Client API Redesign — Functional Composition with Typed Multi-Agent Topologies
 
-> **Status:** architectural proposal (full-scope — covers `@fireline/client`, `@fireline/state`, ACP, and stream-db composition)
-> **Replaces:** the current multi-layer TS client surface
-> **Companion:** [`./sandbox-provider-model.md`](./sandbox-provider-model.md) — the Rust-side provider model
+> **Status:** architectural proposal
+> **Core idea:** `compose(sandbox, middleware, agent)` produces a `Harness`. Multiple harnesses compose via `peer()` / `fanout()` / `pipe()` into typed topologies the compiler can reason about.
 > **Grounded in:**
 > - [`../explorations/managed-agents-mapping.md`](../explorations/managed-agents-mapping.md) — the Anthropic primitive table
-> - [Flamecast guides](https://flamecast.mintlify.app) — local agents, cloud agents, slackbot, webhooks
-> - [stream-db](https://durablestreams.com/stream-db) — the reactive layer over durable-streams
-> - [Ramp Inspect](https://builders.ramp.com/post/why-we-built-our-background-agent) — the background agent pattern
+> - [`../explorations/typescript-typed-functional-core-api.md`](../explorations/typescript-typed-functional-core-api.md) — "if the runtime executes it, model it as data"
+> - [stream-db](https://durablestreams.com/stream-db) — reactive state layer
+> - [Flamecast guides](https://flamecast.mintlify.app) — local/cloud/slackbot/webhook use cases
+> - [Ramp Inspect](https://builders.ramp.com/post/why-we-built-our-background-agent) — background agent pattern
 
 ---
 
 ## 1. Package architecture
 
-Two packages. They stay separate. Each owns one plane.
-
 | Package | Owns | Plane |
 |---|---|---|
-| `@fireline/client` | Sandbox lifecycle + declarative config | **Control plane** — provision, execute, compose topology |
+| `@fireline/client` | Composition + provisioning | **Control plane** — `compose`, `peer`, `fanout`, `pipe`, `harness.start()` |
 | `@fireline/state` | Reactive state observation | **Data plane** — stream-db over durable-streams, TanStack DB live queries |
 
-They compose through `SandboxHandle`:
-
-```typescript
-import { Sandbox } from '@fireline/client'
-import { createFirelineDB } from '@fireline/state'
-
-const sandbox = new Sandbox({ serverUrl: 'http://localhost:4440' })
-const handle = await sandbox.provision({ name: 'my-agent', agentCommand: [...] })
-
-// Control plane gave you the handle.
-// Data plane uses handle.state to subscribe.
-const db = createFirelineDB({ stateStreamUrl: handle.state.url })
-```
-
-**Why not merge?** Because `@fireline/state` is useful without `@fireline/client`. A dashboard that only reads state from a durable stream doesn't need to provision sandboxes. A CLI that only provisions doesn't need TanStack DB. The two planes are independently useful.
-
-ACP (`@agentclientprotocol/sdk`) is a third-party package the user imports directly. Fireline never wraps it. The `SandboxHandle.acp` endpoint tells you where to connect; the ACP SDK tells you how to talk. No side channels.
+ACP (`@agentclientprotocol/sdk`) is a third-party import. Fireline never wraps it. `SandboxHandle.acp` tells you where to connect; the ACP SDK tells you how to talk.
 
 ---
 
-## 2. The primitive client surfaces
+## 2. The three composable values
 
-The Anthropic managed-agent table defines six primitives. Each one maps to a specific surface — a method, a config field, or a separate plane:
-
-| # | Primitive | Client surface | Where it lives |
-|---|---|---|---|
-| 1 | **Session** | Not a client verb. Sessions are ACP-plane via `handle.acp`. | `@agentclientprotocol/sdk` — `ClientSideConnection.newSession()` |
-| 2 | **Orchestration** | `wake(session_id) → void` — separate primitive. | `@fireline/client` — standalone `Orchestrator` interface (unchanged from current) |
-| 3 | **Harness** | Not a client surface. Runs inside the sandbox, server-side. | The conductor proxy chain inside the `fireline` binary |
-| 4 | **Sandbox** | `provision(config) → SandboxHandle`, `execute(handle, input) → string` | `@fireline/client` — the `Sandbox` class |
-| 5 | **Resources** | Declarative config field: `SandboxConfig.resources: ResourceRef[]` | `@fireline/client` — `SandboxConfig` type |
-| 6 | **Tools** | Declarative config field: `SandboxConfig.topology` carries tool registrations via combinator helpers | `@fireline/client` — combinator system in `core/` |
-
-**Three primitives are methods** (Sandbox: `provision` + `execute`; Orchestration: `wake`).
-**Two primitives are config fields** (Resources, Tools — declared in `SandboxConfig`, interpreted server-side).
-**Two primitives are separate planes** (Session via ACP, Harness server-side).
-**Zero primitives require polling or status checks** — the durable stream IS the observation layer.
-
-### The Sandbox primitive
+Everything starts with three independent, serializable values:
 
 ```typescript
-class Sandbox {
-  constructor(opts: { serverUrl: string; token?: string; startupTimeoutMs?: number })
+import { agent, sandbox, middleware, compose } from '@fireline/client'
 
-  /** Provision — hand me a place where an agent can run. */
-  provision(config: SandboxConfig): Promise<SandboxHandle>
+// An Agent — the ACP-speaking process to run
+const myAgent = agent(['npx', '-y', '@anthropic-ai/claude-code-acp'])
 
-  /** Execute — run a command inside it. Returns stdout. */
-  execute(handle: SandboxHandle, input: string): Promise<string>
-}
-
-interface SandboxHandle {
-  readonly id: string
-  readonly acp: Endpoint      // connect here for ACP sessions
-  readonly state: Endpoint    // subscribe here for durable state
-}
-```
-
-Two methods. The handle carries the two endpoints the caller needs to reach the other planes.
-
-### The Orchestration primitive
-
-```typescript
-interface Orchestrator {
-  wakeOne(session_id: string): Promise<void>
-  start(): Promise<void>
-  stop(): Promise<void>
-}
-
-function whileLoopOrchestrator(opts: {
-  handler: (session_id: string) => Promise<void>
-  registry: SessionRegistry
-  pollIntervalMs?: number
-}): Orchestrator
-```
-
-Unchanged from the current `@fireline/client/orchestration`. `wake` is a separate primitive from `Sandbox` — they compose but don't merge.
-
----
-
-## 3. The state observation layer
-
-**The stream IS the observation layer.** No `sandbox.status()` polling. No `host.wake()` checking. The developer subscribes to the durable stream via `@fireline/state` and gets a reactive view of everything happening inside the sandbox.
-
-```typescript
-import { createFirelineDB } from '@fireline/state'
-import { useLiveQuery } from '@tanstack/react-db'
-import { eq } from '@tanstack/db'
-
-const db = createFirelineDB({ stateStreamUrl: handle.state.url })
-await db.preload()  // replays from beginning, then stays connected for live updates
-
-// Reactive queries — update automatically as the stream advances
-function AgentDashboard({ sessionId }: { sessionId: string }) {
-  const turns = useLiveQuery(q =>
-    q.from({ turns: db.collections.promptTurns })
-      .where(({ turns }) => eq(turns.sessionId, sessionId))
-  )
-
-  const permissions = useLiveQuery(q =>
-    q.from({ perms: db.collections.permissions })
-      .where(({ perms }) => eq(perms.sessionId, sessionId))
-      .where(({ perms }) => eq(perms.state, 'pending'))
-  )
-
-  const chunks = useLiveQuery(q =>
-    q.from({ chunks: db.collections.chunks })
-      .where(({ chunks }) => eq(chunks.promptTurnId, currentTurnId))
-  )
-
-  return (
-    <>
-      <TurnList turns={turns} />
-      <ChunkStream chunks={chunks} />
-      <PendingPermissions permissions={permissions} />
-    </>
-  )
-}
-```
-
-**This is stream-db in action.** `createFirelineDB` is a thin wrapper around `createStreamDB` from `@durable-streams/state` with Fireline's schema pre-wired. TanStack DB provides differential dataflow — queries update incrementally as new events arrive on the stream. No polling. No `setInterval`. No manual refetch.
-
-**What `@fireline/state` provides (today — unchanged):**
-
-| Collection | Entity type | Primary key | What it shows |
-|---|---|---|---|
-| `sessions` | `session` | `sessionId` | Active sessions with runtime key, state, timestamps |
-| `promptTurns` | `prompt_turn` | `promptTurnId` | Each prompt/response turn with state, stop reason |
-| `chunks` | `chunk` | `chunkId` | Streaming content blocks per turn |
-| `connections` | `connection` | `logicalConnectionId` | ACP connection lifecycle |
-| `permissions` | `permission` | `requestId` | Permission requests and resolutions |
-| `childSessionEdges` | `child_session_edge` | `edgeId` | Cross-agent call lineage |
-| `runtimeInstances` | `runtime_instance` | `instanceId` | Sandbox process lifecycle |
-| `pendingRequests` | `pending_request` | `requestId` | In-flight ACP requests |
-
-Plus derived collections: `createSessionTurnsCollection`, `createActiveTurnsCollection`, `createPendingPermissionsCollection`, `createTurnChunksCollection`, etc.
-
----
-
-## 4. Declarative composition
-
-Resources, tools, topology, and secrets all compose **declaratively** in `SandboxConfig`. Nothing is imperative. Nothing requires a second API call after `provision`.
-
-```typescript
-import { topology, durableTrace, approvalGate, contextInjection, peer, budget } from '@fireline/client/core'
-
-const config: SandboxConfig = {
-  name: 'reviewer-agent',
-  agentCommand: ['npx', '-y', '@anthropic-ai/claude-code-acp'],
-
-  // TOPOLOGY — combinator chain interpreted by the conductor inside the sandbox
-  topology: topology(
-    durableTrace(),                                         // observe: log every effect
-    contextInjection([{ kind: 'workspace_file', path: '/workspace/README.md' }]),  // mapEffect: prepend context
-    approvalGate({ scope: 'tool_calls', timeoutMs: 60_000 }),  // suspend: require approval for tool calls
-    budget({ tokens: 500_000 }),                            // filter: hard budget cap
-    peer(['agent:slack-notifier']),                          // substitute: route peer calls
-  ),
-
-  // RESOURCES — what to mount inside the sandbox
-  resources: [
-    { source_ref: { kind: 'localPath', host_id: 'self', path: '~/projects/frontend' }, mount_path: '/workspace', read_only: true },
-    { source_ref: { kind: 'durableStreamBlob', stream: 'resources:tenant-demo', key: 'shared-config' }, mount_path: '/config' },
-    { source_ref: { kind: 'gitRepo', url: 'https://github.com/org/repo', ref: 'main', path: '/' }, mount_path: '/reference' },
-  ],
-
-  // ENVIRONMENT — injected into the agent process
-  envVars: {
-    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY!,
-    WORKSPACE_ROOT: '/workspace',
-  },
-
-  // LABELS — for operator lookup and pool reuse
-  labels: { team: 'frontend', env: 'dev' },
-}
-
-const handle = await sandbox.provision(config)
-```
-
-**Everything the sandbox needs to run is in one declarative object.** The server interprets the topology, mounts the resources, injects the env vars, and starts the agent. The client sends one POST and gets back a handle. This matches Ramp Inspect's insight: *"agents should never be limited by missing context or tools, but only by model intelligence itself"* — so we front-load all context into the config.
-
----
-
-## 5. Use case mapping
-
-Seven external references, seven code examples. Each under 15 lines. Each touches at most 2 packages.
-
-### 5.1 Local agent dev loop ([Flamecast: local-agents](https://flamecast.mintlify.app/guides/local-agents))
-
-```typescript
-import { Sandbox } from '@fireline/client'
-
-const sandbox = new Sandbox({ serverUrl: 'http://localhost:4440' })
-const handle = await sandbox.provision({
-  name: 'dev-agent',
-  agentCommand: ['node', 'agent.js'],
-  resources: [{ source_ref: { kind: 'localPath', host_id: 'self', path: '.' }, mount_path: '/workspace' }],
+// A Sandbox — the execution environment
+const mySandbox = sandbox({
+  resources: [{ source_ref: { kind: 'localPath', host_id: 'self', path: '~/project' }, mount_path: '/workspace' }],
+  envVars: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY! },
 })
 
-// ACP session — standard SDK, no wrapper
+// A Middleware chain — interceptors applied to the ACP channel
+const myMiddleware = middleware([
+  trace(),
+  approve({ scope: 'tool_calls', timeoutMs: 60_000 }),
+  budget({ tokens: 500_000 }),
+])
+```
+
+Each is a **serializable value** — data, not a closure. Each is independently reusable. Each is independently testable. None of them do anything until composed.
+
+### `compose` — the fundamental operation
+
+```typescript
+const harness = compose(mySandbox, myMiddleware, myAgent)
+// Type: Harness<'default'>
+```
+
+`compose(sandbox, middleware, agent)` produces a `Harness` — the runnable unit. A harness is everything the server needs to provision a sandbox, wire a conductor with the middleware chain, and start the agent process inside it.
+
+```typescript
+const handle = await harness.start({ serverUrl: 'http://localhost:4440' })
+// handle.acp  → ACP WebSocket endpoint
+// handle.state → durable state stream endpoint
+```
+
+`start()` sends the serialized `HarnessSpec` to the server as a single POST. The server provisions, wires, starts. One request, one handle.
+
+**The type of each value:**
+
+```typescript
+type Agent = { readonly kind: 'agent'; readonly command: readonly string[] }
+
+type SandboxSpec = {
+  readonly kind: 'sandbox'
+  readonly resources?: readonly ResourceRef[]
+  readonly envVars?: Readonly<Record<string, string>>
+  readonly image?: string
+  readonly provider?: string
+  readonly labels?: Readonly<Record<string, string>>
+}
+
+type MiddlewareChain = { readonly kind: 'middleware'; readonly chain: readonly Middleware[] }
+
+type Harness<Name extends string = string> = {
+  readonly kind: 'harness'
+  readonly name: Name
+  readonly sandbox: SandboxSpec
+  readonly middleware: MiddlewareChain
+  readonly agent: Agent
+  start(opts: StartOptions): Promise<HarnessHandle<Name>>
+}
+
+interface HarnessHandle<Name extends string = string> {
+  readonly name: Name
+  readonly id: string
+  readonly acp: Endpoint
+  readonly state: Endpoint
+}
+
+interface StartOptions {
+  readonly serverUrl: string
+  readonly token?: string
+  readonly name?: string
+  readonly stateStream?: string
+  readonly startupTimeoutMs?: number
+}
+```
+
+---
+
+## 3. Type-level composition for multi-agent topologies
+
+### Single agent — `compose`
+
+```typescript
+const reviewer = compose(
+  sandbox({ resources: [codebase] }),
+  middleware([trace(), approve({ scope: 'tool_calls' })]),
+  agent(['claude-code-acp']),
+).as('reviewer')
+// Type: Harness<'reviewer'>
+```
+
+The `.as(name)` method gives the harness a compile-time name. This name is used in topology operators to type-check references.
+
+### Multi-agent with peering — `peer`
+
+```typescript
+const reviewer = compose(
+  sandbox({ resources: [codebase] }),
+  middleware([trace(), approve({ scope: 'tool_calls' })]),
+  agent(['claude-code-acp']),
+).as('reviewer')
+
+const notifier = compose(
+  sandbox({}),
+  middleware([trace()]),
+  agent(['slack-notifier']),
+).as('notifier')
+
+// peer() connects agents — the type system knows the shape
+const topology = peer(reviewer, notifier)
+// Type: Topology<{ reviewer: Harness<'reviewer'>; notifier: Harness<'notifier'> }>
+
+const handles = await topology.start({ serverUrl: 'http://localhost:4440' })
+// handles.reviewer.acp  — ACP endpoint for the reviewer
+// handles.notifier.acp  — ACP endpoint for the notifier
+// reviewer can call notifier via ACP peer calls
+// the stream carries cross-agent lineage (child_session_edge events)
+```
+
+**Type safety:** `handles.reviewer` is typed. `handles.nonexistent` is a compile error. You can't `peer` a harness that doesn't exist; the TypeScript compiler catches the topology error.
+
+### Fan-out — `fanout`
+
+```typescript
+const workers = fanout(
+  compose(sandbox({...}), middleware([trace()]), agent(['worker'])).as('worker'),
+  { count: 3 },
+)
+// Type: Fanout<Harness<'worker'>, 3>
+
+const handles = await workers.start({ serverUrl })
+// handles[0].acp, handles[1].acp, handles[2].acp
+```
+
+Three instances of the same harness. Each gets its own sandbox, its own state stream, its own ACP endpoint. The server provisions them in parallel.
+
+### Pipeline — `pipe`
+
+```typescript
+const pipeline = pipe(
+  compose(sandbox({...}), middleware([trace()]), agent(['researcher'])).as('researcher'),
+  compose(sandbox({...}), middleware([trace()]), agent(['writer'])).as('writer'),
+)
+// Type: Pipeline<[Harness<'researcher'>, Harness<'writer'>]>
+
+const handles = await pipeline.start({ serverUrl })
+// researcher's output feeds writer's input via session events on the shared stream
+```
+
+Sequential composition: the first harness's session events are visible to the second harness via the shared durable stream. The `pipe` operator sets up the stream wiring so `writer` can subscribe to `researcher`'s output.
+
+### Type signatures
+
+```typescript
+function compose(sandbox: SandboxSpec, middleware: MiddlewareChain, agent: Agent): Harness
+function peer<T extends Record<string, Harness>>(...harnesses: Harness[]): Topology<T>
+function fanout<H extends Harness, N extends number>(harness: H, opts: { count: N }): Fanout<H, N>
+function pipe<H extends Harness[]>(...harnesses: H): Pipeline<H>
+```
+
+The return types carry the topology shape at the type level. TypeScript's structural typing means you get autocomplete on `handles.reviewer`, compile-time errors on `handles.typo`, and IDE support for navigating multi-agent topologies.
+
+---
+
+## 4. How this maps to the wire
+
+Every composition function produces a **serializable spec**:
+
+```typescript
+compose() → HarnessSpec { sandbox: SandboxSpec, middleware: Middleware[], agent: Agent }
+peer()    → TopologySpec { kind: 'peer', harnesses: Record<string, HarnessSpec> }
+fanout()  → TopologySpec { kind: 'fanout', harness: HarnessSpec, count: number }
+pipe()    → TopologySpec { kind: 'pipe', stages: HarnessSpec[] }
+```
+
+`harness.start()` sends the `HarnessSpec` as a single `POST /v1/sandboxes`. `topology.start()` sends the `TopologySpec` as `POST /v1/topologies` — the server provisions all sandboxes and wires peer edges between them.
+
+For single-harness `start()`, the server response is a `SandboxDescriptor` mapped to a `HarnessHandle`. For multi-harness `topology.start()`, the server response is a `TopologyDescriptor` with a handle per harness name.
+
+**The execute primitive still exists:**
+
+```typescript
+const sandbox = new Sandbox({ serverUrl })
+const result = await sandbox.execute(handle, 'ls -la /workspace')
+```
+
+`execute` is a standalone verb on the `Sandbox` class, not on the `Harness`. It's the Anthropic primitive's second verb — "call many times as a tool." The harness is how you set up the sandbox; `execute` is how you use it. They compose but don't merge.
+
+---
+
+## 5. The seven combinators as middleware + topology operators
+
+The managed-agents-mapping doc defines seven combinators. Under the composition model, they split into two categories:
+
+### Middleware (per-agent, intercepts the ACP channel)
+
+| Combinator | Middleware helper | What it does |
+|---|---|---|
+| `observe` | `trace()` | Log every ACP effect to the durable stream |
+| `mapEffect` | `inject(sources)` | Prepend context to prompts |
+| `appendToSession` | *(always on — the `DurableStreamTracer` is implicit)* | Append effects to the session log |
+| `filter` | `budget({ tokens })` | Hard budget cap — reject effects over budget |
+| `suspend` | `approve({ scope, timeoutMs })` | Require approval before forwarding tool calls |
+
+### Topology operators (multi-agent, defines the graph)
+
+| Combinator | Operator | What it does |
+|---|---|---|
+| `substitute` | `peer(reviewer, notifier)` | Route peer calls between agents. `peer()` is both a topology operator (wiring the graph) and a middleware effect (the `PeerComponent` intercepts `session/new` and injects per-session MCP tools). |
+| `fanout` | `fanout(harness, { count })` | Spawn N instances of the same harness for parallel work |
+
+The **type system distinguishes them**: `Middleware` is a value inside `middleware([...])`. `peer()` and `fanout()` are functions over `Harness` values. You can't accidentally put a topology operator inside a middleware chain — it's a type error.
+
+---
+
+## 6. Use case examples with `compose`
+
+### 6.1 Local agent dev
+
+```typescript
+const handle = await compose(
+  sandbox({ resources: [{ source_ref: { kind: 'localPath', host_id: 'self', path: '.' }, mount_path: '/workspace' }] }),
+  middleware([trace()]),
+  agent(['node', 'agent.js']),
+).start({ serverUrl: 'http://localhost:4440', name: 'dev-agent' })
+
 const conn = await acpConnect(handle.acp.url)
 const { sessionId } = await conn.newSession({ cwd: '/workspace' })
-await conn.prompt({ sessionId, prompt: [{ type: 'text', text: 'Review the README' }] })
 ```
 
-### 5.2 Cloud deployment ([Flamecast: cloud-agents](https://flamecast.mintlify.app/guides/cloud-agents))
+### 6.2 Cloud deployment — same code, different URL
 
 ```typescript
-// Same code, different server URL. That's the whole migration.
-const sandbox = new Sandbox({ serverUrl: 'https://fireline.prod.internal:4440' })
-const handle = await sandbox.provision({
-  name: 'cloud-agent',
-  agentCommand: ['npx', '-y', '@anthropic-ai/claude-code-acp'],
-  provider: 'docker',  // or 'microsandbox' — server picks if omitted
-  resources: [{ source_ref: { kind: 'durableStreamBlob', stream: 'resources:tenant-prod', key: 'codebase' }, mount_path: '/workspace' }],
-})
+const handle = await compose(
+  sandbox({ provider: 'docker', resources: [streamBlob('resources:prod', 'codebase')] }),
+  middleware([trace(), approve({ scope: 'tool_calls' })]),
+  agent(['claude-code-acp']),
+).start({ serverUrl: 'https://fireline.prod.internal' })
 ```
 
-### 5.3 Custom agent build ([Flamecast: build-your-own-agent](https://flamecast.mintlify.app/guides/build-your-own-agent))
+### 6.3 Slackbot — webhook-driven, stateless
 
 ```typescript
-// Your agent implements ACP. Fireline provisions + manages it.
-const handle = await sandbox.provision({
-  name: 'my-custom-agent',
-  agentCommand: ['./my-agent', '--port', '9100'],
-  topology: topology(durableTrace(), approvalGate({ scope: 'all' })),
-})
-// That's it. Fireline handles ACP handshake, session management, durable tracing.
-```
+app.event('app_mention', async ({ event, say }) => {
+  const handle = await compose(
+    sandbox({}),
+    middleware([trace()]),
+    agent(['claude-code-acp']),
+  ).start({ serverUrl: process.env.FIRELINE_URL!, name: `slack-${event.ts}` })
 
-### 5.4 Slackbot integration ([Flamecast: slackbot](https://flamecast.mintlify.app/guides/slackbot))
-
-```typescript
-import { Sandbox } from '@fireline/client'
-
-const sandbox = new Sandbox({ serverUrl: process.env.FIRELINE_URL! })
-
-app.event('app_mention', async ({ event }) => {
-  const handle = await sandbox.provision({ name: `slack-${event.ts}`, agentCommand: ['claude-code-acp'] })
   const conn = await acpConnect(handle.acp.url)
   const { sessionId } = await conn.newSession({ cwd: '/' })
   const response = await conn.prompt({ sessionId, prompt: [{ type: 'text', text: event.text }] })
@@ -266,164 +287,145 @@ app.event('app_mention', async ({ event }) => {
 })
 ```
 
-### 5.5 Webhook-driven orchestration ([Flamecast RFC: webhooks](https://flamecast.mintlify.app/rfcs/webhooks))
+### 6.4 Background agent — fire and forget
 
 ```typescript
-import { Sandbox } from '@fireline/client'
-import { createFirelineDB } from '@fireline/state'
+await compose(
+  sandbox({ resources: [gitRepo(repoUrl, branch)], labels: { task: taskId } }),
+  middleware([trace(), approve({ scope: 'all' })]),
+  agent(['claude-code-acp']),
+).start({ serverUrl: 'https://fireline.prod.internal', name: `task-${taskId}` })
+// User monitors via @fireline/state — no blocking
+```
 
-const sandbox = new Sandbox({ serverUrl: process.env.FIRELINE_URL! })
-const handle = await sandbox.provision({ name: 'webhook-agent', agentCommand: [...] })
+### 6.5 Multi-agent review pipeline
 
-// Subscribe to permission requests via the durable stream — NO POLLING
+```typescript
+const reviewer = compose(
+  sandbox({ resources: [codebase] }),
+  middleware([trace(), approve({ scope: 'tool_calls' })]),
+  agent(['claude-code-acp']),
+).as('reviewer')
+
+const writer = compose(
+  sandbox({ resources: [codebase] }),
+  middleware([trace()]),
+  agent(['claude-code-acp']),
+).as('writer')
+
+const handles = await pipe(reviewer, writer).start({ serverUrl })
+// reviewer runs first; writer picks up from the shared stream
+```
+
+### 6.6 Reactive observation — zero polling
+
+```typescript
 const db = createFirelineDB({ stateStreamUrl: handle.state.url })
-await db.preload()
+const turns = useLiveQuery(q =>
+  q.from({ t: db.collections.promptTurns }).where(({ t }) => eq(t.sessionId, sessionId))
+)
+// The stream IS the API. No fetch. No setInterval.
+```
+
+### 6.7 Multi-agent topology — one stream, full visibility
+
+```typescript
+const handles = await peer(reviewer, notifier).start({ serverUrl })
+// Both agents write to the same tenant stream — one subscription sees everything
+const db = createFirelineDB({ stateStreamUrl: handles.reviewer.state.url })
+// db.collections.sessions → reviewer's AND notifier's sessions
+// db.collections.childSessionEdges → the peer-call lineage graph between them
+```
+
+---
+
+## 7. What `@fireline/state` does in a topology
+
+**Unchanged. One stream URL. Full deployment visibility.**
+
+The durable-streams service is the single shared hub. ALL agents in a topology — whether single-harness, peered, fanned-out, or pipelined — write to the **same** tenant stream. `createFirelineDB` pointed at that stream already sees everything: every agent's sessions, every turn, every chunk, and the `child_session_edge` events that trace the peering graph across agents.
+
+```typescript
+const db = createFirelineDB({ stateStreamUrl: 'http://streams.internal/v1/stream/tenant-demo' })
+// Sees reviewer's sessions, notifier's sessions, the peer edges between them — all in one reactive view
+```
+
+The topology changes the **call graph** (which agents can peer-call each other), not the **observation surface** (who can see what on the stream). A dashboard that subscribes to the tenant stream sees the full deployment regardless of how many agents are running or how they're wired.
+
+**No Orchestrator class.** Orchestration IS stream subscription. If a session needs advancing (e.g., a pending approval resolved), the subscriber reacts:
+
+```typescript
 db.collections.permissions.subscribe((perms) => {
   for (const perm of perms.filter(p => p.state === 'pending')) {
-    // POST webhook to the client's callback URL
-    fetch(callbackUrl, { method: 'POST', body: JSON.stringify(perm) })
+    approvePermission(db.stateStreamUrl, perm.requestId)
   }
 })
 ```
 
-### 5.6 Background agent ([Ramp: why-we-built-our-background-agent](https://builders.ramp.com/post/why-we-built-our-background-agent))
-
-```typescript
-import { Sandbox } from '@fireline/client'
-
-const sandbox = new Sandbox({ serverUrl: 'https://fireline.prod.internal' })
-
-// Fire-and-forget: provision → prompt → walk away
-const handle = await sandbox.provision({
-  name: `inspect-${taskId}`,
-  agentCommand: ['claude-code-acp'],
-  resources: [{ source_ref: { kind: 'gitRepo', url: repoUrl, ref: branch, path: '/' }, mount_path: '/workspace' }],
-  labels: { task: taskId, user: userId },
-})
-const conn = await acpConnect(handle.acp.url)
-const { sessionId } = await conn.newSession({ cwd: '/workspace' })
-await conn.prompt({ sessionId, prompt: [{ type: 'text', text: taskDescription }] })
-// User monitors progress via @fireline/state in a dashboard — no blocking
-```
-
-### 5.7 Reactive agent pattern (reactive UI observing agent work)
-
-```typescript
-import { createFirelineDB } from '@fireline/state'
-import { useLiveQuery } from '@tanstack/react-db'
-
-// The agent is already running. The UI just subscribes.
-function AgentMonitor({ stateUrl, sessionId }: Props) {
-  const db = useMemo(() => createFirelineDB({ stateStreamUrl: stateUrl }), [stateUrl])
-  const turns = useLiveQuery(q =>
-    q.from({ t: db.collections.promptTurns }).where(({ t }) => eq(t.sessionId, sessionId))
-  )
-  const chunks = useLiveQuery(q =>
-    q.from({ c: db.collections.chunks }).where(({ c }) => eq(c.promptTurnId, turns[turns.length - 1]?.promptTurnId))
-  )
-  return <StreamingView turns={turns} chunks={chunks} />
-}
-// ZERO fetch calls. ZERO polling. The stream IS the API.
-```
-
-**Every example: ≤15 lines. At most 2 packages (`@fireline/client` + `@fireline/state` or `@agentclientprotocol/sdk`).** The common pattern: `new Sandbox(url)` → `sandbox.provision(config)` → either ACP for sessions or `@fireline/state` for observation. No third path.
+If someone needs a wake loop, they subscribe and react. The primitive is the stream, not a `whileLoopOrchestrator` wrapper.
 
 ---
 
-## 6. What gets deleted / what stays / what's new
+## 8. Module layout — old → new
 
 ```
 packages/client/src/                    packages/client/src/
-├── host.ts              DELETED        ├── sandbox.ts          NEW (Sandbox class — 2 methods)
-├── host/                DELETED        ├── admin.ts            NEW (SandboxAdmin — operator extensions)
-├── host-fireline/       DELETED        ├── types.ts            NEW (SandboxConfig, SandboxHandle, etc.)
-├── host-hosted-api/     DELETED        │
+├── host.ts              DELETED        ├── compose.ts          NEW (compose, agent, sandbox, middleware)
+├── host/                DELETED        ├── topology.ts         UPDATED (peer, fanout, pipe operators)
+├── host-fireline/       DELETED        ├── sandbox.ts          NEW (Sandbox class — provision + execute)
+├── host-hosted-api/     DELETED        ├── types.ts            NEW (specs, handles, middleware union)
 ├── sandbox/             MERGED         │
+├── orchestration/       DELETED        │
 │                                       │
-├── core/                KEPT           ├── core/               KEPT (combinators, ResourceRef, etc.)
-├── orchestration/       KEPT           ├── orchestration/      KEPT (Orchestrator, whileLoopOrchestrator)
-├── sandbox-local/       KEPT           ├── sandbox-local/      KEPT (Node subprocess for tools)
+├── core/                UPDATED        ├── core/               UPDATED (middleware helpers: trace, approve, budget, inject, peer)
+├── sandbox-local/       KEPT           ├── sandbox-local/      KEPT
 ├── catalog.ts           KEPT           ├── catalog.ts          KEPT
 ├── acp.ts               KEPT           ├── acp.ts              KEPT
-├── acp-core.ts          KEPT           ├── acp-core.ts         KEPT
-├── acp.browser.ts       KEPT           ├── acp.browser.ts      KEPT
-├── topology.ts          KEPT           ├── topology.ts         KEPT
 └── index.ts             UPDATED        └── index.ts            UPDATED
-
-packages/state/src/                     packages/state/src/
-└── (unchanged)                         └── (unchanged)
 ```
 
-`@fireline/state` is untouched. It already does the right thing: stream-db + TanStack DB live queries over the durable stream. The redesign just makes the composition explicit: `handle.state.url` → `createFirelineDB({ stateStreamUrl })` → `useLiveQuery(...)`.
+`@fireline/state` is unchanged. It already does the right thing.
 
 ---
 
-## 7. Migration plan
+## 9. Migration plan
 
-### M1 — Ship the `Sandbox` class alongside old surface (1 day)
+**M1 (1 day):** Ship `compose`, `agent`, `sandbox`, `middleware` functions + `Harness` type in `@fireline/client/v2`. Single-harness `start()` targets existing `/v1/runtimes` with field mapping. Zero server changes.
 
-Add `sandbox.ts`, `admin.ts`, `types.ts`. Export via `@fireline/client/v2`. The `Sandbox` class targets the existing `/v1/runtimes` endpoints with field mapping. Zero server changes.
+**M2 (half day):** Rewire browser harness from `createFirelineHost` to `compose(...).start(...)`.
 
-### M2 — Rewire browser harness (half day)
+**M3 (1 day):** Add `peer()`, `fanout()`, `pipe()` operators. Server-side: add `POST /v1/topologies` endpoint that provisions multiple sandboxes and wires peer edges. This is the only server change.
 
-Replace `createFirelineHost` with `new Sandbox(...)`. The harness's `SessionHarness` component uses `sandbox.provision()` for launch, `sandbox.admin.destroy()` for cleanup, and `@agentclientprotocol/sdk` directly for ACP sessions (which it already does today — the only change is where the ACP URL comes from: `handle.acp.url` instead of a hardcoded proxy constant).
+**M4 (half day):** Delete old surface (`host/`, `host-fireline/`, `host-hosted-api/`, `sandbox/`, `orchestration/`).
 
-### M3 — Update tests (1 day)
+**M5 (separate):** Server-side endpoint rename `/v1/runtimes` → `/v1/sandboxes`.
 
-Rewrite `host.test.ts` to use the `Sandbox` class. Merge `host-hosted-api.test.ts` (same class, different URL). Add `sandbox.test.ts` (unit, mock fetch) and `sandbox-integration.test.ts` (integration, real binaries).
-
-### M4 — Delete old surface (half day)
-
-Move v2 exports to the package root. Delete `host.ts`, `host/`, `host-fireline/`, `host-hosted-api/`, `sandbox/` (old). Update `index.ts`.
-
-### M5 — Server-side endpoint rename `/v1/runtimes` → `/v1/sandboxes` (separate)
-
-One-line path constant change in `sandbox.ts` after the Rust rename.
-
-**Total: ~3 days.**
+**Total: ~3 days for the core (M1-M2), +1.5 days for topology operators (M3-M4).**
 
 ---
 
-## 8. Composition with other proposals
+## 10. Composition with other proposals
 
-| Proposal | How it composes with the client API |
+| Proposal | Composition |
 |---|---|
-| **Cross-host discovery** ([`./cross-host-discovery.md`](./cross-host-discovery.md)) | A `RemoteApiProvider` reads the `hosts:tenant-<id>` stream to discover sandbox servers. The client doesn't change — `new Sandbox({ serverUrl: discoveredUrl })` works against any server. |
-| **Resource discovery** ([`./resource-discovery.md`](./resource-discovery.md)) | `SandboxConfig.resources` carries `DurableStreamBlob` and `StreamFs` refs. The server's provider resolves them at provision time. The client sends declarative intent; the server does the fetching. |
-| **Secrets injection** ([`./deployment-and-remote-handoff.md`](./deployment-and-remote-handoff.md) §5) | `SandboxConfig.envVars` carries secret values. A future `SecretsInjectionComponent` (a Harness combinator) strips real secrets and replaces them with placeholders at the conductor layer. The client sends secrets in the config; the combinator decides what the agent actually sees. |
-| **Stream-FS** ([`./stream-fs-spike.md`](./stream-fs-spike.md)) | `ResourceRef { kind: 'streamFs', source_ref, revision, mode }` in `SandboxConfig.resources`. The server's `DurableStreamMounter` resolves the snapshot. From the client's perspective, it's just another `ResourceRef` variant. |
-| **Sandbox provider model** ([`./sandbox-provider-model.md`](./sandbox-provider-model.md)) | The `Sandbox` class is the TS client for the Rust `ProviderDispatcher`. `provision()` → `POST /v1/sandboxes` → `ProviderDispatcher::provision()` → whichever `SandboxProvider` impl (Local, Docker, Microsandbox, Remote) the server is configured with. Provider selection is server-side, invisible to the client. |
-| **TLA verification** (`verification/spec/`) | The primitives the client exposes are the ones the TLA spec checks. `sandbox.provision()` exercises `ProvisionReturnsReachableRuntime`. ACP `connection.newSession()` exercises `SessionDurableAcrossRuntimeDeath`. The stream observation layer exercises `SessionAppendOnly`. The client API is the user-facing projection of formally-verified invariants. |
+| **Cross-host discovery** | `peer()` across server URLs: `peer(compose(...).at('server-a'), compose(...).at('server-b'))`. The `at()` method pins a harness to a specific server. |
+| **Resource discovery** | `sandbox({ resources: [streamBlob('resources:tenant-demo', 'codebase')] })` — resource refs in the sandbox spec, resolved server-side. |
+| **Secrets injection** | `middleware([secretsProxy({ OPENAI_KEY: { allow: 'api.openai.com' } })])` — a middleware entry, not a sandbox concern. |
+| **Stream-FS** | `sandbox({ resources: [streamFs('snapshot-id', { mode: 'liveReadWrite' })] })` — another resource ref variant. |
+| **Sandbox provider model** | `sandbox({ provider: 'microsandbox' })` — provider hint in the sandbox spec, resolved by the server's `ProviderDispatcher`. |
+| **TLA verification** | The composition operators produce serializable specs. A TLA model can check topology-level invariants: "every peer edge is bidirectional", "fanout count > 0", "pipeline stages share a durable stream." |
 
 ---
 
-## Appendix: the operator surface — `SandboxAdmin`
+## Appendix: operator surface — `SandboxAdmin`
 
-The primitive is two methods. Operators, dev tools, and dashboards need more. Those live on `SandboxAdmin`:
+The primitive API is `compose` + `start` + `execute`. Operators need more. Admin lives on a separate class:
 
 ```typescript
-interface SandboxAdmin {
-  get(id: string): Promise<SandboxDescriptor | null>
-  list(labels?: Record<string, string>): Promise<SandboxDescriptor[]>
-  findOrCreate(config: SandboxConfig): Promise<SandboxHandle>
-  destroy(id: string): Promise<void>
-  status(id: string): Promise<SandboxStatus>
-  executeDetailed(id: string, command: string, opts?: ExecuteOptions): Promise<ExecutionResult>
-  healthCheck(): Promise<boolean>
-}
-
-// Accessed via sandbox.admin
-const sandbox = new Sandbox({ serverUrl })
-await sandbox.admin.destroy(handle.id)
-const all = await sandbox.admin.list({ team: 'frontend' })
+const admin = new SandboxAdmin({ serverUrl })
+await admin.destroy(handle.id)
+const all = await admin.list({ team: 'frontend' })
+const status = await admin.status(handle.id)
 ```
 
-This is a separate interface, not the primitive. The browser harness uses it. The CLI uses it. Agent code does not.
-
-## Appendix: why `@fireline/state` stays separate
-
-`@fireline/state` is a **read-only reactive view** over a durable stream. It has zero knowledge of sandboxes, provision, or lifecycle. Its input is a URL; its output is TanStack DB collections. That's a fundamentally different concern from `@fireline/client` (which sends HTTP requests to a server).
-
-Merging them would force every state-observation consumer to pull in the sandbox lifecycle code, and every sandbox-lifecycle caller to pull in TanStack DB. Neither dependency makes sense for the other's use case. The two packages compose through `SandboxHandle.state.url` — the control plane gives you the endpoint, the data plane subscribes to it.
-
-This is the same split as Ramp Inspect's architecture: *"the API creates sessions; a separate Durable Object holds the state; clients observe the state reactively."* In our case: `@fireline/client` creates sandboxes; `@fireline/state` observes the stream. The handle is the join point.
+Not on the primitive surface. Not in the import path for agent builders. Exists for dashboards, CLIs, and the browser harness.
