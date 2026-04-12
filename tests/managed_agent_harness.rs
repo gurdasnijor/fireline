@@ -42,7 +42,7 @@ use fireline_harness::{TopologyComponentSpec, TopologySpec};
 use fireline_session::HostStatus;
 use managed_agent_suite::{
     ControlPlaneHarness, DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec,
-    append_approval_resolved, count_events, create_session, load_session_then_prompt,
+    append_approval_resolved, count_events, create_session, load_session, load_session_then_prompt,
     prompt_session, prompt_session_result, read_all_events, wait_for_event_count,
     wait_for_permission_request,
 };
@@ -579,7 +579,7 @@ async fn harness_durable_suspend_resume_round_trip() -> Result<()> {
 }
 
 #[tokio::test]
-async fn harness_approval_resolution_during_rebuild_reuses_pending_request() -> Result<()> {
+async fn harness_approval_resolution_during_rebuild_marks_session_approved() -> Result<()> {
     let topology = TopologySpec {
         components: vec![TopologyComponentSpec {
             name: "approval_gate".to_string(),
@@ -655,25 +655,39 @@ async fn harness_approval_resolution_during_rebuild_reuses_pending_request() -> 
 
         let resumed_acp_url = resumed.acp.url.clone();
         let resumed_session_id = session_id.clone();
-        let resumed_prompt = tokio::spawn(async move {
-            load_session_then_prompt(
-                &resumed_acp_url,
-                &resumed_session_id,
-                "please pause_here during rebuild",
-            )
-            .await
+        let resumed_load = tokio::spawn(async move {
+            load_session(&resumed_acp_url, &resumed_session_id).await
         });
 
         tokio::time::sleep(Duration::from_millis(25)).await;
         append_approval_resolved(&shared_state_url, &session_id, &request_id, true).await?;
 
-        tokio::time::timeout(Duration::from_secs(10), resumed_prompt)
+        tokio::time::timeout(Duration::from_secs(10), resumed_load)
             .await
-            .context("rebuild-race prompt did not complete after external resolution")?
-            .context("rebuild-race prompt task panicked")?
+            .context("rebuild-race load_session did not complete after external resolution")?
+            .context("rebuild-race load_session task panicked")?
             .context(
-                "INVARIANT (Harness): runtime should pick up approval_resolved appended during rebuild and complete the resumed prompt",
+                "INVARIANT (Harness): runtime should pick up approval_resolved appended during rebuild and complete session/load",
             )?;
+
+        let permission_count_before_followup = count_events(&shared_state_url, "permission").await?;
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            load_session_then_prompt(
+                &resumed.acp.url,
+                &session_id,
+                "please pause_here during rebuild",
+            ),
+        )
+        .await
+        .context("rebuild-race follow-up prompt did not complete after rebuild")?
+        .context("rebuild-race follow-up prompt returned an error")?;
+
+        let permission_count_after_followup = count_events(&shared_state_url, "permission").await?;
+        assert_eq!(
+            permission_count_after_followup, permission_count_before_followup,
+            "INVARIANT (Harness): once approval_resolved is observed during rebuild, follow-up prompts must not emit a fresh permission_request"
+        );
 
         let request_ids =
             session_permission_request_ids(&shared_state_url, &session_id).await?;
@@ -681,7 +695,7 @@ async fn harness_approval_resolution_during_rebuild_reuses_pending_request() -> 
         assert_eq!(
             unique_request_ids,
             BTreeSet::from([request_id.clone()]),
-            "INVARIANT (Harness): rebuild-race flow must reuse the original approval request id rather than minting a fresh one"
+            "INVARIANT (Harness): rebuild-race flow must not mint a second permission_request after session/load rebuild"
         );
 
         Ok(())
