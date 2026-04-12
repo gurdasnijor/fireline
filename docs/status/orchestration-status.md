@@ -140,10 +140,6 @@ If a codex absolutely must run cargo locally to debug (rare — only when CI ite
 
 **Applies to review feedback too:** if a landed PR ran any local cargo command in its dispatch contract, note the deviation in the landed review. Future dispatches skip local cargo entirely.
 
-## PM follow-up (low priority)
-
-- `docs/proposals/acp-canonical-identifiers-execution.md §Working Rules #2` currently reads `cargo check`-green locally + CI tests green. Under the 14:33 tightening, it should drop the local step — "green in CI" is the bar. Patch when cycles allow.
-
 ## Active cross-Opus notes
 
 (append short notes here when one Opus needs another's attention)
