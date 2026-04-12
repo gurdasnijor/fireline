@@ -48,9 +48,9 @@ When ambiguity arises:
 |---|---|---|
 | w10 | **Opus 2 (PM)** | onboarded — owns planning surface |
 | w20 | **Opus 3 (Architect)** | onboarded — has posted Phase 1 review |
-| w12 | Opus 1 → codex | canonical-ids Phase 0 + Phase 1 (type layer) |
-| w13 | Opus 1 → codex | **IDLE** (verification/audit crate landed) — Opus 1 claimable |
-| w17 | Opus 1 → codex | **IDLE** (TLA+ invariants landed at `ea72de7`) — Opus 1 claimable |
+| w12 | Opus 2 → codex | **claimed 14:15** — drift-fix #4 (`unified-materialization.md`). w12 prior Phase 1 variant (wrong crate location, `3a75a06`) superseded by w21's correct fixup per Architect. |
+| w13 | Opus 2 → codex | **claimed 14:15** — drift-fix #5 (`secrets-injection-component.md`) |
+| w17 | Opus 2 → codex | **claimed 14:15** — exploration cleanup (`docs/explorations/managed-agents-mapping.md:231` ActiveTurnIndex reference) |
 | w15 | Opus 2 → codex | **ACTIVE** — drift-fix #6 (webhook merge into durable-subscriber.md §5.2) — dispatched 14:05 |
 | w18 | Opus 2 → codex | **ACTIVE** — drift-fix #2 (platform-sdk-api-design.md) — working (was paused on paste; resumed via `send-key Enter`) |
 | w19 | Opus 2 → codex | **STALLED** — cargo test `control_plane_push` running ~15 min+. Subject to new CI-first directive — to be redirected to push + gh run watch. |
@@ -153,6 +153,8 @@ Dispatch contract for every code-path codex:
 - `[PM 2026-04-12 14:05] Dispatch tooling learning: cmux send pastes long prompts but does NOT auto-submit. Must follow with cmux send-key --key Enter. w18/w22 sat idle for ~15 min before I noticed and sent Enter. New dispatch pattern: send prompt, then immediately send-key Enter. Building this into future dispatches.`
 - `[PM → Opus 1 2026-04-12 14:05] Capacity: 7/10 codexes active (my w15/w18/w22 all on doc work; your w12/w21 on code; w19 stalled). IDLE: w13/w17 (yours — finished prior tasks). My three are saturated on #2/#3/#6. Drift #4/#5 stay queued until #2 or #3 lands. Execution doc §Working Rules #2 patched for CI-first directive.`
 - `[PM → Opus 1 2026-04-12 14:05] FLAG: w12 cargo test running 30+ min (past your 20m threshold). And w19 stalled at 15min+ on cargo test control_plane_push. Per new CI-first directive, both should be redirected: stop local cargo test, commit check-green result, let CI run suite. Your call whether to intervene now or let them drain.`
+- `[PM 2026-04-12 14:15] Claimed w12/w13/w17 per Opus 1 handover. Rethought #4/#5 defer: they edit different files from #2/#3, no same-file conflict, so dispatching now. Added queue row #7 for a low-priority exploration cleanup (managed-agents-mapping.md:231) to fill the third slot. w17 → row #7, w12 → #4, w13 → #5. Capacity now targets 9/10.`
+- `[PM → Opus 1 2026-04-12 14:15] Ack on Phase 1 variant situation. Understand w12's 3a75a06 is superseded by w21's forthcoming fixup; not touching that commit. Reclaimed w12 for doc work (#4). Will not dispatch Phase 1.5 — that stays yours when Architect reconfirms.`
 - [Architect 2026-04-12 13:46] Onboarded. Watching w12/w13/w17 output for architectural review.
 - [Architect → Opus 1 + PM 2026-04-12 13:46] **Phase 1 review — partial pass, two issues:**
   1. **Drift: crate location.** Plan (§Phase 1A) calls for a new `fireline-acp-ids` crate. What landed: `crates/fireline-semantics/src/ids.rs` module. `fireline-semantics` currently hosts pure TLA+-aligned state-machine kernels (liveness/stream_truth/session/approval/resume); mixing wire-level ACP identifiers into that crate muddies the boundary. Types themselves are clean re-exports of `sacp::schema::{SessionId, RequestId, ToolCallId}` plus `PromptRequestRef` / `ToolInvocationRef` — no synthetic identity, no branding, no correctness issue. Not a phase blocker. Recommendation: either (a) extract to the planned `fireline-acp-ids` crate before Phase 2 depends on it, or (b) PM updates the execution plan to reflect the chosen home. Prefer (a) — cleaner boundary, matches proposal intent.
@@ -169,8 +171,9 @@ Drift fixes from `docs/proposals/proposal-index.md §6`, priority order:
 | 1 | Critical | `durable-subscriber.md` | `CrossSessionKey` / `cross_session` completion shape; replace with caller-local `PromptKey(SessionId, RequestId)` / `ToolKey(SessionId, ToolCallId)`; move cross-session causality to `_meta` trace context. Line ranges `66-70`, `154-157`, `321-327`, `393-401`, `447`. | **LANDED at `7551cb5`** (14:03) |
 | 2 | Critical | `platform-sdk-api-design.md` | `string` ACP ids + infra rows (`PromptTurnRow`, `ConnectionRow`, `TerminalRow`, `RuntimeInstanceRow`) in `fireline.db()`. Swap to `sacp::schema` branded types, rename prompt-turn → prompt-request, move infra rows to admin API. Lines `114-115`, `151-198`, `215`, `395-402`. | **dispatched to w18** (13:50) |
 | 3 | Critical | `client-api-redesign.md` | `child_session_edge` rows + single-tenant stream as lineage. Switch to prompt-request + `_meta` trace context. Lines `190`, `363`, `422`, `437`, `442-475`. | **dispatched to w22** (13:50) |
-| 4 | Design | `unified-materialization.md` | `ActiveTurnIndex` / `prompt_turn` as steady state. Rewrite around `SessionIndex`/`HostIndex`. Lines `14`, `89-100`. | ready, defer until #2/#3 land |
-| 5 | Design | `secrets-injection-component.md` | Rust `session_id: String` in session-scoped keys + audit events. Type as `sacp::schema::SessionId`. Lines `147`, `531`. | ready, defer until #2/#3 land |
+| 4 | Design | `unified-materialization.md` | `ActiveTurnIndex` / `prompt_turn` as steady state. Rewrite around `SessionIndex`/`HostIndex`. Lines `14`, `89-100`. | **dispatched to w12** (14:15) — different file from #2/#3, no conflict |
+| 5 | Design | `secrets-injection-component.md` | Rust `session_id: String` in session-scoped keys + audit events. Type as `sacp::schema::SessionId`. Lines `147`, `531`. | **dispatched to w13** (14:15) |
+| 7 | Low | `docs/explorations/managed-agents-mapping.md:231` | Line still describes `ActiveTurnIndex` as live substrate (per `proposal-index.md §1.4`). Mark transitional or remove. | **dispatched to w17** (14:15) |
 | 6 | Design | `webhook-support.md` → `durable-subscriber.md` | **MERGE (decided by Architect 2026-04-12)** — absorb `webhook-support.md §6` (`webhook()` middleware + topology lowering + host target config) into `durable-subscriber.md §5.2` as a subsection; mark `webhook-support.md` SUPERSEDED in `proposal-index.md`. | **dispatched to w15** (14:05) — sequential follow-on to #1 |
 
 Post-w19:
