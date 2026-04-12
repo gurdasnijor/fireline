@@ -15,6 +15,7 @@ durable-streams.workspace = true
 fireline-resources.workspace = true
 fireline-session.workspace = true
 futures.workspace = true
+nix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tar.workspace = true

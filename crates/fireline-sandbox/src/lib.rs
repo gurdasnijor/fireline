@@ -33,5 +33,8 @@ pub use provider::{
     SandboxProviderKind, SandboxProviderRequest, SandboxTokenIssuer,
 };
 pub use provider_trait::LocalSandboxLauncher;
-pub use providers::{DockerProvider, DockerProviderConfig, LocalProvider};
+pub use providers::{
+    DockerProvider, DockerProviderConfig, LocalProvider, LocalSubprocessProvider,
+    LocalSubprocessProviderConfig,
+};
 pub use registry::RuntimeRegistry;
