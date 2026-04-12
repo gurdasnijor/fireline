@@ -7,7 +7,7 @@
 ## Executive Summary
 
 - Audited all 21 files in `docs/proposals/`.
-- Active drift against `acp-canonical-identifiers.md`: `durable-subscriber.md`, `platform-sdk-api-design.md`, `client-api-redesign.md`, `unified-materialization.md`, and `secrets-injection-component.md`.
+- All seven drift items identified in this audit are now resolved on `main`: `durable-subscriber.md` (`7551cb5`), `platform-sdk-api-design.md` (`3fa956e`), `client-api-redesign.md` (`12bb7cd`), `unified-materialization.md` (`bb01ce8`), `secrets-injection-component.md` (`045fbba`), `webhook-support.md` supersession cleanup (`57c144e`), and `docs/explorations/managed-agents-mapping.md` (`1f3c610`).
 - `webhook-support.md` is superseded by `durable-subscriber.md` §5.2 "Webhook Delivery Profile".
 - Normative but already aligned: `acp-canonical-identifiers.md`, `acp-canonical-identifiers-execution.md`, and `acp-canonical-identifiers-verification.md` contain forbidden tokens only in removal, migration, or verification contexts.
 - Historical-only hits: `runtime-host-split.md` and `crate-restructure-manifest.md` mention old synthetic-id machinery, but both are explicitly superseded.
@@ -46,17 +46,17 @@ These docs contain hits, but only as history or superseded architecture:
 
 ### 1.3 Drift findings
 
-| Proposal | Lines | Priority | Drift | Canonical replacement |
+| Proposal | Lines | Priority | Drift | Canonical replacement | Status |
 |---|---:|---|---|---|
-| `durable-subscriber.md` | `66-70`, `154-157`, `321-327`, `393-401`, `447` | Critical | `CrossSessionKey` and `cross_session` model cross-session lineage as a Fireline completion key | Completion identity stays caller-local: `PromptKey(SessionId, RequestId)` or `ToolKey(SessionId, ToolCallId)`. Cross-session causality lives only in ACP `_meta` trace context and the trace backend. |
-| `platform-sdk-api-design.md` | `114-115`, `151-198`, `215`, `395-402` | Critical | Public TS API still types ACP ids as `string` and exposes `logicalConnectionId`, `PromptTurnRow`, `childSessionEdges`, `ConnectionRow`, `TerminalRow`, and `RuntimeInstanceRow` in `fireline.db()` | Use `@agentclientprotocol/sdk` branded types, rename prompt-turn surface to prompt-request, and keep `fireline.db()` agent-plane only. Move infra state to admin APIs. |
-| `client-api-redesign.md` | `190`, `363`, `422`, `437`, `442-475` | Critical | Topology examples still claim `child_session_edge` rows and one tenant stream as the lineage/visibility model | Cross-agent causality is OTel trace context via ACP `_meta`; state examples should use prompt requests and agent-plane collections, not edge rows. |
-| `unified-materialization.md` | `14`, `89-100` | Design | Treats `ActiveTurnIndex` and `prompt_turn` as steady-state projection concepts | Rewrite around `SessionIndex`, `HostIndex`, and ACP-keyed prompt/permission/tool-call projections. Mark `ActiveTurnIndex` transitional and deleted by canonical-identifiers Phase 5. |
-| `secrets-injection-component.md` | `147`, `531` | Design | Proposed Rust types still use `String` for `session_id` in session-scoped keys and agent-plane audit events | Type `session_id` as `sacp::schema::SessionId`. |
+| `durable-subscriber.md` | `66-70`, `154-157`, `321-327`, `393-401`, `447` | Critical | `CrossSessionKey` and `cross_session` model cross-session lineage as a Fireline completion key | Completion identity stays caller-local: `PromptKey(SessionId, RequestId)` or `ToolKey(SessionId, ToolCallId)`. Cross-session causality lives only in ACP `_meta` trace context and the trace backend. | RESOLVED at `7551cb5` |
+| `platform-sdk-api-design.md` | `114-115`, `151-198`, `215`, `395-402` | Critical | Public TS API still types ACP ids as `string` and exposes `logicalConnectionId`, `PromptTurnRow`, `childSessionEdges`, `ConnectionRow`, `TerminalRow`, and `RuntimeInstanceRow` in `fireline.db()` | Use `@agentclientprotocol/sdk` branded types, rename prompt-turn surface to prompt-request, and keep `fireline.db()` agent-plane only. Move infra state to admin APIs. | RESOLVED at `3fa956e` |
+| `client-api-redesign.md` | `190`, `363`, `422`, `437`, `442-475` | Critical | Topology examples still claim `child_session_edge` rows and one tenant stream as the lineage/visibility model | Cross-agent causality is OTel trace context via ACP `_meta`; state examples should use prompt requests and agent-plane collections, not edge rows. | RESOLVED at `12bb7cd` |
+| `unified-materialization.md` | `14`, `89-100` | Design | Treats `ActiveTurnIndex` and `prompt_turn` as steady-state projection concepts | Rewrite around `SessionIndex`, `HostIndex`, and ACP-keyed prompt/permission/tool-call projections. Mark `ActiveTurnIndex` transitional and deleted by canonical-identifiers Phase 5. | RESOLVED at `bb01ce8` |
+| `secrets-injection-component.md` | `147`, `531` | Design | Proposed Rust types still use `String` for `session_id` in session-scoped keys and agent-plane audit events | Type `session_id` as `sacp::schema::SessionId`. | RESOLVED at `045fbba` |
 
 ### 1.4 Relevant non-proposal drift
 
-- `docs/explorations/managed-agents-mapping.md:231` still describes `ActiveTurnIndex` as part of the live substrate. This is low-priority exploration cleanup, not a proposal blocker.
+- `docs/explorations/managed-agents-mapping.md:231` was low-priority exploration cleanup and is now resolved at `1f3c610`; the line marks `ActiveTurnIndex` as transitional and points to `acp-canonical-identifiers.md`.
 - `docs/demos/pi-acp-to-openclaw.md` did not contain canonical-identifier drift.
 
 ## 2. Proposal Graph
@@ -117,20 +117,20 @@ These docs contain hits, but only as history or superseded architecture:
 | `acp-canonical-identifiers.md` | Makes ACP ids and ACP `_meta` trace context the only canonical agent-plane identity surface. | — | Root; aligned |
 | `acp-canonical-identifiers-execution.md` | Breaks the canonical-id cut into phased, revertable rollout steps. | `acp-canonical-identifiers` | Aligned |
 | `acp-canonical-identifiers-verification.md` | Defines the grep, fixture, TLA, and test gates for the canonical-id cut. | `acp-canonical-identifiers` | Aligned |
-| `client-api-redesign.md` | Defines the declarative composition model for `@fireline/client`. | composition root | Drift: state/topology sections |
+| `client-api-redesign.md` | Defines the declarative composition model for `@fireline/client`. | composition root | Resolved at `12bb7cd` |
 | `competitive-analysis-anthropic-managed-agents.md` | Strategic comparison of Fireline versus Anthropic Managed Agents. | multiple active proposals | Aligned |
 | `cross-host-discovery.md` | Moves host/sandbox discovery onto durable-streams infrastructure streams. | deployment posture | Aligned |
 | `declarative-agent-api-design.md` | CLI and authoring DX proposal for `fireline run` / `fireline deploy`. | deployment, platform SDK, provider model | Aligned |
 | `deployment-and-remote-handoff.md` | Defines local-first authoring and remote deployment posture. | composition + DX root | Aligned |
-| `durable-promises.md` | Imperative awakeable API layered over passive durable subscribers. | `durable-subscriber` | Aligned, but inherits subscriber key surface |
-| `durable-subscriber.md` | General durable workflow primitive for approvals, webhooks, timers, and integrations. | `acp-canonical-identifiers` | Drift: `CrossSessionKey` |
-| `platform-sdk-api-design.md` | Imperative SDK for apps, dashboards, and bots on top of Fireline. | canonical ids + client composition | Drift: DB shape and type surface |
+| `durable-promises.md` | Imperative awakeable API layered over passive durable subscribers. | `durable-subscriber` | Aligned |
+| `durable-subscriber.md` | General durable workflow primitive for approvals, webhooks, timers, and integrations. | `acp-canonical-identifiers` | Resolved at `7551cb5` |
+| `platform-sdk-api-design.md` | Imperative SDK for apps, dashboards, and bots on top of Fireline. | canonical ids + client composition | Resolved at `3fa956e` |
 | `resource-discovery.md` | Moves resource publication and lookup onto durable-stream streams. | cross-host discovery | Aligned |
 | `sandbox-provider-model.md` | Unifies local, Docker, remote, and API-backed sandboxes behind one provider interface. | deployment, discovery, resource discovery | Aligned |
-| `secrets-injection-component.md` | Harness-level secret resolution and injection model. | deployment | Drift: plain `String` session ids |
+| `secrets-injection-component.md` | Harness-level secret resolution and injection model. | deployment | Resolved at `045fbba` |
 | `stream-fs-spike.md` | Narrow spike for `StreamFs` as a discoverable resource mount. | resource discovery, cross-host discovery | Aligned |
-| `unified-materialization.md` | Shared durable-stream projection abstraction for read models. | should depend on canonical ids | Drift: `ActiveTurnIndex` target model |
-| `webhook-support.md` | Historical webhook-forwarding proposal. | durable stream subscription substrate | Superseded by `durable-subscriber.md` §5.2 |
+| `unified-materialization.md` | Shared durable-stream projection abstraction for read models. | should depend on canonical ids | Resolved at `bb01ce8` |
+| `webhook-support.md` | Historical webhook-forwarding proposal. | durable stream subscription substrate | Superseded; resolved at `57c144e` via `durable-subscriber.md` §5.2 |
 
 ## 4. Merge and Deprecation Recommendations
 
@@ -168,7 +168,7 @@ They should remain clearly labeled historical/superseded, but they do not need c
 
 ## 5. Patch Queue
 
-### 5.1 `durable-subscriber.md` — Critical
+### 5.1 `durable-subscriber.md` — Critical, RESOLVED at `7551cb5`
 
 - `66-70`
   Replace the peer-routing row with:
@@ -183,7 +183,7 @@ They should remain clearly labeled historical/superseded, but they do not need c
   `Cross-session causality is not a completion key. Peer-call lineage is carried only by ACP _meta trace context and queried in the trace backend. Subscriber completion identity remains caller-local.`
 - Priority: `critical`
 
-### 5.2 `platform-sdk-api-design.md` — Critical
+### 5.2 `platform-sdk-api-design.md` — Critical, RESOLVED at `3fa956e`
 
 - `108-116`
   Replace `resolvePermission(sessionId: string, requestId: string, ...)` with `resolvePermission(sessionId: SessionId, requestId: RequestId, ...)` and import ACP types from `@agentclientprotocol/sdk`.
@@ -225,7 +225,7 @@ They should remain clearly labeled historical/superseded, but they do not need c
   Replace `createSessionTurnsCollection` / `db.views.sessionTurns` with `createSessionRequestsCollection` / `db.views.sessionRequests`.
 - Priority: `critical`
 
-### 5.3 `client-api-redesign.md` — Critical
+### 5.3 `client-api-redesign.md` — Critical, RESOLVED at `12bb7cd`
 
 - `190`
   Replace:
@@ -244,7 +244,7 @@ They should remain clearly labeled historical/superseded, but they do not need c
   `Multi-agent topologies expose deployment-wide agent-plane visibility through Fireline state. Dashboards see sessions, prompt requests, permissions, and chunks across the deployment. Cross-agent causality is not materialized as childSessionEdges; it is queried through W3C trace context and the configured trace backend.`
 - Priority: `critical`
 
-### 5.4 `unified-materialization.md` — Design
+### 5.4 `unified-materialization.md` — Design, RESOLVED at `bb01ce8`
 
 - `12-15`
   Replace:
@@ -256,7 +256,7 @@ They should remain clearly labeled historical/superseded, but they do not need c
   `No steady-state projection should depend on prompt_turn or other synthetic turn ids. Any temporary waiter coordination must be keyed by canonical ACP identifiers and treated as transitional pending the canonical-identifiers execution plan.`
 - Priority: `design`
 
-### 5.5 `secrets-injection-component.md` — Design
+### 5.5 `secrets-injection-component.md` — Design, RESOLVED at `045fbba`
 
 - `145-149`
   Replace:
@@ -271,7 +271,7 @@ They should remain clearly labeled historical/superseded, but they do not need c
   `session_id: SessionId`
 - Priority: `design`
 
-### 5.6 `webhook-support.md` — SUPERSEDED
+### 5.6 `webhook-support.md` — SUPERSEDED, RESOLVED at `57c144e`
 
 - Status:
   superseded by `durable-subscriber.md` §5.2 "Webhook Delivery Profile"
@@ -280,13 +280,21 @@ They should remain clearly labeled historical/superseded, but they do not need c
 - Priority:
   complete
 
-## 6. Suggested Dispatch Order
+### 5.7 `docs/explorations/managed-agents-mapping.md` — Low priority, RESOLVED at `1f3c610`
 
-1. `durable-subscriber.md`
-2. `platform-sdk-api-design.md`
-3. `client-api-redesign.md`
-4. `unified-materialization.md`
-5. `secrets-injection-component.md`
-6. `webhook-support.md` supersession cleanup
+- `231`
+  Mark the `ActiveTurnIndex` reference as transitional and point readers to `acp-canonical-identifiers.md` for the canonical steady-state direction.
+- Priority:
+  complete
+
+## 6. Dispatch Order Completed
+
+1. `durable-subscriber.md` — completed at `7551cb5`
+2. `platform-sdk-api-design.md` — completed at `3fa956e`
+3. `client-api-redesign.md` — completed at `12bb7cd`
+4. `unified-materialization.md` — completed at `bb01ce8`
+5. `secrets-injection-component.md` — completed at `045fbba`
+6. `webhook-support.md` supersession cleanup — completed at `57c144e`
+7. `docs/explorations/managed-agents-mapping.md` cleanup — completed at `1f3c610`
 
 That order keeps the root identity and workflow substrate ahead of the client-surface rewrites that depend on them.
