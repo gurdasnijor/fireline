@@ -5,7 +5,6 @@ import { z } from 'zod'
 
 import {
   chunkSchema,
-  childSessionEdgeSchema,
   connectionSchema,
   pendingRequestSchema,
   promptTurnSchema,
@@ -30,7 +29,6 @@ const baseEnvelopeSchema = z
 
 const strictValueSchemas = {
   chunk: chunkSchema.strict(),
-  child_session_edge: childSessionEdgeSchema.strict(),
   connection: connectionSchema.strict(),
   pending_request: pendingRequestSchema.strict(),
   prompt_turn: promptTurnSchema.strict(),
@@ -54,6 +52,14 @@ describe('Rust producer fixture', () => {
 
     for (const line of lines) {
       const parsed = baseEnvelopeSchema.parse(JSON.parse(line))
+
+      // ACP canonical-identifiers Phase 3 deletes the child_session_edge writer first.
+      // Keep this fixture parser tolerant until the Rust fixture is regenerated
+      // without that transitional write-only entity.
+      if (parsed.type === 'child_session_edge') {
+        continue
+      }
+
       const valueSchema = strictValueSchemas[parsed.type as keyof typeof strictValueSchemas]
 
       expect(valueSchema, `unexpected entity type in Rust fixture: ${parsed.type}`).toBeDefined()

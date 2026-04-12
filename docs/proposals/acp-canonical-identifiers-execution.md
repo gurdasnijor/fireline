@@ -28,10 +28,12 @@ This avoids rewriting append-only durable streams and keeps replay safe during t
 
 This plan intentionally swaps the original “delete lineage structures” and “add W3C trace propagation” order:
 
-- Phase 4 introduces canonical W3C trace-context propagation.
-- Phase 5 deletes `ActiveTurnIndex` and `child_session_edge`.
+- Phase 4 introduces canonical W3C trace-context propagation after Phase 3.5 lands.
+- Phase 5 deletes `ActiveTurnIndex`.
 
-Deleting the synthetic lineage structures first would break peer calls before a canonical replacement exists.
+`child_session_edge` is pulled up into Phase 3 because the writer has zero agent-plane consumers and no canonical replacement dependency.
+
+Deleting `ActiveTurnIndex` first would break peer calls before a canonical replacement exists. That rationale does not apply to `child_session_edge`.
 
 ## Phase 0: Prerequisites
 
@@ -185,10 +187,17 @@ The final `rg` must return zero matches.
 - `crates/fireline-harness/src/routes_acp.rs`
 - `crates/fireline-harness/src/trace.rs`
 - `crates/fireline-session/src/lib.rs`
+- `crates/fireline-orchestration/src/child_session_edge.rs` (delete)
+- `crates/fireline-tools/src/peer/lookup.rs`
+- `crates/fireline-tools/src/peer/mcp_server.rs`
+- `crates/fireline-tools/src/peer/mod.rs`
+- `crates/fireline-host/src/bootstrap.rs`
+- `crates/fireline-harness/src/host_topology.rs`
 - `tests/managed_agent_harness.rs`
 - `tests/managed_agent_sandbox.rs`
 - `tests/minimal_vertical_slice.rs`
 - `tests/state_fixture_snapshot.rs`
+- `packages/state/test/rust-fixture.test.ts`
 
 **B. Exact change summary**
 - Replace `PromptTurnRow` with `PromptRequestRow` in the Rust projector.
@@ -197,6 +206,18 @@ The final `rg` must return zero matches.
 - Re-key prompt lifecycle rows by the canonical `(session_id, request_id)` pair. Use a derived storage key such as `{session_id}:{request_id}` only as a storage convenience.
 - Delete synthetic `chunk_id` and `seq`; ordering comes from durable-stream offsets.
 - Delete `trace_id` and `parent_prompt_turn_id` from `SessionRecord`.
+- Delete `ConnectionRow` and `ConnectionState` from the agent-plane projection.
+- Move `HostInstanceRow` and `HostInstanceState` to the infrastructure plane (`hosts:tenant-{id}` or equivalent admin-only surface).
+- Delete `PendingRequestRow`, `PendingRequestDirection`, and `PendingRequestState` from the agent-plane projection; Phase 6 removes the corresponding TS collection surface.
+- Delete `TraceEndpoint`.
+- Retype renamed `PromptRequestRow.stop_reason: Option<String>` to `Option<sacp::schema::StopReason>`.
+- Trim `PromptTurnState` to only the variants the projector actually emits; keep any extra variant only if TLC / `SessionEventKind` proves it is still required.
+- Keep `StateHeaders` and `StateEnvelope` private module helpers. They are explicitly out of scope for Phase 3.
+- Pull `child_session_edge` deletion up from Phase 5:
+  - delete `crates/fireline-orchestration/src/child_session_edge.rs`
+  - delete `ChildSessionEdgeSink` and `ChildSessionEdgeInput`
+  - delete peer-call edge emission and sink wiring in peer/bootstrap/host-topology paths
+  - stop emitting write-only lineage rows with no agent-plane consumers
 - During the migration window, dual-write canonical rows under new entity names:
   - `prompt_request`
   - `chunk_v2`
@@ -206,6 +227,8 @@ The final `rg` must return zero matches.
 **C. Type-level change summary**
 - `PromptTurnRow -> PromptRequestRow`
 - `session_id`, `request_id`: plain strings -> ACP types
+- `PromptRequestRow.stop_reason: Option<String> -> Option<sacp::schema::StopReason>`
+- `PromptTurnState` trims to projector-emitted variants only
 - `SessionRecord` drops `logical_connection_id`, `trace_id`, `parent_prompt_turn_id`
 - `ChunkRow` becomes keyed by `SessionId + RequestId (+ ToolCallId when present)` rather than `prompt_turn_id`
 
@@ -213,18 +236,20 @@ The final `rg` must return zero matches.
 - Add a focused projector unit test proving that two prompts in one session produce two distinct canonical `prompt_request` rows keyed by request id.
 - Update `tests/managed_agent_harness.rs` and `tests/managed_agent_sandbox.rs` to assert `prompt_request` / canonical request-id behavior.
 - Update `tests/state_fixture_snapshot.rs` to include canonical entity types in the fixture output.
+- Update `packages/state/test/rust-fixture.test.ts` to stop expecting `child_session_edge` entities in the Rust-emitted fixture stream.
 
 **E. Verification gate**
 ```bash
 cargo test --workspace
-rg -n "next_prompt_turn_id|turn_counter|prompt_request_to_turn|chunk_seq|InheritedLineage|logical_connection_id" crates/fireline-harness/src/state_projector.rs crates/fireline-harness/src/routes_acp.rs crates/fireline-harness/src/trace.rs
-rg -n "trace_id|parent_prompt_turn_id" crates/fireline-harness/src/state_projector.rs crates/fireline-session/src/lib.rs
+rg -n "next_prompt_turn_id|turn_counter|prompt_request_to_turn|chunk_seq|InheritedLineage|logical_connection_id|TraceEndpoint" crates/fireline-harness/src/state_projector.rs crates/fireline-harness/src/routes_acp.rs crates/fireline-harness/src/trace.rs
+rg -n "trace_id|parent_prompt_turn_id|ConnectionRow|ConnectionState|PendingRequestRow|PendingRequestDirection|PendingRequestState|HostInstanceRow|HostInstanceState" crates/fireline-harness/src/state_projector.rs crates/fireline-session/src/lib.rs
+rg -n "child_session_edge|ChildSessionEdge|ChildSessionEdgeSink|ChildSessionEdgeInput" crates/fireline-orchestration crates/fireline-tools/src/peer crates/fireline-host/src/bootstrap.rs crates/fireline-harness/src/host_topology.rs
 ```
 
-Both `rg` commands must return zero matches in source files.
+All three `rg` commands must return zero matches in source files.
 
 **F. Estimated LOC of diff**
-- 350-600
+- 700-850
 
 **G. Dependencies on prior phases**
 - Phase 2
@@ -235,6 +260,56 @@ Both `rg` commands must return zero matches in source files.
 **Rollback**
 - Revert the projector PR only.
 - Because this phase dual-writes new entity types rather than mutating old rows in place, rollback is safe: old readers still exist.
+
+## Phase 3.5: Chunk Payload Redesign
+
+**A. Files touched**
+- `crates/fireline-harness/src/state_projector.rs`
+- `crates/fireline-tools/` (if any MCP chunk emission still uses the old shape)
+- `packages/state/src/schema.ts`
+- `packages/state/src/collections/turn-chunks.ts`
+- `examples/flamecast-client/server.ts`
+- `examples/multi-agent-team/`
+- `examples/live-monitoring/`
+- `tests/state_fixture_snapshot.rs`
+
+**B. Exact change summary**
+- Replace `ChunkRow.chunk_type: ChunkType` + `ChunkRow.content: String` with `ChunkRow.update: sacp::schema::SessionUpdate` or a thin typed wrapper if serde shape requires it.
+- Delete `ChunkType`.
+- Update `packages/state/src/schema.ts` chunk schema to the typed-update shape with ACP SDK `SessionUpdate` types.
+- Update Flamecast and example consumers to pattern-match on `SessionUpdate` variants instead of `type` / `content` pairs.
+- Provide a one-phase TS migration helper such as `extractChunkTextPreview(update)` so example code does not regress on the simple "show a text string" use case.
+
+**C. Type-level change summary**
+- Rust: `ChunkRow.{chunk_type, content} -> ChunkRow.update: SessionUpdate`
+- TS: `ChunkRow['type' | 'content']` removed; `ChunkRow['update']` typed from `@agentclientprotocol/sdk`
+
+**D. Tests that must be added or updated**
+- Update `tests/state_fixture_snapshot.rs` to assert the new chunk shape.
+- Add a regression test in Flamecast-style consumer code that a typed `SessionUpdate.ToolCall` variant renders the same logical transcript as before.
+
+**E. Verification gate**
+```bash
+cargo test --workspace
+pnpm --filter @fireline/state test
+pnpm --filter @fireline/client test
+rg -n "ChunkType|chunk\\.type|chunk\\.content" crates packages tests examples
+```
+
+The `rg` command should return only canonical typed-update uses, not string-typed `chunk.type === '...'` comparisons.
+
+**F. Estimated LOC of diff**
+- 250-400
+
+**G. Dependencies on prior phases**
+- Phase 3
+
+**H. Can be dispatched independently?**
+- Yes, after Phase 3 lands.
+
+**Rollback**
+- Revert the Phase 3.5 PR only.
+- Phase 3 stays independently revertable because it keeps `chunk_v2` on the old string-typed payload shape until this phase lands.
 
 ## Phase 4: W3C Trace Context Propagation
 
@@ -282,7 +357,7 @@ The `rg` command must return zero source matches.
 - 220-380
 
 **G. Dependencies on prior phases**
-- Phase 3
+- Phase 3.5
 
 **H. Can be dispatched independently?**
 - No. The peer transport, harness, and integration tests must move together.
@@ -291,43 +366,36 @@ The `rg` command must return zero source matches.
 - Revert the trace-context PR only.
 - This phase is isolated because Phase 5 does not land until this gate is green.
 
-## Phase 5: Delete `ActiveTurnIndex` and `child_session_edge`
+## Phase 5: Delete `ActiveTurnIndex`
 
 **A. Files touched**
 - `crates/fireline-session/src/active_turn_index.rs` (delete)
 - `crates/fireline-session/src/lib.rs`
-- `crates/fireline-orchestration/src/child_session_edge.rs` (delete)
-- `crates/fireline-orchestration/src/lib.rs`
-- `crates/fireline-host/src/bootstrap.rs`
-- `crates/fireline-harness/src/host_topology.rs`
 - `crates/fireline-tools/src/peer/lookup.rs`
-- `crates/fireline-tools/src/peer/mcp_server.rs`
 - `tests/mesh_baseline.rs`
 - `tests/control_plane_docker.rs`
 
 **B. Exact change summary**
 - Delete `ActiveTurnIndex`, its exports, and all bootstrap wiring that keeps it alive.
-- Delete `child_session_edge.rs`, `ChildSessionEdgeWriter`, and all edge emission from peer calls.
-- Remove `ActiveTurnLookup` and `ChildSessionEdgeSink` from peer interfaces.
+- Remove `ActiveTurnLookup` from peer interfaces.
 - Update the peer call flow to depend only on the canonical `SessionId` and W3C trace context introduced in Phase 4.
-- Rewrite mesh and docker integration tests to assert trace propagation and session creation, not bespoke edge rows.
+- Rewrite mesh and docker integration tests to assert trace propagation and session creation without any `ActiveTurnIndex` dependency.
 
 **C. Type-level change summary**
 - Delete `ActiveTurnRecord`
-- Delete `ChildSessionEdgeInput`
-- Remove `prompt_turn_id`, `trace_id`, and `parent_prompt_turn_id` from peer interfaces
+- Remove residual `prompt_turn_id`, `trace_id`, and `parent_prompt_turn_id` dependencies that existed only to support `ActiveTurnIndex`
 
 **D. Tests that must be added or updated**
-- Delete unit tests that belong to `active_turn_index.rs` and `child_session_edge.rs`.
+- Delete unit tests that belong to `active_turn_index.rs`.
 - Update:
   - `tests/mesh_baseline.rs`
   - `tests/control_plane_docker.rs`
-- Add a regression test that a peer call still provisions a child session and that the trace link is visible without any `child_session_edge` row.
+- Add a regression test that a peer call still provisions a child session and keeps the trace link visible without any `ActiveTurnIndex` lookup state.
 
 **E. Verification gate**
 ```bash
 cargo check --workspace
-rg -n "active_turn_index|ActiveTurnIndex|child_session_edge|ChildSessionEdge|prompt_turn_id|parent_prompt_turn_id" crates/fireline-session crates/fireline-tools crates/fireline-host crates/fireline-orchestration tests/mesh_baseline.rs tests/control_plane_docker.rs
+rg -n "active_turn_index|ActiveTurnIndex|prompt_turn_id|parent_prompt_turn_id" crates/fireline-session crates/fireline-tools tests/mesh_baseline.rs tests/control_plane_docker.rs
 ```
 
 The `rg` command must return zero source matches.
@@ -369,6 +437,7 @@ The `rg` command must return zero source matches.
   - `SessionRow` with agent-plane fields only
   - `ChunkRow` keyed by `(sessionId, requestId, toolCallId?)`
 - Replace `promptTurns` with `promptRequests` in the public DB collections.
+- Delete `pendingRequests` from the public DB collections now that `PendingRequestRow` is gone from the Rust projection.
 - Remove `childSessionEdges` from the public state schema.
 - Add renamed query builders:
   - `createSessionPromptRequestsCollection`
@@ -378,15 +447,19 @@ The `rg` command must return zero source matches.
   - `createSessionTurnsCollection = createSessionPromptRequestsCollection`
   - `createTurnChunksCollection = createRequestChunksCollection`
 - Make the schema dual-read old and new row shapes during the migration window.
+- Tighten `PromptRequestRow.stopReason` from `z.string()` to the ACP SDK `StopReason` type.
 
 **C. Type-level change summary**
 - Public TS row types use ACP-branded `SessionId`, `RequestId`, `ToolCallId`
 - `jsonrpcId`, `promptTurnId`, `logicalConnectionId`, `traceId`, `parentPromptTurnId` disappear from public agent-plane row types
+- `stopReason: string | undefined -> StopReason | undefined`
+- `pendingRequests` disappears from `FirelineCollections`
 - `childSessionEdges` disappears from `FirelineCollections`
 
 **D. Tests that must be added or updated**
 - Update `schema.test.ts` to validate `prompt_request` and canonical permission/session/chunk rows.
 - Update `collections.test.ts` to target `promptRequests` and request-keyed chunks.
+- Update `schema.test.ts` and any TS row fixtures so `stopReason` validates against the typed ACP enum surface, not an unconstrained string.
 - Update `rust-fixture.test.ts` to accept the new canonical fixture output and to reject `child_session_edge`.
 
 **E. Verification gate**
