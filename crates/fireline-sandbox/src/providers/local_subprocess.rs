@@ -131,7 +131,7 @@ impl LocalSubprocessProvider {
             .arg("0")
             .arg("--name")
             .arg(&config.name)
-            .arg("--runtime-key")
+            .arg("--host-key")
             .arg(sandbox_id)
             .arg("--node-id")
             .arg(&node_id)
