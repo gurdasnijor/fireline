@@ -11,9 +11,12 @@ read models:
 - `crates/fireline-session/src/state_materializer.rs` owns the single
   subscribe -> replay -> live-tail loop and fans decoded envelopes out to
   `Vec<Arc<dyn StreamProjection>>`.
-- `SessionIndex`, `HostIndex`, and `ActiveTurnIndex` now implement
-  `StreamProjection::apply()` directly instead of each carrying their own
-  private envelope model and projection interface.
+- The steady-state projection model is `SessionIndex` for agent-plane session
+  state, `HostIndex` for infrastructure-plane host state, and ACP-keyed
+  prompt-request / permission / tool-call projections that use
+  `(SessionId, RequestId)` and `(SessionId, ToolCallId)` rather than synthetic
+  ids. `ActiveTurnIndex` remains transitional compatibility scaffolding and is
+  deleted by canonical-identifiers Phase 5.
 
 This keeps one stream reader per state stream, one protocol model for the
 reader side, and one trait for in-memory projections.
@@ -84,22 +87,32 @@ That part of the design was already correct, so it stayed in place. The change
 was to make its projection dependency explicit and reusable instead of private
 to the file.
 
-### 3. Indexes are now plain projections
+### 3. Projections are now plain `StreamProjection` implementations
 
-`SessionIndex`, `HostIndex`, and `ActiveTurnIndex` each now implement
-`StreamProjection` directly.
+The steady-state materialization model is now centered on two durable read
+models with a clear plane boundary:
 
-Each projection keeps its own narrow in-memory state and only owns the logic
-specific to its entity families:
+- `SessionIndex` is the agent-plane projection. It owns durable session state
+  and is the right home for ACP-keyed prompt-request, permission, and tool-call
+  read models keyed by canonical ACP identifiers such as
+  `(SessionId, RequestId)` and `(SessionId, ToolCallId)`.
+- `HostIndex` is the infrastructure-plane projection. It owns
+  `runtime_spec`, `runtime_instance`, and `runtime_endpoints`, which are
+  Fireline infrastructure records rather than ACP agent records.
 
-- `SessionIndex` projects `session` and `runtime_spec`
-- `HostIndex` projects `runtime_spec`, `runtime_instance`, and
-  `runtime_endpoints`
-- `ActiveTurnIndex` projects `prompt_turn`
+This keeps the projection contract compatible with the canonical-identifiers
+split:
 
-`ActiveTurnIndex` still includes runtime-local waiter coordination on top of
-the projection state. That is acceptable for now because the durable-state
-application path is still unified through `StreamProjection::apply()`.
+- agent-plane projections deserialize ACP-schema identity fields directly
+- infrastructure-plane projections keep Fireline host/runtime identity local to
+  infra records
+- no steady-state projection depends on `prompt_turn_id` or any other synthetic
+  lineage key
+
+`ActiveTurnIndex` still implements `StreamProjection` in the current codebase,
+but only as transitional runtime-local waiter coordination. It is not part of
+the steady-state projection model and is deleted by canonical-identifiers
+Phase 5.
 
 ## Alignment with Durable Streams `STATE-PROTOCOL`
 
@@ -140,15 +153,16 @@ The old structure looked like this:
 - `state_materializer.rs`: transport + private trait + private envelope types
 - `session_index.rs`: local projection logic
 - `host_index.rs`: local projection logic
-- `active_turn_index.rs`: local projection logic + waiters
+- `active_turn_index.rs`: transitional local projection logic + waiters
 
 The new structure is:
 
 - `projection.rs`: shared protocol types + shared `StreamProjection` trait
 - `state_materializer.rs`: transport and fanout only
-- `session_index.rs`: session projection
-- `host_index.rs`: host projection
-- `active_turn_index.rs`: active-turn projection plus waiters
+- `session_index.rs`: agent-plane session projection
+- `host_index.rs`: infrastructure-plane host projection
+- `active_turn_index.rs`: transitional compatibility projection plus waiters,
+  scheduled for deletion by canonical-identifiers Phase 5
 
 This is a smaller refactor than a fully generic materialization framework, but
 it is the correct cut for the codebase today:
