@@ -19,7 +19,7 @@
 //! resume(sessionId) =
 //!   sessionStore.get(sessionId)           — Session read surface
 //! → provision(storedRuntimeSpec)          — Sandbox provision
-//! → connectAcp(runtime.acp)               — ACP transport
+//! → ACP SDK connect(runtime.acp)          — ACP transport
 //! → loadSession(sessionId)                — session/load rebuild
 //! ```
 //!
