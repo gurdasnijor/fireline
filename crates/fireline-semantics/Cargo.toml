@@ -8,9 +8,6 @@ publish = false
 description = "Pure managed-agent semantic kernels for session, resume, and approval transitions"
 
 [dependencies]
-sacp.workspace = true
-serde.workspace = true
 
 [dev-dependencies]
 proptest = "1.6"
-serde_json.workspace = true
