@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 400" fill="none">
+  <defs>
+    <linearGradient id="bg4" x1="0" y1="0" x2="900" y2="400">
+      <stop offset="0%" stop-color="#0a0e1a"/>
+      <stop offset="100%" stop-color="#0f1628"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10" fill="none" stroke="#8b5cf6" stroke-width="1.5"/>
+    </marker>
+    <marker id="arrow2" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10" fill="none" stroke="#475569" stroke-width="1.5"/>
+    </marker>
+    <filter id="glow4">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="900" height="400" fill="url(#bg4)" rx="12"/>
+
+  <!-- Title -->
+  <text x="450" y="38" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, sans-serif" font-size="18" font-weight="600">Multi-Agent Topology</text>
+  <text x="450" y="58" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="12">peer(reviewer, writer) — type-safe at compile time</text>
+
+  <!-- Reviewer sandbox -->
+  <rect x="60" y="90" width="340" height="200" rx="12" fill="#0f172a" stroke="#3b82f6" stroke-width="1.5"/>
+  <rect x="60" y="90" width="340" height="35" rx="12" fill="#3b82f6" opacity="0.12"/>
+  <circle cx="85" cy="108" r="6" fill="#3b82f6" filter="url(#glow4)"/>
+  <text x="100" y="113" fill="#60a5fa" font-family="monospace" font-size="13" font-weight="600">reviewer</text>
+  <text x="295" y="113" fill="#475569" font-family="system-ui, sans-serif" font-size="10">Sandbox</text>
+
+  <!-- Reviewer internals -->
+  <rect x="80" y="140" width="130" height="55" rx="6" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <text x="145" y="162" text-anchor="middle" fill="#94a3b8" font-family="monospace" font-size="10">trace()</text>
+  <text x="145" y="178" text-anchor="middle" fill="#94a3b8" font-family="monospace" font-size="10">approve()</text>
+
+  <rect x="230" y="140" width="150" height="55" rx="6" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <text x="305" y="158" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, sans-serif" font-size="11" font-weight="500">claude-code-acp</text>
+  <text x="305" y="178" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="9">Agent process</text>
+
+  <!-- Reviewer endpoints -->
+  <rect x="80" y="210" width="300" height="30" rx="6" fill="#1e293b"/>
+  <text x="100" y="229" fill="#60a5fa" font-family="monospace" font-size="9">handle.reviewer.acp</text>
+  <text x="280" y="229" fill="#34d399" font-family="monospace" font-size="9">handle.reviewer.state</text>
+
+  <!-- Connector labels -->
+  <text x="145" y="260" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="9">middleware</text>
+  <text x="305" y="260" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="9">agent</text>
+
+  <!-- Writer sandbox -->
+  <rect x="500" y="90" width="340" height="200" rx="12" fill="#0f172a" stroke="#10b981" stroke-width="1.5"/>
+  <rect x="500" y="90" width="340" height="35" rx="12" fill="#10b981" opacity="0.12"/>
+  <circle cx="525" cy="108" r="6" fill="#10b981" filter="url(#glow4)"/>
+  <text x="540" y="113" fill="#34d399" font-family="monospace" font-size="13" font-weight="600">writer</text>
+  <text x="735" y="113" fill="#475569" font-family="system-ui, sans-serif" font-size="10">Sandbox</text>
+
+  <!-- Writer internals -->
+  <rect x="520" y="140" width="100" height="55" rx="6" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <text x="570" y="170" text-anchor="middle" fill="#94a3b8" font-family="monospace" font-size="10">trace()</text>
+
+  <rect x="640" y="140" width="180" height="55" rx="6" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <text x="730" y="158" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, sans-serif" font-size="11" font-weight="500">claude-code-acp</text>
+  <text x="730" y="178" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="9">Agent process</text>
+
+  <!-- Writer endpoints -->
+  <rect x="520" y="210" width="300" height="30" rx="6" fill="#1e293b"/>
+  <text x="540" y="229" fill="#60a5fa" font-family="monospace" font-size="9">handle.writer.acp</text>
+  <text x="720" y="229" fill="#34d399" font-family="monospace" font-size="9">handle.writer.state</text>
+
+  <!-- Peer connection -->
+  <path d="M400,165 C430,165 430,165 460,165" stroke="#8b5cf6" stroke-width="2.5" stroke-dasharray="8,4" marker-end="url(#arrow)" filter="url(#glow4)"/>
+  <path d="M460,180 C430,180 430,180 400,180" stroke="#8b5cf6" stroke-width="2.5" stroke-dasharray="8,4" marker-end="url(#arrow)" filter="url(#glow4)"/>
+  <text x="430" y="155" text-anchor="middle" fill="#a78bfa" font-family="monospace" font-size="10" font-weight="600">peer()</text>
+
+  <!-- Bottom: Durable Stream -->
+  <rect x="100" y="310" width="700" height="55" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1"/>
+  <text x="450" y="335" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, sans-serif" font-size="12" font-weight="500">Shared Durable Stream</text>
+  <text x="450" y="353" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="10">Both agents write to the same tenant stream. One subscription sees everything.</text>
+
+  <!-- Arrows to stream -->
+  <line x1="230" y1="290" x2="300" y2="310" stroke="#475569" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow2)"/>
+  <line x1="670" y1="290" x2="600" y2="310" stroke="#475569" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow2)"/>
+
+  <!-- Bottom: code -->
+  <text x="450" y="390" text-anchor="middle" fill="#475569" font-family="monospace" font-size="11">const handles = await peer(reviewer, writer).start({ serverUrl })</text>
+</svg>

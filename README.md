@@ -53,6 +53,10 @@ See [examples/](examples/) for more — background agents, Slackbots, multi-agen
 
 ---
 
+<picture>
+  <img alt="The Three Planes" src="assets/three-planes.svg" width="100%">
+</picture>
+
 ## The three planes
 
 | Plane | Package | What it does |
@@ -64,6 +68,10 @@ See [examples/](examples/) for more — background agents, Slackbots, multi-agen
 The control plane gives you a handle. The handle carries two endpoints. Each endpoint connects you to a different plane. No side channels.
 
 ---
+
+<picture>
+  <img alt="Middleware Pipeline" src="assets/middleware-pipeline.svg" width="100%">
+</picture>
 
 ## Middleware
 
@@ -163,6 +171,10 @@ const handle2 = await compose(sandbox(), middleware([trace()]), agent([...]))
 The session is the stream, not the sandbox. Both hosts read and write the same durable log. The agent on Host B replays the full conversation history and continues. Zero state is lost.
 
 ---
+
+<picture>
+  <img alt="Multi-Agent Topology" src="assets/multi-agent-topology.svg" width="100%">
+</picture>
 
 ## Multi-agent topologies
 

@@ -71,6 +71,10 @@ This means your 3am batch job doesn't lose 4 hours of work when a container recy
 
 ---
 
+<picture>
+  <img alt="What Fireline Replaces" src="../assets/before-after.svg" width="100%">
+</picture>
+
 ## Under the hood
 
 For the engineering team that will evaluate the technical foundation:
