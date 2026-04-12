@@ -3,6 +3,7 @@
 pub mod active_turn_index;
 pub mod host_identity;
 pub mod host_index;
+pub mod projection;
 pub mod state_materializer;
 pub mod session_index;
 pub mod stream_host;
@@ -14,10 +15,10 @@ pub use host_identity::{
     HostStatus, TopologyComponentSpec, TopologySpec,
 };
 pub use host_index::{HostIndex, HostInstanceRecord, HostInstanceStatus};
-pub use state_materializer::{
-    RawStateEnvelope, RawStateHeaders, StateMaterializer, StateMaterializerTask,
-    StateProjection,
+pub use projection::{
+    ChangeOperation, ControlKind, StateEnvelope, StateHeaders, StreamProjection,
 };
+pub use state_materializer::{StateMaterializer, StateMaterializerTask};
 pub use session_index::SessionIndex;
 pub use stream_host::*;
 

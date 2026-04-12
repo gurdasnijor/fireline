@@ -9,65 +9,30 @@
 //! (`packages/state/STATE-PROTOCOL.md` upstream):
 //!
 //! - **Change messages** carry `type`, `key`, and `headers.operation` ∈
-//!   {`insert`, `update`, `delete`}. Each event is parsed independently, so
-//!   a single malformed event cannot poison neighbors in the same chunk.
+//!   {`insert`, `update`, `delete`} with optional `old_value`, `txid`, and
+//!   `timestamp`. Each event is parsed independently, so a single malformed
+//!   event cannot poison neighbors in the same chunk.
 //! - **Control messages** carry only `headers.control` ∈ {`snapshot-start`,
-//!   `snapshot-end`, `reset`}. Fireline observes `snapshot-start` and
-//!   `snapshot-end` passively for now; `reset` clears every projection via
-//!   `StateProjection::reset` before continuing the stream.
+//!   `snapshot-end`, `reset`} plus optional `headers.offset`. Fireline
+//!   observes `snapshot-start` and `snapshot-end` passively for now; `reset`
+//!   clears every projection via `StreamProjection::reset` before continuing
+//!   the stream.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, anyhow};
-use async_trait::async_trait;
 use durable_streams::{Client, LiveMode, Offset};
-use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::{AbortHandle, JoinHandle};
 use tracing::{debug, warn};
 
-/// A change event from the state stream. Matches the state-protocol
-/// change-message shape: `type`, `key`, `headers.operation` and an optional
-/// `value` body.
-#[derive(Debug, Deserialize)]
-pub struct RawStateEnvelope {
-    #[serde(rename = "type")]
-    pub entity_type: String,
-    pub key: String,
-    pub headers: RawStateHeaders,
-    #[serde(default)]
-    pub value: Option<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RawStateHeaders {
-    pub operation: String,
-}
-
-/// Control-message header. Only `control` is required; `offset` is optional.
-#[derive(Debug, Deserialize)]
-struct ControlHeaders {
-    control: String,
-}
-
-#[async_trait]
-pub trait StateProjection: Send + Sync {
-    async fn apply_state_event(&self, event: &RawStateEnvelope) -> Result<()>;
-
-    /// Discard all materialized state in response to a protocol-level
-    /// `reset` control event. The default implementation is a no-op; each
-    /// projection should override this if it holds mutable state that must
-    /// be dropped when the upstream stream signals a reset.
-    async fn reset(&self) -> Result<()> {
-        Ok(())
-    }
-}
+use crate::projection::{ControlKind, StateEnvelope, StreamProjection};
 
 #[derive(Clone, Default)]
 pub struct StateMaterializer {
-    projections: Vec<Arc<dyn StateProjection>>,
+    projections: Vec<Arc<dyn StreamProjection>>,
 }
 
 pub struct StateMaterializerTask {
@@ -78,7 +43,7 @@ pub struct StateMaterializerTask {
 }
 
 impl StateMaterializer {
-    pub fn new(projections: Vec<Arc<dyn StateProjection>>) -> Self {
+    pub fn new(projections: Vec<Arc<dyn StreamProjection>>) -> Self {
         Self { projections }
     }
 
@@ -117,34 +82,34 @@ impl StateMaterializer {
     }
 
     async fn apply_event(&self, event: Value) {
-        match classify_event(&event) {
-            EventKind::Change => match serde_json::from_value::<RawStateEnvelope>(event) {
-                Ok(envelope) => {
-                    if !is_supported_operation(&envelope.headers.operation) {
-                        debug!(
-                            operation = %envelope.headers.operation,
-                            entity_type = %envelope.entity_type,
-                            "skipping change event with unsupported operation"
+        let envelope = match serde_json::from_value::<StateEnvelope>(event.clone()) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                debug!(error = %error, "skip malformed state event");
+                return;
+            }
+        };
+
+        match classify_event(&envelope) {
+            EventKind::Change => {
+                let entity_type = envelope.entity_type().unwrap_or("<missing>");
+                let key = envelope.key().unwrap_or("<missing>");
+                let operation = envelope.change_operation();
+
+                for projection in &self.projections {
+                    if let Err(error) = projection.apply(&envelope) {
+                        warn!(
+                            error = %error,
+                            entity_type,
+                            key,
+                            operation = ?operation,
+                            "projection failed to apply state event"
                         );
-                        return;
-                    }
-                    for projection in &self.projections {
-                        if let Err(error) = projection.apply_state_event(&envelope).await {
-                            warn!(
-                                error = %error,
-                                entity_type = %envelope.entity_type,
-                                key = %envelope.key,
-                                "projection failed to apply state event"
-                            );
-                        }
                     }
                 }
-                Err(error) => {
-                    debug!(error = %error, "skip malformed change event");
-                }
-            },
+            }
             EventKind::Control(control) => {
-                self.apply_control(&control).await;
+                self.apply_control(control);
             }
             EventKind::Unknown => {
                 debug!(event = ?event, "skip unrecognized state stream event");
@@ -152,21 +117,18 @@ impl StateMaterializer {
         }
     }
 
-    async fn apply_control(&self, control: &str) {
+    fn apply_control(&self, control: ControlKind) {
         match control {
-            "snapshot-start" | "snapshot-end" => {
-                debug!(control, "observed state stream snapshot control event");
+            ControlKind::SnapshotStart | ControlKind::SnapshotEnd => {
+                debug!(control = ?control, "observed state stream snapshot control event");
             }
-            "reset" => {
+            ControlKind::Reset => {
                 debug!("state stream signaled reset; clearing projections");
                 for projection in &self.projections {
-                    if let Err(error) = projection.reset().await {
+                    if let Err(error) = projection.reset() {
                         warn!(error = %error, "projection reset failed");
                     }
                 }
-            }
-            other => {
-                debug!(control = other, "skip unknown control event");
             }
         }
     }
@@ -174,26 +136,18 @@ impl StateMaterializer {
 
 enum EventKind {
     Change,
-    Control(String),
+    Control(ControlKind),
     Unknown,
 }
 
-fn classify_event(event: &Value) -> EventKind {
-    let headers = match event.get("headers") {
-        Some(headers) => headers,
-        None => return EventKind::Unknown,
-    };
-    if let Ok(control) = serde_json::from_value::<ControlHeaders>(headers.clone()) {
-        return EventKind::Control(control.control);
+fn classify_event(event: &StateEnvelope) -> EventKind {
+    if let Some(control) = event.control_kind() {
+        return EventKind::Control(control);
     }
-    if headers.get("operation").is_some() {
+    if event.is_change() {
         return EventKind::Change;
     }
     EventKind::Unknown
-}
-
-fn is_supported_operation(operation: &str) -> bool {
-    matches!(operation, "insert" | "update" | "delete")
 }
 
 impl StateMaterializerTask {
@@ -283,6 +237,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::projection::{ChangeOperation, StreamProjection};
 
     #[derive(Default)]
     struct RecordingProjection {
@@ -290,18 +245,17 @@ mod tests {
         resets: Mutex<u32>,
     }
 
-    #[async_trait]
-    impl StateProjection for RecordingProjection {
-        async fn apply_state_event(&self, event: &RawStateEnvelope) -> Result<()> {
+    impl StreamProjection for RecordingProjection {
+        fn apply(&self, event: &StateEnvelope) -> Result<()> {
             self.events.lock().unwrap().push((
-                event.entity_type.clone(),
-                event.key.clone(),
-                event.headers.operation.clone(),
+                event.entity_type.clone().unwrap(),
+                event.key.clone().unwrap(),
+                format!("{:?}", event.headers.operation.clone().unwrap()).to_lowercase(),
             ));
             Ok(())
         }
 
-        async fn reset(&self) -> Result<()> {
+        fn reset(&self) -> Result<()> {
             *self.resets.lock().unwrap() += 1;
             self.events.lock().unwrap().clear();
             Ok(())
@@ -447,6 +401,32 @@ mod tests {
         let events = projection.events.lock().unwrap().clone();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, "session");
+    }
+
+    #[test]
+    fn state_envelope_deserializes_protocol_optional_fields() {
+        let envelope: StateEnvelope = serde_json::from_value(serde_json::json!({
+            "type": "session",
+            "key": "sess-1",
+            "value": {"sessionId": "sess-1"},
+            "old_value": {"sessionId": "sess-0"},
+            "headers": {
+                "operation": "update",
+                "txid": "tx-1",
+                "timestamp": "2025-01-15T10:35:00Z"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(envelope.entity_type.as_deref(), Some("session"));
+        assert_eq!(envelope.key.as_deref(), Some("sess-1"));
+        assert_eq!(envelope.headers.operation, Some(ChangeOperation::Update));
+        assert_eq!(envelope.headers.txid.as_deref(), Some("tx-1"));
+        assert_eq!(
+            envelope.headers.timestamp.as_deref(),
+            Some("2025-01-15T10:35:00Z")
+        );
+        assert!(envelope.old_value.is_some());
     }
 
     #[tokio::test]

@@ -7,15 +7,16 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use fireline_tools::lookup::{ActiveTurnLookup, ActiveTurnRecord as PeerActiveTurnRecord};
 use serde::Deserialize;
-use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::sync::Notify;
 
-use crate::state_materializer::{RawStateEnvelope, StateProjection};
+use crate::projection::{ChangeOperation, StateEnvelope, StreamProjection};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveTurnRecord {
@@ -36,7 +37,7 @@ impl ActiveTurnIndex {
     }
 
     pub async fn get(&self, session_id: &str) -> Option<ActiveTurnRecord> {
-        self.inner.read().await.get(session_id).cloned()
+        self.inner.read().unwrap().get(session_id).cloned()
     }
 
     pub async fn wait_for(&self, session_id: &str, timeout: Duration) -> Option<ActiveTurnRecord> {
@@ -45,7 +46,7 @@ impl ActiveTurnIndex {
         }
 
         let notify = {
-            let mut waiters = self.waiters.lock().await;
+            let mut waiters = self.waiters.lock().unwrap();
             waiters
                 .entry(session_id.to_string())
                 .or_insert_with(|| Arc::new(Notify::new()))
@@ -62,13 +63,17 @@ impl ActiveTurnIndex {
         self.get(session_id).await
     }
 
-    async fn apply_envelope(&self, envelope: &RawStateEnvelope) -> Result<()> {
-        if envelope.entity_type != "prompt_turn" {
+    fn apply_envelope(&self, envelope: &StateEnvelope) -> Result<()> {
+        if envelope.entity_type() != Some("prompt_turn") {
             return Ok(());
         }
 
-        match envelope.headers.operation.as_str() {
-            "insert" | "update" => {
+        let Some(operation) = envelope.change_operation() else {
+            return Ok(());
+        };
+
+        match operation {
+            ChangeOperation::Insert | ChangeOperation::Update => {
                 let Some(value) = envelope.value.as_ref() else {
                     return Ok(());
                 };
@@ -76,7 +81,7 @@ impl ActiveTurnIndex {
 
                 if record.state == PromptTurnState::Active {
                     let session_id = record.session_id.clone();
-                    self.inner.write().await.insert(
+                    self.inner.write().unwrap().insert(
                         session_id.clone(),
                         ActiveTurnRecord {
                             session_id: record.session_id,
@@ -84,11 +89,11 @@ impl ActiveTurnIndex {
                             trace_id: record.trace_id,
                         },
                     );
-                    if let Some(notify) = self.waiters.lock().await.get(&session_id).cloned() {
+                    if let Some(notify) = self.waiters.lock().unwrap().get(&session_id).cloned() {
                         notify.notify_waiters();
                     }
                 } else {
-                    let mut inner = self.inner.write().await;
+                    let mut inner = self.inner.write().unwrap();
                     if inner
                         .get(&record.session_id)
                         .is_some_and(|current| current.prompt_turn_id == record.prompt_turn_id)
@@ -97,26 +102,27 @@ impl ActiveTurnIndex {
                     }
                 }
             }
-            "delete" => {
-                let mut inner = self.inner.write().await;
-                inner.retain(|_, current| current.prompt_turn_id != envelope.key);
+            ChangeOperation::Delete => {
+                let Some(key) = envelope.key() else {
+                    return Ok(());
+                };
+                let mut inner = self.inner.write().unwrap();
+                inner.retain(|_, current| current.prompt_turn_id != key);
             }
-            _ => {}
         }
 
         Ok(())
     }
 }
 
-#[async_trait]
-impl StateProjection for ActiveTurnIndex {
-    async fn apply_state_event(&self, event: &RawStateEnvelope) -> Result<()> {
-        self.apply_envelope(event).await
+impl StreamProjection for ActiveTurnIndex {
+    fn apply(&self, event: &StateEnvelope) -> Result<()> {
+        self.apply_envelope(event)
     }
 
-    async fn reset(&self) -> Result<()> {
-        self.inner.write().await.clear();
-        self.waiters.lock().await.clear();
+    fn reset(&self) -> Result<()> {
+        self.inner.write().unwrap().clear();
+        self.waiters.lock().unwrap().clear();
         Ok(())
     }
 }
@@ -169,13 +175,13 @@ struct PromptTurnRecord {
 #[cfg(test)]
 mod tests {
     use super::ActiveTurnIndex;
-    use crate::state_materializer::RawStateEnvelope;
+    use crate::projection::StateEnvelope;
     use std::time::Duration;
 
     #[tokio::test]
     async fn tracks_active_turns_from_prompt_turn_rows() {
         let index = ActiveTurnIndex::new();
-        let insert: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+        let insert: StateEnvelope = serde_json::from_value(serde_json::json!({
             "type": "prompt_turn",
             "key": "turn-1",
             "headers": { "operation": "insert" },
@@ -188,12 +194,12 @@ mod tests {
         }))
         .unwrap();
 
-        index.apply_envelope(&insert).await.unwrap();
+        index.apply_envelope(&insert).unwrap();
         let current = index.get("sess-1").await.expect("active turn");
         assert_eq!(current.prompt_turn_id, "turn-1");
         assert_eq!(current.trace_id.as_deref(), Some("trace-1"));
 
-        let complete: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+        let complete: StateEnvelope = serde_json::from_value(serde_json::json!({
             "type": "prompt_turn",
             "key": "turn-1",
             "headers": { "operation": "update" },
@@ -206,7 +212,7 @@ mod tests {
         }))
         .unwrap();
 
-        index.apply_envelope(&complete).await.unwrap();
+        index.apply_envelope(&complete).unwrap();
         assert!(index.get("sess-1").await.is_none());
     }
 
@@ -223,7 +229,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        let insert: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+        let insert: StateEnvelope = serde_json::from_value(serde_json::json!({
             "type": "prompt_turn",
             "key": "turn-2",
             "headers": { "operation": "insert" },
@@ -236,7 +242,7 @@ mod tests {
         }))
         .unwrap();
 
-        index.apply_envelope(&insert).await.unwrap();
+        index.apply_envelope(&insert).unwrap();
 
         let turn = waiter.await.unwrap().expect("active turn should resolve");
         assert_eq!(turn.prompt_turn_id, "turn-2");

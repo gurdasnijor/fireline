@@ -7,12 +7,11 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use anyhow::Result;
-use async_trait::async_trait;
-use tokio::sync::RwLock;
 
-use crate::state_materializer::{RawStateEnvelope, StateProjection};
+use crate::projection::{ChangeOperation, StateEnvelope, StreamProjection};
 use crate::{PersistedHostSpec, SessionRecord};
 
 #[derive(Debug, Clone, Default)]
@@ -27,22 +26,22 @@ impl SessionIndex {
     }
 
     pub async fn get(&self, session_id: &str) -> Option<SessionRecord> {
-        self.sessions.read().await.get(session_id).cloned()
+        self.sessions.read().unwrap().get(session_id).cloned()
     }
 
     pub async fn list(&self) -> Vec<SessionRecord> {
-        self.sessions.read().await.values().cloned().collect()
+        self.sessions.read().unwrap().values().cloned().collect()
     }
 
     pub async fn host_spec(&self, host_key: &str) -> Option<PersistedHostSpec> {
-        self.host_specs.read().await.get(host_key).cloned()
+        self.host_specs.read().unwrap().get(host_key).cloned()
     }
 
     pub async fn host_spec_for_session(&self, session_id: &str) -> Option<PersistedHostSpec> {
         let host_key = self
             .sessions
             .read()
-            .await
+            .unwrap()
             .get(session_id)
             .map(|record| record.host_key.clone())?;
         self.host_spec(&host_key).await
@@ -52,49 +51,57 @@ impl SessionIndex {
         let mut keys = self
             .sessions
             .read()
-            .await
+            .unwrap()
             .values()
             .map(|record| record.host_key.clone())
             .collect::<Vec<_>>();
-        keys.extend(self.host_specs.read().await.keys().cloned());
+        keys.extend(self.host_specs.read().unwrap().keys().cloned());
         keys.sort();
         keys.dedup();
         keys
     }
 
-    async fn apply_envelope(&self, envelope: &RawStateEnvelope) -> Result<()> {
-        match envelope.entity_type.as_str() {
-            "session" => match envelope.headers.operation.as_str() {
-                "insert" | "update" => {
+    fn apply_envelope(&self, envelope: &StateEnvelope) -> Result<()> {
+        let Some(operation) = envelope.change_operation() else {
+            return Ok(());
+        };
+
+        match envelope.entity_type() {
+            Some("session") => match operation {
+                ChangeOperation::Insert | ChangeOperation::Update => {
                     let Some(value) = envelope.value.as_ref() else {
                         return Ok(());
                     };
                     let record: SessionRecord = serde_json::from_value(value.clone())?;
                     self.sessions
                         .write()
-                        .await
+                        .unwrap()
                         .insert(record.session_id.clone(), record);
                 }
-                "delete" => {
-                    self.sessions.write().await.remove(&envelope.key);
+                ChangeOperation::Delete => {
+                    let Some(key) = envelope.key() else {
+                        return Ok(());
+                    };
+                    self.sessions.write().unwrap().remove(key);
                 }
-                _ => {}
             },
-            "runtime_spec" => match envelope.headers.operation.as_str() {
-                "insert" | "update" => {
+            Some("runtime_spec") => match operation {
+                ChangeOperation::Insert | ChangeOperation::Update => {
                     let Some(value) = envelope.value.as_ref() else {
                         return Ok(());
                     };
                     let spec: PersistedHostSpec = serde_json::from_value(value.clone())?;
                     self.host_specs
                         .write()
-                        .await
+                        .unwrap()
                         .insert(spec.host_key.clone(), spec);
                 }
-                "delete" => {
-                    self.host_specs.write().await.remove(&envelope.key);
+                ChangeOperation::Delete => {
+                    let Some(key) = envelope.key() else {
+                        return Ok(());
+                    };
+                    self.host_specs.write().unwrap().remove(key);
                 }
-                _ => {}
             },
             _ => {}
         }
@@ -103,15 +110,14 @@ impl SessionIndex {
     }
 }
 
-#[async_trait]
-impl StateProjection for SessionIndex {
-    async fn apply_state_event(&self, event: &RawStateEnvelope) -> Result<()> {
-        self.apply_envelope(event).await
+impl StreamProjection for SessionIndex {
+    fn apply(&self, event: &StateEnvelope) -> Result<()> {
+        self.apply_envelope(event)
     }
 
-    async fn reset(&self) -> Result<()> {
-        self.sessions.write().await.clear();
-        self.host_specs.write().await.clear();
+    fn reset(&self) -> Result<()> {
+        self.sessions.write().unwrap().clear();
+        self.host_specs.write().unwrap().clear();
         Ok(())
     }
 }
@@ -119,12 +125,12 @@ impl StateProjection for SessionIndex {
 #[cfg(test)]
 mod tests {
     use super::SessionIndex;
-    use crate::{PersistedHostSpec, state_materializer::RawStateEnvelope};
+    use crate::{PersistedHostSpec, projection::StateEnvelope};
 
     #[tokio::test]
     async fn materializes_session_rows_from_state_events() {
         let index = SessionIndex::new();
-        let envelope: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+        let envelope: StateEnvelope = serde_json::from_value(serde_json::json!({
             "type":"session",
             "key":"sess-1",
             "headers":{"operation":"insert"},
@@ -145,7 +151,7 @@ mod tests {
         }))
         .unwrap();
 
-        index.apply_envelope(&envelope).await.unwrap();
+        index.apply_envelope(&envelope).unwrap();
 
         let session = index.get("sess-1").await.expect("session indexed");
         assert_eq!(session.host_key, "runtime:1");
@@ -171,16 +177,16 @@ mod tests {
                 "topology": { "components": [] }
             }),
         );
-        let host_spec_envelope: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+        let host_spec_envelope: StateEnvelope = serde_json::from_value(serde_json::json!({
             "type":"runtime_spec",
             "key":"runtime:1",
             "headers":{"operation":"insert"},
             "value": host_spec,
         }))
         .unwrap();
-        index.apply_envelope(&host_spec_envelope).await.unwrap();
+        index.apply_envelope(&host_spec_envelope).unwrap();
 
-        let session_envelope: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+        let session_envelope: StateEnvelope = serde_json::from_value(serde_json::json!({
             "type":"session",
             "key":"sess-1",
             "headers":{"operation":"insert"},
@@ -200,7 +206,7 @@ mod tests {
             }
         }))
         .unwrap();
-        index.apply_envelope(&session_envelope).await.unwrap();
+        index.apply_envelope(&session_envelope).unwrap();
 
         let spec = index
             .host_spec_for_session("sess-1")

@@ -43,13 +43,13 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use anyhow::Result;
-use async_trait::async_trait;
 use serde::Deserialize;
-use tokio::sync::RwLock;
 
-use crate::{PersistedHostSpec, RawStateEnvelope, HostDescriptor, StateProjection};
+use crate::projection::{ChangeOperation, StateEnvelope, StreamProjection};
+use crate::{HostDescriptor, PersistedHostSpec};
 
 /// The observed lifecycle state of a single `fireline` process on
 /// the shared state stream. Matches the `status` discriminator
@@ -100,13 +100,13 @@ impl HostIndex {
     /// Returns the persisted spec for a given host_key, if one
     /// has been observed on the stream.
     pub async fn spec_for(&self, host_key: &str) -> Option<PersistedHostSpec> {
-        self.host_specs.read().await.get(host_key).cloned()
+        self.host_specs.read().unwrap().get(host_key).cloned()
     }
 
     /// Returns the list of all host_keys for which a
     /// `runtime_spec` envelope has been observed.
     pub async fn known_host_keys(&self) -> Vec<String> {
-        let mut keys: Vec<String> = self.host_specs.read().await.keys().cloned().collect();
+        let mut keys: Vec<String> = self.host_specs.read().unwrap().keys().cloned().collect();
         keys.sort();
         keys
     }
@@ -114,7 +114,7 @@ impl HostIndex {
     /// Returns the latest observed state of a single host instance
     /// (by `host_id`), if one has been observed on the stream.
     pub async fn instance(&self, host_id: &str) -> Option<HostInstanceRecord> {
-        self.host_instances.read().await.get(host_id).cloned()
+        self.host_instances.read().unwrap().get(host_id).cloned()
     }
 
     /// Returns every `host_id` whose latest observed status
@@ -123,7 +123,7 @@ impl HostIndex {
         let mut matching: Vec<String> = self
             .host_instances
             .read()
-            .await
+            .unwrap()
             .iter()
             .filter_map(|(id, record)| (record.status == status).then(|| id.clone()))
             .collect();
@@ -137,8 +137,8 @@ impl HostIndex {
     /// expectations; not generally useful.
     pub async fn counts(&self) -> (usize, usize) {
         (
-            self.host_specs.read().await.len(),
-            self.host_instances.read().await.len(),
+            self.host_specs.read().unwrap().len(),
+            self.host_instances.read().unwrap().len(),
         )
     }
 
@@ -150,7 +150,7 @@ impl HostIndex {
     pub async fn endpoints_for(&self, host_key: &str) -> Option<HostDescriptor> {
         self.host_endpoints
             .read()
-            .await
+            .unwrap()
             .get(host_key)
             .cloned()
     }
@@ -160,61 +160,71 @@ impl HostIndex {
     /// deterministic test assertions. This is the replacement for
     /// `RuntimeRegistry::list`.
     pub async fn list_endpoints(&self) -> Vec<HostDescriptor> {
-        let guard = self.host_endpoints.read().await;
+        let guard = self.host_endpoints.read().unwrap();
         let mut descriptors: Vec<HostDescriptor> = guard.values().cloned().collect();
         descriptors.sort_by(|left, right| left.host_key.cmp(&right.host_key));
         descriptors
     }
 
-    async fn apply_envelope(&self, envelope: &RawStateEnvelope) -> Result<()> {
-        match envelope.entity_type.as_str() {
-            "runtime_spec" => match envelope.headers.operation.as_str() {
-                "insert" | "update" => {
+    fn apply_envelope(&self, envelope: &StateEnvelope) -> Result<()> {
+        let Some(operation) = envelope.change_operation() else {
+            return Ok(());
+        };
+
+        match envelope.entity_type() {
+            Some("runtime_spec") => match operation {
+                ChangeOperation::Insert | ChangeOperation::Update => {
                     let Some(value) = envelope.value.as_ref() else {
                         return Ok(());
                     };
                     let spec: PersistedHostSpec = serde_json::from_value(value.clone())?;
                     self.host_specs
                         .write()
-                        .await
+                        .unwrap()
                         .insert(spec.host_key.clone(), spec);
                 }
-                "delete" => {
-                    self.host_specs.write().await.remove(&envelope.key);
+                ChangeOperation::Delete => {
+                    let Some(key) = envelope.key() else {
+                        return Ok(());
+                    };
+                    self.host_specs.write().unwrap().remove(key);
                 }
-                _ => {}
             },
-            "runtime_instance" => match envelope.headers.operation.as_str() {
-                "insert" | "update" => {
+            Some("runtime_instance") => match operation {
+                ChangeOperation::Insert | ChangeOperation::Update => {
                     let Some(value) = envelope.value.as_ref() else {
                         return Ok(());
                     };
                     let record: HostInstanceRecord = serde_json::from_value(value.clone())?;
                     self.host_instances
                         .write()
-                        .await
+                        .unwrap()
                         .insert(record.instance_id.clone(), record);
                 }
-                "delete" => {
-                    self.host_instances.write().await.remove(&envelope.key);
+                ChangeOperation::Delete => {
+                    let Some(key) = envelope.key() else {
+                        return Ok(());
+                    };
+                    self.host_instances.write().unwrap().remove(key);
                 }
-                _ => {}
             },
-            "runtime_endpoints" => match envelope.headers.operation.as_str() {
-                "insert" | "update" => {
+            Some("runtime_endpoints") => match operation {
+                ChangeOperation::Insert | ChangeOperation::Update => {
                     let Some(value) = envelope.value.as_ref() else {
                         return Ok(());
                     };
                     let descriptor: HostDescriptor = serde_json::from_value(value.clone())?;
                     self.host_endpoints
                         .write()
-                        .await
+                        .unwrap()
                         .insert(descriptor.host_key.clone(), descriptor);
                 }
-                "delete" => {
-                    self.host_endpoints.write().await.remove(&envelope.key);
+                ChangeOperation::Delete => {
+                    let Some(key) = envelope.key() else {
+                        return Ok(());
+                    };
+                    self.host_endpoints.write().unwrap().remove(key);
                 }
-                _ => {}
             },
             _ => {}
         }
@@ -223,16 +233,15 @@ impl HostIndex {
     }
 }
 
-#[async_trait]
-impl StateProjection for HostIndex {
-    async fn apply_state_event(&self, event: &RawStateEnvelope) -> Result<()> {
-        self.apply_envelope(event).await
+impl StreamProjection for HostIndex {
+    fn apply(&self, event: &StateEnvelope) -> Result<()> {
+        self.apply_envelope(event)
     }
 
-    async fn reset(&self) -> Result<()> {
-        self.host_specs.write().await.clear();
-        self.host_instances.write().await.clear();
-        self.host_endpoints.write().await.clear();
+    fn reset(&self) -> Result<()> {
+        self.host_specs.write().unwrap().clear();
+        self.host_instances.write().unwrap().clear();
+        self.host_endpoints.write().unwrap().clear();
         Ok(())
     }
 }
@@ -244,8 +253,8 @@ mod tests {
 
     use super::{HostIndex, HostInstanceStatus};
     use crate::{
-        ProvisionSpec, PersistedHostSpec, RawStateEnvelope, SandboxProviderRequest,
-        HostStatus, StateProjection, TopologySpec,
+        HostStatus, PersistedHostSpec, ProvisionSpec, SandboxProviderRequest, TopologySpec,
+        projection::{StateEnvelope, StreamProjection},
     };
 
     fn sample_spec(host_key: &str) -> PersistedHostSpec {
@@ -274,7 +283,7 @@ mod tests {
     async fn materializes_host_spec_rows_from_state_events() {
         let index = HostIndex::new();
         let host_spec = sample_spec("runtime:one");
-        let envelope: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+        let envelope: StateEnvelope = serde_json::from_value(serde_json::json!({
             "type": "runtime_spec",
             "key": "runtime:one",
             "headers": { "operation": "insert" },
@@ -282,7 +291,7 @@ mod tests {
         }))
         .unwrap();
 
-        index.apply_state_event(&envelope).await.unwrap();
+        index.apply(&envelope).unwrap();
 
         let fetched = index.spec_for("runtime:one").await.expect("spec indexed");
         assert_eq!(fetched.host_key, "runtime:one");
@@ -292,7 +301,7 @@ mod tests {
     #[tokio::test]
     async fn materializes_runtime_instance_rows_from_state_events() {
         let index = HostIndex::new();
-        let envelope: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+        let envelope: StateEnvelope = serde_json::from_value(serde_json::json!({
             "type": "runtime_instance",
             "key": "fireline:one:abcd",
             "headers": { "operation": "insert" },
@@ -306,7 +315,7 @@ mod tests {
         }))
         .unwrap();
 
-        index.apply_state_event(&envelope).await.unwrap();
+        index.apply(&envelope).unwrap();
 
         let record = index
             .instance("fireline:one:abcd")
@@ -325,7 +334,7 @@ mod tests {
     async fn running_to_stopped_transition_is_observable() {
         let index = HostIndex::new();
 
-        let started: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+        let started: StateEnvelope = serde_json::from_value(serde_json::json!({
             "type": "runtime_instance",
             "key": "fireline:one:abcd",
             "headers": { "operation": "insert" },
@@ -338,7 +347,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let stopped: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+        let stopped: StateEnvelope = serde_json::from_value(serde_json::json!({
             "type": "runtime_instance",
             "key": "fireline:one:abcd",
             "headers": { "operation": "update" },
@@ -352,8 +361,8 @@ mod tests {
         }))
         .unwrap();
 
-        index.apply_state_event(&started).await.unwrap();
-        index.apply_state_event(&stopped).await.unwrap();
+        index.apply(&started).unwrap();
+        index.apply(&stopped).unwrap();
 
         let record = index.instance("fireline:one:abcd").await.unwrap();
         assert_eq!(record.status, HostInstanceStatus::Stopped);
@@ -375,14 +384,14 @@ mod tests {
     #[tokio::test]
     async fn reset_clears_both_maps() {
         let index = HostIndex::new();
-        let spec_envelope: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+        let spec_envelope: StateEnvelope = serde_json::from_value(serde_json::json!({
             "type": "runtime_spec",
             "key": "runtime:one",
             "headers": { "operation": "insert" },
             "value": sample_spec("runtime:one"),
         }))
         .unwrap();
-        let instance_envelope: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+        let instance_envelope: StateEnvelope = serde_json::from_value(serde_json::json!({
             "type": "runtime_instance",
             "key": "fireline:one:abcd",
             "headers": { "operation": "insert" },
@@ -396,18 +405,18 @@ mod tests {
         }))
         .unwrap();
 
-        index.apply_state_event(&spec_envelope).await.unwrap();
-        index.apply_state_event(&instance_envelope).await.unwrap();
+        index.apply(&spec_envelope).unwrap();
+        index.apply(&instance_envelope).unwrap();
         assert_eq!(index.counts().await, (1, 1));
 
-        StateProjection::reset(&index).await.unwrap();
+        StreamProjection::reset(&index).unwrap();
         assert_eq!(index.counts().await, (0, 0));
     }
 
     #[tokio::test]
     async fn materializes_host_endpoints_rows_from_state_events() {
         let index = HostIndex::new();
-        let envelope: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+        let envelope: StateEnvelope = serde_json::from_value(serde_json::json!({
             "type": "runtime_endpoints",
             "key": "runtime:one",
             "headers": { "operation": "update" },
@@ -426,7 +435,7 @@ mod tests {
         }))
         .unwrap();
 
-        index.apply_state_event(&envelope).await.unwrap();
+        index.apply(&envelope).unwrap();
 
         let descriptor = index
             .endpoints_for("runtime:one")
@@ -448,7 +457,7 @@ mod tests {
     #[tokio::test]
     async fn endpoints_update_overwrites_previous_observation() {
         let index = HostIndex::new();
-        let first: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+        let first: StateEnvelope = serde_json::from_value(serde_json::json!({
             "type": "runtime_endpoints",
             "key": "runtime:one",
             "headers": { "operation": "update" },
@@ -466,7 +475,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let after_stop: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+        let after_stop: StateEnvelope = serde_json::from_value(serde_json::json!({
             "type": "runtime_endpoints",
             "key": "runtime:one",
             "headers": { "operation": "update" },
@@ -485,8 +494,8 @@ mod tests {
         }))
         .unwrap();
 
-        index.apply_state_event(&first).await.unwrap();
-        index.apply_state_event(&after_stop).await.unwrap();
+        index.apply(&first).unwrap();
+        index.apply(&after_stop).unwrap();
 
         let descriptor = index.endpoints_for("runtime:one").await.unwrap();
         assert_eq!(descriptor.updated_at_ms, 300);
@@ -496,7 +505,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_entity_types_are_ignored() {
         let index = HostIndex::new();
-        let envelope: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+        let envelope: StateEnvelope = serde_json::from_value(serde_json::json!({
             "type": "session",
             "key": "sess-1",
             "headers": { "operation": "insert" },
@@ -504,7 +513,7 @@ mod tests {
         }))
         .unwrap();
 
-        index.apply_state_event(&envelope).await.unwrap();
+        index.apply(&envelope).unwrap();
         assert_eq!(index.counts().await, (0, 0));
     }
 }
