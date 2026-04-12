@@ -17,15 +17,11 @@ use fireline_resources::{
     StreamResourcePublisher,
 };
 use fireline_sandbox::{SandboxDescriptor, SandboxStatus};
-use fireline_session::{
-    Endpoint, HostDescriptor, HostStatus, SandboxProviderKind,
-};
+use fireline_session::{Endpoint, HostDescriptor, HostStatus, SandboxProviderKind};
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt::format::FmtSpan;
 use uuid::Uuid;
 
 const DEFAULT_RESOURCE_TENANT_ID: &str = "default";
@@ -172,16 +168,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let span_events = if std::env::var_os("FIRELINE_TRACE_SPANS").is_some() {
-        FmtSpan::CLOSE
-    } else {
-        FmtSpan::NONE
-    };
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .with_span_events(span_events)
-        .without_time()
-        .init();
+    let _observability = fireline_host::observability::init_tracing()?;
 
     let cli = Cli::parse();
     if let Some(command) = cli.command.clone() {

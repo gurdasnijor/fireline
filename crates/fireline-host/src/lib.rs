@@ -2,4 +2,5 @@
 
 pub mod bootstrap;
 pub mod control_plane;
+pub mod observability;
 pub mod router;
