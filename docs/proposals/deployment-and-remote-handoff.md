@@ -187,7 +187,7 @@ every fireline Host and every sandbox VM by definition.
 User declares intent with a normal `ResourceRef`:
 
 ```typescript
-const handle = await host.createSession({
+const handle = await host.provision({
   agentCommand,
   resources: [
     { source_ref: { kind: 'local_path', path: '~/projects/foo' },
@@ -218,7 +218,7 @@ This:
 4. Returns a new `ResourceRef` that points at
    `DurableStreamBlob { stream: "resources:foo", key: "/" }`
 
-The user embeds the returned ref in their `SessionSpec.resources`
+The user embeds the returned ref in their `ProvisionSpec.resources`
 instead of the local path, or — better — the fireline CLI rewrites it
 automatically when it detects the resource is a local path and the
 durable-streams URL is remote.
