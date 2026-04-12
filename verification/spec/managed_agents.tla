@@ -22,21 +22,26 @@ CONSTANTS
   Sessions,
   RuntimeKeys,
   RuntimeIds,
+  NodeIds,
+  ProviderInstanceIds,
   SandboxIds,
   RequestIds,
+  ToolCallIds,
   ToolNames,
   Sources,
   MountPaths,
-  LogicalEventIds,
   ProducerIds,
   ProducerEpochs,
   ProducerSeqs,
-  Callers
+  Callers,
+  TraceParents,
+  TraceStates,
+  Baggages
 
 EventKinds ==
   {
     "session_created",
-    "prompt_turn_started",
+    "prompt_request_started",
     "chunk_appended",
     "permission_requested",
     "approval_resolved",
@@ -50,9 +55,15 @@ EventKinds ==
 DefaultSession == CHOOSE s \in Sessions : TRUE
 DefaultRuntimeKey == CHOOSE rk \in RuntimeKeys : TRUE
 DefaultRuntimeId == CHOOSE rid \in RuntimeIds : TRUE
+DefaultNodeId == CHOOSE nid \in NodeIds : TRUE
+DefaultProviderInstanceId == CHOOSE pid \in ProviderInstanceIds : TRUE
 DefaultProducerEpoch == CHOOSE epoch \in ProducerEpochs : TRUE
 NoRequest == "no_request"
 NoRuntimeId == "no_runtime"
+NoToolCall == "no_tool_call"
+NoTraceparent == "no_traceparent"
+NoTracestate == "no_tracestate"
+NoBaggage == "no_baggage"
 
 InitialSessionLog ==
   [s \in Sessions |-> <<>>]
@@ -61,6 +72,8 @@ InitialRuntimeIndex ==
   [ rk \in RuntimeKeys |->
       [ status |-> "stopped",
         runtimeId |-> DefaultRuntimeId,
+        nodeId |-> DefaultNodeId,
+        providerInstanceId |-> DefaultProviderInstanceId,
         specPresent |-> FALSE,
         boundSessions |-> {}
       ]
@@ -70,6 +83,16 @@ InitialSandboxIndex ==
   [ sb \in SandboxIds |->
       [ status |-> "stopped",
         runtimeKey |-> DefaultRuntimeKey
+      ]
+  ]
+
+InitialTraceContext ==
+  [ s \in Sessions |->
+      [ req \in RequestIds |->
+          [ traceparent |-> NoTraceparent,
+            tracestate |-> NoTracestate,
+            baggage |-> NoBaggage
+          ]
       ]
   ]
 
@@ -123,6 +146,69 @@ NextWakeEpoch(epoch) ==
   THEN CHOOSE next \in ProducerEpochs : next # epoch
   ELSE epoch
 
+AgentIdentifierUniverse == Sessions \cup RequestIds \cup ToolCallIds
+
+InfrastructureIdentifierUniverse ==
+  RuntimeKeys \cup RuntimeIds \cup NodeIds \cup ProviderInstanceIds
+
+SyntheticIdFields ==
+  {"prompt_turn_id", "trace_id", "parent_prompt_turn_id",
+   "logical_connection_id", "chunk_id", "chunk_seq", "seq", "edge_id"}
+
+InfrastructureIdFields ==
+  {"host_key", "runtime_id", "node_id", "provider_instance_id"}
+
+AgentIdFields == {"session_id", "request_id", "tool_call_id"}
+
+CrossSessionLineageFields ==
+  {"trace_id", "parent_prompt_turn_id", "parent_session_id",
+   "child_session_id", "logical_connection_id", "edge_id"}
+
+AgentIdentifiers(row) ==
+  (IF "session_id" \in DOMAIN row THEN {row.session_id} ELSE {})
+  \cup (IF "request_id" \in DOMAIN row /\ row.request_id # NoRequest
+        THEN {row.request_id}
+        ELSE {})
+  \cup (IF "tool_call_id" \in DOMAIN row /\ row.tool_call_id # NoToolCall
+        THEN {row.tool_call_id}
+        ELSE {})
+
+InfrastructureIdentifiers(row) ==
+  (IF "host_key" \in DOMAIN row THEN {row.host_key} ELSE {})
+  \cup (IF "runtime_id" \in DOMAIN row THEN {row.runtime_id} ELSE {})
+  \cup (IF "node_id" \in DOMAIN row THEN {row.node_id} ELSE {})
+  \cup (IF "provider_instance_id" \in DOMAIN row
+        THEN {row.provider_instance_id}
+        ELSE {})
+
+SameCanonicalEffect(effect, event) ==
+  /\ effect.producerId = event.producerId
+  /\ effect.epoch = event.epoch
+  /\ effect.seq = event.seq
+  /\ effect.kind = event.kind
+  /\ ("request_id" \in DOMAIN effect) = ("request_id" \in DOMAIN event)
+  /\ ("request_id" \notin DOMAIN effect \/ effect.request_id = event.request_id)
+  /\ ("tool_call_id" \in DOMAIN effect) = ("tool_call_id" \in DOMAIN event)
+  /\ ("tool_call_id" \notin DOMAIN effect \/ effect.tool_call_id = event.tool_call_id)
+
+SessionCreatedEvent(s, producerId, epoch, seq) ==
+  [ session_id |-> s,
+    producerId |-> producerId,
+    epoch |-> epoch,
+    seq |-> seq,
+    kind |-> "session_created"
+  ]
+
+RequestScopedEvent(s, req, toolCall, kind, producerId, epoch, seq) ==
+  [ session_id |-> s,
+    request_id |-> req,
+    tool_call_id |-> toolCall,
+    producerId |-> producerId,
+    epoch |-> epoch,
+    seq |-> seq,
+    kind |-> kind
+  ]
+
 VARIABLES
   sessionLog,
   runtimeIndex,
@@ -145,6 +231,7 @@ VARIABLES
   responseEpochs,
   lastWake,
   wakeResponses,
+  traceContext,
   previousSessionLog,
   previousRuntimeIndex,
   lastAction
@@ -171,6 +258,7 @@ Vars ==
      responseEpochs,
      lastWake,
      wakeResponses,
+     traceContext,
      previousSessionLog,
      previousRuntimeIndex,
      lastAction >>
@@ -182,6 +270,7 @@ Init ==
   /\ pendingApprovals =
       [ req \in RequestIds |->
           [ sessionId |-> DefaultSession,
+            toolCallId |-> NoToolCall,
             state |-> "none"
           ]
       ]
@@ -217,6 +306,7 @@ Init ==
         createdNew |-> FALSE
       ]
   /\ wakeResponses = [c \in Callers |-> NoRuntimeId]
+  /\ traceContext = InitialTraceContext
   /\ previousSessionLog = InitialSessionLog
   /\ previousRuntimeIndex = InitialRuntimeIndex
   /\ lastAction = "init"
@@ -226,12 +316,107 @@ RecordStep(actionName) ==
   /\ previousRuntimeIndex' = runtimeIndex
   /\ lastAction' = actionName
 
-ProvisionRuntime(rk, rid, s, source, mount) ==
+LogEntries ==
+  UNION { { sessionLog[s][i] : i \in 1..Len(sessionLog[s]) } : s \in Sessions }
+
+SessionLogEntries ==
+  { entry \in LogEntries : entry.kind = "session_created" }
+
+PromptRequestLogEntries ==
+  { entry \in LogEntries : entry.kind = "prompt_request_started" }
+
+PermissionLogEntries ==
+  { entry \in LogEntries : entry.kind \in {"permission_requested", "approval_resolved"} }
+
+PermissionRequestLogEntries ==
+  { entry \in LogEntries : entry.kind = "permission_requested" }
+
+ResolvedApprovalLogEntries ==
+  { entry \in LogEntries : entry.kind = "approval_resolved" }
+
+ChunkLogEntries ==
+  { entry \in LogEntries : entry.kind = "chunk_appended" }
+
+SessionRows ==
+  { [ session_id |-> entry.session_id ] : entry \in SessionLogEntries }
+
+PromptRequestRows ==
+  { [ session_id |-> entry.session_id,
+      request_id |-> entry.request_id ] : entry \in PromptRequestLogEntries }
+
+PermissionRows ==
+  { [ session_id |-> entry.session_id,
+      request_id |-> entry.request_id,
+      tool_call_id |-> entry.tool_call_id ] : entry \in PermissionLogEntries }
+
+PermissionRequestRows ==
+  { [ session_id |-> entry.session_id,
+      request_id |-> entry.request_id,
+      tool_call_id |-> entry.tool_call_id ] : entry \in PermissionRequestLogEntries }
+
+ResolvedApprovalRows ==
+  { [ session_id |-> entry.session_id,
+      request_id |-> entry.request_id,
+      tool_call_id |-> entry.tool_call_id ] : entry \in ResolvedApprovalLogEntries }
+
+ChunkRows ==
+  { [ session_id |-> entry.session_id,
+      request_id |-> entry.request_id,
+      tool_call_id |-> entry.tool_call_id ] : entry \in ChunkLogEntries }
+
+PendingSessions ==
+  { s \in Sessions : blockedRequests[s] # NoRequest }
+
+PendingRequestRows ==
+  { [ session_id |-> s,
+      request_id |-> blockedRequests[s],
+      tool_call_id |-> pendingApprovals[blockedRequests[s]].toolCallId,
+      kind |-> "pending_request" ] : s \in PendingSessions }
+
+AgentRows ==
+  SessionRows \cup PromptRequestRows \cup PermissionRows \cup ChunkRows \cup PendingRequestRows
+
+ProvisionedRuntimeKeys ==
+  { rk \in RuntimeKeys : runtimeIndex[rk].specPresent }
+
+HostRows ==
+  { [ host_key |-> rk,
+      runtime_id |-> runtimeIndex[rk].runtimeId,
+      node_id |-> runtimeIndex[rk].nodeId,
+      provider_instance_id |-> runtimeIndex[rk].providerInstanceId ] :
+      rk \in ProvisionedRuntimeKeys }
+
+InfrastructureRows == HostRows
+
+PermissionRequestIds ==
+  { row.request_id : row \in PermissionRequestRows }
+
+ResolvedApprovalIds ==
+  { row.request_id : row \in ResolvedApprovalRows }
+
+ChunkOrdinal(s, req, i) ==
+  Cardinality(
+    { j \in 1..i :
+        /\ sessionLog[s][j].kind = "chunk_appended"
+        /\ sessionLog[s][j].request_id = req
+    }
+  )
+
+CanonicalIdsSmallModel ==
+  /\ Cardinality(Sessions) <= 3
+  /\ Cardinality(RequestIds) <= 5
+  /\ Cardinality(ToolCallIds) <= 3
+  /\ \A s \in Sessions : Len(sessionLog[s]) <= 4
+  /\ \A s \in Sessions : lastReplay[s].offset <= 4
+
+ProvisionRuntime(rk, rid, nodeId, providerInstanceId, s, source, mount) ==
   /\ runtimeIndex[rk].status = "stopped"
   /\ runtimeIndex' =
       [runtimeIndex EXCEPT ![rk] =
         [ status |-> "ready",
           runtimeId |-> rid,
+          nodeId |-> nodeId,
+          providerInstanceId |-> providerInstanceId,
           specPresent |-> TRUE,
           boundSessions |-> {s}
         ]
@@ -257,28 +442,53 @@ ProvisionRuntime(rk, rid, s, source, mount) ==
          wakeEpoch,
          responseEpochs,
          lastWake,
-         wakeResponses >>
+         wakeResponses,
+         traceContext >>
 
-HarnessEmit(s, rk, logicalId, kind, producerId, epoch, seq) ==
+HarnessEmit(s, rk, kind, req, toolCall, producerId, epoch, seq, traceparent, tracestate, baggage) ==
+  LET event ==
+        IF kind = "session_created"
+        THEN SessionCreatedEvent(s, producerId, epoch, seq)
+        ELSE RequestScopedEvent(s, req, toolCall, kind, producerId, epoch, seq)
+      nextTraceContext ==
+        IF kind = "prompt_request_started"
+        THEN
+          [traceContext EXCEPT ![s][req] =
+            [ traceparent |-> traceparent,
+              tracestate |-> tracestate,
+              baggage |-> baggage
+            ]
+          ]
+        ELSE traceContext
+  IN
   /\ runtimeIndex[rk].status = "ready"
   /\ s \in runtimeIndex[rk].boundSessions
   /\ CommitTuple(producerId, epoch, seq) \notin seenCommits[s]
-  /\ kind \in {"session_created", "prompt_turn_started", "chunk_appended", "fs_op_captured"}
-  /\ sessionLog' =
-      [sessionLog EXCEPT ![s] =
-        Append(
-          @,
-          [ logicalId |-> logicalId,
-            producerId |-> producerId,
-            epoch |-> epoch,
-            seq |-> seq,
-            kind |-> kind
-          ]
-        )
-      ]
-  /\ visibleEffects' =
-      [visibleEffects EXCEPT ![s] = Append(@, [logicalId |-> logicalId, kind |-> kind])]
+  /\ kind \in {"session_created", "prompt_request_started", "chunk_appended", "fs_op_captured"}
+  /\ IF kind = "session_created"
+     THEN
+       /\ req = NoRequest
+       /\ toolCall = NoToolCall
+       /\ traceparent = NoTraceparent
+       /\ tracestate = NoTracestate
+       /\ baggage = NoBaggage
+     ELSE IF kind = "prompt_request_started"
+     THEN
+       /\ req \in RequestIds
+       /\ toolCall = NoToolCall
+       /\ traceparent \in TraceParents \cup {NoTraceparent}
+       /\ tracestate \in TraceStates \cup {NoTracestate}
+       /\ baggage \in Baggages \cup {NoBaggage}
+     ELSE
+       /\ req \in RequestIds
+       /\ toolCall \in ToolCallIds \cup {NoToolCall}
+       /\ traceparent = NoTraceparent
+       /\ tracestate = NoTracestate
+       /\ baggage = NoBaggage
+  /\ sessionLog' = [sessionLog EXCEPT ![s] = Append(@, event)]
+  /\ visibleEffects' = [visibleEffects EXCEPT ![s] = Append(@, event)]
   /\ seenCommits' = [seenCommits EXCEPT ![s] = @ \cup {CommitTuple(producerId, epoch, seq)}]
+  /\ traceContext' = nextTraceContext
   /\ RecordStep("harness_emit")
   /\ UNCHANGED
       << runtimeIndex,
@@ -324,7 +534,8 @@ RetryAppend(s, producerId, epoch, seq) ==
          wakeEpoch,
          responseEpochs,
          lastWake,
-         wakeResponses >>
+         wakeResponses,
+         traceContext >>
 
 ReplayFromOffset(s, offset) ==
   /\ offset \in 0..Len(sessionLog[s])
@@ -356,25 +567,25 @@ ReplayFromOffset(s, offset) ==
          wakeEpoch,
          responseEpochs,
          lastWake,
-         wakeResponses >>
+         wakeResponses,
+         traceContext >>
 
-RequestApproval(s, req, logicalId, producerId, epoch, seq) ==
+RequestApproval(s, req, toolCall, producerId, epoch, seq) ==
+  LET event ==
+        RequestScopedEvent(s, req, toolCall, "permission_requested", producerId, epoch, seq)
+  IN
   /\ blockedRequests[s] = NoRequest
+  /\ req \in RequestIds
+  /\ toolCall \in ToolCallIds \cup {NoToolCall}
   /\ CommitTuple(producerId, epoch, seq) \notin seenCommits[s]
-  /\ sessionLog' =
-      [sessionLog EXCEPT ![s] =
-        Append(
-          @,
-          [ logicalId |-> logicalId,
-            producerId |-> producerId,
-            epoch |-> epoch,
-            seq |-> seq,
-            kind |-> "permission_requested"
-          ]
-        )
-      ]
+  /\ sessionLog' = [sessionLog EXCEPT ![s] = Append(@, event)]
   /\ pendingApprovals' =
-      [pendingApprovals EXCEPT ![req] = [sessionId |-> s, state |-> "pending"]]
+      [pendingApprovals EXCEPT ![req] =
+        [ sessionId |-> s,
+          toolCallId |-> toolCall,
+          state |-> "pending"
+        ]
+      ]
   /\ blockedRequests' = [blockedRequests EXCEPT ![s] = req]
   /\ seenCommits' = [seenCommits EXCEPT ![s] = @ \cup {CommitTuple(producerId, epoch, seq)}]
   /\ RecordStep("request_approval")
@@ -395,24 +606,18 @@ RequestApproval(s, req, logicalId, producerId, epoch, seq) ==
          wakeEpoch,
          responseEpochs,
          lastWake,
-         wakeResponses >>
+         wakeResponses,
+         traceContext >>
 
-ResolveApproval(req, logicalId, producerId, epoch, seq, allow) ==
-  LET s == pendingApprovals[req].sessionId IN
+ResolveApproval(req, producerId, epoch, seq, allow) ==
+  LET s == pendingApprovals[req].sessionId
+      toolCall == pendingApprovals[req].toolCallId
+      event ==
+        RequestScopedEvent(s, req, toolCall, "approval_resolved", producerId, epoch, seq)
+  IN
   /\ pendingApprovals[req].state \in {"pending", "resolved_allow", "resolved_deny"}
   /\ CommitTuple(producerId, epoch, seq) \notin seenCommits[s]
-  /\ sessionLog' =
-      [sessionLog EXCEPT ![s] =
-        Append(
-          @,
-          [ logicalId |-> logicalId,
-            producerId |-> producerId,
-            epoch |-> epoch,
-            seq |-> seq,
-            kind |-> "approval_resolved"
-          ]
-        )
-      ]
+  /\ sessionLog' = [sessionLog EXCEPT ![s] = Append(@, event)]
   /\ pendingApprovals' =
       [pendingApprovals EXCEPT ![req].state =
         IF allow THEN "resolved_allow" ELSE "resolved_deny"
@@ -438,7 +643,8 @@ ResolveApproval(req, logicalId, producerId, epoch, seq, allow) ==
          wakeEpoch,
          responseEpochs,
          lastWake,
-         wakeResponses >>
+         wakeResponses,
+         traceContext >>
 
 AdvanceBlockedRequest(s, req) ==
   /\ blockedRequests[s] = req
@@ -465,7 +671,8 @@ AdvanceBlockedRequest(s, req) ==
          wakeEpoch,
          responseEpochs,
          lastWake,
-         wakeResponses >>
+         wakeResponses,
+         traceContext >>
 
 StopRuntime(rk) ==
   /\ runtimeIndex[rk].status = "ready"
@@ -491,7 +698,8 @@ StopRuntime(rk) ==
          wakeEpoch,
          responseEpochs,
          lastWake,
-         wakeResponses >>
+         wakeResponses,
+         traceContext >>
 
 SandboxProvision(sb, rk) ==
   /\ sandboxIndex[sb].status = "stopped"
@@ -524,7 +732,8 @@ SandboxProvision(sb, rk) ==
          wakeEpoch,
          responseEpochs,
          lastWake,
-         wakeResponses >>
+         wakeResponses,
+         traceContext >>
 
 SandboxExecute(sb, tool) ==
   /\ sandboxIndex[sb].status = "ready"
@@ -553,7 +762,8 @@ SandboxExecute(sb, tool) ==
          wakeEpoch,
          responseEpochs,
          lastWake,
-         wakeResponses >>
+         wakeResponses,
+         traceContext >>
 
 SandboxStop(sb) ==
   /\ sandboxIndex[sb].status = "ready"
@@ -584,7 +794,8 @@ SandboxStop(sb) ==
          wakeEpoch,
          responseEpochs,
          lastWake,
-         wakeResponses >>
+         wakeResponses,
+         traceContext >>
 
 WakeReady(caller, s, rk) ==
   LET sameEpisode ==
@@ -642,7 +853,8 @@ WakeReady(caller, s, rk) ==
          releasedRequests,
          reachable,
          lastReplay,
-         stopSnapshot >>
+         stopSnapshot,
+         traceContext >>
 
 WakeStopped(caller, s, rk, newRid) ==
   LET sameEpisode ==
@@ -705,7 +917,8 @@ WakeStopped(caller, s, rk, newRid) ==
          blockedRequests,
          releasedRequests,
          lastReplay,
-         stopSnapshot >>
+         stopSnapshot,
+         traceContext >>
 
 CurrentWakeResponses ==
   { wakeResponses[c] :
@@ -716,25 +929,110 @@ CurrentWakeResponses ==
   }
 
 Next ==
-  \/ \E rk \in RuntimeKeys, rid \in RuntimeIds, s \in Sessions, source \in Sources, mount \in MountPaths :
-       ProvisionRuntime(rk, rid, s, source, mount)
-  \/ \E s \in Sessions, rk \in RuntimeKeys, logicalId \in LogicalEventIds, producerId \in ProducerIds, epoch \in ProducerEpochs, seq \in ProducerSeqs :
-       HarnessEmit(s, rk, logicalId, "session_created", producerId, epoch, seq)
-  \/ \E s \in Sessions, rk \in RuntimeKeys, logicalId \in LogicalEventIds, producerId \in ProducerIds, epoch \in ProducerEpochs, seq \in ProducerSeqs :
-       HarnessEmit(s, rk, logicalId, "prompt_turn_started", producerId, epoch, seq)
-  \/ \E s \in Sessions, rk \in RuntimeKeys, logicalId \in LogicalEventIds, producerId \in ProducerIds, epoch \in ProducerEpochs, seq \in ProducerSeqs :
-       HarnessEmit(s, rk, logicalId, "fs_op_captured", producerId, epoch, seq)
+  \/ \E rk \in RuntimeKeys,
+        rid \in RuntimeIds,
+        nodeId \in NodeIds,
+        providerInstanceId \in ProviderInstanceIds,
+        s \in Sessions,
+        source \in Sources,
+        mount \in MountPaths :
+       ProvisionRuntime(rk, rid, nodeId, providerInstanceId, s, source, mount)
+  \/ \E s \in Sessions,
+        rk \in RuntimeKeys,
+        producerId \in ProducerIds,
+        epoch \in ProducerEpochs,
+        seq \in ProducerSeqs :
+       HarnessEmit(
+         s,
+         rk,
+         "session_created",
+         NoRequest,
+         NoToolCall,
+         producerId,
+         epoch,
+         seq,
+         NoTraceparent,
+         NoTracestate,
+         NoBaggage
+       )
+  \/ \E s \in Sessions,
+        rk \in RuntimeKeys,
+        req \in RequestIds,
+        producerId \in ProducerIds,
+        epoch \in ProducerEpochs,
+        seq \in ProducerSeqs,
+        traceparent \in TraceParents \cup {NoTraceparent},
+        tracestate \in TraceStates \cup {NoTracestate},
+        baggage \in Baggages \cup {NoBaggage} :
+       HarnessEmit(
+         s,
+         rk,
+         "prompt_request_started",
+         req,
+         NoToolCall,
+         producerId,
+         epoch,
+         seq,
+         traceparent,
+         tracestate,
+         baggage
+       )
+  \/ \E s \in Sessions,
+        rk \in RuntimeKeys,
+        req \in RequestIds,
+        toolCall \in ToolCallIds \cup {NoToolCall},
+        producerId \in ProducerIds,
+        epoch \in ProducerEpochs,
+        seq \in ProducerSeqs :
+       HarnessEmit(
+         s,
+         rk,
+         "chunk_appended",
+         req,
+         toolCall,
+         producerId,
+         epoch,
+         seq,
+         NoTraceparent,
+         NoTracestate,
+         NoBaggage
+       )
+  \/ \E s \in Sessions,
+        rk \in RuntimeKeys,
+        req \in RequestIds,
+        toolCall \in ToolCallIds \cup {NoToolCall},
+        producerId \in ProducerIds,
+        epoch \in ProducerEpochs,
+        seq \in ProducerSeqs :
+       HarnessEmit(
+         s,
+         rk,
+         "fs_op_captured",
+         req,
+         toolCall,
+         producerId,
+         epoch,
+         seq,
+         NoTraceparent,
+         NoTracestate,
+         NoBaggage
+       )
   \/ \E s \in Sessions, producerId \in ProducerIds, epoch \in ProducerEpochs, seq \in ProducerSeqs :
        RetryAppend(s, producerId, epoch, seq)
   \/ \E s \in Sessions :
        \E offset \in 0..Len(sessionLog[s]) :
          ReplayFromOffset(s, offset)
-  \/ \E s \in Sessions, req \in RequestIds, logicalId \in LogicalEventIds, producerId \in ProducerIds, epoch \in ProducerEpochs, seq \in ProducerSeqs :
-       RequestApproval(s, req, logicalId, producerId, epoch, seq)
-  \/ \E req \in RequestIds, logicalId \in LogicalEventIds, producerId \in ProducerIds, epoch \in ProducerEpochs, seq \in ProducerSeqs :
-       ResolveApproval(req, logicalId, producerId, epoch, seq, TRUE)
-  \/ \E req \in RequestIds, logicalId \in LogicalEventIds, producerId \in ProducerIds, epoch \in ProducerEpochs, seq \in ProducerSeqs :
-       ResolveApproval(req, logicalId, producerId, epoch, seq, FALSE)
+  \/ \E s \in Sessions,
+        req \in RequestIds,
+        toolCall \in ToolCallIds \cup {NoToolCall},
+        producerId \in ProducerIds,
+        epoch \in ProducerEpochs,
+        seq \in ProducerSeqs :
+       RequestApproval(s, req, toolCall, producerId, epoch, seq)
+  \/ \E req \in RequestIds, producerId \in ProducerIds, epoch \in ProducerEpochs, seq \in ProducerSeqs :
+       ResolveApproval(req, producerId, epoch, seq, TRUE)
+  \/ \E req \in RequestIds, producerId \in ProducerIds, epoch \in ProducerEpochs, seq \in ProducerSeqs :
+       ResolveApproval(req, producerId, epoch, seq, FALSE)
   \/ \E s \in Sessions, req \in RequestIds :
        AdvanceBlockedRequest(s, req)
   \/ \E rk \in RuntimeKeys :
@@ -777,8 +1075,7 @@ HarnessEveryEffectLogged ==
   \A s \in Sessions :
     \A i \in 1..Len(visibleEffects[s]) :
       \E j \in 1..Len(sessionLog[s]) :
-        /\ sessionLog[s][j].logicalId = visibleEffects[s][i].logicalId
-        /\ sessionLog[s][j].kind = visibleEffects[s][i].kind
+        SameCanonicalEffect(visibleEffects[s][i], sessionLog[s][j])
 
 HarnessAppendOrderStable == SessionAppendOnly
 
@@ -787,7 +1084,7 @@ HarnessSuspendReleasedOnlyByMatchingApproval ==
     FirstMatchingResolution(approvalHistory[req]) = "allow"
 
 WakeOnReadyIsNoop ==
-  lastWake.valid /\ lastWake.beforeStatus = "ready" =>
+  lastAction = "wake_ready" =>
     /\ lastWake.createdNew = FALSE
     /\ lastWake.afterRuntimeId = lastWake.beforeRuntimeId
 
@@ -800,7 +1097,7 @@ ConcurrentWakeSingleWinner ==
         => wakeResponses[c] = lastWake.afterRuntimeId
 
 WakeOnStoppedChangesRuntimeId ==
-  lastWake.valid /\ lastWake.createdNew =>
+  lastAction = "wake_stopped" =>
     /\ lastWake.beforeStatus = "stopped"
     /\ lastWake.afterRuntimeId # lastWake.beforeRuntimeId
     /\ runtimeIndex[lastWake.runtimeKey].runtimeId = lastWake.afterRuntimeId
@@ -819,7 +1116,7 @@ ProvisionedRuntimeReusable ==
   WakeOnReadyIsNoop
 
 WakeOnStoppedPreservesSessionBinding ==
-  lastWake.valid /\ lastWake.createdNew =>
+  lastAction = "wake_stopped" =>
     /\ runtimeIndex[lastWake.runtimeKey].runtimeId = lastWake.afterRuntimeId
     /\ runtimeIndex[lastWake.runtimeKey].specPresent
     /\ lastWake.sessionId \in runtimeIndex[lastWake.runtimeKey].boundSessions
@@ -834,8 +1131,7 @@ FsBackendCapturesFsOpDurably ==
     \A i \in 1..Len(visibleEffects[s]) :
       visibleEffects[s][i].kind = "fs_op_captured" =>
         \E j \in 1..Len(sessionLog[s]) :
-          /\ sessionLog[s][j].logicalId = visibleEffects[s][i].logicalId
-          /\ sessionLog[s][j].kind = "fs_op_captured"
+          SameCanonicalEffect(visibleEffects[s][i], sessionLog[s][j])
 
 ToolDescriptorSchemaOnly ==
   \A t \in ToolNames :
@@ -866,5 +1162,50 @@ SandboxCapabilityRefRespected ==
 SandboxStopDoesNotAffectHostRuntime ==
   lastAction = "sandbox_stop" =>
     runtimeIndex = previousRuntimeIndex
+
+AgentLayerIdentifiersAreCanonical ==
+  /\ \A row \in AgentRows :
+       /\ DOMAIN row \cap SyntheticIdFields = {}
+       /\ AgentIdentifiers(row) \subseteq AgentIdentifierUniverse
+  /\ \A row \in PermissionRows \cup ChunkRows :
+       row.tool_call_id = NoToolCall \/ row.tool_call_id \in ToolCallIds
+
+InfrastructureAndAgentPlanesDisjoint ==
+  /\ \A row \in AgentRows :
+       /\ DOMAIN row \cap InfrastructureIdFields = {}
+       /\ AgentIdentifiers(row) \cap InfrastructureIdentifierUniverse = {}
+  /\ \A row \in InfrastructureRows :
+       /\ DOMAIN row \cap AgentIdFields = {}
+       /\ InfrastructureIdentifiers(row) \cap AgentIdentifierUniverse = {}
+
+CrossSessionLineageIsOutOfBand ==
+  /\ \A row \in AgentRows :
+       DOMAIN row \cap CrossSessionLineageFields = {}
+  /\ \A s \in Sessions :
+       \A req \in RequestIds :
+         traceContext[s][req] \in
+           [ traceparent : TraceParents \cup {NoTraceparent},
+             tracestate : TraceStates \cup {NoTracestate},
+             baggage : Baggages \cup {NoBaggage} ]
+
+ChunkOrderingFromStreamOffset ==
+  /\ \A row \in ChunkRows : DOMAIN row \cap {"chunk_id", "chunk_seq", "seq"} = {}
+  /\ \A s \in Sessions :
+       \A req \in RequestIds :
+         \A i, j \in 1..Len(sessionLog[s]) :
+           /\ i < j
+           /\ sessionLog[s][i].kind = "chunk_appended"
+           /\ sessionLog[s][j].kind = "chunk_appended"
+           /\ sessionLog[s][i].request_id = req
+           /\ sessionLog[s][j].request_id = req
+           => ChunkOrdinal(s, req, i) < ChunkOrdinal(s, req, j)
+
+ApprovalKeyedByCanonicalRequestId ==
+  /\ PermissionRequestIds \subseteq RequestIds
+  /\ ResolvedApprovalIds \subseteq PermissionRequestIds
+  /\ \A req \in RequestIds :
+       pendingApprovals[req].state # "none" =>
+         /\ req \in PermissionRequestIds
+         /\ pendingApprovals[req].sessionId \in Sessions
 
 =============================================================================
