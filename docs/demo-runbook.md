@@ -65,6 +65,24 @@ Execute in order. Treat each step as a hard gate — if one fails, **stop and in
    ```
    If `curl` returns non-200 or the process exits before `sleep` finishes, do NOT attempt the demo — the binary is broken. Fall through to §5.
 
+8. **Set `DURABLE_STREAMS_URL` for the resource discovery demo beat.**
+   ```sh
+   export DURABLE_STREAMS_URL="http://127.0.0.1:4437/v1/stream"
+   ```
+   This points at the runtime's embedded durable-streams server. For the cross-Host demo (Phase 2 in the walkthrough), this would point at a shared external durable-streams service instead. For the single-Host demo, the runtime's own embedded server is sufficient.
+
+9. **Publish the demo resource to the `resources:tenant-demo` stream.**
+   ```sh
+   fireline publish-resource \
+     --durable-streams-url "$DURABLE_STREAMS_URL" \
+     --tenant demo \
+     --resource-id workspace-foo \
+     --source ~/projects/foo
+   ```
+   > **TODO(demo-review):** Confirm whether `fireline publish-resource` is a shipped CLI subcommand at demo time. If it hasn't landed yet, see the walkthrough's §3 TODO for fallback options (raw producer script or slide-only walkthrough). The `ResourcePublisher` trait at `crates/fireline-resources` specifies the envelope shape if you need to emit manually.
+
+   This is only needed if you plan to show the resource-discovery beat (walkthrough §3). If skipping that beat, omit this step.
+
 ## 2. Startup sequence
 
 Run in a single terminal. Keep it visible on your secondary monitor during the demo so you can see the control-plane logs.

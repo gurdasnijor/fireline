@@ -99,7 +99,45 @@ SessionDurableAcrossRuntimeDeath ==
 
 Plain English: *"if a runtime is stopped, the session log snapshot taken at stop time must be a prefix of the current session log"* — i.e., the stream never loses events across a runtime lifecycle boundary. The ACP disconnect/reconnect demo above doesn't actually stop the runtime — it only drops the browser's WebSocket — but it's the visual proof of *the same property* at the ACP-session layer: the session is a durable record, not a transient connection.
 
-## 3. The Wake moment — the single orchestration verb
+## 3. Resource discovery — the durable stream as a discovery plane
+
+**This beat shows the Resources primitive crossing a Host boundary.** A resource published on one Host becomes mountable on a different Host through the shared durable-streams service — no sidecar file transfer, no S3, no operator-configured shared volume.
+
+### Pre-demo setup (run once before the demo)
+
+Before the demo, publish a local directory as a discoverable resource on the shared stream. This is a one-time CLI step that seeds the `resources:tenant-demo` stream with a `resource_published` envelope:
+
+```sh
+fireline publish-resource \
+  --durable-streams-url "$DURABLE_STREAMS_URL" \
+  --tenant demo \
+  --resource-id workspace-foo \
+  --source ~/projects/foo
+```
+
+This reads `~/projects/foo`, chunks its contents into blob events on the `resources:tenant-demo` stream, and emits a `resource_published` envelope containing the `ResourceRef { kind: 'durable_stream_blob', stream: 'resources:tenant-demo', key: 'workspace-foo' }` and the tree manifest. Any Host subscribed to that tenant stream can now discover and mount the resource.
+
+> **TODO(demo-review):** Confirm whether `fireline publish-resource` is a shipped CLI subcommand at demo time. If not yet landed, either (a) use a raw `@durable-streams` producer script to emit the envelope manually (the ResourcePublisher trait at `crates/fireline-resources` specifies the shape), or (b) skip this beat and talk through the architecture on a slide. The resource-discovery proposal ([`./proposals/resource-discovery.md`](./proposals/resource-discovery.md)) specifies the full flow.
+
+### The demo step
+
+**Action:** After completing the Wake beat in §4, point at the State Explorer's **sessions** tab. Explain:
+
+> "The state stream you've been watching is one of several streams the durable-streams service hosts. Another stream — `resources:tenant-demo` — carries resource-discovery events. Before the demo I published a local directory to that stream using `fireline publish-resource`. Any Host sharing this tenant can now mount it."
+
+Now provision a second runtime (or use the existing one if it was provisioned with a `ProvisionSpec` that references the published resource):
+
+> "When this Host provisions a runtime, its `DurableStreamMounter` reads the `resources:tenant-demo` stream, finds the `resource_published` envelope for `workspace-foo`, downloads the blob chunks from the same stream, materializes them to a tmpfs, and bind-mounts them into the sandbox. The agent inside sees `/workspace/foo` as a normal directory — it has no idea the bytes arrived from a durable stream rather than a local path."
+
+**What to say (the punchline):**
+
+> "This is the same durable-streams service that carries session state and host-discovery events. **One service, three discovery surfaces**: sessions, hosts, resources. No separate file service, no artifact registry, no operator-configured volume shares. Publish to the stream, discover from the stream, mount from the stream. That's the Resources primitive implemented as a stream-backed registry."
+
+**TLA tie-in:** `ResourcePublishedIsEventuallyDiscoverable` from `verification/spec/deployment_discovery.tla` — any reader that has replayed past the `resource_published` event observes the resource in its `ResourceIndex`. `SourceRefIsImmutableAfterPublish` — once published, the backing `source_ref` never changes; updates only touch metadata.
+
+---
+
+## 4. The Wake moment — the single orchestration verb
 
 **This is the demo's money beat.** Pause here.
 
@@ -140,7 +178,7 @@ WakeOnStoppedChangesRuntimeId ==
 
 > **TODO(demo-review):** The current `createFirelineHost.wake` implementation at `packages/client/src/host-fireline/client.ts:78-80` returns `{ kind: 'blocked', reason: { kind: 'require_approval', scope: 'all' } }` when the runtime is `stopped` or `broken`, **not** a new runtime via `POST /v1/runtimes`. The `WakeOnStoppedChangesRuntimeId` beat is therefore a **spec-level demonstration**, not a click-through beat. If asked *"can you click Wake on a stopped runtime and show it coming back?"* the honest answer is *"the TS satisfier currently gates that path behind a policy decision; the Rust `fireline::orchestration::resume` helper does the full recovery composition, and slice 16 will close the loop in the TS layer. The TLA invariant is satisfied by the spec; the impl is 90% there."* Decide before demo whether to (a) show only the `WakeOnReadyIsNoop` beat live and talk through the stopped case on the slide, or (b) extend `createFirelineHost.wake` to do the cold-start composition before demo day.
 
-## 4. The state explorer — `@fireline/state` as the universal read surface
+## 5. The state explorer — `@fireline/state` as the universal read surface
 
 **Action:** Click through all five tabs on the right pane: **sessions**, **turns**, **edges**, **chunks**, **connections**.
 
@@ -154,7 +192,7 @@ WakeOnStoppedChangesRuntimeId ==
 
 **Primitive path:** TanStack DB live query → `createFirelineDB({ stateStreamUrl })` → `@durable-streams/state` subscription → `GET http://localhost:5173/v1/stream/fireline-harness-state?live=sse` → vite proxy → `127.0.0.1:4437/v1/stream/...` → the durable-streams-server embedded inside the `fireline` binary (via `stream_host.rs`) → SSE back out through the same chain. The runtime itself writes into the same stream via its `DurableStreamTracer`, so there's a clean loop: *runtime projects ACP events → durable stream → @fireline/state materializes → TanStack DB renders → React reconciles*. **Same loop the `fireline-dashboard` TUI binary would use.**
 
-## 5. Fallback stories — if X breaks, say Y
+## 6. Fallback stories — if X breaks, say Y
 
 ### 5a. Control plane fails to start
 
@@ -203,6 +241,7 @@ WakeOnStoppedChangesRuntimeId ==
 | "Reconnect + Load" button | ACP `session/load` | Session | `SessionDurableAcrossRuntimeDeath` (line 763) |
 | "Disconnect" button | WebSocket close (not a Host verb) | Session (read side continues) | — |
 | "Wake" button | `host.wake(handle)` | Orchestration | `WakeOnReadyIsNoop` (line 789), `ConcurrentWakeSingleWinner` (line 794), `WakeOnStoppedChangesRuntimeId` (line 802) |
+| Resource discovery beat (§3) | `fireline publish-resource` + `DurableStreamMounter` | Resources | `ResourcePublishedIsEventuallyDiscoverable`, `SourceRefIsImmutableAfterPublish` (deployment_discovery.tla) |
 | "Stop Runtime" button | `host.stop(handle)` | Host | (no direct invariant; complements the Wake pair) |
 | "Reset" button | `disconnect + clear events` (not a Host verb) | — | — |
 | State explorer tabs | `@fireline/state` live queries | Session (read surface) | `SessionAppendOnly` (line 755), `SessionScopedIdempotentAppend` (line 769) |
