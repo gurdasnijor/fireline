@@ -5,6 +5,7 @@ WORKDIR /app
 COPY Cargo.toml ./
 COPY crates ./crates
 COPY src ./src
+COPY verification ./verification
 
 RUN cargo build --release --features anthropic-provider --bin fireline --bin fireline-streams
 
