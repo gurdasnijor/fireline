@@ -124,18 +124,82 @@ impl ResourceRegistry for StreamResourceRegistry {
     }
 
     async fn subscribe(&self, watcher: Box<dyn ResourceWatcher>) -> Result<Subscription> {
-        watcher.on_index_updated(self.list().await?).await?;
-
         let mut receiver = self.updates.subscribe();
+        watcher
+            .on_index_updated(current_snapshot(&self.index).await)
+            .await?;
+        replay_buffered_updates(
+            &self.stream_url,
+            &self.index,
+            &mut receiver,
+            watcher.as_ref(),
+        )
+        .await?;
+
+        let index = self.index.clone();
+        let stream_url = self.stream_url.clone();
         let handle = tokio::spawn(async move {
-            while let Ok(entries) = receiver.recv().await {
-                if watcher.on_index_updated(entries).await.is_err() {
-                    break;
+            loop {
+                match receiver.recv().await {
+                    Ok(entries) => {
+                        if let Err(error) = watcher.on_index_updated(entries).await {
+                            warn!(
+                                error = %error,
+                                stream_url = %stream_url,
+                                "resource registry watcher failed"
+                            );
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(
+                            stream_url = %stream_url,
+                            skipped,
+                            "resource registry watcher lagged; replaying current snapshot"
+                        );
+                        let snapshot = current_snapshot(&index).await;
+                        if let Err(error) = watcher.on_index_updated(snapshot).await {
+                            warn!(
+                                error = %error,
+                                stream_url = %stream_url,
+                                "resource registry watcher failed during lag recovery"
+                            );
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
 
         Ok(Subscription::new(handle))
+    }
+}
+
+async fn current_snapshot(index: &Arc<RwLock<ResourceIndex>>) -> Vec<ResourceEntry> {
+    index.read().await.list().cloned().collect()
+}
+
+async fn replay_buffered_updates(
+    stream_url: &str,
+    index: &Arc<RwLock<ResourceIndex>>,
+    receiver: &mut broadcast::Receiver<Vec<ResourceEntry>>,
+    watcher: &dyn ResourceWatcher,
+) -> Result<()> {
+    loop {
+        match receiver.try_recv() {
+            Ok(entries) => watcher.on_index_updated(entries).await?,
+            Err(broadcast::error::TryRecvError::Empty) => return Ok(()),
+            Err(broadcast::error::TryRecvError::Closed) => return Ok(()),
+            Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
+                warn!(
+                    stream_url = %stream_url,
+                    skipped,
+                    "resource registry watcher lagged during bootstrap; replaying current snapshot"
+                );
+                watcher.on_index_updated(current_snapshot(index).await).await?;
+            }
+        }
     }
 }
 
