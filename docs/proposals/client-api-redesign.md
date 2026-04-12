@@ -1,117 +1,212 @@
-# Client API Redesign — Unified Sandbox Surface
+# Client API Redesign — Sandbox as Anthropic Primitive
 
-> **Status:** architectural proposal
+> **Status:** architectural proposal (revised — narrowed to match the Anthropic primitive table)
 > **Replaces:** the current multi-layer TS client in `packages/client/src/` (Host + Sandbox + Orchestrator + multiple satisfier modules)
-> **Inspired by:** [Cased sandboxes](https://github.com/cased/sandboxes) client surface (Python `Sandbox.create()` → `sandbox.execute()` → `sandbox.destroy()`)
-> **Companion:** [`./sandbox-provider-model.md`](./sandbox-provider-model.md) — the Rust-side provider model this TS client maps onto
+> **Companion:** [`./sandbox-provider-model.md`](./sandbox-provider-model.md) — the Rust-side provider model
 > **Related:**
 > - [`./client-primitives.md`](./client-primitives.md) — the v2 design this proposal supersedes at the Host/Sandbox boundary
-> - [`./deployment-and-remote-handoff.md`](./deployment-and-remote-handoff.md) — deployment topology
+> - [`../explorations/managed-agents-mapping.md`](../explorations/managed-agents-mapping.md) — the Anthropic primitive table (Session, Orchestration, Harness, Sandbox, Resources, Tools)
 > - Current TS client: `packages/client/src/` (~15 modules, 40+ exported types)
 
 ---
 
-## 1. TL;DR — one Sandbox, provider-agnostic
+## 1. TL;DR — two methods, matching the Anthropic primitive table
 
-The user writes:
+Anthropic's managed-agents post defines the Sandbox primitive as:
+
+```
+provision({resources}) → execute(name, input) → String
+```
+
+*"Any executor configured once and called many times as a tool."*
+
+The client surface matches:
 
 ```typescript
-import { createFirelineClient } from '@fireline/client'
+import { Sandbox } from '@fireline/client'
 
-const client = createFirelineClient({ serverUrl: 'http://localhost:4440' })
+const sandbox = new Sandbox({ serverUrl: 'http://localhost:4440' })
 
-const sandbox = await client.create({
+// provision — hand me a place where an agent can run
+const handle = await sandbox.provision({
   name: 'my-agent',
   agentCommand: ['npx', '-y', '@anthropic-ai/claude-agent-sdk'],
   topology: topology(durableTrace(), approvalGate({ scope: 'tool_calls' })),
-  resources: [{ source_ref: { kind: 'localPath', host_id: 'self', path: '~/project' }, mount_path: '/workspace' }],
 })
 
-// Sandbox gives you a raw ACP connection — sessions are an ACP-plane concern, not a Sandbox method
-const connection = await sandbox.connect()
-await connection.initialize({
-  protocolVersion: PROTOCOL_VERSION,
-  clientInfo: { name: 'my-app', version: '0.0.1' },
-  clientCapabilities: { fs: { readTextFile: false } },
-})
-const { sessionId } = await connection.newSession({ cwd: '/workspace' })
-const response = await connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'What files are in this directory?' }] })
-console.log(response)
+// execute — run a command inside it
+const result = await sandbox.execute(handle, 'ls -la /workspace')
+console.log(result) // stdout string
 
-// Or execute a command directly (provider-level exec, bypasses ACP)
-const result = await sandbox.execute('ls -la /workspace')
-console.log(result.stdout)
+// ACP sessions — SEPARATE PLANE, not on Sandbox
+import { ClientSideConnection, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
+const ws = new WebSocket(handle.acp.url)
+const connection = new ClientSideConnection(handler, createWebSocketStream(ws))
+await connection.initialize({ protocolVersion: PROTOCOL_VERSION, clientInfo: { name: 'my-app', version: '0.0.1' }, clientCapabilities: { fs: { readTextFile: false } } })
+const { sessionId } = await connection.newSession({ cwd: '/' })
+await connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'Hello' }] })
 
-await sandbox.destroy()
+// State observation — SEPARATE PLANE, not on Sandbox
+import { createFirelineDB } from '@fireline/state'
+const db = createFirelineDB({ stateStreamUrl: handle.state.url })
 ```
 
-**No separate Host/Sandbox distinction at the client level.** The old `host.provision()` → `host.wake()` → `host.status()` → `host.stop()` four-verb dance is replaced by `client.create()` → `sandbox.connect()` / `sandbox.execute()` → `sandbox.destroy()`. The `Host` concept was always "the thing that hands you a running agent" — the `Sandbox` IS that thing.
+**Two methods.** `provision` and `execute`. Everything else is orthogonal:
 
-**No side channels through client interfaces.** The Sandbox handle owns lifecycle (create/status/execute/destroy). ACP owns sessions (newSession/loadSession/prompt). `sandbox.connect()` gives you a raw `ClientSideConnection` from `@agentclientprotocol/sdk` — the Sandbox never holds session state, never wraps ACP methods, never leaks session abstractions into the lifecycle layer. The caller uses the ACP SDK directly.
-
-This matches Cased's model:
-```python
-# Cased (Python):
-sandbox = await Sandbox.create(provider='e2b', image='python')
-result = await sandbox.execute('print("hello")')
-await sandbox.destroy()
-```
-
-Same pattern, different substrate: Fireline's sandboxes carry ACP + durable-streams integration; Cased's don't.
+- **Sessions** → ACP plane via `handle.acp` (`ClientSideConnection` from `@agentclientprotocol/sdk`)
+- **State observation** → durable stream via `handle.state` (`@fireline/state`)
+- **Orchestration** → `wake(session_id)` is a separate primitive, not on Sandbox
+- **Listing / finding / admin** → operator concern, not the primitive interface (see §3)
 
 ---
 
-## 2. The Sandbox handle
+## 2. The Sandbox primitive
 
 ```typescript
-interface Sandbox {
-  /** Unique sandbox identifier (matches Rust SandboxHandle.id) */
+/**
+ * The Sandbox primitive from Anthropic's managed-agent taxonomy.
+ *
+ * "Any executor configured once and called many times as a tool."
+ *
+ * Two methods: provision (create a sandbox) and execute (run a
+ * command inside it). The returned SandboxHandle carries ACP and
+ * state-stream endpoints so callers can reach the ACP plane (for
+ * sessions) and the state plane (for durable stream observation)
+ * without the Sandbox primitive knowing about either.
+ *
+ * This class is a thin HTTP client. It holds a server URL and
+ * sends requests. It does not hold sandbox state, track sessions,
+ * or manage connections. It is the primitive, not the management
+ * surface.
+ */
+class Sandbox {
+  constructor(opts: SandboxOptions)
+
+  /**
+   * Provision a sandbox — hand me a place where an agent can run.
+   *
+   * Creates a sandbox on the server, waits for it to become ready,
+   * and returns a handle carrying the ACP and state-stream endpoints.
+   */
+  provision(config: SandboxConfig): Promise<SandboxHandle>
+
+  /**
+   * Execute a command inside a provisioned sandbox.
+   *
+   * Provider-level exec — bypasses ACP. Useful for setup, health
+   * checks, and tool calls. Returns the stdout of the command.
+   */
+  execute(handle: SandboxHandle, input: string): Promise<string>
+}
+
+interface SandboxOptions {
+  /** Base URL of the Fireline server. */
+  readonly serverUrl: string
+
+  /** Optional bearer token. */
+  readonly token?: string
+
+  /** Startup timeout for polling sandbox readiness (default: 20s). */
+  readonly startupTimeoutMs?: number
+}
+
+interface SandboxHandle {
+  /** Unique sandbox identifier. */
   readonly id: string
 
-  /** Which provider is running this sandbox ('local', 'docker', 'microsandbox', 'remote') */
-  readonly provider: string
-
-  /** ACP WebSocket endpoint. Callers open a ClientSideConnection here. */
+  /** ACP WebSocket endpoint. Open a ClientSideConnection here for sessions. */
   readonly acp: Endpoint
 
   /** Durable state stream endpoint. Subscribe with @fireline/state. */
   readonly state: Endpoint
-
-  /** Current lifecycle status. */
-  status(): Promise<SandboxStatus>
-
-  /**
-   * Execute a command inside the sandbox. Provider-level exec —
-   * bypasses ACP. Useful for setup, health checks, tool calls.
-   */
-  execute(command: string, opts?: ExecuteOptions): Promise<ExecutionResult>
-
-  /** Destroy the sandbox. Idempotent. */
-  destroy(): Promise<void>
-
-  /**
-   * Open a raw ACP connection to the sandbox.
-   *
-   * Returns a @agentclientprotocol/sdk ClientSideConnection pointed
-   * at sandbox.acp.url. The caller is responsible for calling
-   * initialize(), newSession(), loadSession(), prompt(), etc.
-   * via the standard ACP SDK — the Sandbox handle never wraps
-   * session lifecycle, never holds session state, never leaks
-   * ACP abstractions into the sandbox lifecycle layer.
-   *
-   * This is a stateless factory: each call opens a fresh WebSocket.
-   * The Sandbox does not track connections or sessions.
-   */
-  connect(): Promise<ClientSideConnection>
 }
 
-type SandboxStatus =
-  | { readonly kind: 'creating' }
-  | { readonly kind: 'ready' }
-  | { readonly kind: 'busy' }
-  | { readonly kind: 'idle' }
-  | { readonly kind: 'stopped' }
-  | { readonly kind: 'broken'; readonly message: string }
+interface SandboxConfig {
+  /** Human-readable name. */
+  name?: string
+
+  /** Agent binary + args to run inside the sandbox. */
+  agentCommand?: readonly string[]
+
+  /** OCI image for container/VM providers. Ignored by local subprocess. */
+  image?: string
+
+  /** Topology (combinator chain) for the conductor. */
+  topology?: Topology
+
+  /** Resources to mount inside the sandbox. */
+  resources?: readonly ResourceRef[]
+
+  /** Environment variables visible to the agent process. */
+  envVars?: Readonly<Record<string, string>>
+
+  /** Labels for operator-level lookup. Not used by the primitive. */
+  labels?: Readonly<Record<string, string>>
+
+  /** Explicit state stream name. Auto-generated if omitted. */
+  stateStream?: string
+
+  /** Provider hint. Auto-select if omitted. */
+  provider?: string
+}
+```
+
+**That's the entire primitive surface.** Two methods, three types. The `Sandbox` class, `SandboxHandle`, and `SandboxConfig`.
+
+**Why `execute` returns `string`, not `ExecutionResult`:** the Anthropic primitive definition is `execute(name, input) → String`. The primitive is "call a tool, get a string back." A richer `ExecutionResult` with `exitCode`, `stderr`, `durationMs`, `timedOut` is an operator extension (see §3) — useful, but not the primitive contract. If a caller needs structured results, they use the operator extension's `executeDetailed()` method.
+
+**Why `SandboxHandle` carries `acp` + `state` endpoints:** these are how the caller reaches the two other planes (ACP for sessions, durable-streams for state) without the Sandbox primitive knowing about either. The Sandbox provisions a runtime; the handle tells you where to find it. No side channels. No leaky abstractions.
+
+---
+
+## 3. Operator extensions — `SandboxAdmin`
+
+The primitive is two methods. But the browser harness, CLI tools, and operator dashboards need more: listing, finding, destroying, status-checking, health-probing. Those are **operator concerns**, not primitive concerns. They live on a separate interface:
+
+```typescript
+/**
+ * Operator extensions for sandbox lifecycle management.
+ *
+ * NOT part of the Anthropic primitive surface. These methods are
+ * for dev tools, browser harnesses, operator CLIs, and admin
+ * dashboards. They hit the same server but expose the management
+ * surface that the primitive deliberately excludes.
+ */
+interface SandboxAdmin {
+  /** Look up a sandbox by id. */
+  get(id: string): Promise<SandboxDescriptor | null>
+
+  /** List sandboxes, optionally filtered by labels. */
+  list(labels?: Readonly<Record<string, string>>): Promise<SandboxDescriptor[]>
+
+  /** Find a sandbox by labels, or provision one if none match. */
+  findOrCreate(config: SandboxConfig): Promise<SandboxHandle>
+
+  /** Destroy a sandbox. Idempotent. */
+  destroy(id: string): Promise<void>
+
+  /** Current lifecycle status. */
+  status(id: string): Promise<SandboxStatus>
+
+  /** Execute with full structured result (exitCode, stderr, etc.). */
+  executeDetailed(id: string, command: string, opts?: ExecuteOptions): Promise<ExecutionResult>
+
+  /** Server-level health check. */
+  healthCheck(): Promise<boolean>
+}
+
+type SandboxStatus = 'creating' | 'ready' | 'busy' | 'idle' | 'stopped' | 'broken'
+
+interface SandboxDescriptor {
+  readonly id: string
+  readonly provider: string
+  readonly status: SandboxStatus
+  readonly acp: Endpoint
+  readonly state: Endpoint
+  readonly labels: Readonly<Record<string, string>>
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
+}
 
 interface ExecuteOptions {
   readonly timeout?: number
@@ -127,324 +222,176 @@ interface ExecutionResult {
 }
 ```
 
-Note what's **not** here: no `AcpSession`, no `NewSessionOptions`, no `LoadSessionOptions`, no `PromptResponse`. The ACP SDK (`@agentclientprotocol/sdk`) already defines all of those. The Sandbox handle is a **lifecycle + connection factory**, not a session wrapper. Sessions are an ACP-plane concern; the Sandbox's only job at the ACP boundary is `connect()` — opening a raw `ClientSideConnection` pointed at `sandbox.acp.url`.
-
-**Key design principle: no side channels through client interfaces.**
-
-Cased wraps execution in the Sandbox class (`sandbox.execute()` delegates to `provider.execute_command()`). We do the same for provider-level execution. But we deliberately do **not** wrap ACP sessions because sessions are a separate protocol plane with their own lifecycle (create, load, prompt, update, close) that is richer than what a Sandbox lifecycle method should abstract over. Wrapping `newSession()` / `loadSession()` on the Sandbox would create a leaky abstraction — the caller would need the `ClientSideConnection` back anyway for streaming, permissions, and tool calls. `connect()` gives them the raw connection and lets the ACP SDK own the session surface.
-
-**Key design choice: `Sandbox` is a live object, not a stateless handle.** Cased's `Sandbox` class holds a reference to its provider and delegates `execute()` / `destroy()` through it. We do the same: the `Sandbox` object returned by `client.create()` holds the server URL and sandbox id internally, and every lifecycle method is a single HTTP call to the server. `connect()` is the only method that opens a WebSocket — and it returns the connection directly to the caller, not a wrapped session.
-
----
-
-## 3. The FirelineClient surface
+The `Sandbox` class can optionally expose an `admin` accessor for callers that need management:
 
 ```typescript
-interface FirelineClient {
-  /** Provision a new sandbox. */
-  create(config: SandboxConfig): Promise<Sandbox>
+const sandbox = new Sandbox({ serverUrl: 'http://localhost:4440' })
+const handle = await sandbox.provision(config)
 
-  /** Look up a sandbox by id. Returns null if not found. */
-  get(id: string): Promise<Sandbox | null>
+// Primitive path: execute via the primitive
+const output = await sandbox.execute(handle, 'echo hello')
 
-  /** List sandboxes, optionally filtered by labels. */
-  list(labels?: Readonly<Record<string, string>>): Promise<Sandbox[]>
-
-  /** Find the first sandbox matching labels, or create one if none match. */
-  findOrCreate(config: SandboxConfig): Promise<Sandbox>
-
-  /** Server-level health check. */
-  healthCheck(): Promise<boolean>
-
-  /** Clean up any client-side resources (WebSocket pools, etc.). */
-  close(): Promise<void>
-}
-
-interface FirelineClientOptions {
-  /** Base URL of the Fireline host HTTP server. */
-  readonly serverUrl: string
-
-  /** Optional bearer token for authenticated endpoints. */
-  readonly token?: string
-
-  /** Startup timeout for polling sandbox readiness (default: 20s). */
-  readonly startupTimeoutMs?: number
-
-  /** Poll interval for readiness checks (default: 100ms). */
-  readonly pollIntervalMs?: number
-}
-
-function createFirelineClient(opts: FirelineClientOptions): FirelineClient
+// Operator path: structured execute, status, destroy
+const result = await sandbox.admin.executeDetailed(handle.id, 'echo hello')
+const status = await sandbox.admin.status(handle.id)
+await sandbox.admin.destroy(handle.id)
 ```
 
-**One client, one server URL, any provider.** The old model had `createFirelineHost` (for the Fireline control plane), `createHostedApiHost` (for a remote hosted API), plus the legacy `createHostClient` (Node binary spawner). All three are replaced by `createFirelineClient` pointed at any Fireline server. The server handles provider dispatch internally per [`sandbox-provider-model.md`](./sandbox-provider-model.md) §4.
-
-**`findOrCreate(config)` is the pooling / reuse surface.** Cased implements this as `get_or_create()` — search by labels first, create if not found. Same pattern here: the server checks existing sandboxes matching `config.labels`, reuses if found, creates if not. This is the building block for connection pooling, dev-mode reuse, and multi-tenant sandbox sharing.
+This is the same split as `fs` in Node: `fs.readFile()` is the primitive; `fs.stat()`, `fs.readdir()`, `fs.chmod()` are operator extensions. Both exist; they're separated by intent.
 
 ---
 
-## 4. SandboxConfig — what the user passes
+## 4. HTTP API mapping
 
-```typescript
-interface SandboxConfig {
-  /** Human-readable name. Used for logging and default stream names. */
-  name?: string
-
-  /** The agent binary + args to run inside the sandbox. */
-  agentCommand?: readonly string[]
-
-  /** OCI image for container/VM providers (docker, microsandbox). Ignored by local. */
-  image?: string
-
-  /** Topology (combinator chain) for the conductor inside the sandbox. */
-  topology?: Topology
-
-  /** Resources to mount inside the sandbox. */
-  resources?: readonly ResourceRef[]
-
-  /** Environment variables visible to the agent process. */
-  envVars?: Readonly<Record<string, string>>
-
-  /** Labels for sandbox lookup, filtering, and pool reuse. */
-  labels?: Readonly<Record<string, string>>
-
-  /** Explicit state stream name. Auto-generated from sandbox id if omitted. */
-  stateStream?: string
-
-  /** Provider hint. Auto-select if omitted. */
-  provider?: string
-}
-```
-
-This maps directly to the Rust `SandboxConfig` in [`sandbox-provider-model.md`](./sandbox-provider-model.md) §2. The only difference is `durable_streams_url` — in the TS client that's a server-side concern (the server knows its own durable-streams URL), not a client-side config field. The client doesn't need to know where the streams live.
-
-**Cased comparison:** Cased's `SandboxConfig` carries `image`, `language`, `memory_mb`, `cpu_cores`, `timeout_seconds`, `env_vars`, `labels`, `setup_commands`, `working_dir`. We carry the same shape minus the resource-constraint fields (those are provider-internal in Fireline) and plus `topology` + `resources` (which Cased doesn't model because they don't have ACP or structured resource mounting).
-
----
-
-## 5. HTTP API mapping
-
-Every `FirelineClient` and `Sandbox` method maps to a single HTTP call:
-
-| Client method | HTTP | Path | Body | Returns |
+| Method | HTTP | Path | Body | Returns |
 |---|---|---|---|---|
-| `client.create(config)` | `POST` | `/v1/sandboxes` | `SandboxConfig` JSON | `SandboxDescriptor` → wrapped as `Sandbox` |
-| `client.get(id)` | `GET` | `/v1/sandboxes/{id}` | — | `SandboxDescriptor \| null` |
-| `client.list(labels)` | `GET` | `/v1/sandboxes?label.env=prod&label.tier=1` | — | `SandboxDescriptor[]` |
-| `client.findOrCreate(config)` | `POST` | `/v1/sandboxes/find-or-create` | `SandboxConfig` JSON | `SandboxDescriptor` |
-| `client.healthCheck()` | `GET` | `/healthz` | — | `boolean` |
-| `sandbox.status()` | `GET` | `/v1/sandboxes/{id}` | — | `SandboxDescriptor.status` |
-| `sandbox.execute(cmd)` | `POST` | `/v1/sandboxes/{id}/execute` | `{ command, timeout?, env? }` | `ExecutionResult` |
-| `sandbox.destroy()` | `DELETE` | `/v1/sandboxes/{id}` | — | `void` |
+| **Primitive** | | | | |
+| `sandbox.provision(config)` | `POST` | `/v1/sandboxes` | `SandboxConfig` JSON | `SandboxDescriptor` → mapped to `SandboxHandle` |
+| `sandbox.execute(handle, input)` | `POST` | `/v1/sandboxes/{id}/execute` | `{ command: input }` | `{ stdout: string }` |
+| **Operator extensions** | | | | |
+| `admin.get(id)` | `GET` | `/v1/sandboxes/{id}` | — | `SandboxDescriptor` |
+| `admin.list(labels)` | `GET` | `/v1/sandboxes?label.k=v` | — | `SandboxDescriptor[]` |
+| `admin.findOrCreate(config)` | `POST` | `/v1/sandboxes/find-or-create` | `SandboxConfig` JSON | `SandboxDescriptor` |
+| `admin.destroy(id)` | `DELETE` | `/v1/sandboxes/{id}` | — | `void` |
+| `admin.status(id)` | `GET` | `/v1/sandboxes/{id}` | — | `.status` field |
+| `admin.executeDetailed(id, cmd)` | `POST` | `/v1/sandboxes/{id}/execute` | `{ command, timeout?, env? }` | `ExecutionResult` |
+| `admin.healthCheck()` | `GET` | `/healthz` | — | `boolean` |
 
-**ACP methods (`newSession`, `loadSession`, `prompt`) don't go through the HTTP API** — they open a WebSocket directly to `sandbox.acp.url` using `@agentclientprotocol/sdk`'s `ClientSideConnection`. The HTTP API provisions and manages sandboxes; ACP is the data plane.
-
-**Backward compatibility:** during the transition, the server serves both `/v1/runtimes` (old) and `/v1/sandboxes` (new) endpoints. The old paths are aliases that map to the same `ProviderDispatcher` handlers. The TS client sends to `/v1/sandboxes`; legacy callers continue to work against `/v1/runtimes` until a deprecation period ends.
+**ACP sessions and state observation do NOT go through this HTTP API.** They use `handle.acp.url` (WebSocket) and `handle.state.url` (HTTP+SSE) directly.
 
 ---
 
-## 6. What gets deleted from `packages/client/`
+## 5. What gets deleted from `packages/client/`
 
 | Current module | Disposition |
 |---|---|
-| `host.ts` | **DELETED** — the legacy binary-spawner client. Fully superseded by `createFirelineClient` + server-side provisioning. |
-| `host/index.ts` (`Host` interface, `HostHandle`, `HostStatus`, `WakeOutcome`, `ProvisionSpec`) | **DELETED** — `Host.provision` is replaced by `FirelineClient.create`; `Host.wake` → `client.get(id)` or `sandbox.status()` (the Wake verb collapses into status-polling + sandbox-level lifecycle); `Host.stop` → `sandbox.destroy()`. |
-| `host-fireline/client.ts` (`createFirelineHost`, `FirelineHostOptions`) | **REPLACED** by `createFirelineClient`. The HTTP calls are nearly identical — `POST /v1/runtimes` becomes `POST /v1/sandboxes`, the polling loop is the same, the `HostHandle` → `Sandbox` wrapping is the same. |
-| `host-fireline/orchestrator.ts` (`createFirelineHostOrchestrator`, `createFirelineClient`) | **MERGED** — the orchestrator moves to a standalone `@fireline/client/orchestration` export that wraps any `FirelineClient`. |
-| `host-fireline/registry.ts` (`createStreamSessionRegistry`) | **KEPT** — the session registry is orthogonal to the provider model; it reads from `@fireline/state` and is consumed by the orchestrator. |
-| `host-hosted-api/client.ts` (`createHostedApiHost`) | **DELETED** — `createFirelineClient` pointed at the remote server's URL does the same thing. There's no "hosted API vs local" distinction in the client anymore; all servers expose the same `/v1/sandboxes` API. |
-| `sandbox/index.ts` (`Sandbox` interface for tool execution) | **MERGED** — the tool-execution `Sandbox` interface (with `ToolCall` / `ToolResult`) merges into the unified `Sandbox` handle via the `execute()` method. Tool-specific structured calls become a higher-level wrapper over `execute()`, not a separate trait. |
-| `sandbox-local/client.ts` (`createLocalSandbox`) | **KEPT as a Node-only convenience** — for tests and CLI tools that want to run a tool in a subprocess without provisioning a full sandbox. Not part of the main `FirelineClient` surface. |
-| `orchestration/index.ts` (`Orchestrator`, `whileLoopOrchestrator`, `SessionRegistry`) | **KEPT** — orchestration is orthogonal. The `WakeHandler` now calls `client.get(id)` + `sandbox.status()` instead of `host.wake(handle)`. |
-| `core/` (`Combinator`, `Topology`, `ResourceRef`, `CapabilityRef`, etc.) | **KEPT** — pure serializable types. Zero changes. |
-| `catalog.ts` (`CatalogClient`) | **KEPT** — agent catalog is orthogonal to the provider model. |
-| `acp.ts` / `acp-core.ts` / `acp.browser.ts` | **KEPT** — ACP connectivity is consumed by `Sandbox.connect()` internally. |
-| `topology.ts` (`TopologyBuilder`) | **KEPT** — pure composition helpers. |
+| `host.ts` (binary spawner) | **DELETED** |
+| `host/index.ts` (`Host` interface) | **DELETED** — `Host.provision` → `Sandbox.provision`; `Host.wake` → separate Orchestration primitive; `Host.status` → `SandboxAdmin.status`; `Host.stop` → `SandboxAdmin.destroy` |
+| `host-fireline/client.ts` | **REPLACED** by `Sandbox` class (same HTTP calls, narrower interface) |
+| `host-fireline/orchestrator.ts` | Orchestrator moves to standalone export (unchanged) |
+| `host-hosted-api/client.ts` | **DELETED** — `Sandbox` class works against any server URL |
+| `sandbox/index.ts` (old tool-execution interface) | **REPLACED** by `Sandbox.execute` |
+| `sandbox-local/` | **KEPT** as Node-only convenience |
+| `orchestration/` | **KEPT** — orchestration is a separate primitive |
+| `core/` | **KEPT** — pure types |
+| `catalog.ts` | **KEPT** |
+| `acp.ts` / `acp-core.ts` | **KEPT** — consumed by callers directly, not wrapped by Sandbox |
+| `topology.ts` | **KEPT** |
 
-**Net deletion:** `host.ts`, `host/index.ts`, `host-fireline/client.ts`, `host-fireline/orchestrator.ts`, `host-hosted-api/`. ~800-1000 lines removed. **Net addition:** `client.ts` (the new `FirelineClient` + `Sandbox` impl), ~300-400 lines. Net reduction: ~500-600 lines with a simpler mental model.
+**The `Sandbox` class replaces 4 modules with 1.** Net: ~800 lines deleted, ~150 lines added.
 
 ---
 
-## 7. What the browser-harness changes to
+## 6. What the browser-harness changes to
 
-**Before (current, Tier 5):**
+**Before (current):**
 ```typescript
-import { createFirelineHost } from '@fireline/client/host-fireline'
-import type { Host, SessionHandle, SessionStatus } from '@fireline/client/host'
-
-const host: Host = createFirelineHost({
-  controlPlaneUrl: CONTROL_PLANE_URL,
-  sharedStateUrl: STATE_PROXY_URL,
-})
-
-const handle = await host.provision({ agentCommand, metadata: { name: 'harness', stateStream } })
+const host: Host = createFirelineHost({ controlPlaneUrl, sharedStateUrl })
+const handle = await host.provision({ agentCommand, metadata: { name: 'harness' } })
 const status = await host.status(handle)
 const outcome = await host.wake(handle)
 await host.stop(handle)
 
-// ACP: open WebSocket manually to a hardcoded proxy URL
-const ws = new WebSocket('ws://localhost:5173/acp')
+const ws = new WebSocket('ws://localhost:5173/acp') // hardcoded proxy URL
 ```
 
-**After (new API):**
+**After:**
 ```typescript
-import { createFirelineClient } from '@fireline/client'
+const sandbox = new Sandbox({ serverUrl: '/cp' })
+const handle = await sandbox.provision({ name: 'harness', agentCommand })
 
-const client = createFirelineClient({ serverUrl: '/cp' })
-
-const sandbox = await client.create({
-  name: 'browser-harness',
-  agentCommand: resolvedAgentCommand,
-  stateStream: STATE_STREAM_NAME,
-})
-
-// sandbox.connect() gives a raw ACP connection — no hardcoded proxy URL
-const connection = await sandbox.connect()
-await connection.initialize({ protocolVersion: PROTOCOL_VERSION, clientInfo: { name: 'harness', version: '0.0.1' }, clientCapabilities: { fs: { readTextFile: false } } })
+// ACP — from the handle, not hardcoded
+const ws = new WebSocket(handle.acp.url)
+const connection = new ClientSideConnection(handler, createWebSocketStream(ws))
+await connection.initialize(...)
 const { sessionId } = await connection.newSession({ cwd: '/' })
-await connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'Hello from the browser harness' }] })
 
-// Status is on the sandbox, not a separate host.status(handle) call
-const status = await sandbox.status()
-
-// Wake collapses: the user clicks "Wake" → sandbox.status() returns the state;
-// if stopped, client.create() with the same labels reuses or re-provisions.
-// No separate wake() verb needed at the client level.
-
-await sandbox.destroy()
+// Operator extensions for the harness UI
+const status = await sandbox.admin.status(handle.id)
+await sandbox.admin.destroy(handle.id)
 ```
 
-The browser-harness app.tsx drops:
-- `useMemo<Host>(() => createFirelineHost({...}), [])` → `useMemo(() => createFirelineClient({...}), [])`
-- `host.provision(spec)` → `client.create(config)` — returns a `Sandbox` with `.acp.url`, not a `HostHandle` that needs a separate proxy URL
-- `host.wake(handle)` → removed from the UI (or: `sandbox.status()` + conditional `client.create()` with the same labels if stopped)
-- `host.stop(handle)` → `sandbox.destroy()`
-- The hardcoded `ACP_PROXY_URL = 'ws://${window.location.host}/acp'` → `sandbox.acp.url` read from the handle (vite proxy still works, but the URL comes from the server response, not a client-side constant)
-
-**This fixes the port-4437-pinning fragility** identified in the API surface audit — the sandbox handle carries the actual ACP endpoint, so the browser doesn't need to guess the port.
+The browser harness is a dev tool — it uses `sandbox.admin` for status/destroy. But its core flow (provision → connect ACP → prompt) uses only the two primitive methods plus the ACP SDK directly.
 
 ---
 
-## 8. Comparison to Cased client API
-
-### What we adopt
-
-| Cased pattern | Fireline equivalent |
-|---|---|
-| `Sandbox.create(provider='e2b', image='python')` | `client.create({ provider: 'microsandbox', image: 'python', agentCommand: [...] })` |
-| `sandbox.execute('ls')` → `ExecutionResult` | `sandbox.execute('ls')` → `ExecutionResult` |
-| `sandbox.destroy()` | `sandbox.destroy()` |
-| `Sandbox.find(labels={...})` | `client.list({ env: 'prod' })` or `client.findOrCreate(config)` |
-| `Sandbox.get_or_create(labels={...})` | `client.findOrCreate(config)` |
-| `sandbox.upload('local.txt', '/remote.txt')` | `sandbox.execute('cat > /remote.txt', { stdin: content })` or via ACP `fs/write_text_file` |
-| `sandbox.stream('tail -f /var/log/app.log')` | Future: `sandbox.executeStream(cmd)` returning `AsyncIterator<string>` |
-| `sandbox.state` (enum: running/stopped/...) | `sandbox.status()` → `SandboxStatus` (async, fetches from server) |
-| `SandboxManager.create_sandbox(config, fallback_providers=[...])` | `client.create(config)` — failover is server-side (`ProviderDispatcher`) |
-
-### What differs
+## 7. Comparison to Cased
 
 | Dimension | Cased | Fireline |
 |---|---|---|
-| **ACP sessions** | Not modeled — Cased wraps execution in the Sandbox class | `sandbox.connect()` returns a raw `ClientSideConnection`; sessions are purely an ACP-plane concern. We deliberately do NOT wrap ACP sessions in the Sandbox handle because sessions are a separate protocol plane with their own lifecycle. The Sandbox's only ACP-facing method is `connect()` — a stateless factory for raw ACP connections. |
-| **Topology / combinators** | Not modeled | `config.topology` carries a `Topology` (combinator chain) that the conductor inside the sandbox interprets |
-| **Durable state** | No concept of state streams | `sandbox.state` is a durable-streams endpoint; the browser subscribes via `@fireline/state` and `useLiveQuery` |
-| **Provider dispatch** | Client-side `SandboxManager` | Server-side `ProviderDispatcher` — the client is provider-agnostic, sends to one URL |
-| **Status** | Synchronous property (`sandbox.state`) | Async method (`sandbox.status()`) — the client fetches from the server each time |
-| **Auto-configure** | `Sandbox._auto_configure()` reads env vars to pick providers | Not needed — the server picks the provider based on its config |
-| **File transfer** | `sandbox.upload()` / `sandbox.download()` | Via ACP `fs/*` methods or `sandbox.execute('cat ...')` — no separate file-transfer surface |
-| **Pooling** | Client-side `SandboxPool` with acquire/release | Server-side `PooledProvider` — the client calls `findOrCreate` and the server handles pooling internally |
-| **Context manager** | `async with Sandbox.create() as sb:` auto-destroys | Not modeled in TS (no `using` equivalent in current Node); caller calls `sandbox.destroy()` explicitly or registers a process exit handler |
+| **Primitive surface** | `create / execute / destroy` (3 methods) | `provision / execute` (2 methods). `destroy` is an operator extension, not the primitive. |
+| **Handle** | `Sandbox` object with id + state + labels | `SandboxHandle` with id + `acp` endpoint + `state` endpoint |
+| **Execution** | `sandbox.execute(cmd) → ExecutionResult` | `sandbox.execute(handle, input) → string` (primitive); `admin.executeDetailed(id, cmd) → ExecutionResult` (operator) |
+| **Sessions** | Not modeled | ACP plane via `handle.acp.url` — deliberate non-wrapping |
+| **Management** | On the `Sandbox` class: `find`, `get_or_create`, `destroy` | On `SandboxAdmin`: `get`, `list`, `findOrCreate`, `destroy`, `status` — separated from the primitive |
+| **Provider dispatch** | Client-side `SandboxManager` | Server-side `ProviderDispatcher` — client is provider-agnostic |
+| **Pooling** | Client-side `SandboxPool` | Server-side `PooledProvider`; client uses `findOrCreate` |
+
+**What we adopt:** the `provision`/`execute` pattern, the handle-as-return-value shape, label-based lookup, provider-agnostic client.
+
+**What we narrow:** Cased puts management methods (destroy, find, get_or_create) on the primary `Sandbox` class. We separate them into `SandboxAdmin` because the Anthropic primitive table says Sandbox is `provision + execute`, not `provision + execute + destroy + find + status`. The operator surface exists — it's just not the primitive.
 
 ---
 
-## 9. Migration plan
+## 8. Migration plan
 
-### Phase M1 — Ship the new client alongside the old (1 day)
+### Phase M1 — Ship the `Sandbox` class alongside the old surface (1 day)
 
-Add `packages/client/src/v2/` with `client.ts`, `sandbox.ts`, `types.ts`. Export via a new subpath `@fireline/client/v2`:
+Add `packages/client/src/sandbox-v2.ts` exporting `Sandbox` class + `SandboxAdmin` + types. Export via `@fireline/client/v2`:
 
 ```typescript
-import { createFirelineClient } from '@fireline/client/v2'
+import { Sandbox } from '@fireline/client/v2'
 ```
 
-The old `@fireline/client` surface stays unchanged. Both coexist. The v2 client targets the existing `/v1/runtimes` endpoints (not `/v1/sandboxes` — that's a server-side rename that happens in a later phase per [`sandbox-provider-model.md`](./sandbox-provider-model.md) §7 Phase P6). Field mapping:
+The `Sandbox` class targets the existing `/v1/runtimes` endpoints (renamed `/v1/sandboxes` is a server-side change that happens later). Field mapping is a thin adapter: `POST /v1/runtimes` body stays the same, response `HostDescriptor` is mapped to `SandboxHandle`.
 
-| v2 client call | HTTP path | Notes |
-|---|---|---|
-| `client.create(config)` | `POST /v1/runtimes` | Body: `{ name, agentCommand, topology, resources, stateStream }` (same as current `ProvisionRequest`) |
-| `client.get(id)` | `GET /v1/runtimes/{id}` | Response: `HostDescriptor` mapped to `SandboxDescriptor` |
-| `sandbox.destroy()` | `POST /v1/runtimes/{id}/stop` + `DELETE /v1/runtimes/{id}` | Two calls; collapsed to one `DELETE /v1/sandboxes/{id}` after P6 |
+**Zero server changes.** The v2 client is a 150-line adapter over the existing API.
 
-This means M1 ships with **zero server changes**. The v2 client is a thin adapter over the existing API.
+### Phase M2 — Rewire the browser harness (half day)
 
-### Phase M2 — Rewire the browser harness to v2 (half day)
-
-`packages/browser-harness/src/app.tsx` switches from `createFirelineHost` to `createFirelineClient`. The `SessionHarness` component uses `sandbox.connect()` to get a raw `ClientSideConnection`, then calls `connection.initialize()` + `connection.newSession()` via the standard ACP SDK — same code the harness already has today, just with the connection opened from `sandbox.acp.url` instead of a hardcoded proxy URL.
+`packages/browser-harness/src/app.tsx` switches from `createFirelineHost` to `new Sandbox(...)`. The harness uses `sandbox.provision()` for launch, `sandbox.admin.status()` / `sandbox.admin.destroy()` for the control buttons, and `new ClientSideConnection(...)` with `handle.acp.url` for the ACP session.
 
 ### Phase M3 — Update tests (1 day)
 
 | Test file | Change |
 |---|---|
-| `test/host.test.ts` | Rewrite to use `createFirelineClient` → `client.create()` → `sandbox.destroy()`. The spawn-control-plane pattern stays; only the client calls change. |
-| `test/host-hosted-api.test.ts` | Merge into `host.test.ts` — the v2 client works against both local and hosted API servers. |
-| `test/sandbox-local.test.ts` | Unchanged (sandbox-local is a Node-only convenience, not part of the main client surface). |
-| `test/catalog.test.ts` | Unchanged. |
-| `test/topology.test.ts` | Unchanged. |
-| `test/acp.test.ts` | Unchanged (ACP connectivity is consumed internally by `Sandbox.connect()`). |
-| Browser test (`test/tier5-smoke.browser.test.ts`) | Rewrite to match M2's new browser-harness shape. |
+| `test/host.test.ts` | Rewrite: `new Sandbox(...)` → `sandbox.provision()` → `sandbox.execute()` → `sandbox.admin.destroy()` |
+| `test/host-hosted-api.test.ts` | Merge into `host.test.ts` — `new Sandbox({ serverUrl: remote })` works against any server |
+| `test/sandbox-local.test.ts` | Unchanged |
+| `test/catalog.test.ts` | Unchanged |
+| `test/topology.test.ts` | Unchanged |
+| `test/acp.test.ts` | Unchanged |
+| `test/tier5-smoke.browser.test.ts` | Update to match M2's new harness shape |
 
 ### Phase M4 — Delete the v1 surface (half day)
 
-Once all callers have migrated to `@fireline/client/v2`:
+Move `sandbox-v2.ts` to `sandbox-client.ts` (or `client.ts`). Delete: `host.ts`, `host/`, `host-fireline/`, `host-hosted-api/`, `sandbox/` (old tool-execution interface). Update `index.ts` exports. Remove `/v2` subpath after one release.
 
-1. Move `v2/` contents to the package root: `client.ts` → `src/client.ts`, `sandbox.ts` → `src/sandbox.ts`, `types.ts` → `src/types.ts`.
-2. Delete: `src/host.ts`, `src/host/`, `src/host-fireline/`, `src/host-hosted-api/`, `src/sandbox/` (the old tool-execution interface).
-3. Update `src/index.ts` to export from the new paths.
-4. Update `package.json` exports — remove the `/host`, `/host-fireline`, `/host-hosted-api` subpath exports; add `/v2` as an alias for the root (transitional).
-5. Delete the `/v2` subpath export after one release cycle.
+### Phase M5 — Server-side endpoint rename (separate)
 
-### Phase M5 — Server-side endpoint rename (separate, after Rust P6)
+After the Rust-side provider model Phase P6 renames endpoints to `/v1/sandboxes`, the TS `Sandbox` class switches path constants. One-line change.
 
-After the Rust-side `sandbox-provider-model.md` Phase P6 renames the HTTP endpoints from `/v1/runtimes` to `/v1/sandboxes`, the TS client switches to the new paths. The old paths remain as aliases on the server during the deprecation window. This is a one-line change in the client's base URL / path constants.
-
-**Total: ~3 days of focused work across M1-M4.** M5 is a follow-on that waits for the server rename.
+**Total: ~3 days across M1-M4.**
 
 ---
 
-## 10. Test strategy
+## 9. Test strategy
 
-### Existing test files and their fate
+### New tests
 
-| File | Lines | Status | Notes |
-|---|---|---|---|
-| `test/host.test.ts` | ~190 | **Rewrite** (M3) | Spawns control plane + fireline binary; exercises create/get/list/stop/delete. The test shape stays (it's an integration test against real binaries); only the client calls change from `host.create()` → `client.create()`, `host.stop()` → `sandbox.destroy()`. |
-| `test/host-hosted-api.test.ts` | ~120 | **Merge into host.test.ts** (M3) | The v2 client is provider-agnostic; this test's fixture (mock HTTP server) becomes a second `describe` block in host.test.ts. |
-| `test/sandbox-local.test.ts` | ~80 | **Unchanged** | Tests the Node-only subprocess sandbox for tool execution. Not part of the main client surface. |
-| `test/catalog.test.ts` | ~60 | **Unchanged** | Agent catalog is orthogonal. |
-| `test/topology.test.ts` | ~80 | **Unchanged** | Pure combinator composition tests. |
-| `test/acp.test.ts` | ~40 | **Unchanged** | ACP connectivity. May gain a new test for `Sandbox.connect()` that uses a mock WebSocket. |
-| `test/tier5-smoke.browser.test.ts` | ~230 | **Rewrite** (M3) | Playwright browser test exercising the harness UI. Mock fetch handlers update from `/cp/v1/runtimes` to `/cp/v1/sandboxes` (or `/cp/v1/runtimes` during M1-M3 while the server hasn't renamed yet). Button labels stay the same. |
+1. **`test/sandbox-client.test.ts`** — unit tests for the `Sandbox` class. Mock fetch: `provision()` → `POST /v1/runtimes` returns descriptor, `execute()` → `POST /v1/runtimes/{id}/execute` returns stdout. Verify the `SandboxHandle` carries correct `acp` + `state` endpoints. ~50 lines.
 
-### New tests to add
+2. **`test/sandbox-admin.test.ts`** — unit tests for operator extensions. Mock fetch: `get`, `list`, `destroy`, `status`, `executeDetailed`, `healthCheck`. ~80 lines.
 
-1. **`test/client.test.ts`** — unit tests for `createFirelineClient`. Mock fetch: `POST /v1/sandboxes` → returns `SandboxDescriptor`, `GET /v1/sandboxes/{id}` → returns status, `DELETE /v1/sandboxes/{id}` → returns 200. Exercises `create` → `get` → `list` → `findOrCreate` → `healthCheck` → `close`.
+3. **`test/sandbox-integration.test.ts`** — integration test replacing `host.test.ts`. Spawns real binaries. Full lifecycle: `sandbox.provision()` → `sandbox.execute('echo hello')` → `new ClientSideConnection(handle.acp.url)` → `connection.newSession()` → `connection.prompt(...)` → `sandbox.admin.destroy(handle.id)`. ~120 lines.
 
-2. **`test/sandbox.test.ts`** — unit tests for the `Sandbox` handle object. Mock fetch: `sandbox.status()`, `sandbox.execute()`, `sandbox.destroy()`. Exercises `sandbox.connect()` with a mock WebSocket (verify it opens a connection to `sandbox.acp.url` and returns a `ClientSideConnection` the caller can use for ACP operations).
+### What this proves
 
-3. **`test/client-integration.test.ts`** — integration test replacing `host.test.ts`. Spawns the real control plane + fireline binary. Full lifecycle: `client.create()` → `sandbox.status()` → `sandbox.execute('echo hello')` → `sandbox.connect()` → `connection.newSession()` → `connection.prompt(...)` → `sandbox.destroy()`. This is the "golden path" test that proves the whole stack works end-to-end.
+- `sandbox-client.test.ts` → primitive works against mock (fast, no cargo)
+- `sandbox-admin.test.ts` → operator extensions work (fast, no cargo)
+- `sandbox-integration.test.ts` → full stack end-to-end (slow, needs cargo build)
 
-### What the test suite proves after M4
-
-- `client.test.ts` → `FirelineClient` factory works against a mock server (unit)
-- `sandbox.test.ts` → `Sandbox` handle delegates correctly (unit)
-- `client-integration.test.ts` → full lifecycle against real binaries (integration)
-- `sandbox-local.test.ts` → Node subprocess sandbox works (unit)
-- `catalog.test.ts` → agent catalog resolves (unit)
-- `topology.test.ts` → combinator composition (unit)
-- `acp.test.ts` → ACP connectivity (unit)
-- `tier5-smoke.browser.test.ts` → browser harness UI (e2e via Playwright)
-
-Every test except the integration test and the browser e2e can run without compiling Rust binaries — they're pure TS unit tests with mock fetch. This is a material improvement: today `test/host.test.ts` requires `cargo build` in its `beforeAll`, making the TS test suite slow and cargo-dependent. Under the new model, the unit tests are fast and independent; only the integration test needs binaries.
+Every test except the integration test runs without Rust binaries. This is a material improvement: today `test/host.test.ts` requires `cargo build` in `beforeAll`.
 
 ---
 
@@ -452,40 +399,43 @@ Every test except the integration test and the browser e2e can run without compi
 
 | Old type | New type | Notes |
 |---|---|---|
-| `Host` interface | `FirelineClient` | `provision` → `create`, `wake` → deleted (status-polling), `status` → `sandbox.status()`, `stop` → `sandbox.destroy()` |
-| `HostHandle` | `Sandbox` handle | Carries the same `id`, `acp`, `state` fields but is now a live object with methods |
-| `HostStatus` | `SandboxStatus` | Same variants, different names: `created` → `creating`, `running` → `ready`, `needs_wake` → deleted (status-polling handles this), `error` → `broken` |
-| `WakeOutcome` | deleted | The `wake` verb collapses: `noop` = sandbox is already ready; `blocked` = sandbox is stopped, call `client.create()` to re-provision; `advanced` = not used in the TS client layer |
-| `ProvisionSpec` | `SandboxConfig` | Same fields with better names: `agentCommand`, `topology`, `resources`, `metadata` → `envVars` + `labels` (split from opaque metadata into typed fields) |
-| `FirelineHostOptions` | `FirelineClientOptions` | `controlPlaneUrl` → `serverUrl`, `sharedStateUrl` → deleted (server-side concern) |
-| `createFirelineHost()` | `createFirelineClient()` | Returns `FirelineClient`, not `Host` |
-| `createHostedApiHost()` | `createFirelineClient()` | Same function, different server URL |
-| `createFirelineClient()` (the old orchestrator bundle) | deleted | The orchestrator is a standalone concern |
-| `Sandbox` interface (old, for tool execution) | merged into `Sandbox` handle | `execute()` replaces the old `Sandbox.execute(handle, call)` pattern |
-| `SandboxHandle` (old) | deleted | The new `Sandbox` IS the handle |
-| `ToolCall` / `ToolResult` | `ExecutionResult` | Structured tool calls become `sandbox.execute()` with a command string; typed tool dispatch is a higher-level wrapper |
-| `SandboxSpec` | merged into `SandboxConfig` | `runtime_key` → `config.labels` for sandbox lookup |
-
----
+| `Host` interface (4 methods) | `Sandbox` class (2 methods) | `provision` stays; `wake/status/stop` move to Orchestration or SandboxAdmin |
+| `HostHandle` | `SandboxHandle` | Same fields minus `kind` (provider-agnostic at the client) |
+| `HostStatus` (discriminated union) | `SandboxStatus` (string enum on admin) | Slimmed — the primitive doesn't expose status |
+| `WakeOutcome` | deleted | Wake is Orchestration, not Sandbox |
+| `ProvisionSpec` | `SandboxConfig` | Renamed, same fields |
+| `FirelineHostOptions` | `SandboxOptions` | `controlPlaneUrl` → `serverUrl`; `sharedStateUrl` → deleted (server-side) |
+| `FirelineClient` (proposed in prior revision) | deleted | Was a management surface; management moved to `SandboxAdmin` |
+| `createFirelineHost()` | `new Sandbox(...)` | Class, not factory function |
+| `createHostedApiHost()` | `new Sandbox({ serverUrl: remoteUrl })` | Same class, different URL |
+| `Sandbox` interface (old, tool execution) | merged into `Sandbox.execute()` | Structured tool calls → `admin.executeDetailed()` |
 
 ## Appendix: module layout — old → new
 
 ```
 packages/client/src/                    packages/client/src/
-├── host.ts              DELETED        ├── client.ts           NEW (FirelineClient + createFirelineClient)
-├── host/                DELETED        ├── sandbox.ts          NEW (Sandbox handle class)
-├── host-fireline/       DELETED        ├── types.ts            NEW (SandboxConfig, SandboxStatus, ExecutionResult, etc.)
+├── host.ts              DELETED        ├── sandbox-client.ts   NEW (Sandbox class + SandboxAdmin)
+├── host/                DELETED        ├── sandbox-types.ts    NEW (SandboxConfig, SandboxHandle, etc.)
+├── host-fireline/       DELETED        │
 ├── host-hosted-api/     DELETED        │
 ├── sandbox/             MERGED         │
 │                                       │
 ├── core/                KEPT           ├── core/               KEPT
-├── orchestration/       KEPT           ├── orchestration/      KEPT (WakeHandler wraps client.get + status polling)
+├── orchestration/       KEPT           ├── orchestration/      KEPT
 ├── sandbox-local/       KEPT           ├── sandbox-local/      KEPT
 ├── catalog.ts           KEPT           ├── catalog.ts          KEPT
-├── acp.ts               KEPT           ├── acp.ts              KEPT (consumed by Sandbox.connect() internally)
+├── acp.ts               KEPT           ├── acp.ts              KEPT
 ├── acp-core.ts          KEPT           ├── acp-core.ts         KEPT
 ├── acp.browser.ts       KEPT           ├── acp.browser.ts      KEPT
 ├── browser.ts           KEPT           ├── browser.ts          KEPT
 ├── topology.ts          KEPT           ├── topology.ts         KEPT
-└── index.ts             UPDATED        └── index.ts            UPDATED (re-exports from client.ts, types.ts, core/)
+└── index.ts             UPDATED        └── index.ts            UPDATED
 ```
+
+## Appendix: why two methods, not three
+
+Cased's `Sandbox` has three core methods: `create`, `execute`, `destroy`. The Anthropic primitive table has two: `provision`, `execute`. The difference is `destroy`.
+
+We follow Anthropic: `destroy` is an operator concern, not a primitive concern. The primitive's contract is *"configure once, call many times."* Cleanup is the operator's job — they decide when a sandbox is no longer needed, they call `admin.destroy()`, and the server handles teardown. The primitive user shouldn't have to think about lifecycle cleanup; that's what the Orchestration primitive and the operator surface are for.
+
+If the user forgets to destroy, the server's idle-timeout or TTL policy handles it. The primitive is stateless; the management surface is not. Keeping them separate is the whole point.
