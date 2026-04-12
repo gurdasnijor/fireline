@@ -161,6 +161,20 @@ lost.
 
 ## 4. Solving context and documents
 
+> **Forward reference:** resource sync is being reframed as
+> **publish/discover via a shared `resources:tenant-<id>` stream**,
+> parallel to the `hosts:tenant-<id>` stream that [`./cross-host-discovery.md`](./cross-host-discovery.md)
+> introduces for cross-Host agent handoff. See
+> [`./resource-discovery.md`](./resource-discovery.md) for the full
+> design of the resource-discovery stream, the
+> `StreamResourceRegistry` satisfier, and how it composes with the
+> existing `FsBackendComponent`. §4's `DurableStreamBlob` variant
+> below **remains valid** — it's one of the backing stores the
+> resource-discovery stream can reference, alongside
+> `OciImageLayer` and `HttpUrl`. The discovery proposal changes
+> *how* resources are found across Hosts, not *where* their bytes
+> live.
+
 ### Use the Resources primitive with durable-streams as the transport
 
 `ResourceRef` is already `{ source_ref, mount_path }` in the
@@ -441,9 +455,15 @@ enterprise / compliance asks for it.
 ## 6. The demo narrative
 
 This is the punchline, and it's why the handoff story is worth
-front-loading into the demo.
+front-loading into the demo. The narrative comes in two phases.
+Phase 1 shows a single session surviving a local→remote topology
+migration. Phase 2 shows two *different* Hosts discovering each
+other over the same durable-streams service and handing off a
+task mid-turn. The two phases share the same underlying mechanic
+— "the stream is the truth, the Hosts are stateless" — applied at
+different scales.
 
-### The "topology migration mid-session" beat
+### Phase 1: Session migration — the "topology migration mid-session" beat
 
 1. Open the browser harness. Launch an agent locally. Run a few
    prompts — the user sees them land in the session log via the
@@ -467,6 +487,62 @@ front-loading into the demo.
    stream, resolves credentials from the secrets stream, and keeps
    going. **Zero conversation state is lost.**
 
+### Phase 2: Cross-Host agent handoff
+
+Phase 1 showed *one* session crossing a topology boundary. Phase 2
+shows *two different agents on two different Hosts* discovering
+each other at runtime through the same durable-streams service and
+handing off a task mid-turn. This is where the durable-streams
+service stops being "just a state plane" and reveals itself as a
+**discovery plane** — Host presence, runtime presence, and
+resource presence all become discoverable by reading per-tenant
+streams.
+
+The setup: Agent A is running on my laptop Host. Mid-conversation,
+it realizes it needs help from a specialist agent deployed on a
+cloud Host it has never seen before.
+
+1. Agent A's Host reads the `hosts:tenant-demo` stream.
+2. Agent A finds Agent B's Host registered there, with the Host's
+   ACP URL embedded in the registration envelope.
+3. Agent A opens an ACP connection to Agent B's URL directly.
+4. Agent A hands off the task via a normal ACP message — a prompt,
+   a tool-call, or a lineage-stamped peer call.
+
+Agent B's Host sees the incoming ACP request, loads the relevant
+session state from the shared durable-streams service — **the same
+stream Agent A writes to** — picks up the conversation where Agent
+A left off, and continues. The user watching the browser harness
+sees a single conversation thread flow across the network boundary
+without a pause in the state explorer.
+
+**Zero operator configuration.** No Consul, no DNS SRV records, no
+k8s Services, no service mesh, no bootstrap config files, no
+explicitly-shared peer-directory TOML. **The same durable-streams
+service that carries session state IS the service discovery
+mechanism.** Two Hosts share one tenant stream, and they discover
+each other by reading it.
+
+**Zero conversation state lost across the handoff**, because the
+session log already lives in the shared stream and both Hosts are
+readers of it. This isn't "migration" in the Phase 1 sense — it's
+**the Hosts are stateless and the stream is the truth**. Phase 1
+is a session moving; Phase 2 is two Hosts cooperating on a session
+neither of them owns.
+
+> **The demo beat:** we'll show Agent A on a laptop discovering a
+> cloud-hosted agent at runtime, handing off mid-turn, and the user
+> watching a single conversation thread flow across the network
+> boundary without a pause.
+
+The full mechanism lives in
+[`./cross-host-discovery.md`](./cross-host-discovery.md) (in
+progress) — which specifies the `hosts:tenant-<id>` stream schema,
+the registration envelope shape, the TTL / stale-collapse rule,
+and the `StreamDeploymentPeerRegistry` implementation that replaces
+the deleted `LocalPeerDirectory` and `ControlPlanePeerRegistry`.
+The demo's mechanics land on top of whatever that proposal ships.
+
 ### Why this works
 
 Every "magic" moment in that demo traces back to a property we
@@ -474,6 +550,7 @@ already proved in the TLA model:
 
 | Demo moment | TLA invariant |
 |---|---|
+| *Phase 1 — Session migration* | |
 | Session history survives local→remote | `SessionDurableAcrossRuntimeDeath` |
 | Wake on remote Host rehydrates correctly | `WakeOnStoppedPreservesSessionBinding` |
 | Local Host's final wake is a no-op | `WakeOnReadyIsNoop` |
@@ -482,11 +559,20 @@ already proved in the TLA model:
 | The state explorer's log never rewinds | `SessionAppendOnly` |
 | Resources mounted on the remote sandbox match the local intent | `ResourceMountMappingCorrect` |
 | Tool invocations on the remote side don't leak credentials through the descriptor | `ToolDescriptorNoCredentialLeak` |
+| *Phase 2 — Cross-Host agent handoff* | |
+| Agent A discovers Host B from a single stream read | `HostRegisteredIsEventuallyDiscoverable` (new — future `deployment_discovery.tla`) |
+| Stale Hosts never show up in discovery | `StaleHeartbeatCollapsesToInvisible` (new — future `deployment_discovery.tla`) |
 
-**Every property is already checked in
-`verification/spec/managed_agents.tla` today.** The deployment story
+**Every Phase 1 property is already checked in
+`verification/spec/managed_agents.tla` today.** Phase 2's two new
+invariants are not yet encoded — they belong in a future
+`deployment_discovery.tla` spec that pairs with
+[`./cross-host-discovery.md`](./cross-host-discovery.md). The
+design posture is unchanged: every "magic" moment in the demo
+traces back to a formal property, whether already-verified (Phase
+1) or scheduled-to-be-verified (Phase 2). **The deployment story
 is not a new architecture — it's the physical manifestation of
-invariants the formal spec has been encoding the whole time. That's
+invariants the formal spec has been encoding the whole time.** That's
 the best possible demo posture: "we designed this from the
 primitives up; here's the distributed topology that falls out."
 
