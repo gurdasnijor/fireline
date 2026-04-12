@@ -196,41 +196,12 @@ function parseCredentialRef(ref: CredentialRef | string): CredentialRef {
 
 ### Rust registration (`host_topology.rs`)
 
-Add to `build_host_topology_registry`, after the `attach_tool` block:
-
-```rust
-.register_component("secrets_injection", {
-    let context = context.clone();
-    move |config| {
-        let config = config
-            .ok_or_else(|| anyhow!("topology component 'secrets_injection' requires config"))?;
-        let parsed: SecretsInjectionConfig =
-            serde_json::from_value(config.clone()).context("parse secrets_injection config")?;
-        let resolver: Arc<dyn CredentialResolver> =
-            Arc::new(LocalCredentialResolver::default());
-        let rules = parsed.rules.into_iter().map(|rule| {
-            InjectionRule {
-                target: match rule.target {
-                    SecretsTargetConfig::EnvVar { name } => InjectionTarget::EnvVar(name),
-                    SecretsTargetConfig::McpServerHeader { server, header } =>
-                        InjectionTarget::McpServerHeader { server, header },
-                    SecretsTargetConfig::ToolArg { tool, arg_path } =>
-                        InjectionTarget::ToolArg { tool, arg_path },
-                },
-                credential_ref: rule.credential_ref,
-                scope: match rule.scope.as_deref() {
-                    Some("perCall") => InjectionScope::PerCall,
-                    Some("once") => InjectionScope::Once,
-                    _ => InjectionScope::Session,
-                },
-            }
-        }).collect();
-        Ok(sacp::DynConnectTo::new(
-            SecretsInjectionComponent::new(resolver, rules)
-        ))
-    }
-})
-```
+Add `.register_component("secrets_injection", ...)` to
+`build_host_topology_registry` after the `attach_tool` block. The
+closure deserializes `SecretsInjectionConfig`, constructs
+`InjectionRule` vec, creates a `LocalCredentialResolver::default()`,
+and returns `SecretsInjectionComponent::new(resolver, rules)`.
+Follows the exact pattern of every other registered component.
 
 New config types (add in `host_topology.rs`):
 
@@ -293,38 +264,13 @@ Remove `image?: string` from `SandboxDefinition` — it moves into the
 
 ### Wire mapping (`sandbox.ts`)
 
-`buildProvisionRequest` extracts the provider string and merges
-provider-specific fields:
+Add `resolveProvider(provider?: SandboxProvider)` that switches on
+`provider.kind`, extracts `providerName` and provider-specific config
+fields. Called from `buildProvisionRequest`. Defaults to `local`.
 
-```typescript
-function resolveProvider(provider?: SandboxProvider): {
-  providerName: string
-  providerConfig: Record<string, unknown>
-} {
-  if (!provider) return { providerName: 'local', providerConfig: {} }
-  switch (provider.kind) {
-    case 'local':
-      return { providerName: 'local', providerConfig: {} }
-    case 'docker':
-      return { providerName: 'docker', providerConfig: cloneDefined({
-        image: provider.image,
-        dockerfile: provider.dockerfile,
-      })}
-    case 'microsandbox':
-      return { providerName: 'microsandbox', providerConfig: {} }
-    case 'anthropic':
-      return { providerName: 'anthropic', providerConfig: cloneDefined({
-        model: provider.model,
-      })}
-  }
-}
-```
-
-### Backwards compatibility
-
-The old `provider?: string` callers break at the type level. This is
-intentional — it's a pre-1.0 API and the string was never validated.
-Migration: `{ provider: 'docker' }` → `{ provider: { kind: 'docker' } }`.
+Breaking change: `provider?: string` → `provider?: SandboxProvider`.
+Pre-1.0, the string was never validated. Migration:
+`{ provider: 'docker' }` → `{ provider: { kind: 'docker' } }`.
 
 ---
 
@@ -333,18 +279,12 @@ Migration: `{ provider: 'docker' }` → `{ provider: { kind: 'docker' } }`.
 ### Types (`types.ts`)
 
 ```typescript
-/** Shorthand tool attachment — expands to a full CapabilityRef. */
 export interface ToolAttachment {
-  /** Tool name exposed to the agent. */
   readonly name: string
-  /** Human-readable description for the agent. */
   readonly description?: string
-  /** JSON Schema for tool input. Omit for schema-less tools. */
   readonly inputSchema?: Record<string, unknown>
-  /** Transport: MCP server URL, peer runtime, or in-process component. */
-  readonly transport: string | TransportRef
-  /** Optional credential for authenticated tools. */
-  readonly credential?: string | CredentialRef
+  readonly transport: string | TransportRef   // 'mcp:https://...' shorthand or full ref
+  readonly credential?: string | CredentialRef // 'secret:...' shorthand or full ref
 }
 
 export type TransportRef =
@@ -362,17 +302,6 @@ export interface AttachToolsMiddleware {
 ### Helper (`middleware.ts`)
 
 ```typescript
-/**
- * Attaches external tools to the agent's capability surface.
- *
- * @example
- * ```ts
- * attachTools([
- *   { name: 'github', transport: 'mcp:https://github-mcp.example.com',
- *     credential: 'secret:gh-pat' },
- * ])
- * ```
- */
 export function attachTools(tools: readonly ToolAttachment[]): AttachToolsMiddleware {
   return { kind: 'attachTools', tools: [...tools] }
 }
@@ -516,71 +445,18 @@ packages/
 }
 ```
 
-### Binary resolution (`resolve-binary.ts`)
+### Binary resolution
 
-```typescript
-import { execFileSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+`resolve-binary.ts` maps `${process.platform}-${process.arch}` to the
+matching `@fireline/cli-{platform}` package, resolves `bin/fireline`,
+falls back to `fireline` on `$PATH` for dev. Standard pattern — see
+esbuild's `install.ts` for reference.
 
-const PLATFORM_PACKAGES: Record<string, string> = {
-  'darwin-arm64':  '@fireline/cli-darwin-arm64',
-  'darwin-x64':    '@fireline/cli-darwin-x64',
-  'linux-arm64':   '@fireline/cli-linux-arm64',
-  'linux-x64':     '@fireline/cli-linux-x64',
-  'win32-x64':     '@fireline/cli-win32-x64',
-}
+### CI
 
-export function resolveFirelineBinary(): string {
-  const key = `${process.platform}-${process.arch}`
-  const pkg = PLATFORM_PACKAGES[key]
-  if (!pkg) throw new Error(`Unsupported platform: ${key}`)
-
-  try {
-    const pkgDir = require.resolve(`${pkg}/package.json`)
-    const binPath = join(pkgDir, '..', 'bin', 'fireline')
-    if (existsSync(binPath)) return binPath
-  } catch {}
-
-  // Fallback: check if fireline is on PATH (dev mode)
-  try {
-    execFileSync('fireline', ['--version'], { stdio: 'ignore' })
-    return 'fireline'
-  } catch {}
-
-  throw new Error(
-    `Could not find fireline binary for ${key}. ` +
-    `Install @fireline/cli or ensure the fireline binary is on PATH.`
-  )
-}
-```
-
-### CI build matrix
-
-The release workflow cross-compiles for each target using
-`cargo build --release --target <triple>`, then copies the binary into
-the corresponding npm package directory. Standard GitHub Actions matrix:
-
-```yaml
-strategy:
-  matrix:
-    include:
-      - target: aarch64-apple-darwin
-        os: macos-latest
-        npm-package: fireline-darwin-arm64
-      - target: x86_64-apple-darwin
-        os: macos-latest
-        npm-package: fireline-darwin-x64
-      - target: aarch64-unknown-linux-gnu
-        os: ubuntu-latest
-        npm-package: fireline-linux-arm64
-      - target: x86_64-unknown-linux-gnu
-        os: ubuntu-latest
-        npm-package: fireline-linux-x64
-      - target: x86_64-pc-windows-msvc
-        os: windows-latest
-        npm-package: fireline-win32-x64
-```
+Release workflow cross-compiles for 5 targets (darwin-arm64/x64,
+linux-arm64/x64, win32-x64), copies each binary into its npm package,
+publishes all 6 packages atomically.
 
 ---
 
