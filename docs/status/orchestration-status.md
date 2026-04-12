@@ -151,7 +151,7 @@ Deferred (background / blocked):
 
 ## Open architectural decisions (Opus 3 owns)
 
-- Does `webhook-support.md` merge into `durable-subscriber.md` or stay standalone? Waiting on w15's proposal-index audit.
+- ~~Does `webhook-support.md` merge into `durable-subscriber.md` or stay standalone?~~ **DECIDED 2026-04-12 (Architect): MERGE.** `durable-subscriber.md §5.2` already specifies `WebhookSubscriber` as a primary use-case of the generalized primitive; `webhook-support.md`'s mechanism (host-side always-on stream subscriber, at-least-once delivery, cursor-stream persistence, topology component lowering) is a strict subset of DurableSubscriber's contract. DurableSubscriber additionally mandates W3C Trace Context propagation on outbound side effects — webhook-support.md lacks this, so merging is a strict architectural improvement, not just dedup. Merge plan: absorb webhook-support.md's concrete API surface (§6 `webhook()` middleware helper + topology lowering + host target config) into durable-subscriber.md as a dedicated subsection under §5.2, and mark `webhook-support.md` as SUPERSEDED in `proposal-index.md`.
 - Does `fireline.db()` session-flattened DB restructure in canonical-ids Phase 6 or post-refactor?
 - Does "always-on" sandbox policy (from deployment proposal) ship with DurableSubscriber or as its own execution phase?
 - Should chunk ordering strictly derive from durable-streams offset (as proposed) or can we keep a redundant `seq` field as a derived convenience? (Verification doc current answer: strict offset, no redundant field.)
