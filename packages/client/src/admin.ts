@@ -1,3 +1,4 @@
+import { requestControlPlane } from './control-plane.js'
 import type { SandboxDescriptor, SandboxStatus } from './types.js'
 
 export interface SandboxAdminOptions {
@@ -22,23 +23,52 @@ export class SandboxAdmin {
     this.token = options.token
   }
 
-  async get(_id: string): Promise<SandboxDescriptor | null> {
-    throw new Error('SandboxAdmin.get() is wired in phase 2')
+  async get(id: string): Promise<SandboxDescriptor | null> {
+    return requestControlPlane<SandboxDescriptor>(
+      this,
+      `/v1/sandboxes/${encodeURIComponent(id)}`,
+      { allowNotFound: true },
+    )
   }
 
-  async list(_labels?: Readonly<Record<string, string>>): Promise<SandboxDescriptor[]> {
-    throw new Error('SandboxAdmin.list() is wired in phase 2')
+  async list(labels?: Readonly<Record<string, string>>): Promise<SandboxDescriptor[]> {
+    const sandboxes =
+      (await requestControlPlane<SandboxDescriptor[]>(this, '/v1/sandboxes')) ?? []
+    if (!labels || Object.keys(labels).length === 0) {
+      return sandboxes
+    }
+    return sandboxes.filter((descriptor) => matchesLabels(descriptor.labels, labels))
   }
 
-  async destroy(_id: string): Promise<SandboxDescriptor | null> {
-    throw new Error('SandboxAdmin.destroy() is wired in phase 2')
+  async destroy(id: string): Promise<SandboxDescriptor | null> {
+    return requestControlPlane<SandboxDescriptor>(
+      this,
+      `/v1/sandboxes/${encodeURIComponent(id)}`,
+      {
+        method: 'DELETE',
+        allowNotFound: true,
+      },
+    )
   }
 
-  async status(_id: string): Promise<SandboxStatus | null> {
-    throw new Error('SandboxAdmin.status() is wired in phase 2')
+  async status(id: string): Promise<SandboxStatus | null> {
+    return (await this.get(id))?.status ?? null
   }
 
   async healthCheck(): Promise<boolean> {
-    throw new Error('SandboxAdmin.healthCheck() is wired in phase 2')
+    const response = await fetch(`${this.serverUrl.replace(/\/$/, '')}/healthz`, {
+      headers: {
+        accept: 'text/plain',
+        ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
+      },
+    })
+    return response.ok
   }
+}
+
+function matchesLabels(
+  actual: Readonly<Record<string, string>>,
+  expected: Readonly<Record<string, string>>,
+): boolean {
+  return Object.entries(expected).every(([key, value]) => actual[key] === value)
 }
