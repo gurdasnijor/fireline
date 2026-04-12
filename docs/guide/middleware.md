@@ -1,12 +1,17 @@
 # Middleware
 
-All middleware helpers in the TypeScript client are serializable data specs defined in [packages/client/src/middleware.ts](../../packages/client/src/middleware.ts) and typed in [packages/client/src/types.ts](../../packages/client/src/types.ts).
+All middleware helpers in the TypeScript client are serializable data
+specs defined in
+[packages/client/src/middleware.ts](../../packages/client/src/middleware.ts)
+and typed in [packages/client/src/types.ts](../../packages/client/src/types.ts).
 
 The translation path is:
 
 1. JS builds middleware data.
-2. [packages/client/src/sandbox.ts](../../packages/client/src/sandbox.ts) maps each middleware item to a topology component or tracer config.
-3. [crates/fireline-harness/src/host_topology.rs](../../crates/fireline-harness/src/host_topology.rs) instantiates the Rust implementation.
+2. [packages/client/src/sandbox.ts](../../packages/client/src/sandbox.ts)
+   maps each middleware item to a topology component or tracer config.
+3. [crates/fireline-harness/src/host_topology.rs](../../crates/fireline-harness/src/host_topology.rs)
+   instantiates the Rust implementation.
 
 ## `trace()`
 
@@ -19,17 +24,12 @@ const mw = trace({
 })
 ```
 
-What it becomes:
-
-- topology component name: `audit`
+- topology component: `audit`
 - Rust implementation: `AuditTracer`
-- source: [crates/fireline-harness/src/audit.rs](../../crates/fireline-harness/src/audit.rs)
+  ([`audit.rs`](../../crates/fireline-harness/src/audit.rs))
 
-What it does:
-
-- observes ACP/MCP trace events
-- serializes `AuditRecord` JSON
-- appends those records to a durable stream
+Observes ACP/MCP trace events, serializes `AuditRecord` JSON, appends to
+a durable stream.
 
 ## `approve({ scope })`
 
@@ -39,23 +39,19 @@ import { approve } from '@fireline/client/middleware'
 const mw = approve({ scope: 'tool_calls', timeoutMs: 60_000 })
 ```
 
-What it becomes:
-
-- topology component name: `approval_gate`
+- topology component: `approval_gate`
 - Rust implementation: `ApprovalGateComponent`
-- source: [crates/fireline-harness/src/approval.rs](../../crates/fireline-harness/src/approval.rs)
+  ([`approval.rs`](../../crates/fireline-harness/src/approval.rs))
 
-What it does:
+Emits a `permission_request` event to the state stream, blocks until an
+`approval_resolved` event appears on the same stream. The wait is
+durable via SSE, not in-memory callbacks.
 
-- emits a `permission_request` event to the state stream
-- blocks until an `approval_resolved` event appears on that same stream
-- waits durably via SSE, not in-memory callbacks
-
-Important current limitation:
-
-- the TS helper accepts `scope: 'tool_calls'`
-- the current implementation still gates at the prompt level, not the individual tool-call level
-- that fallback is visible in [packages/client/src/sandbox.ts](../../packages/client/src/sandbox.ts), where `scope: 'tool_calls'` is translated into a prompt-level approval policy until ACP/MCP tool interception lands upstream
+Current limitation: `scope: 'tool_calls'` accepts that vocabulary in the
+public API, but enforcement is still at the prompt level until ACP/MCP
+tool interception lands upstream. See
+[packages/client/src/sandbox.ts](../../packages/client/src/sandbox.ts)
+for the fallback mapping.
 
 ## `budget({ tokens })`
 
@@ -65,24 +61,14 @@ import { budget } from '@fireline/client/middleware'
 const mw = budget({ tokens: 50_000 })
 ```
 
-What it becomes:
-
-- topology component name: `budget`
+- topology component: `budget`
 - Rust implementation: `BudgetComponent`
-- source: [crates/fireline-harness/src/budget.rs](../../crates/fireline-harness/src/budget.rs)
+  ([`budget.rs`](../../crates/fireline-harness/src/budget.rs))
 
-What it does today:
-
-- counts approximate prompt tokens as `ceil(chars / 4)`
-- enforces `max_tokens`
-- terminates the current turn when the budget is exceeded
-
-What is not wired from the TS client today:
-
-- max tool-call count
-- max duration
-
-The Rust component supports those concepts, but the current TS middleware helper only exposes `tokens`.
+Counts approximate prompt tokens as `ceil(chars / 4)`, enforces
+`max_tokens`, terminates the current turn when the budget is exceeded.
+The Rust component also supports max tool-call count and max duration,
+but the TS helper only exposes `tokens` today.
 
 ## `contextInjection(...)` and `inject([...])`
 
@@ -101,64 +87,97 @@ const b = inject([
 ])
 ```
 
-What they become:
-
-- topology component name: `context_injection`
+- topology component: `context_injection`
 - Rust implementation: `ContextInjectionComponent`
-- source: [crates/fireline-harness/src/context.rs](../../crates/fireline-harness/src/context.rs)
+  ([`context.rs`](../../crates/fireline-harness/src/context.rs))
 
-Built-in context sources that exist today:
+Built-in context sources: `datetime`, `workspaceFile`, `staticText`.
 
-- `datetime`
-- `workspaceFile`
-- `staticText`
-
-## `peer()`
+## `peer({ peers? })`
 
 ```ts
 import { peer } from '@fireline/client/middleware'
 
-const mw = peer()
+const mw = peer({ peers: ['agent:reviewer', 'agent:writer'] })
 ```
 
-What it becomes:
-
-- topology component name: `peer_mcp`
+- topology component: `peer_mcp`
 - Rust implementation: `PeerComponent`
-- sources:
-  - [crates/fireline-harness/src/host_topology.rs](../../crates/fireline-harness/src/host_topology.rs)
-  - [crates/fireline-tools/src/peer/mod.rs](../../crates/fireline-tools/src/peer/mod.rs)
+  ([`host_topology.rs`](../../crates/fireline-harness/src/host_topology.rs),
+   [`peer/mod.rs`](../../crates/fireline-tools/src/peer/mod.rs))
 
-What it does:
+Intercepts `session/new`, injects a per-session MCP server, exposes peer
+tools (`list_peers`, `prompt_peer`), emits tool descriptors for the peer
+MCP surface.
 
-- intercepts `session/new`
-- injects a per-session MCP server
-- exposes peer tools such as `list_peers` and `prompt_peer`
-- emits tool descriptors for the peer MCP surface
+The optional `peers` list is now forwarded to the topology component
+config — prior versions silently dropped it, this is fixed.
 
-## `secretsProxy()`: not in the TS client yet
+## `secretsProxy({ ... })`
 
-The Rust side has a real secrets-injection implementation:
+Credential isolation is shipped end-to-end. The agent never sees
+plaintext; the harness resolves secrets at call time and writes an audit
+envelope to the durable stream.
 
-- [crates/fireline-harness/src/secrets.rs](../../crates/fireline-harness/src/secrets.rs)
+```ts
+import { secretsProxy } from '@fireline/client/middleware'
 
-That code includes:
+const mw = secretsProxy({
+  GITHUB_TOKEN:      { ref: 'secret:gh-pat', allow: 'api.github.com' },
+  OPENAI_API_KEY:    { ref: 'env:OPENAI_API_KEY' },
+  ANTHROPIC_API_KEY: { ref: 'env:ANTHROPIC_API_KEY' },
+})
+```
 
-- `SecretsInjectionComponent`
-- `InjectionRule`
-- `InjectionTarget`
-- `InjectionScope`
-- credential resolvers and redacted `SecretValue`
+- topology component: `secrets_injection`
+- Rust implementation: `SecretsInjectionComponent`
+  ([`secrets.rs`](../../crates/fireline-harness/src/secrets.rs))
 
-What it does on the Rust side today:
+Each binding is a `SecretBinding`:
 
-- resolves credentials on the prompt path
-- supports session-scoped environment-variable injection end to end
-- keeps plaintext wrapped in `SecretValue`
+| Field | Purpose |
+|---|---|
+| `ref` | Credential reference resolved by the host. Common forms: `env:VAR`, `secret:key`, `oauth:provider:account`. |
+| `allow` | Optional domain allow-list (string or array). The secret is only injected on outbound requests to matching hosts. |
 
-What does **not** exist today:
+Resolution today:
 
-- a `secretsProxy()` helper in `packages/client/src/middleware.ts`
-- a TS serialization path from `compose(...)` into `SecretsInjectionComponent`
+- `env:*` reads from the host process environment
+- `secret:*` reads from `~/.config/fireline/secrets.toml`, falling back
+  to a normalized env var name
+- `oauth:provider[:account]` reads from the same TOML file, falling back
+  to `FIRELINE_OAUTH_<PROVIDER>_<ACCOUNT>`
 
-So if you are writing against the public TS client, treat secrets injection as planned-but-not-exposed.
+Resolved plaintext stays wrapped in the Rust-side `SecretValue` (zeroized
+on drop, never serialized). The agent-visible `ToolDescriptor` surface
+never contains credential parameters.
+
+End-to-end example:
+
+```ts
+import { agent, compose, middleware, sandbox } from '@fireline/client'
+import { approve, secretsProxy, trace } from '@fireline/client/middleware'
+
+const reviewer = await compose(
+  sandbox({ provider: 'docker', image: 'node:22-slim' }),
+  middleware([
+    trace(),
+    approve({ scope: 'tool_calls' }),
+    secretsProxy({
+      GITHUB_TOKEN: { ref: 'secret:gh-pat', allow: 'api.github.com' },
+    }),
+  ]),
+  agent(['npx', '-y', '@anthropic-ai/claude-code-acp']),
+).start({ serverUrl: 'http://127.0.0.1:4440' })
+```
+
+Current scope of the injection target:
+
+- **shipped:** session-scoped environment-variable injection (the
+  `EnvVar` target), which covers most agent credentials today
+- **Rust has, not yet exposed from TS:** `McpServerHeader` and `ToolArg`
+  targets. The `SecretBinding` type accepts only the env-var shape right
+  now; broader targets are tracked in the secrets injection proposal.
+
+See also:
+[docs/proposals/secrets-injection-component.md](../proposals/secrets-injection-component.md).

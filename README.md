@@ -3,16 +3,27 @@
 Open-source infrastructure for durable, composable AI agents.
 
 ```typescript
-import { compose, agent, sandbox, middleware } from '@fireline/client'
-import { trace, approve, budget } from '@fireline/client/middleware'
+// agent.ts
+import { agent, compose, middleware, sandbox } from '@fireline/client'
+import { approve, budget, trace } from '@fireline/client/middleware'
 import { localPath } from '@fireline/client/resources'
 
-const handle = await compose(
+export default compose(
   sandbox({ resources: [localPath('.', '/workspace')] }),
   middleware([trace(), approve({ scope: 'tool_calls' }), budget({ tokens: 500_000 })]),
-  agent(['claude-code-acp']),
-).start({ serverUrl: 'http://localhost:4440' })
+  agent(['npx', '-y', '@anthropic-ai/claude-code-acp']),
+)
 ```
+
+```bash
+npx fireline agent.ts
+#   ✓ fireline ready
+#     sandbox: runtime:59f5ed5a-d624-…
+#     ACP:     ws://127.0.0.1:54896/acp
+#     state:   http://127.0.0.1:7474/v1/stream/fireline-state-runtime-…
+```
+
+Connect any ACP client to the printed URL. See [CLI guide](docs/guide/cli.md).
 
 ---
 
@@ -30,26 +41,58 @@ const handle = await compose(
 
 ## Quick start
 
-Give an AI agent access to your codebase, with approval gates and a token budget — in 8 lines:
+Two paths — declarative (recommended) and imperative.
+
+### Declarative: `npx fireline agent.ts`
 
 ```typescript
-import { compose, agent, sandbox, middleware } from '@fireline/client'
-import { trace, approve, budget } from '@fireline/client/middleware'
+// agent.ts — the whole agent definition, 10 lines
+import { agent, compose, middleware, sandbox } from '@fireline/client'
+import { approve, budget, trace } from '@fireline/client/middleware'
 import { localPath } from '@fireline/client/resources'
 
-const handle = await compose(
+export default compose(
   sandbox({ resources: [localPath('.', '/workspace')] }),
   middleware([trace(), approve({ scope: 'tool_calls' }), budget({ tokens: 500_000 })]),
   agent(['npx', '-y', '@anthropic-ai/claude-code-acp']),
-).start({ serverUrl: 'http://localhost:4440' })
-
-// handle.acp.url  → open an ACP session, start prompting
-// handle.state.url → subscribe to live agent activity
+)
 ```
 
-The agent runs in an isolated sandbox with your workspace mounted read-only. Every tool call requires your approval. Every effect is logged to a durable stream you can replay, query, or pipe into a dashboard. Kill the sandbox, restart it on a different machine — the session continues from where it left off.
+```bash
+npx fireline agent.ts
+```
 
-See [examples/](examples/) for more — background agents, Slackbots, multi-agent pipelines, session migration across hosts.
+The CLI boots durable streams in-process, spawns the control plane,
+provisions the sandbox, and prints the ACP endpoint for any
+[ACP client](https://agentclientprotocol.com/get-started/clients) to
+connect. See the [CLI guide](docs/guide/cli.md).
+
+### Imperative: `FirelineAgent` from code
+
+```typescript
+import { agent, compose, middleware, sandbox } from '@fireline/client'
+import { approve, budget, trace } from '@fireline/client/middleware'
+import { localPath } from '@fireline/client/resources'
+
+const fireAgent = await compose(
+  sandbox({ resources: [localPath('.', '/workspace')] }),
+  middleware([trace(), approve({ scope: 'tool_calls' }), budget({ tokens: 500_000 })]),
+  agent(['npx', '-y', '@anthropic-ai/claude-code-acp']),
+).start({ serverUrl: 'http://127.0.0.1:4440' })
+
+// The live FirelineAgent object:
+const acp = await fireAgent.connect()              // open an ACP session
+await fireAgent.resolvePermission(sid, rid, { allow: true })  // resolve approvals
+await fireAgent.stop()                             // tear down the sandbox
+```
+
+Either way, the agent runs in an isolated sandbox, every tool call
+requires approval, every effect lands on a durable stream you can
+replay, query, or pipe into a dashboard. Kill the sandbox, restart it
+on a different machine — the session continues from where it left off.
+
+See [examples/](examples/) — code review, background task runner, live
+monitoring, multi-agent team, crash-proof agent, approval workflow.
 
 ---
 
@@ -61,11 +104,12 @@ See [examples/](examples/) for more — background agents, Slackbots, multi-agen
 
 | Plane | Package | What it does |
 |---|---|---|
-| **Control** | `@fireline/client` | `compose(sandbox, middleware, agent).start()` — provision sandboxes, wire middleware, execute commands |
-| **Session** | `@agentclientprotocol/sdk` | ACP over `handle.acp.url` — `newSession()`, `prompt()`, `loadSession()`. Third-party protocol; Fireline never wraps it. |
-| **Observation** | `@fireline/state` | `createFirelineDB({ stateStreamUrl: handle.state.url })` → `useLiveQuery()` — reactive TanStack DB collections over the durable stream |
+| **Control** | `@fireline/client` | `compose(sandbox, middleware, agent).start()` returns a `FirelineAgent` with `.connect()`, `.resolvePermission()`, `.stop()` |
+| **Session** | `@agentclientprotocol/sdk` | ACP over `agent.acp.url` — `newSession()`, `prompt()`, `loadSession()`. Third-party protocol; Fireline never wraps it. |
+| **Observation** | `@fireline/client` / `@fireline/state` | `await fireline.db({ stateStreamUrl: agent.state.url })` → `db.sessions`, `db.permissions`, `useLiveQuery()` — reactive TanStack DB collections over the durable stream |
 
-The control plane gives you a handle. The handle carries two endpoints. Each endpoint connects you to a different plane. No side channels.
+`FirelineAgent` carries two endpoints (`acp`, `state`). Each connects you
+to a different plane. No side channels.
 
 ---
 
@@ -104,21 +148,22 @@ Middleware composes. Add `peer(['agent:reviewer'])` to route cross-agent calls. 
 Agents need API keys to do useful work. But if the agent can see the key, it can exfiltrate it. Fireline's `secretsProxy()` middleware injects credentials at call time, scoped to specific domains, without ever exposing the plaintext to the agent.
 
 ```typescript
-import { compose, agent, sandbox, middleware } from '@fireline/client'
-import { trace, approve, secretsProxy } from '@fireline/client/middleware'
+import { agent, compose, middleware, sandbox } from '@fireline/client'
+import { approve, secretsProxy, trace } from '@fireline/client/middleware'
+import { localPath } from '@fireline/client/resources'
 
-const handle = await compose(
+const fireAgent = await compose(
   sandbox({ resources: [localPath('.', '/workspace')] }),
   middleware([
     trace(),
     approve({ scope: 'tool_calls' }),
     secretsProxy({
-      GITHUB_TOKEN: { ref: 'secret:gh-pat', allow: 'api.github.com' },
-      OPENAI_KEY:   { ref: 'secret:openai', allow: 'api.openai.com' },
+      GITHUB_TOKEN:      { ref: 'secret:gh-pat', allow: 'api.github.com' },
+      ANTHROPIC_API_KEY: { ref: 'env:ANTHROPIC_API_KEY' },
     }),
   ]),
-  agent(['claude-code-acp']),
-).start({ serverUrl: 'http://localhost:4440' })
+  agent(['npx', '-y', '@anthropic-ai/claude-code-acp']),
+).start({ serverUrl: 'http://127.0.0.1:4440' })
 ```
 
 The agent sees tool schemas without credential parameters. The harness resolves `CredentialRef`s from your secret store (env vars in dev, vault in production), injects them into outbound requests for the allowed domain, and emits an audit envelope to the durable stream — all without the agent ever touching a plaintext token.
@@ -129,23 +174,23 @@ The agent sees tool schemas without credential parameters. The harness resolves 
 
 ## Observe everything — reactively, from the stream
 
-Every agent effect lands on a durable stream. `@fireline/state` materializes it into reactive collections you query like a database — no polling, no custom APIs.
+Every agent effect lands on a durable stream. `fireline.db()` materializes it into reactive collections you query like a database — no polling, no custom APIs.
 
 ```typescript
-import { createFirelineDB } from '@fireline/state'
+import fireline from '@fireline/client'
 import { useLiveQuery } from '@tanstack/react-db'
 import { eq } from '@tanstack/db'
 
-const db = createFirelineDB({ stateStreamUrl: handle.state.url })
+const db = await fireline.db({ stateStreamUrl: fireAgent.state.url })
 
 // React component — re-renders automatically as the agent works
 function AgentActivity({ sessionId }: { sessionId: string }) {
   const turns = useLiveQuery(q =>
-    q.from({ t: db.collections.promptTurns })
+    q.from({ t: db.promptTurns })
       .where(({ t }) => eq(t.sessionId, sessionId))
   )
   const pending = useLiveQuery(q =>
-    q.from({ p: db.collections.permissions })
+    q.from({ p: db.permissions })
       .where(({ p }) => eq(p.state, 'pending'))
   )
   return <>{turns.map(t => <Turn key={t.promptTurnId} turn={t} />)}</>
@@ -161,21 +206,30 @@ The stream contains sessions, turns, chunks, tool calls, permissions, cross-agen
 Need to know when an agent finishes? When it needs approval? When a multi-step pipeline advances? Subscribe to the stream. The durable log IS the orchestration mechanism.
 
 ```typescript
+import { appendApprovalResolved } from '@fireline/client'
+
 // Wait for agent completion — durably, without holding a connection open
-db.collections.promptTurns.subscribe(turns => {
+db.promptTurns.subscribe(turns => {
   const done = turns.find(t => t.sessionId === id && t.state === 'completed')
   if (done) notifyUser(done)
 })
 
 // Auto-approve tool calls matching a policy — the approval gate is a stream event
-db.collections.permissions.subscribe(perms => {
+db.permissions.subscribe(perms => {
   for (const p of perms.filter(p => p.state === 'pending')) {
-    if (matchesPolicy(p)) approveViaStream(p.requestId)
+    if (matchesPolicy(p)) {
+      void appendApprovalResolved({
+        streamUrl: fireAgent.state.url,
+        sessionId: p.sessionId,
+        requestId: p.requestId,
+        allow: true,
+      })
+    }
   }
 })
 
 // React to cross-agent handoffs
-db.collections.childSessionEdges.subscribe(edges => {
+db.childSessionEdges.subscribe(edges => {
   // Agent A called Agent B — the lineage graph is in the stream
 })
 ```
@@ -195,11 +249,18 @@ The agent calls a dangerous tool. The `approve()` middleware suspends the agent 
 The key insight: the durable stream is the transport. There's no callback URL to expire, no WebSocket to drop, no in-memory state to lose. If the sandbox crashes between the request and the resolution, restart it anywhere — the approval is already on the stream, waiting to be replayed.
 
 ```typescript
+import { appendApprovalResolved } from '@fireline/client'
+
 // Auto-approve safe operations, escalate dangerous ones to Slack
-db.collections.permissions.subscribe(perms => {
+db.permissions.subscribe(perms => {
   for (const p of perms.filter(p => p.state === 'pending')) {
     if (isSafeOperation(p)) {
-      approveViaStream(p.requestId)
+      void appendApprovalResolved({
+        streamUrl: fireAgent.state.url,
+        sessionId: p.sessionId,
+        requestId: p.requestId,
+        allow: true,
+      })
     } else {
       postToSlack(`Agent wants to run: ${p.toolCall.command}`, p.requestId)
     }
@@ -215,12 +276,13 @@ Kill a sandbox. Restart it on a different host. The session continues.
 
 ```typescript
 // Host A — local dev
-const handle1 = await compose(sandbox(), middleware([trace()]), agent([...]))
-  .start({ serverUrl: 'http://localhost:4440', stateStream: 'my-session' })
+const agentA = await compose(sandbox(), middleware([trace()]), agent([...]))
+  .start({ serverUrl: 'http://127.0.0.1:4440', stateStream: 'my-session' })
 // ... prompt a few turns, then stop
+await agentA.stop()
 
 // Host B — cloud, different machine, different continent
-const handle2 = await compose(sandbox(), middleware([trace()]), agent([...]))
+const agentB = await compose(sandbox(), middleware([trace()]), agent([...]))
   .start({ serverUrl: 'https://prod.internal:4440', stateStream: 'my-session' })
 // session/load picks up from exactly where Host A left off
 ```
@@ -243,18 +305,23 @@ Five hours later, you open the dashboard on your phone. The pending approval is 
 
 ```typescript
 // Fire-and-forget personal assistant
-const handle = await compose(
-  sandbox({ provider: 'cloud' }),
-  middleware([ trace(), approve({ scope: 'tool_calls' }), secretsProxy({...}) ]),
-  agent(['claude-code-acp']),
-).start({ serverUrl: 'https://prod.fireline.dev' })
+const assistant = await compose(
+  sandbox({ provider: 'anthropic' }),
+  middleware([ trace(), approve({ scope: 'tool_calls' }), secretsProxy({ /* ... */ }) ]),
+  agent(['npx', '-y', '@anthropic-ai/claude-code-acp']),
+).start({ serverUrl: 'https://prod.fireline.dev', stateStream: 'inbox-check' })
 
 // Prompt and walk away — the stream remembers everything
-conn.prompt({ message: 'Check my inbox for the Acme contract and summarize it' })
+const acp = await assistant.connect()
+const { sessionId } = await acp.newSession({ cwd: '/workspace', mcpServers: [] })
+await acp.prompt({
+  sessionId,
+  prompt: [{ type: 'text', text: 'Check my inbox for the Acme contract and summarize it' }],
+})
 
 // Hours later, from a different device:
 // 1. Dashboard shows pending approval (it's a stream event, not a callback)
-// 2. You approve
+// 2. You approve via assistant.resolvePermission(...) or appendApprovalResolved(...)
 // 3. New sandbox provisions, replays stream, agent continues
 ```
 
@@ -269,14 +336,15 @@ The stream outlives the sandbox, the process, the network connection, and your a
 ## Multi-agent topologies
 
 ```typescript
-import { compose, agent, sandbox, middleware, peer, fanout } from '@fireline/client'
+import { agent, compose, fanout, middleware, peer, sandbox } from '@fireline/client'
+import { peer as peerMiddleware } from '@fireline/client/middleware'
 
-const reviewer = compose(sandbox({...}), middleware([...]), agent(['claude-code-acp'])).as('reviewer')
-const writer   = compose(sandbox({...}), middleware([...]), agent(['claude-code-acp'])).as('writer')
+const reviewer = compose(sandbox({...}), middleware([peerMiddleware()]), agent([...])).as('reviewer')
+const writer   = compose(sandbox({...}), middleware([peerMiddleware()]), agent([...])).as('writer')
 
 // peer() wires cross-agent ACP calls — type-safe at compile time
-const handles = await peer(reviewer, writer).start({ serverUrl })
-// handles.reviewer.acp, handles.writer.acp — each agent gets its own endpoints
+const team = await peer(reviewer, writer).start({ serverUrl })
+// team.reviewer and team.writer are each FirelineAgent objects
 // Both write to the same durable stream — one subscription sees everything
 
 // fanout() runs N instances in parallel
@@ -289,10 +357,14 @@ const workers = await fanout(worker, { count: 3 }).start({ serverUrl })
 
 | Example | Pattern | What it shows |
 |---|---|---|
-| [`examples/flamecast-client/`](examples/flamecast-client/) | Agent platform client | `compose` + `peer` + reactive dashboard with approval flow |
-| [`examples/agent-os/`](examples/agent-os/) | Multi-agent orchestration | `peer` + `fanout` + session migration + cross-agent lineage |
-| [`examples/background-agent/`](examples/background-agent/) | Fire-and-forget task runner | Ramp Inspect pattern — provision, prompt, observe via stream |
-| [`examples/slackbot/`](examples/slackbot/) | Integration agent | Slack Bolt + stream-based completion/approval observation |
+| [`examples/code-review-agent/`](examples/code-review-agent/) | Scoped code access | `compose` + `approve` + `secretsProxy` + reactive observation of pending approvals |
+| [`examples/approval-workflow/`](examples/approval-workflow/) | Durable approvals | `appendApprovalResolved` + stream-backed resolution from outside the agent |
+| [`examples/background-task/`](examples/background-task/) | Fire-and-forget | Provision, prompt, observe completion via stream subscription |
+| [`examples/live-monitoring/`](examples/live-monitoring/) | Reactive dashboard | `useLiveQuery` across `sessions`, `promptTurns`, `permissions` |
+| [`examples/multi-agent-team/`](examples/multi-agent-team/) | Multi-agent | `peer(...)` across harnesses with shared state stream |
+| [`examples/crash-proof-agent/`](examples/crash-proof-agent/) | Session resume | `stateStream` + `session/load` after sandbox death |
+| [`examples/cross-host-discovery/`](examples/cross-host-discovery/) | Discovery | Two control planes, shared discovery stream, peer MCP routing |
+| [`examples/flamecast-client/`](examples/flamecast-client/) | Platform client | Dashboard UI over `fireline.db` |
 
 ---
 

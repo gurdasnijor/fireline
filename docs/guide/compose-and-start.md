@@ -2,24 +2,17 @@
 
 ## Current API surface
 
-Today, the TypeScript control-plane API is:
+The TypeScript control-plane API is:
 
 - `compose(sandbox(...), middleware([...]), agent([...]))`
 - `.as('name')`
-- `.start({ serverUrl, name?, stateStream?, token? })`
+- `.start({ serverUrl, name?, stateStream?, token? })` → `Promise<FirelineAgent>`
 
 See:
 
 - [packages/client/src/sandbox.ts](../../packages/client/src/sandbox.ts)
+- [packages/client/src/agent.ts](../../packages/client/src/agent.ts)
 - [packages/client/src/types.ts](../../packages/client/src/types.ts)
-
-The client does **not** currently implement:
-
-- local no-URL `start()`
-- `start({ remote: '...' })`
-- a live `FirelineAgent` wrapper object
-
-Those are proposal-level ideas, not the current package surface.
 
 ## Define a harness
 
@@ -31,6 +24,7 @@ import { localPath } from '@fireline/client/resources'
 const reviewer = compose(
   sandbox({
     provider: 'docker',
+    image: 'node:22-slim',
     resources: [localPath(process.cwd(), '/workspace', true)],
     labels: { team: 'infra', role: 'reviewer' },
   }),
@@ -42,46 +36,81 @@ const reviewer = compose(
 ).as('reviewer')
 ```
 
-`compose(...)` returns a `Harness`. It is still just a serializable spec at this point.
+`compose(...)` returns a `Harness`. It is still a serializable spec at
+this point — no sandbox has been provisioned.
 
 ## Start a harness
 
 ```ts
-const handle = await reviewer.start({
+const agent = await reviewer.start({
   serverUrl: 'http://127.0.0.1:4440',
   name: 'reviewer',
   stateStream: 'demo-reviewer',
 })
 
-console.log(handle.id)
-console.log(handle.acp.url)
-console.log(handle.state.url)
+console.log(agent.id)
+console.log(agent.acp.url)
+console.log(agent.state.url)
 ```
 
-Internally, `start()` creates a `Sandbox` client and POSTs a provision request to `/v1/sandboxes`.
+`start()` returns a **`FirelineAgent`** — a live object that preserves the
+sandbox-handle fields and adds imperative methods:
 
-## What you get back
+| Field / method | Purpose |
+|---|---|
+| `agent.id` | Provider-assigned sandbox identifier |
+| `agent.provider` | Provider name that created the sandbox |
+| `agent.acp` | `{ url, headers? }` ACP endpoint |
+| `agent.state` | `{ url, headers? }` durable state endpoint |
+| `agent.name` | Logical harness name |
+| `agent.connect(clientName?)` | Open an ACP WebSocket connection |
+| `agent.resolvePermission(sessionId, requestId, outcome)` | Append `approval_resolved` to the state stream |
+| `agent.stop()` / `agent.destroy()` | Tear down the sandbox via the control plane |
 
-`start()` returns a `HarnessHandle`, not a live session wrapper. The handle contains:
+`FirelineAgent` implements `HarnessHandle`, so anything that expected the
+bare handle fields still works.
 
-- `id` for lifecycle operations
-- `provider` for debugging or routing
-- `acp.url` for ACP
-- `state.url` for `@fireline/state`
-- `name` for topology bookkeeping
+### Current requirement: `serverUrl`
 
-If you want a single object with `connect()`, `resolvePermission()`, `stop()`, and `destroy()`, that convenience layer does not exist yet.
+`start()` currently requires a `serverUrl` pointing at a running Fireline
+control plane. Two ways to run one:
 
-Today you compose it yourself:
+1. **Manual (dev):** `cargo build --bin fireline --bin fireline-streams`,
+   then run `fireline-streams` and `fireline --control-plane --port 4440
+   --durable-streams-url http://127.0.0.1:7474/v1/stream`.
+2. **CLI (recommended):** `npx fireline run agent.ts` — the CLI spawns
+   both binaries, provisions the sandbox, and prints the endpoints. See
+   [cli.md](./cli.md).
 
-- ACP connection: `@agentclientprotocol/sdk` or `use-acp`
-- observation: `createFirelineDB({ stateStreamUrl: handle.state.url })`
-- destroy: `new SandboxAdmin({ serverUrl }).destroy(handle.id)`
-- external approval resolution: `appendApprovalResolved(...)`
+The proposal vocabulary sometimes talks about `start()` with no arguments
+(local embedded mode) or `start({ remote: '...' })`. Those are on the
+[Declarative Agent API design](../proposals/declarative-agent-api-design.md)
+roadmap; they are not in the package today. `serverUrl` is still the only
+way to tell the client where to provision.
 
 ## Connect to ACP
 
-In React, the cleanest path is `use-acp`:
+```ts
+const acp = await agent.connect('reviewer-ui')
+const { sessionId } = await acp.newSession({ cwd: '/workspace', mcpServers: [] })
+await acp.prompt({
+  sessionId,
+  prompt: [{ type: 'text', text: 'Review this repo.' }],
+})
+await acp.close()
+```
+
+`agent.connect()` returns a `ConnectedAcp` — a `ClientSideConnection` from
+`@agentclientprotocol/sdk` with a `.close()` method added. If you prefer
+the standalone helper, import `connectAcp` directly:
+
+```ts
+import { connectAcp } from '@fireline/client'
+
+const acp = await connectAcp(agent.acp, 'reviewer-ui')
+```
+
+In React, use `use-acp` instead:
 
 ```tsx
 import { useAcpClient } from 'use-acp'
@@ -92,46 +121,52 @@ function SessionView({ acpUrl }: { acpUrl: string }) {
     autoConnect: true,
     sessionParams: { cwd: '/workspace', mcpServers: [] },
   })
-
   return <pre>{acp.connectionState.status}</pre>
 }
 ```
 
-In Node, use `@agentclientprotocol/sdk` directly. The repo’s example helper in [examples/shared/acp-node.ts](../../examples/shared/acp-node.ts) is a compact reference implementation.
-
 ## Observe the state stream
 
 ```ts
-import { createFirelineDB } from '@fireline/state'
+import fireline from '@fireline/client'
 
-const db = createFirelineDB({ stateStreamUrl: handle.state.url })
-await db.preload()
+const db = await fireline.db({ stateStreamUrl: agent.state.url })
 
-db.collections.sessions.subscribe((rows) => {
+db.sessions.subscribe((rows) => {
   console.log(rows.map((row) => row.sessionId))
 })
 ```
 
-## Destroy a sandbox
+See [observation.md](./observation.md) for the full surface.
+
+## Stop a sandbox
+
+```ts
+await agent.stop()
+```
+
+That calls the control plane's `DELETE /v1/sandboxes/:id`. If you don't
+have the `FirelineAgent` object — for example, because a different process
+provisioned it — use `SandboxAdmin`:
 
 ```ts
 import { SandboxAdmin } from '@fireline/client/admin'
 
 const admin = new SandboxAdmin({ serverUrl: 'http://127.0.0.1:4440' })
-await admin.destroy(handle.id)
+await admin.destroy(sandboxId)
 ```
 
-There is no root export for `SandboxAdmin`; import it from `@fireline/client/admin`.
+There is no root export for `SandboxAdmin`; import it from
+`@fireline/client/admin`.
 
 ## Multi-agent topologies
 
-The current client exports three topology helpers from [packages/client/src/topology.ts](../../packages/client/src/topology.ts):
+The client exports three topology helpers from
+[packages/client/src/topology.ts](../../packages/client/src/topology.ts):
 
 - `peer(...)`
 - `fanout(...)`
 - `pipe(...)`
-
-Example:
 
 ```ts
 import { agent, compose, fanout, middleware, peer as startPeers, pipe, sandbox } from '@fireline/client'
@@ -148,6 +183,7 @@ const peers = await startPeers(worker('agent-a'), worker('agent-b')).start({
   serverUrl: 'http://127.0.0.1:4440',
   stateStream: 'team-demo',
 })
+// → { 'agent-a': FirelineAgent, 'agent-b': FirelineAgent }
 
 const replicas = await fanout(worker('reviewer'), { count: 3 }).start({
   serverUrl: 'http://127.0.0.1:4440',
@@ -160,9 +196,13 @@ const pipeline = await pipe(worker('researcher'), worker('writer')).start({
 })
 ```
 
-Important current behavior:
+Current behavior:
 
-- topology-level `peer(...)` shares a state stream and starts harnesses in parallel
-- it does **not** inject the `peer_mcp` component by itself
-- if you want cross-agent MCP routing, add middleware-level `peer()` inside each harness
-- `pipe(...)` starts sequentially with a shared state stream, but it does **not** automatically pipe one agent’s output into the next
+- topology-level `peer(...)` shares a state stream and starts harnesses in
+  parallel; it does **not** inject the `peer_mcp` middleware component by
+  itself. Add middleware-level `peer({ peers: [...] })` inside each
+  harness for cross-agent MCP routing.
+- `peer({ peers: [...] })` now forwards the peer list to the topology
+  component (this was a silent drop before — fixed).
+- `pipe(...)` starts sequentially with a shared state stream; it does
+  **not** automatically pipe output between agents.

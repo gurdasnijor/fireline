@@ -1,28 +1,72 @@
 # Observation
 
-## Current API: `createFirelineDB(...)`
+## Current API: `fireline.db(...)`
 
-The proposal vocabulary sometimes talks about `fireline.db()`. That convenience does **not** exist in the current TypeScript client.
-
-Today, observation lives in `@fireline/state`:
+`@fireline/client` exposes `fireline.db()` as the unified entry point for
+durable-stream observation. It wraps `createFirelineDB` from
+`@fireline/state`, preloads the underlying stream, and hoists collections
+onto the DB object so callers can write `db.sessions` or `db.permissions`
+directly.
 
 ```ts
-import { createFirelineDB } from '@fireline/state'
+import fireline from '@fireline/client'
 
-const db = createFirelineDB({ stateStreamUrl: handle.state.url })
-await db.preload()
+const db = await fireline.db({ stateStreamUrl: agent.state.url })
+
+db.sessions.subscribe((rows) => {
+  console.log(rows.map((row) => row.sessionId))
+})
+```
+
+If `stateStreamUrl` is omitted, `db()` reads `FIRELINE_STREAM_URL` from
+the environment and falls back to
+`http://localhost:7474/streams/state/default`.
+
+The named export is also available:
+
+```ts
+import { db } from '@fireline/client'
+
+const fireDb = await db({ stateStreamUrl: agent.state.url })
 ```
 
 See:
 
+- [packages/client/src/db.ts](../../packages/client/src/db.ts)
 - [packages/state/src/collection.ts](../../packages/state/src/collection.ts)
 - [packages/state/src/schema.ts](../../packages/state/src/schema.ts)
 
-Under the hood this is built on `createStreamDB(...)` from `@durable-streams/state`.
+### Using `@fireline/state` directly
+
+`createFirelineDB` from `@fireline/state` is still exported and still
+works. Use it when you want explicit control over preloading or when you
+don't have `@fireline/client` in scope:
+
+```ts
+import { createFirelineDB } from '@fireline/state'
+
+const db = createFirelineDB({ stateStreamUrl: agent.state.url })
+await db.preload()
+
+db.collections.sessions.subscribe((rows) => {
+  console.log(rows.map((row) => row.sessionId))
+})
+```
+
+The difference:
+
+- `fireline.db(...)` — preloads automatically, hoists collections onto
+  the DB object (`db.sessions`, `db.permissions`, …), returns a `Promise`.
+- `createFirelineDB(...)` — returns the DB synchronously; you call
+  `await db.preload()` yourself and access collections through
+  `db.collections.*`.
+
+Both return the same underlying TanStack DB instance.
 
 ## Collections
 
-The current `FirelineDB` exposes these live collections:
+The `FirelineDB` exposes these live collections (via `db.<name>` or
+`db.collections.<name>`):
 
 - `sessions`
 - `promptTurns`
@@ -34,20 +78,22 @@ The current `FirelineDB` exposes these live collections:
 - `terminals`
 - `runtimeInstances`
 
-These are defined in [packages/state/src/schema.ts](../../packages/state/src/schema.ts).
+See [packages/state/src/schema.ts](../../packages/state/src/schema.ts)
+for the row shapes.
 
 ## Subscribe, do not poll
 
-Each collection gets a convenience `.subscribe(...)` helper in [packages/state/src/collection.ts](../../packages/state/src/collection.ts):
+Each collection has a `.subscribe(...)` helper in
+[packages/state/src/collection.ts](../../packages/state/src/collection.ts):
 
 ```ts
-db.collections.permissions.subscribe((rows) => {
+db.permissions.subscribe((rows) => {
   const pending = rows.filter((row) => row.state === 'pending')
   console.log(pending.map((row) => row.requestId))
 })
 ```
 
-That helper is just a thin wrapper over TanStack DB’s `subscribeChanges(...)`, but it makes the “reactive, not polling” usage pattern obvious.
+This is a thin wrapper over TanStack DB's `subscribeChanges(...)`.
 
 ## React pattern: `useLiveQuery`
 
@@ -58,53 +104,50 @@ import { eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
 
 const sessions = useLiveQuery(
-  (q) => q.from({ s: db.collections.sessions }),
+  (q) => q.from({ s: db.sessions }),
   [db],
 )
 
 const pendingPermissions = useLiveQuery(
   (q) =>
     q
-      .from({ p: db.collections.permissions })
+      .from({ p: db.permissions })
       .where(({ p }) => eq(p.state, 'pending')),
   [db],
 )
 ```
 
-The repo’s [examples/live-monitoring/index.ts](../../examples/live-monitoring/index.ts) is the clean reference for this pattern.
+The repo's
+[examples/live-monitoring/index.ts](../../examples/live-monitoring/index.ts)
+is the clean reference for this pattern.
 
 ## ACP hooks in React
 
 Observation and ACP are separate planes:
 
-- observation: `createFirelineDB(...)`
-- session: `useAcpClient(...)`
+- observation: `fireline.db(...)`
+- session: `useAcpClient(...)` from `use-acp`
 
-For React/browser UIs, the intended pairing is:
-
-- `@fireline/state` for durable observation
-- `use-acp` for ACP session state and prompts
+For React/browser UIs, pair them. For Node, use `agent.connect()` or
+`connectAcp(agent.acp)` (see [compose-and-start.md](./compose-and-start.md)).
 
 ## Prebuilt query builders
 
-`@fireline/state` already exports seven prebuilt live-query helpers from [packages/state/src/collections](../../packages/state/src/collections):
+`@fireline/state` exports seven prebuilt live-query helpers from
+[packages/state/src/collections](../../packages/state/src/collections):
 
-- `createPendingPermissionsCollection`
-  Pending approvals only.
-- `createSessionTurnsCollection`
-  All prompt turns for one ACP session, ordered by `startedAt`.
-- `createTurnChunksCollection`
-  All chunks for one prompt turn, ordered by `seq`.
-- `createSessionPermissionsCollection`
-  Full approval history for one session, not just pending items.
-- `createActiveTurnsCollection`
-  Prompt turns whose state is `active`.
-- `createQueuedTurnsCollection`
-  Prompt turns whose state is `queued`, ordered by queue position.
-- `createConnectionTurnsCollection`
-  Prompt turns for one logical connection across sessions.
-
-Example:
+- `createPendingPermissionsCollection` — pending approvals only
+- `createSessionTurnsCollection` — all prompt turns for one ACP session,
+  ordered by `startedAt`
+- `createTurnChunksCollection` — all chunks for one prompt turn, ordered
+  by `seq`
+- `createSessionPermissionsCollection` — full approval history for one
+  session
+- `createActiveTurnsCollection` — prompt turns whose state is `active`
+- `createQueuedTurnsCollection` — prompt turns whose state is `queued`,
+  ordered by queue position
+- `createConnectionTurnsCollection` — prompt turns for one logical
+  connection across sessions
 
 ```ts
 import {
@@ -113,23 +156,23 @@ import {
 } from '@fireline/state'
 
 const pending = createPendingPermissionsCollection({
-  permissions: db.collections.permissions,
+  permissions: db.permissions,
 })
 
 const sessionTurns = createSessionTurnsCollection({
-  promptTurns: db.collections.promptTurns,
+  promptTurns: db.promptTurns,
   sessionId,
 })
 ```
 
-These helpers are already exported. Most of the example apps currently do not use them enough.
-
 ## Why observation matters
 
-The durable stream is the source of truth, so observation is more than UI rendering:
+The durable stream is the source of truth, so observation is more than
+UI rendering:
 
 - approvals wait on stream events
 - session history is replayable after restart
 - dashboards and bots can subscribe without reaching into sandbox memory
 
-That architectural choice is why Fireline can replace polling-heavy, ad hoc backend infrastructure with a stream-backed read model.
+That architectural choice is why Fireline can replace polling-heavy, ad
+hoc backend infrastructure with a stream-backed read model.

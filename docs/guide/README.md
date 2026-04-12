@@ -12,8 +12,10 @@ These guides describe the code that exists in this repository today. Where the p
 
 - [Concepts](./concepts.md)
   Core vocabulary: harness specs, handles, the three planes, and why durable streams are the source of truth.
+- [CLI (`npx fireline`)](./cli.md)
+  Run declarative agent specs with one command — boots streams, control plane, provisions the sandbox.
 - [Compose and Start](./compose-and-start.md)
-  How to define a harness, start it, connect to ACP, and manage lifecycle with `SandboxAdmin`.
+  How to define a harness, call `.start()`, and work with the `FirelineAgent` object it returns.
 - [Middleware](./middleware.md)
   What each middleware helper actually emits today, how the Rust conductor interprets it, and what is still missing.
 - [Observation](./observation.md)
