@@ -1,86 +1,165 @@
 # Fireline
 
-> Open-source substrate for managed agents. Every surface Fireline exposes maps to one of Anthropic's six managed-agent primitives. Products (Flamecast and others) build on top without Fireline absorbing their scope.
+Open-source infrastructure for durable, composable AI agents.
 
-Fireline is the thing that makes an ACP agent **durable, observable, peerable, and resumable**. It runs the conductor that sits between an ACP client and an agent process, projects every effect into a durable `STATE-PROTOCOL` stream, and exposes a small set of trait-shaped primitives that downstream TypeScript consumers compose against.
+```typescript
+import { compose, agent, sandbox, middleware } from '@fireline/client'
+import { trace, approve, budget } from '@fireline/client/middleware'
+import { localPath } from '@fireline/client/resources'
 
-Pairs with **[Flamecast](https://github.com/flamecast)** — the operator-facing control plane for agents that run on Fireline. Fireline is the substrate; Flamecast is the product layer above it.
-
-## The six primitives
-
-| # | Primitive | Interface | Fireline status |
-|---|---|---|---|
-| 1 | **Session** | Append-only log, idempotent appends, replayable from any offset | **Strong** — `durable-streams` + `DurableStreamTracer` + `@fireline/state` live collections |
-| 2 | **Orchestration** | `wake(session_id) → void` | **Live** — `Host.wake(handle)` trait + `whileLoopOrchestrator` satisfier |
-| 3 | **Harness** | `yield Effect → EffectResult` | **Partial by design** — conductor proxy chain; durable suspend/resume via seven-combinator composition |
-| 4 | **Sandbox** | `provision(resources) → execute(name, input)` | **Strong** — `Sandbox` trait + `MicrosandboxSandbox` satisfier (behind `microsandbox-provider` feature) |
-| 5 | **Resources** | `[{source_ref, mount_path}]` | **Strong** — `ResourceMounter` + `FsBackendComponent`; ACP-fs and physical-mount paths both live |
-| 6 | **Tools** | `{name, description, input_schema}` | **Strong** — topology components + MCP injection; portable `CapabilityRef` / `TransportRef` / `CredentialRef` in `@fireline/client/core` |
-
-Fireline introduces concepts **above** the six primitives (conductor components, topology specs, proxy chains, materializers) but **none of these are new primitives** — they all decompose into a seven-combinator algebra (`observe`, `mapEffect`, `appendToSession`, `filter`, `substitute`, `suspend`, `fanout`) over the primitive substrate. See `docs/explorations/managed-agents-mapping.md` for the full decomposition.
-
-## Authoritative references
-
-Start here, in this order:
-
-- **`docs/proposals/client-primitives.md`** — the authoritative TypeScript substrate surface (`Host`, `Sandbox`, `Orchestrator`, `Combinator`, module layout). This supersedes every earlier TS-API exploration doc.
-- **`docs/proposals/runtime-host-split.md`** §7 — Host / Sandbox / Orchestrator reframe on the Rust side.
-- **`docs/proposals/crate-restructure-manifest.md`** — target Rust crate layout with 1:1 primitive alignment.
-- **`docs/explorations/managed-agents-mapping.md`** — operational source of truth for the six primitives and the combinator algebra.
-- **`docs/explorations/managed-agents-citations.md`** — file:line inventory of where each primitive is implemented today.
-- **`docs/explorations/claude-agent-sdk-v2-findings.md`** — verification of the Claude Agent SDK v2 preview against the `Host` primitive.
-- **`docs/architecture.md`** — comprehensive architectural reference.
-
-## Repo layout (target)
-
-The target Rust workspace layout below is aligned 1:1 with the primitive taxonomy per `docs/proposals/crate-restructure-manifest.md`.
-
-> **Note:** **target layout — restructure in progress.** The live tree still contains `crates/fireline-conductor` and `crates/fireline-components` as transitional crates being dissolved into the primitive-aligned crates below. Use the manifest for the current move state.
-
-```
-fireline/
-├── Cargo.toml                       # workspace root + binary package
-├── crates/
-│   ├── fireline-semantics/          # pure semantic kernel (leaf, no internal deps)
-│   ├── fireline-session/            # durable-stream-backed session log + replay
-│   ├── fireline-orchestration/      # wake(session_id), trigger loop, session index
-│   ├── fireline-harness/            # ACP adapter, approval gate, effect capture
-│   ├── fireline-sandbox/            # tool execution container (microsandbox, local, docker)
-│   ├── fireline-resources/          # mount + fs backend + resource attachment
-│   ├── fireline-tools/              # registry, capability ref, descriptor projection
-│   ├── fireline-runtime/            # runtime manager + provider + registry glue
-│   └── fireline-control-plane/      # HTTP runtime management surface
-├── packages/                        # TypeScript workspace (pnpm)
-│   ├── state/                       # @fireline/state — durable-stream consumer collections
-│   ├── client/                      # @fireline/client — Host / Sandbox / Orchestrator surface
-│   │   └── src/
-│   │       ├── core/                # @fireline/client/core — combinators, refs, specs
-│   │       ├── host/                # @fireline/client/host — Host primitive + types
-│   │       ├── orchestration/       # @fireline/client/orchestration — whileLoopOrchestrator
-│   │       ├── host-fireline/       # createFirelineHost satisfier
-│   │       └── host-claude/         # createClaudeHost satisfier (Agent SDK v2 preview)
-│   └── browser-harness/             # Vite dev harness driven by the Host primitive
-├── src/                             # fireline binary
-│   ├── main.rs                      # CLI + bootstrap
-│   └── bin/                         # additional binaries (dashboard, agents CLI, testy variants)
-├── tests/                           # cross-crate Rust integration tests
-├── verification/                    # Stateright + TLA model-checking for the semantic kernel
-└── docs/                            # architecture and design docs
-    ├── architecture.md
-    ├── proposals/                   # authoritative proposals (client-primitives, host-split, restructure)
-    └── explorations/                # source-of-truth reference docs
+const handle = await compose(
+  sandbox({ resources: [localPath('.', '/workspace')] }),
+  middleware([trace(), approve({ scope: 'tool_calls' }), budget({ tokens: 500_000 })]),
+  agent(['claude-code-acp']),
+).start({ serverUrl: 'http://localhost:4440' })
 ```
 
-## Status
+---
 
-- **Managed-agent suite is green on CI.** 30+ managed-agent-suite tests plus `runtime_index_agreement` pass in the default feature configuration.
-- **Stream-as-truth refactor.** Phase 1 is landed (`runtime_endpoints` envelope + `RuntimeIndex` projection + agreement tests). Phase 2/3 (flip read path, delete `RuntimeRegistry`) are deferred pending production control-plane shared-state subscription.
-- **Primitive trait layer is live.** `Host`, `Sandbox`, `Orchestrator` traits introduced in `crates/fireline-conductor/src/primitives/` (pending migration into `fireline-runtime` per the restructure manifest).
-- **`MicrosandboxSandbox` satisfier** ships behind the `microsandbox-provider` feature flag (off by default — libdbus-sys doesn't build on vanilla CI runners).
-- **TypeScript primitive layer** (Tiers 1–5) is landed: `@fireline/client/core`, `/host`, `/orchestration`, `/host-fireline`, `/host-claude`, and the browser-harness rewire onto the `Host` primitive.
+## What makes Fireline different
 
-For an operational snapshot and the live in-flight work index, see `docs/handoff-2026-04-11-stream-as-truth-and-runtime-abstraction.md`.
+**Durable.** Sessions survive sandbox death. The [durable stream](https://durablestreams.com) is the source of truth, not any single process. Kill a sandbox, restart on a different host, run `session/load` — the conversation continues from exactly where it left off. Every ACP effect lands in an append-only log with idempotent writes and offset replay.
+
+**Composable.** Middleware intercepts the ACP channel declaratively. `trace()`, `approve()`, `budget()`, `inject()` — each is a serializable spec, not a closure. The Rust conductor interprets them server-side. Compose them like Express middleware, ship them as data, validate them before deployment.
+
+**Observable.** [`@fireline/state`](packages/state/) gives you reactive queries over the agent's durable stream. No polling. `useLiveQuery()` in React, `.subscribe()` in Node. The stream IS the observation API — sessions, turns, chunks, permissions, cross-agent lineage, all materialized by [TanStack DB](https://tanstack.com/db) with differential dataflow.
+
+**Portable.** Same `compose()` call runs on a local subprocess, in a Docker container, on a [microsandbox](https://github.com/superradcompany/microsandbox) VM, or on a remote Fireline server. Swap the `serverUrl`, keep everything else. The agent code doesn't know or care where it's running.
+
+---
+
+## Quick start
+
+```bash
+# Build the Fireline server
+cargo build -p fireline -p fireline-host
+
+# Start the server
+target/debug/fireline --control-plane --port 4440 --durable-streams-url http://localhost:8787/v1/stream
+
+# In another terminal — provision an agent and talk to it
+npx ts-node <<'EOF'
+import { compose, agent, sandbox, middleware } from '@fireline/client'
+import { trace } from '@fireline/client/middleware'
+import { ClientSideConnection, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
+
+const handle = await compose(
+  sandbox({}),
+  middleware([trace()]),
+  agent(['npx', '-y', '@anthropic-ai/claude-code-acp']),
+).start({ serverUrl: 'http://localhost:4440' })
+
+const conn = new ClientSideConnection(handler, createWebSocketStream(new WebSocket(handle.acp.url)))
+await conn.initialize({ protocolVersion: PROTOCOL_VERSION, clientInfo: { name: 'quickstart', version: '0.0.1' }, clientCapabilities: {} })
+const { sessionId } = await conn.newSession({ cwd: '/' })
+const response = await conn.prompt({ sessionId, prompt: [{ type: 'text', text: 'Hello from Fireline!' }] })
+EOF
+```
+
+---
+
+## The three planes
+
+| Plane | Package | What it does |
+|---|---|---|
+| **Control** | `@fireline/client` | `compose(sandbox, middleware, agent).start()` — provision sandboxes, wire middleware, execute commands |
+| **Session** | `@agentclientprotocol/sdk` | ACP over `handle.acp.url` — `newSession()`, `prompt()`, `loadSession()`. Third-party protocol; Fireline never wraps it. |
+| **Observation** | `@fireline/state` | `createFirelineDB({ stateStreamUrl: handle.state.url })` → `useLiveQuery()` — reactive TanStack DB collections over the durable stream |
+
+The control plane gives you a handle. The handle carries two endpoints. Each endpoint connects you to a different plane. No side channels.
+
+---
+
+## Middleware
+
+An ordered list of ACP interceptors. Each is a serializable spec — data, not a closure. The Rust conductor interprets them server-side.
+
+```typescript
+import { trace, approve, budget, inject } from '@fireline/client/middleware'
+
+middleware([
+  trace(),                              // Log every ACP effect to the durable stream
+  approve({ scope: 'tool_calls' }),     // Require approval before tool execution
+  budget({ tokens: 1_000_000 }),        // Hard token budget cap
+  inject([                              // Prepend context to every prompt
+    { kind: 'workspace_file', path: '/workspace/README.md' },
+    { kind: 'datetime' },
+  ]),
+])
+```
+
+Middleware composes. Add `peer(['agent:reviewer'])` to route cross-agent calls. Add `secretsProxy({ OPENAI_KEY: { allow: 'api.openai.com' } })` to isolate credentials. The conductor processes them in order on every ACP message.
+
+---
+
+## Multi-agent topologies
+
+```typescript
+import { compose, agent, sandbox, middleware, peer, fanout } from '@fireline/client'
+
+const reviewer = compose(sandbox({...}), middleware([...]), agent(['claude-code-acp'])).as('reviewer')
+const writer   = compose(sandbox({...}), middleware([...]), agent(['claude-code-acp'])).as('writer')
+
+// peer() wires cross-agent ACP calls — type-safe at compile time
+const handles = await peer(reviewer, writer).start({ serverUrl })
+// handles.reviewer.acp, handles.writer.acp — each agent gets its own endpoints
+// Both write to the same durable stream — one subscription sees everything
+
+// fanout() runs N instances in parallel
+const workers = await fanout(worker, { count: 3 }).start({ serverUrl })
+```
+
+---
+
+## Examples
+
+| Example | Pattern | What it shows |
+|---|---|---|
+| [`examples/flamecast-client/`](examples/flamecast-client/) | Agent platform client | `compose` + `peer` + reactive dashboard with approval flow |
+| [`examples/agent-os/`](examples/agent-os/) | Multi-agent orchestration | `peer` + `fanout` + session migration + cross-agent lineage |
+| [`examples/background-agent/`](examples/background-agent/) | Fire-and-forget task runner | Ramp Inspect pattern — provision, prompt, observe via stream |
+| [`examples/slackbot/`](examples/slackbot/) | Integration agent | Slack Bolt + stream-based completion/approval observation |
+
+---
+
+## Architecture
+
+The Rust workspace is organized by [Anthropic's managed-agent primitive taxonomy](https://www.anthropic.com/engineering/managed-agents):
+
+```
+crates/
+├── fireline-semantics     Pure semantic kernel — session, approval, resume state machines
+├── fireline-session        Durable-stream session log, replay, materializer, host index
+├── fireline-harness        ACP conductor, middleware pipeline, approval gate, trace projector
+├── fireline-sandbox        SandboxProvider trait + LocalSubprocess/Docker/Microsandbox impls
+├── fireline-resources      ResourceMounter, FsBackend, resource publisher
+├── fireline-tools          Peer registry, MCP tool injection, capability refs
+├── fireline-orchestration  Child session edges, orchestration primitives
+└── fireline-host           HTTP server, ProviderDispatcher, control plane routes
+```
+
+Proposals driving the next phase:
+
+- [`docs/proposals/sandbox-provider-model.md`](docs/proposals/sandbox-provider-model.md) — unified SandboxProvider abstraction
+- [`docs/proposals/client-api-redesign.md`](docs/proposals/client-api-redesign.md) — `compose()` client API with typed topologies
+- [`docs/proposals/cross-host-discovery.md`](docs/proposals/cross-host-discovery.md) — cross-host agent discovery via durable streams
+- [`docs/proposals/resource-discovery.md`](docs/proposals/resource-discovery.md) — stream-backed resource publishing + mounting
+- [`docs/proposals/deployment-and-remote-handoff.md`](docs/proposals/deployment-and-remote-handoff.md) — local → cloud migration
+
+**Formally verified.** The semantic kernel is model-checked with [TLA+](verification/spec/managed_agents.tla) and [Stateright](verification/stateright/). Key invariants: `SessionDurableAcrossRuntimeDeath`, `WakeOnReadyIsNoop`, `WakeOnStoppedChangesRuntimeId`, `ConcurrentWakeSingleWinner`, `ResourcePublishedIsEventuallyDiscoverable`.
+
+---
+
+## Built on
+
+- [**durable-streams**](https://durablestreams.com) — the append-only, replayable event stream substrate
+- [**ACP**](https://agentclientprotocol.com) — Agent Client Protocol for agent ↔ host communication
+- [**sacp-conductor**](https://github.com/agentclientprotocol/rust-sdk) — the Rust ACP conductor + middleware pipeline
+- [**microsandbox**](https://github.com/superradcompany/microsandbox) — hardware-isolated microVM sandboxes (optional provider)
+- [**TanStack DB**](https://tanstack.com/db) — differential-dataflow reactive queries over materialized state
+
+---
 
 ## License
 
-TBD. See `LICENSE` (to be added).
+Apache 2.0. See [LICENSE](LICENSE).
