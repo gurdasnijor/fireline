@@ -1,6 +1,8 @@
 # Crate Restructure Manifest (Option A — 9 primitive-aligned crates)
 
-## Execution status (live — updated 2026-04-11)
+## Execution status (live — updated 2026-04-12)
+
+### Crate restructure (phases 1–8) — ✅ COMPLETE
 
 | Phase | Description | Status | Commit |
 |---|---|---|---|
@@ -9,15 +11,34 @@
 | 3 | Move tools + resources | ✅ done | `abd5a29` |
 | 4 | Move session + sandbox | ✅ done | `283a903`, `a2b8227` |
 | 5 | Move harness + orchestration | ✅ done | `5db71e7` |
-| 6 | Move runtime + thin root crate | 🔄 in progress | — |
-| 7 | Delete dissolved crates (`fireline-conductor`, `fireline-components`) | ⏳ pending | — |
-| 8 | Rewrite test imports + `cargo check --workspace` green | ⏳ pending | — |
+| 6 | Move runtime + thin root crate | ✅ done | `7ff3276`, `b5161f1`, `c64c541` |
+| 7 | Delete dissolved crates (`fireline-conductor`, `fireline-components`, `fireline-runtime`) | ✅ done | `aece7cf` |
+| 8 | Rewrite test imports + `cargo check --workspace` green | ✅ done | `8e78251` |
 
-**Notes on the landed phases:**
+All three dissolved crates (`fireline-conductor`, `fireline-components`, `fireline-runtime`) are deleted from the workspace. The live crate layout is:
 
-- **Phase 4** landed as two commits (`283a903 Move session and sandbox primitives` plus `a2b8227 Drop moved microsandbox source`); the second is the follow-up cleanup of the now-orphaned source files after the sandbox content migrated out of `fireline-components`.
-- **Phases 6–8 are serialized.** Phase 6 (moving runtime + thinning the root crate) has to land before Phase 7's delete pass can happen cleanly, and Phase 7 has to land before Phase 8's test-import fixup can be green against a workspace that contains only the new primitive-aligned crates.
-- The demo runbook (`../demo-runbook.md`) §"State 0 — restructure not green" documents how to pin to the last restructure-stable commit if Phase 6–8 work leaves `origin/main` mid-move at demo time.
+```
+crates/fireline-harness        crates/fireline-resources     crates/fireline-session
+crates/fireline-host           crates/fireline-sandbox        crates/fireline-tools
+crates/fireline-orchestration  crates/fireline-semantics
+```
+
+**Note:** the original target specified 9 crates including `fireline-control-plane` as a separate crate. The actual outcome merged the control-plane surface into `fireline-host` (the combined host + control-plane crate), giving 8 crates. `fireline-runtime` was a compatibility shim over `fireline-host` and was deleted in `aece7cf` rather than retained as a target crate.
+
+### Post-restructure cleanup (phases C1–CB) — partial
+
+| Phase | Description | Status | Commit |
+|---|---|---|---|
+| C1 | Delete dead surfaces (`connections.rs`, `routes_files.rs`, duplicate `build`/`transports`) | ✅ done | `d2210cd` |
+| C2 | Collapse direct-host path (delete `BootstrapRuntimeLauncher` + `runtime_host.rs` wrapper) | ✅ done | `7f16e11` |
+| C3 | Delete `/v1/auth/runtime-token` public route | ✅ done | `da38c60` |
+| CB | Naming drift — `create_runtime` → `provision_runtime` etc. | ✅ done | `8e794a4` |
+| C4 | Peer registry collapse + stream-backed `StreamDeploymentPeerRegistry` | ⏳ blocked by `cross-host-discovery.md` | — |
+| C4b | Resource discovery collapse + `StreamResourceMounter` | ⏳ blocked by `resource-discovery.md` | — |
+| C5 | Stream-as-truth flip + delete `heartbeat.rs` + `HeartbeatTracker` + stale scanner | ⏳ pending (depends on C4) | — |
+| C6 | Rewrite or inline `bootstrap.rs` | ⏳ pending (depends on C2 + C5) | — |
+
+The full cleanup execution plan lives at [`./fireline-host-cleanup-plan.md`](./fireline-host-cleanup-plan.md). Phases C4–C6 are blocked on the cross-host-discovery and resource-discovery proposals landing.
 
 The existing plan below is unchanged — this status block is an overlay to help readers locate where the in-flight work is relative to the committed manifest.
 
