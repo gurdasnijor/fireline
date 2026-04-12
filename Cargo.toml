@@ -5,6 +5,7 @@ members = [
     "crates/fireline-session",
     "crates/fireline-orchestration",
     "crates/fireline-harness",
+    "crates/fireline-host",
     "crates/fireline-sandbox",
     "crates/fireline-resources",
     "crates/fireline-tools",
@@ -26,6 +27,7 @@ fireline-semantics = { path = "crates/fireline-semantics" }
 fireline-session = { path = "crates/fireline-session" }
 fireline-orchestration = { path = "crates/fireline-orchestration" }
 fireline-harness = { path = "crates/fireline-harness" }
+fireline-host = { path = "crates/fireline-host" }
 fireline-sandbox = { path = "crates/fireline-sandbox" }
 fireline-resources = { path = "crates/fireline-resources" }
 fireline-tools = { path = "crates/fireline-tools" }
