@@ -166,14 +166,21 @@ pub(crate) fn build_peer_mcp_server(
                         ))
                     })?;
 
+                    let parent_prompt_turn_id = parent_lineage
+                        .parent_prompt_turn_id
+                        .ok_or_else(|| {
+                            sacp::util::internal_error(
+                                "prompt_peer: parent lineage is missing an active turn id; \
+                                 the active-turn projection may be lagging behind the session"
+                            )
+                        })?;
+
                     child_session_edge_sink
                         .emit_child_session_edge(ChildSessionEdgeInput {
                             trace_id: parent_lineage.trace_id.clone(),
                             parent_host_id: host_id.clone(),
                             parent_session_id: session_id,
-                            parent_prompt_turn_id: parent_lineage
-                                .parent_prompt_turn_id
-                                .expect("parent lineage should always include an active turn id"),
+                            parent_prompt_turn_id,
                             child_host_id: peer.host_id.clone(),
                             child_session_id: result.child_session_id.clone(),
                         })
