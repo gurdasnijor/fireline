@@ -14,7 +14,7 @@ Anthropic's managed-agents docs present four core concepts: **Agent**, **Environ
 |---|---|---|---|---|
 | **Agent** | A reusable, versioned configuration containing model choice, prompts, tools, callable agents, and environment linkage | `agent(...)` plus the rest of a `compose(sandbox, middleware, agent)` harness spec | **Partial** | Fireline deliberately splits "the thing that runs" across `agent`, `sandbox`, `middleware`, resources, secrets, and topology. That is more composable, but less product-shaped. Fireline does not yet have Anthropic's first-class "versioned Agent object" abstraction. |
 | **Environment** | A reusable, versioned container template that controls packages, files, env vars, network, and runtime isolation | `sandbox(...)` plus provider selection, resource mounts, env vars, and the proposed secrets-injection layer | **Partial** | Fireline has richer provider flexibility than Anthropic, but no equally crisp first-class Environment object with stable version history and simple lifecycle semantics. Environment concerns are spread across multiple primitives and proposals. |
-| **Session** | An execution instance that pairs an Agent with an Environment and emits progress/state over time | A provisioned Fireline sandbox/runtime handle plus ACP session traffic plus durable state stream | **Strained** | Fireline splits responsibility across the control plane, ACP data plane, and durable-stream projections. That gives Fireline stronger replayability and externalized state, but it is not a single product-level "Session" abstraction from the developer's point of view. |
+| **Session** | An execution instance that pairs an Agent with an Environment and emits progress/state over time | A provisioned Fireline sandbox/runtime handle plus ACP session traffic plus durable state stream | **Strained** | Fireline splits responsibility across the control plane, ACP data plane, conductor proxy chain, and durable-stream projections. That gives Fireline stronger replayability and programmable I/O interception, but it is not a single product-level "Session" abstraction from the developer's point of view. |
 | **Events** | A single streamed feed of execution updates, tool use, results, compaction, and usage | Durable-stream events, ACP messages, and reactive projections via `@fireline/state` | **Reasonably strong, but not simple** | Fireline's event substrate is more general and more durable, but Anthropic's event story is easier to consume because it is presented as one session stream. Fireline still feels like infrastructure; Anthropic feels like an application API. |
 
 ### Where Fireline maps cleanly
@@ -65,15 +65,28 @@ Anthropic's docs explicitly position Agents and Environments as versioned object
 
 **Strategic effect:** Anthropic has the cleaner enterprise story for reproducibility, promotion, rollback, and governance.
 
-### 2.4 Prompt caching and compaction
+### 2.4 Provider-native prompt caching, compaction, and context economics
 
-Anthropic exposes session compaction and prompt-cache accounting as part of the event/usage model.
+This is where my original draft was too blunt.
 
-- Fireline currently has no comparable, product-level answer for long-session context economics.
-- Fireline's durable stream could support this well, but the capability is not surfaced as a clear feature.
-- Without an answer here, Fireline is weaker on long-running agents, cost control, and operational predictability.
+Fireline **does** already have an implemented prompt/effect transformation path. The conductor is a real proxy chain, and the shipped harness components already intercept and rewrite `session/prompt` traffic:
 
-**Strategic effect:** Anthropic looks tuned for real workloads; Fireline still looks substrate-first.
+- `ContextInjectionComponent` gathers per-session context and rewrites the prompt before it reaches the agent
+- `BudgetComponent` inspects prompt text on the hot path and can terminate or gate turns
+- `ApprovalGateComponent` can suspend or deny prompt execution based on policy
+- the topology registry wires these components into the connection path as JSON-resolved middleware
+
+So the gap is **not** "Fireline lacks prompt-path programmability." Fireline has that, and in a more explicit form than Anthropic exposes.
+
+The actual gap is narrower and still important:
+
+- Anthropic exposes **provider-native prompt-cache accounting**
+- Anthropic exposes **session compaction as a first-class managed runtime behavior**
+- Anthropic gives the developer a clearer operational story for **long-session context pressure, cost, and token reuse**
+
+Fireline's current equivalent is an explicit programmable proxy chain plus durable trace, not a turnkey cache/compaction product surface. Fireline can rewrite and enrich prompts today; it does **not** yet present a polished answer for cache-aware, provider-level long-session economics.
+
+**Strategic effect:** Anthropic looks more mature on managed runtime economics. Fireline looks stronger on programmable prompt and effect control.
 
 ### 2.5 Memory across sessions
 
@@ -112,7 +125,7 @@ Fireline's happy path is more composable, but also more demanding:
 6. Connect ACP separately
 7. Observe durable state separately
 
-That complexity is not accidental. Fireline is exposing more of the machine. But the difference is real.
+That complexity is not accidental. Fireline is exposing more of the machine: the sandbox boundary, the middleware topology, the conductor proxy chain, and the durable state plane are all first-class. That buys real leverage, not just incidental complexity. But the ergonomic difference is still real.
 
 **Strategic effect:** Anthropic is easier for application developers. Fireline is easier for infrastructure-minded teams that want explicit control.
 
@@ -127,7 +140,7 @@ The main caveat is maturity: some of Fireline's best differentiators are already
 | **Durable streams as universal substrate** | One append-only substrate for session state, replay, projection, discovery, and cross-host continuity | Anthropic exposes events, but not a general-purpose shared state/discovery substrate to the user | **Core architecture, materially real** |
 | **Self-hosted and local-first** | Developers can run the exact system locally, on their own infra, and in regulated environments | Anthropic is a managed platform, not a self-hosted substrate | **Real differentiator** |
 | **Multi-provider sandbox model** | Local subprocess, microsandbox, Docker, and remote-provider execution can share one control model | Anthropic environments are powerful but Claude-managed and Anthropic-specific | **Partly shipped, partly proposalized** |
-| **Middleware composition** | Trace, approval, budgeting, secrets injection, and future policies can sit between client and agent | Anthropic has platform features, but not the same explicit, composable middleware pipeline | **Partly real, partly proposalized** |
+| **Middleware composition and programmable harness I/O** | Trace, context injection, approval, budgeting, audit, peer brokering, and future policies can sit directly on the request/response path between client and agent | Anthropic has platform features, but not the same explicit, user-shaped conductor proxy chain around the harness loop | **Materially real on the prompt path; still partial on some tool-call interception paths** |
 | **Type-safe multi-agent topology operators** | `peer`, `fanout`, and `pipe` give multi-agent structure a type-level API rather than ad hoc orchestration code | Anthropic has a multi-agent preview, but its model is same-environment Claude agents inside one session, not a general typed topology substrate | **Proposal, but strategically differentiated** |
 | **Cross-host discovery via durable streams** | Hosts and runtimes discover one another through replayable stream projection, not a side registry | Anthropic does not expose user-owned cross-host discovery semantics because the platform boundary hides the fleet | **Architecture in motion, strategically strong** |
 | **Resource discovery via durable streams** | Files, blobs, Git repos, OCI layers, and stream-backed resources can become discoverable objects in one plane | Anthropic environments can mount assets, but Fireline aims for a more general resource-discovery substrate | **Proposal, potentially differentiated** |
@@ -150,6 +163,20 @@ Fireline is genuinely **model-agnostic and deployment-agnostic**.
 
 - Anthropic's platform is best when the answer is "use Claude and stay inside Anthropic's platform."
 - Fireline is stronger when the answer is "compose many agents, many models, many runtimes, and many deployment postures, but keep one durable control/state substrate."
+
+### The overlooked Fireline strength
+
+Fireline already exposes the harness loop as a programmable surface.
+
+That matters strategically because the developer is not limited to "configure an agent and stream events." Fireline can:
+
+- rewrite prompts before they hit the agent
+- inject context from pluggable sources
+- gate or deny turns
+- append durable audit and state traces
+- project those effects into reactive state
+
+Anthropic is stronger on managed convenience. Fireline is stronger where the product needs explicit interception and policy on the live request path.
 
 ### The maturity warning
 
@@ -429,3 +456,5 @@ That is a credible coexistence story. It is also the only positioning where Fire
 - [cross-host-discovery.md](./cross-host-discovery.md)
 - [resource-discovery.md](./resource-discovery.md)
 - [secrets-injection-component.md](./secrets-injection-component.md)
+- [../architecture.md](../architecture.md)
+- [../explorations/managed-agents-mapping.md](../explorations/managed-agents-mapping.md)
