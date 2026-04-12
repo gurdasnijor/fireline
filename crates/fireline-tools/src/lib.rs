@@ -48,6 +48,7 @@ use durable_streams::Producer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod agent_catalog;
 pub mod attach;
 pub mod peer;
 pub mod smithery;
@@ -91,7 +92,11 @@ pub struct ToolDescriptor {
 /// `rename_all_fields` keeps the inner variant fields in camelCase on
 /// the wire so the TS side can parse them without custom decoders.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum TransportRef {
     /// Resolve the tool through another Fireline runtime identified by
     /// its runtime key. Used for cross-runtime peering over ACP.
@@ -115,7 +120,11 @@ pub enum TransportRef {
 /// indirection handle. Concrete resolution (env var read, secret store
 /// fetch, OAuth token exchange) happens in the conductor layer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum CredentialRef {
     /// Resolve at call time from a process environment variable.
     Env { var: String },
@@ -231,10 +240,17 @@ mod tests {
         let serialized = serde_json::to_value(&descriptor).unwrap();
         assert_eq!(serialized["name"], "list_peers");
         assert_eq!(serialized["description"], "List running peers");
-        assert_eq!(serialized["inputSchema"], serde_json::json!({"type": "object"}));
+        assert_eq!(
+            serialized["inputSchema"],
+            serde_json::json!({"type": "object"})
+        );
         // No extra keys that would leak transport or credentials.
         let obj = serialized.as_object().unwrap();
-        assert_eq!(obj.len(), 3, "expected only the Anthropic triple, got {obj:?}");
+        assert_eq!(
+            obj.len(),
+            3,
+            "expected only the Anthropic triple, got {obj:?}"
+        );
     }
 
     fn sample_descriptor() -> ToolDescriptor {

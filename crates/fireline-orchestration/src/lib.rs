@@ -2,11 +2,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use fireline_runtime::{RuntimeDescriptor, RuntimeStatus};
-use fireline_session::{PersistedRuntimeSpec, RuntimeMaterializer, SessionIndex};
+use fireline_session::{
+    PersistedRuntimeSpec, RuntimeDescriptor, RuntimeMaterializer, RuntimeStatus, SessionIndex,
+};
 use reqwest::Client as HttpClient;
 use tracing::{info, instrument};
 
+pub mod child_session_edge;
+pub mod load_coordinator;
 pub mod primitive;
 
 /// Resume a session by session id.
@@ -31,8 +34,8 @@ pub async fn resume(
 ) -> Result<RuntimeDescriptor> {
     let started = tokio::time::Instant::now();
     let shared_index = wait_for_shared_session_index(shared_state_url, session_id).await?;
-    let runtime = lookup_runtime_for_session(http, control_plane_url, &shared_index, session_id)
-        .await?;
+    let runtime =
+        lookup_runtime_for_session(http, control_plane_url, &shared_index, session_id).await?;
 
     if runtime.status == RuntimeStatus::Ready {
         info!(
@@ -51,7 +54,10 @@ pub async fn resume(
             anyhow!("runtime_spec for session '{session_id}' not found in shared session index")
         })?;
     let created = http
-        .post(format!("{}/v1/runtimes", control_plane_url.trim_end_matches('/')))
+        .post(format!(
+            "{}/v1/runtimes",
+            control_plane_url.trim_end_matches('/')
+        ))
         .json(&persisted.create_spec)
         .send()
         .await
@@ -83,7 +89,10 @@ pub async fn reconstruct_runtime_spec_from_log(
         attempts += 1;
         let index = materialize_session_index(state_stream_url).await?;
         if let Some(spec) = index.runtime_spec(runtime_key).await {
-            info!(runtime_key, attempts, "reconstructed runtime_spec from durable state");
+            info!(
+                runtime_key,
+                attempts, "reconstructed runtime_spec from durable state"
+            );
             return Ok(spec);
         }
 
@@ -107,9 +116,7 @@ pub async fn materialize_session_index(state_stream_url: &str) -> Result<Session
     Ok(index)
 }
 
-pub async fn materialize_shared_session_index(
-    shared_state_url: &str,
-) -> Result<SessionIndex> {
+pub async fn materialize_shared_session_index(shared_state_url: &str) -> Result<SessionIndex> {
     materialize_session_index(shared_state_url).await
 }
 
@@ -126,7 +133,10 @@ async fn wait_for_shared_session_index(
         if index.get(session_id).await.is_some()
             && index.runtime_spec_for_session(session_id).await.is_some()
         {
-            info!(session_id, attempts, "shared session index is ready for resume");
+            info!(
+                session_id,
+                attempts, "shared session index is ready for resume"
+            );
             return Ok(index);
         }
 

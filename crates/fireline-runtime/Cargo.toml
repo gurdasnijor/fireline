@@ -16,6 +16,7 @@ dirs.workspace = true
 durable-streams.workspace = true
 durable-streams-server.workspace = true
 fireline-harness.workspace = true
+fireline-orchestration.workspace = true
 fireline-resources.workspace = true
 fireline-sandbox.workspace = true
 fireline-session.workspace = true

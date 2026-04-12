@@ -9,8 +9,13 @@ description = "Session wake orchestration primitives for Fireline"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-fireline-runtime.workspace = true
+durable-streams.workspace = true
 fireline-session.workspace = true
+fireline-tools.workspace = true
 reqwest.workspace = true
+sacp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
