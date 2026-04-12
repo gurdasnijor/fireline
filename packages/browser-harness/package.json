@@ -4,7 +4,7 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "predev": "pnpm dev:clean && pnpm --filter @fireline/client build && cargo build -q --manifest-path ../../Cargo.toml -p fireline --bin fireline --bin fireline-testy-load",
+    "predev": "pnpm dev:clean && pnpm --filter @fireline/client build && cargo build -q --manifest-path ../../Cargo.toml -p fireline --bin fireline --bin fireline-testy-load --bin fireline-streams",
     "test:browser:poll": "PREFER_PUSH=false pnpm --filter @fireline/client test:browser",
     "test:browser:push": "PREFER_PUSH=true pnpm --filter @fireline/client test:browser",
     "dev": "concurrently -k --kill-signal SIGTERM -n control,vite -c cyan,magenta \"pnpm dev:server\" \"pnpm dev:vite\"",

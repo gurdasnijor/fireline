@@ -12,10 +12,11 @@ const tmpDir = join(packageDir, '.tmp')
 const runtimeRegistryPath = join(tmpDir, 'runtimes.toml')
 const peerDirectoryPath = join(tmpDir, 'peers.toml')
 const firelineBin = join(repoRoot, 'target', 'debug', 'fireline')
+const firelineStreamsBin = join(repoRoot, 'target', 'debug', 'fireline-streams')
 const firelineTestyLoadBin = join(repoRoot, 'target', 'debug', 'fireline-testy-load')
 const controlPlaneUrl = 'http://127.0.0.1:4440'
 const preferPush = process.env.PREFER_PUSH === 'true'
-const durableStreamsUrl = process.env.DURABLE_STREAMS_URL ?? null
+const durableStreamsUrl = process.env.DURABLE_STREAMS_URL ?? 'http://127.0.0.1:7474/v1/stream'
 
 const client = createFirelineClient({
   host: {
@@ -42,8 +43,14 @@ const client = createFirelineClient({
 
 let currentRuntime = null
 let controlPlaneProcess = null
+let streamsProcess = null
 
 await mkdir(tmpDir, { recursive: true })
+
+if (!process.env.DURABLE_STREAMS_URL) {
+  await startEmbeddedStreams()
+}
+
 await startControlPlane()
 
 const server = createServer(async (req, res) => {
@@ -112,14 +119,6 @@ const server = createServer(async (req, res) => {
         sendJson(res, 400, { error: 'missing_agent_id' })
         return
       }
-      if (!durableStreamsUrl) {
-        sendJson(res, 400, {
-          error: 'missing_durable_streams_url',
-          detail: 'set DURABLE_STREAMS_URL to an external durable-streams base URL',
-        })
-        return
-      }
-
       await stopCurrentRuntime()
 
       const resolved = await client.catalog.resolveAgent(agentId)
@@ -179,6 +178,7 @@ async function shutdown() {
   await stopCurrentRuntime()
   await client.close()
   await stopControlPlane()
+  await stopEmbeddedStreams()
 }
 
 function sendJson(res, statusCode, payload) {
@@ -207,6 +207,41 @@ function toErrorMessage(error) {
     return error.message
   }
   return String(error)
+}
+
+async function startEmbeddedStreams() {
+  console.log('starting embedded durable-streams server on port 7474')
+
+  streamsProcess = spawn(
+    firelineStreamsBin,
+    [],
+    {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, PORT: '7474' },
+    },
+  )
+
+  for (const stream of [streamsProcess.stdout, streamsProcess.stderr]) {
+    stream?.on('data', (chunk) => {
+      process.stdout.write(`[streams] ${chunk.toString('utf8')}`)
+    })
+  }
+
+  await waitForHttpReady('http://127.0.0.1:7474/healthz', streamsProcess)
+  console.log('durable-streams ready at http://127.0.0.1:7474/v1/stream')
+}
+
+async function stopEmbeddedStreams() {
+  if (!streamsProcess) {
+    return
+  }
+  const child = streamsProcess
+  streamsProcess = null
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return
+  }
+  child.kill('SIGTERM')
+  await new Promise((resolve) => child.on('close', resolve))
 }
 
 async function startControlPlane() {

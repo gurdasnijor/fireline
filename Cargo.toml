@@ -182,3 +182,7 @@ path = "src/bin/testy_fs.rs"
 [[bin]]
 name = "fireline-testy-prompt"
 path = "src/bin/testy_prompt.rs"
+
+[[bin]]
+name = "fireline-streams"
+path = "src/bin/streams.rs"
