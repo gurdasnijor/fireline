@@ -187,7 +187,7 @@ const handles = await topology.start({ serverUrl: 'http://localhost:4440' })
 // handles.reviewer.acp  — ACP endpoint for the reviewer
 // handles.notifier.acp  — ACP endpoint for the notifier
 // reviewer can call notifier via ACP peer calls
-// the stream carries cross-agent lineage (child_session_edge events)
+// cross-agent causality is visible through ACP _meta trace context and the trace backend
 ```
 
 **Type safety:** `handles.reviewer` is typed. `handles.nonexistent` is a compile error. You can't `peer` a harness that doesn't exist; the TypeScript compiler catches the topology error.
@@ -217,10 +217,10 @@ const pipeline = pipe(
 // Type: Pipeline<[Harness<'researcher'>, Harness<'writer'>]>
 
 const handles = await pipeline.start({ serverUrl })
-// researcher's output feeds writer's input via session events on the shared stream
+// researcher's output feeds writer's input through the pipeline wiring
 ```
 
-Sequential composition: the first harness's session events are visible to the second harness via the shared durable stream. The `pipe` operator sets up the stream wiring so `writer` can subscribe to `researcher`'s output.
+Sequential composition: the first harness's output becomes the next harness's input. The `pipe` operator establishes that handoff without introducing a tenant-wide lineage stream.
 
 ### Type signatures
 
@@ -336,7 +336,7 @@ import { compose, agent, sandbox, middleware } from '@fireline/client'
 import { trace } from '@fireline/client/middleware'
 import { createFirelineDB } from '@fireline/state'
 // ACP (third-party)
-import { ClientSideConnection, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
+import { ClientSideConnection, PROTOCOL_VERSION, type RequestId } from '@agentclientprotocol/sdk'
 // User's integration (NOT Fireline)
 import { App } from '@slack/bolt'
 
@@ -355,13 +355,14 @@ app.event('app_mention', async ({ event, say }) => {
   const conn = new ClientSideConnection(/* handler */, createWebSocketStream(ws))
   await conn.initialize({ protocolVersion: PROTOCOL_VERSION, clientInfo: { name: 'slackbot', version: '0.0.1' }, clientCapabilities: {} })
   const { sessionId } = await conn.newSession({ cwd: '/' })
-  conn.prompt({ sessionId, prompt: [{ type: 'text', text: event.text }] })  // fire-and-forget
+  const requestId = `slack:${event.ts}` as RequestId
+  void conn.prompt({ sessionId, requestId, prompt: [{ type: 'text', text: event.text }] })  // fire-and-forget
 
   // 3. Observe completion + permissions via @fireline/state (the ONLY subscription interface)
   const db = createFirelineDB({ stateStreamUrl: handle.state.url })
   await db.preload()
-  db.collections.promptTurns.subscribe((turns) => {
-    const completed = turns.find(t => t.sessionId === sessionId && t.completedAt)
+  db.collections.promptRequests.subscribe((requests) => {
+    const completed = requests.find(r => r.sessionId === sessionId && r.requestId === requestId && r.completedAt)
     if (completed) {
       say(`Agent finished: ${completed.stopReason}`)  // say() is Slack Bolt's reply helper
     }
@@ -419,7 +420,7 @@ const writer = compose(
 ).as('writer')
 
 const handles = await pipe(reviewer, writer).start({ serverUrl: 'http://localhost:4440' })
-// reviewer runs first; writer picks up from the shared tenant stream
+// reviewer runs first; writer observes the prior agent-plane events through Fireline's state substrate
 ```
 
 ### 6.6 Reactive observation — zero polling
@@ -429,17 +430,16 @@ const handles = await pipe(reviewer, writer).start({ serverUrl: 'http://localhos
 import { createFirelineDB } from '@fireline/state'
 // TanStack DB (peer dependency of @fireline/state)
 import { useLiveQuery } from '@tanstack/react-db'
-import { eq } from '@tanstack/db'
 
 // handle obtained from a prior compose(...).start() call
 const db = createFirelineDB({ stateStreamUrl: handle.state.url })
-const turns = useLiveQuery(q =>
-  q.from({ t: db.collections.promptTurns }).where(({ t }) => eq(t.sessionId, sessionId))
+const promptRequests = useLiveQuery(q =>
+  q.from({ r: db.collections.promptRequests }).where(({ r }) => r.sessionId === sessionId && r.requestId === requestId)
 )
 // The stream IS the API. No fetch. No setInterval. React re-renders as events arrive.
 ```
 
-### 6.7 Multi-agent topology — one stream, full visibility
+### 6.7 Multi-agent topology — per-agent streams, trace-owned lineage
 
 ```typescript
 // Fireline
@@ -450,29 +450,35 @@ import { createFirelineDB } from '@fireline/state'
 // reviewer and notifier defined as in §6.5
 const handles = await peer(reviewer, notifier).start({ serverUrl: 'http://localhost:4440' })
 
-// Both agents write to the same tenant stream — one subscription sees everything
-const db = createFirelineDB({ stateStreamUrl: handles.reviewer.state.url })
-// db.collections.sessions → reviewer's AND notifier's sessions
-// db.collections.childSessionEdges → the peer-call lineage graph between them
+const reviewerDb = createFirelineDB({ stateStreamUrl: handles.reviewer.state.url })
+const notifierDb = createFirelineDB({ stateStreamUrl: handles.notifier.state.url })
+// reviewerDb.collections.sessions       → reviewer's agent-plane state
+// notifierDb.collections.promptRequests → notifier's prompt requests
+// peer-call causality is carried in ACP _meta.traceparent / tracestate / baggage
+// "reviewer called notifier" is queried from the trace backend, not Fireline rows
 ```
 
 ---
 
 ## 7. What `@fireline/state` does in a topology
 
-**Unchanged. One stream URL. Full deployment visibility.**
+**Still agent-plane only. One stream URL per agent.**
 
-The durable-streams service is the single shared hub. ALL agents in a topology — whether single-harness, peered, fanned-out, or pipelined — write to the **same** tenant stream. `createFirelineDB` pointed at that stream already sees everything: every agent's sessions, every turn, every chunk, and the `child_session_edge` events that trace the peering graph across agents.
+Each agent in a topology writes to its own agent-plane stream. `@fireline/state` stays focused on agent-plane collections such as sessions, prompt requests, permissions, and chunks; it does not materialize cross-agent lineage rows, and it does not expose infra-plane rows on the client surface.
 
 ```typescript
 // Fireline — state observation
 import { createFirelineDB } from '@fireline/state'
 
-const db = createFirelineDB({ stateStreamUrl: 'http://streams.internal/v1/stream/tenant-demo' })
-// Sees reviewer's sessions, notifier's sessions, the peer edges between them — all in one reactive view
+const reviewerDb = createFirelineDB({ stateStreamUrl: handles.reviewer.state.url })
+const notifierDb = createFirelineDB({ stateStreamUrl: handles.notifier.state.url })
+// Dashboards join agent-plane views across streams as needed.
+// Cross-agent causality comes from ACP _meta trace context in the trace backend.
 ```
 
-The topology changes the **call graph** (which agents can peer-call each other), not the **observation surface** (who can see what on the stream). A dashboard that subscribes to the tenant stream sees the full deployment regardless of how many agents are running or how they're wired.
+Multi-agent topologies expose deployment-wide agent-plane visibility through Fireline state. Dashboards see sessions, prompt requests, permissions, and chunks across the deployment by subscribing to the relevant agent-plane streams. Cross-agent causality is not materialized as Fireline rows; it is queried through W3C Trace Context and the configured trace backend.
+
+The topology changes the **call graph** (which agents can peer-call each other), not the **state model**. Fireline state stays flat and agent-local; outbound peer calls inject `_meta.traceparent`, `_meta.tracestate`, and `_meta.baggage`, inbound peer calls extract them, and the observability layer owns the span graph.
 
 **No Orchestrator class.** Orchestration IS stream subscription. If a session needs advancing (e.g., a pending approval resolved), the subscriber reacts:
 
@@ -541,7 +547,7 @@ packages/client/src/                    packages/client/src/
 | **Secrets injection** | `middleware([secretsProxy({ OPENAI_KEY: { allow: 'api.openai.com' } })])` — a middleware entry, not a sandbox concern. |
 | **Stream-FS** | `sandbox({ resources: [streamFs('snapshot-id', { mode: 'liveReadWrite' })] })` — another resource ref variant. |
 | **Sandbox provider model** | `sandbox({ provider: 'microsandbox' })` — provider hint in the sandbox spec, resolved by the server's `ProviderDispatcher`. |
-| **TLA verification** | The composition operators produce serializable specs. A TLA model can check topology-level invariants: "every peer edge is bidirectional", "fanout count > 0", "pipeline stages share a durable stream." |
+| **TLA verification** | The composition operators produce serializable specs. A TLA model can check topology-level invariants: "every peer edge is bidirectional", "fanout count > 0", "pipeline handoff preserves stage order and agent-plane state visibility." |
 
 ---
 
