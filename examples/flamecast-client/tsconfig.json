@@ -1,0 +1,41 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node", "vite/client"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./app/*"],
+      "@flamecast/ui": ["./ui/index.ts"],
+      "@flamecast/sdk/client": ["./ui/fireline-client.ts"],
+      "@flamecast/sdk/session": ["./ui/fireline-types.ts"],
+      "@flamecast/protocol/runtime": ["./ui/fireline-types.ts"],
+      "@flamecast/protocol/session": ["./ui/fireline-types.ts"],
+      "@flamecast/protocol/storage": ["./ui/fireline-types.ts"],
+      "@flamecast/protocol/session-host": ["./ui/fireline-types.ts"],
+      "@flamecast/protocol/ws/channels": ["./ui/ws-types.ts"],
+      "@fireline/client": ["../../packages/client/src/index.ts"],
+      "@fireline/client/admin": ["../../packages/client/src/admin.ts"],
+      "@fireline/client/middleware": ["../../packages/client/src/middleware.ts"],
+      "@fireline/client/resources": ["../../packages/client/src/resources.ts"],
+      "@fireline/state": ["../../packages/state/src/index.ts"]
+    }
+  },
+  "include": [
+    "app/**/*.ts",
+    "app/**/*.tsx",
+    "shared/**/*.ts",
+    "ui/**/*.ts",
+    "ui/**/*.tsx",
+    "server.ts",
+    "vite.config.ts"
+  ]
+}
