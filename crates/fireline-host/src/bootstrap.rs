@@ -231,24 +231,11 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
             .map_err(anyhow::Error::from)
     });
 
-    let state_materializer_task = state_materializer.connect(state_stream_url.clone());
-    state_materializer_task.preload().await?;
-
-    // Direct-host bootstraps emit the same `host_spec_persisted`
-    // envelope that control-plane-managed runtimes emit through the
-    // sandbox host create path. Without this, direct-host
-    // bootstraps are invisible to stream-derived projections
-    // like `crate::host_index::HostIndex` — the `runtime_instance`
-    // row lands on the stream but nothing describes what the runtime
-    // was asked to be. Closing this gap is a prerequisite for replacing
-    // the in-memory `RuntimeRegistry` with a pure stream projection.
-    //
-    // The `resources` field is left empty: BootstrapConfig only carries
-    // already-mounted `MountedResource` values, not the original
-    // `ResourceRef` launch spec. Direct-host runtimes therefore record
-    // their host/port/topology/agent_command but not their resource
-    // launch spec. Promotion to a full round-trip spec is follow-up
-    // work when a caller actually needs it.
+    // Emit stream events BEFORE the materializer preloads, so
+    // the stream has content when the materializer subscribes.
+    // Without this ordering, preload connects to an empty stream,
+    // the worker finds nothing to replay, and exits — causing
+    // "state materializer worker exited before preload completed."
     let persisted_spec = PersistedHostSpec::new(
         host_key.clone(),
         node_id.clone(),
@@ -275,6 +262,9 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     emit_host_instance_started(&state_producer, &host_id, &host_name, host_created_at)
         .await
         .context("flush runtime_instance_started from bootstrap")?;
+
+    let state_materializer_task = state_materializer.connect(state_stream_url.clone());
+    state_materializer_task.preload().await?;
     emit_deployment_event(
         &deployment_producer,
         &DeploymentDiscoveryEvent::HostRegistered {
