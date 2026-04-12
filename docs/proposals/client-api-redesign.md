@@ -27,19 +27,27 @@ const sandbox = await client.create({
   resources: [{ source_ref: { kind: 'localPath', host_id: 'self', path: '~/project' }, mount_path: '/workspace' }],
 })
 
-// Sandbox carries its own ACP + state endpoints — no separate Host/Sandbox dance
-const session = await sandbox.newSession({ cwd: '/workspace' })
-const response = await session.prompt('What files are in this directory?')
+// Sandbox gives you a raw ACP connection — sessions are an ACP-plane concern, not a Sandbox method
+const connection = await sandbox.connect()
+await connection.initialize({
+  protocolVersion: PROTOCOL_VERSION,
+  clientInfo: { name: 'my-app', version: '0.0.1' },
+  clientCapabilities: { fs: { readTextFile: false } },
+})
+const { sessionId } = await connection.newSession({ cwd: '/workspace' })
+const response = await connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'What files are in this directory?' }] })
 console.log(response)
 
-// Or execute a command directly (bypasses ACP, provider-level exec)
+// Or execute a command directly (provider-level exec, bypasses ACP)
 const result = await sandbox.execute('ls -la /workspace')
 console.log(result.stdout)
 
 await sandbox.destroy()
 ```
 
-**No separate Host/Sandbox distinction at the client level.** The old `host.provision()` → `host.wake()` → `host.status()` → `host.stop()` four-verb dance is replaced by `client.create()` → `sandbox.execute()` / `sandbox.newSession()` → `sandbox.destroy()`. The `Host` concept was always "the thing that hands you a running agent" — the `Sandbox` IS that thing. ACP sessions live inside sandboxes.
+**No separate Host/Sandbox distinction at the client level.** The old `host.provision()` → `host.wake()` → `host.status()` → `host.stop()` four-verb dance is replaced by `client.create()` → `sandbox.connect()` / `sandbox.execute()` → `sandbox.destroy()`. The `Host` concept was always "the thing that hands you a running agent" — the `Sandbox` IS that thing.
+
+**No side channels through client interfaces.** The Sandbox handle owns lifecycle (create/status/execute/destroy). ACP owns sessions (newSession/loadSession/prompt). `sandbox.connect()` gives you a raw `ClientSideConnection` from `@agentclientprotocol/sdk` — the Sandbox never holds session state, never wraps ACP methods, never leaks session abstractions into the lifecycle layer. The caller uses the ACP SDK directly.
 
 This matches Cased's model:
 ```python
@@ -63,7 +71,7 @@ interface Sandbox {
   /** Which provider is running this sandbox ('local', 'docker', 'microsandbox', 'remote') */
   readonly provider: string
 
-  /** ACP WebSocket endpoint. Open a ClientSideConnection here. */
+  /** ACP WebSocket endpoint. Callers open a ClientSideConnection here. */
   readonly acp: Endpoint
 
   /** Durable state stream endpoint. Subscribe with @fireline/state. */
@@ -81,25 +89,20 @@ interface Sandbox {
   /** Destroy the sandbox. Idempotent. */
   destroy(): Promise<void>
 
-  // --- ACP session management ---
-
   /**
-   * Open a new ACP session inside this sandbox.
-   * Connects to sandbox.acp.url, initializes, calls session/new.
+   * Open a raw ACP connection to the sandbox.
+   *
+   * Returns a @agentclientprotocol/sdk ClientSideConnection pointed
+   * at sandbox.acp.url. The caller is responsible for calling
+   * initialize(), newSession(), loadSession(), prompt(), etc.
+   * via the standard ACP SDK — the Sandbox handle never wraps
+   * session lifecycle, never holds session state, never leaks
+   * ACP abstractions into the sandbox lifecycle layer.
+   *
+   * This is a stateless factory: each call opens a fresh WebSocket.
+   * The Sandbox does not track connections or sessions.
    */
-  newSession(opts?: NewSessionOptions): Promise<AcpSession>
-
-  /**
-   * Reconnect to an existing ACP session inside this sandbox.
-   * Connects to sandbox.acp.url, initializes, calls session/load.
-   */
-  loadSession(sessionId: string, opts?: LoadSessionOptions): Promise<AcpSession>
-}
-
-interface AcpSession {
-  readonly sessionId: string
-  prompt(text: string): Promise<PromptResponse>
-  disconnect(): Promise<void>
+  connect(): Promise<ClientSideConnection>
 }
 
 type SandboxStatus =
@@ -122,26 +125,15 @@ interface ExecutionResult {
   readonly durationMs: number
   readonly timedOut: boolean
 }
-
-interface NewSessionOptions {
-  readonly cwd?: string
-  readonly mcpServers?: readonly unknown[]
-}
-
-interface LoadSessionOptions {
-  readonly cwd?: string
-  readonly mcpServers?: readonly unknown[]
-}
-
-interface PromptResponse {
-  readonly stopReason: string
-  readonly messages: readonly unknown[]
-}
 ```
 
-**Key design choice: `Sandbox` is a live object, not a stateless handle.** Cased's `Sandbox` class holds a reference to its provider and delegates `execute()` / `destroy()` through it. We do the same: the `Sandbox` object returned by `client.create()` holds the server URL and sandbox id internally, and every method is a single HTTP call to the server.
+Note what's **not** here: no `AcpSession`, no `NewSessionOptions`, no `LoadSessionOptions`, no `PromptResponse`. The ACP SDK (`@agentclientprotocol/sdk`) already defines all of those. The Sandbox handle is a **lifecycle + connection factory**, not a session wrapper. Sessions are an ACP-plane concern; the Sandbox's only job at the ACP boundary is `connect()` — opening a raw `ClientSideConnection` pointed at `sandbox.acp.url`.
 
-**Why `newSession()` and `loadSession()` live on `Sandbox`, not on `FirelineClient`:** sessions are ACP concepts that live *inside* a running sandbox. The sandbox's `acp.url` is the WebSocket endpoint; the session is opened over that connection. Making sessions a sandbox-level concern (not a client-level concern) matches the Rust-side model where `SandboxProvider::create()` returns endpoints and the provider has no opinion about what ACP sessions happen inside.
+**Key design principle: no side channels through client interfaces.**
+
+Cased wraps execution in the Sandbox class (`sandbox.execute()` delegates to `provider.execute_command()`). We do the same for provider-level execution. But we deliberately do **not** wrap ACP sessions because sessions are a separate protocol plane with their own lifecycle (create, load, prompt, update, close) that is richer than what a Sandbox lifecycle method should abstract over. Wrapping `newSession()` / `loadSession()` on the Sandbox would create a leaky abstraction — the caller would need the `ClientSideConnection` back anyway for streaming, permissions, and tool calls. `connect()` gives them the raw connection and lets the ACP SDK own the session surface.
+
+**Key design choice: `Sandbox` is a live object, not a stateless handle.** Cased's `Sandbox` class holds a reference to its provider and delegates `execute()` / `destroy()` through it. We do the same: the `Sandbox` object returned by `client.create()` holds the server URL and sandbox id internally, and every lifecycle method is a single HTTP call to the server. `connect()` is the only method that opens a WebSocket — and it returns the connection directly to the caller, not a wrapped session.
 
 ---
 
@@ -266,7 +258,7 @@ Every `FirelineClient` and `Sandbox` method maps to a single HTTP call:
 | `orchestration/index.ts` (`Orchestrator`, `whileLoopOrchestrator`, `SessionRegistry`) | **KEPT** — orchestration is orthogonal. The `WakeHandler` now calls `client.get(id)` + `sandbox.status()` instead of `host.wake(handle)`. |
 | `core/` (`Combinator`, `Topology`, `ResourceRef`, `CapabilityRef`, etc.) | **KEPT** — pure serializable types. Zero changes. |
 | `catalog.ts` (`CatalogClient`) | **KEPT** — agent catalog is orthogonal to the provider model. |
-| `acp.ts` / `acp-core.ts` / `acp.browser.ts` | **KEPT** — ACP connectivity is consumed by `Sandbox.newSession()` / `Sandbox.loadSession()` internally. |
+| `acp.ts` / `acp-core.ts` / `acp.browser.ts` | **KEPT** — ACP connectivity is consumed by `Sandbox.connect()` internally. |
 | `topology.ts` (`TopologyBuilder`) | **KEPT** — pure composition helpers. |
 
 **Net deletion:** `host.ts`, `host/index.ts`, `host-fireline/client.ts`, `host-fireline/orchestrator.ts`, `host-hosted-api/`. ~800-1000 lines removed. **Net addition:** `client.ts` (the new `FirelineClient` + `Sandbox` impl), ~300-400 lines. Net reduction: ~500-600 lines with a simpler mental model.
@@ -306,9 +298,11 @@ const sandbox = await client.create({
   stateStream: STATE_STREAM_NAME,
 })
 
-// sandbox.acp.url gives the ACP WebSocket URL — no hardcoded proxy
-const session = await sandbox.newSession({ cwd: '/' })
-const response = await session.prompt('Hello from the browser harness')
+// sandbox.connect() gives a raw ACP connection — no hardcoded proxy URL
+const connection = await sandbox.connect()
+await connection.initialize({ protocolVersion: PROTOCOL_VERSION, clientInfo: { name: 'harness', version: '0.0.1' }, clientCapabilities: { fs: { readTextFile: false } } })
+const { sessionId } = await connection.newSession({ cwd: '/' })
+await connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'Hello from the browser harness' }] })
 
 // Status is on the sandbox, not a separate host.status(handle) call
 const status = await sandbox.status()
@@ -351,7 +345,7 @@ The browser-harness app.tsx drops:
 
 | Dimension | Cased | Fireline |
 |---|---|---|
-| **ACP sessions** | Not modeled | `sandbox.newSession()` / `sandbox.loadSession()` / `session.prompt()` — the sandbox carries a live ACP data plane |
+| **ACP sessions** | Not modeled — Cased wraps execution in the Sandbox class | `sandbox.connect()` returns a raw `ClientSideConnection`; sessions are purely an ACP-plane concern. We deliberately do NOT wrap ACP sessions in the Sandbox handle because sessions are a separate protocol plane with their own lifecycle. The Sandbox's only ACP-facing method is `connect()` — a stateless factory for raw ACP connections. |
 | **Topology / combinators** | Not modeled | `config.topology` carries a `Topology` (combinator chain) that the conductor inside the sandbox interprets |
 | **Durable state** | No concept of state streams | `sandbox.state` is a durable-streams endpoint; the browser subscribes via `@fireline/state` and `useLiveQuery` |
 | **Provider dispatch** | Client-side `SandboxManager` | Server-side `ProviderDispatcher` — the client is provider-agnostic, sends to one URL |
@@ -385,7 +379,7 @@ This means M1 ships with **zero server changes**. The v2 client is a thin adapte
 
 ### Phase M2 — Rewire the browser harness to v2 (half day)
 
-`packages/browser-harness/src/app.tsx` switches from `createFirelineHost` to `createFirelineClient`. The `SessionHarness` component uses `sandbox.newSession()` instead of manually constructing a `ClientSideConnection`. The hardcoded `ACP_PROXY_URL` is replaced by `sandbox.acp.url`.
+`packages/browser-harness/src/app.tsx` switches from `createFirelineHost` to `createFirelineClient`. The `SessionHarness` component uses `sandbox.connect()` to get a raw `ClientSideConnection`, then calls `connection.initialize()` + `connection.newSession()` via the standard ACP SDK — same code the harness already has today, just with the connection opened from `sandbox.acp.url` instead of a hardcoded proxy URL.
 
 ### Phase M3 — Update tests (1 day)
 
@@ -396,7 +390,7 @@ This means M1 ships with **zero server changes**. The v2 client is a thin adapte
 | `test/sandbox-local.test.ts` | Unchanged (sandbox-local is a Node-only convenience, not part of the main client surface). |
 | `test/catalog.test.ts` | Unchanged. |
 | `test/topology.test.ts` | Unchanged. |
-| `test/acp.test.ts` | Unchanged (ACP connectivity is consumed internally by `Sandbox.newSession()`). |
+| `test/acp.test.ts` | Unchanged (ACP connectivity is consumed internally by `Sandbox.connect()`). |
 | Browser test (`test/tier5-smoke.browser.test.ts`) | Rewrite to match M2's new browser-harness shape. |
 
 ### Phase M4 — Delete the v1 surface (half day)
@@ -428,16 +422,16 @@ After the Rust-side `sandbox-provider-model.md` Phase P6 renames the HTTP endpoi
 | `test/sandbox-local.test.ts` | ~80 | **Unchanged** | Tests the Node-only subprocess sandbox for tool execution. Not part of the main client surface. |
 | `test/catalog.test.ts` | ~60 | **Unchanged** | Agent catalog is orthogonal. |
 | `test/topology.test.ts` | ~80 | **Unchanged** | Pure combinator composition tests. |
-| `test/acp.test.ts` | ~40 | **Unchanged** | ACP connectivity. May gain a new test for `Sandbox.newSession()` that uses a mock ACP server. |
+| `test/acp.test.ts` | ~40 | **Unchanged** | ACP connectivity. May gain a new test for `Sandbox.connect()` that uses a mock WebSocket. |
 | `test/tier5-smoke.browser.test.ts` | ~230 | **Rewrite** (M3) | Playwright browser test exercising the harness UI. Mock fetch handlers update from `/cp/v1/runtimes` to `/cp/v1/sandboxes` (or `/cp/v1/runtimes` during M1-M3 while the server hasn't renamed yet). Button labels stay the same. |
 
 ### New tests to add
 
 1. **`test/client.test.ts`** — unit tests for `createFirelineClient`. Mock fetch: `POST /v1/sandboxes` → returns `SandboxDescriptor`, `GET /v1/sandboxes/{id}` → returns status, `DELETE /v1/sandboxes/{id}` → returns 200. Exercises `create` → `get` → `list` → `findOrCreate` → `healthCheck` → `close`.
 
-2. **`test/sandbox.test.ts`** — unit tests for the `Sandbox` handle object. Mock fetch: `sandbox.status()`, `sandbox.execute()`, `sandbox.destroy()`. Exercises `newSession()` with a mock WebSocket (verify the ACP `initialize` + `newSession` handshake fires correctly).
+2. **`test/sandbox.test.ts`** — unit tests for the `Sandbox` handle object. Mock fetch: `sandbox.status()`, `sandbox.execute()`, `sandbox.destroy()`. Exercises `sandbox.connect()` with a mock WebSocket (verify it opens a connection to `sandbox.acp.url` and returns a `ClientSideConnection` the caller can use for ACP operations).
 
-3. **`test/client-integration.test.ts`** — integration test replacing `host.test.ts`. Spawns the real control plane + fireline binary. Full lifecycle: `client.create()` → `sandbox.status()` → `sandbox.execute('echo hello')` → `sandbox.newSession()` → `session.prompt('hi')` → `sandbox.destroy()`. This is the "golden path" test that proves the whole stack works end-to-end.
+3. **`test/client-integration.test.ts`** — integration test replacing `host.test.ts`. Spawns the real control plane + fireline binary. Full lifecycle: `client.create()` → `sandbox.status()` → `sandbox.execute('echo hello')` → `sandbox.connect()` → `connection.newSession()` → `connection.prompt(...)` → `sandbox.destroy()`. This is the "golden path" test that proves the whole stack works end-to-end.
 
 ### What the test suite proves after M4
 
@@ -488,7 +482,7 @@ packages/client/src/                    packages/client/src/
 ├── orchestration/       KEPT           ├── orchestration/      KEPT (WakeHandler wraps client.get + status polling)
 ├── sandbox-local/       KEPT           ├── sandbox-local/      KEPT
 ├── catalog.ts           KEPT           ├── catalog.ts          KEPT
-├── acp.ts               KEPT           ├── acp.ts              KEPT (consumed by Sandbox.newSession internally)
+├── acp.ts               KEPT           ├── acp.ts              KEPT (consumed by Sandbox.connect() internally)
 ├── acp-core.ts          KEPT           ├── acp-core.ts         KEPT
 ├── acp.browser.ts       KEPT           ├── acp.browser.ts      KEPT
 ├── browser.ts           KEPT           ├── browser.ts          KEPT
