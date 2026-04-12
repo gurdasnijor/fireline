@@ -1,4 +1,8 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -6,8 +10,11 @@ use durable_streams::{Client, LiveMode, Offset};
 use serde_json::Value;
 use tokio::sync::{RwLock, broadcast};
 use tokio::task::JoinHandle;
+use tracing::warn;
 
 use crate::{ResourceEntry, ResourceEvent, ResourceId, ResourceIndex};
+
+const PROJECTION_RETRY_DELAY_MS: u64 = 1_000;
 
 #[async_trait]
 pub trait ResourceWatcher: Send + Sync {
@@ -47,6 +54,8 @@ pub struct StreamResourceRegistry {
     tenant_id: String,
     index: Arc<RwLock<ResourceIndex>>,
     updates: broadcast::Sender<Vec<ResourceEntry>>,
+    projection_healthy: Arc<AtomicBool>,
+    projection_error_count: Arc<AtomicU64>,
     subscription: JoinHandle<()>,
 }
 
@@ -56,10 +65,14 @@ impl StreamResourceRegistry {
         let stream_url = resource_stream_url(&stream_base_url.into(), &tenant_id);
         let index = Arc::new(RwLock::new(ResourceIndex::default()));
         let (updates, _) = broadcast::channel(32);
+        let projection_healthy = Arc::new(AtomicBool::new(true));
+        let projection_error_count = Arc::new(AtomicU64::new(0));
         let subscription = tokio::spawn(run_projection_task(
             stream_url.clone(),
             index.clone(),
             updates.clone(),
+            projection_healthy.clone(),
+            projection_error_count.clone(),
         ));
 
         Self {
@@ -67,6 +80,8 @@ impl StreamResourceRegistry {
             tenant_id,
             index,
             updates,
+            projection_healthy,
+            projection_error_count,
             subscription,
         }
     }
@@ -77,6 +92,14 @@ impl StreamResourceRegistry {
 
     pub fn tenant_id(&self) -> &str {
         &self.tenant_id
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        self.projection_healthy.load(Ordering::SeqCst)
+    }
+
+    pub fn projection_error_count(&self) -> u64 {
+        self.projection_error_count.load(Ordering::SeqCst)
     }
 }
 
@@ -120,53 +143,124 @@ async fn run_projection_task(
     stream_url: String,
     index: Arc<RwLock<ResourceIndex>>,
     updates: broadcast::Sender<Vec<ResourceEntry>>,
+    projection_healthy: Arc<AtomicBool>,
+    projection_error_count: Arc<AtomicU64>,
 ) {
     let client = Client::new();
     let stream = client.stream(&stream_url);
 
-    let mut reader = match stream
-        .read()
-        .offset(Offset::Beginning)
-        .live(LiveMode::Sse)
-        .build()
-    {
-        Ok(reader) => reader,
-        Err(_) => return,
-    };
-
     loop {
-        match reader.next_chunk().await {
-            Ok(Some(chunk)) => {
-                if chunk.data.is_empty() {
-                    continue;
-                }
-                apply_chunk_bytes(&chunk.data, &index, &updates).await;
+        let mut reader = match stream
+            .read()
+            .offset(Offset::Beginning)
+            .live(LiveMode::Sse)
+            .build()
+        {
+            Ok(reader) => {
+                projection_healthy.store(true, Ordering::SeqCst);
+                reader
             }
-            Ok(None) | Err(_) => return,
+            Err(error) => {
+                projection_healthy.store(false, Ordering::SeqCst);
+                projection_error_count.fetch_add(1, Ordering::SeqCst);
+                warn!(error = %error, stream_url = %stream_url, "build resource registry reader");
+                tokio::time::sleep(Duration::from_millis(PROJECTION_RETRY_DELAY_MS)).await;
+                continue;
+            }
+        };
+
+        loop {
+            match reader.next_chunk().await {
+                Ok(Some(chunk)) => {
+                    if chunk.data.is_empty() {
+                        continue;
+                    }
+                    apply_chunk_bytes(
+                        &stream_url,
+                        &chunk.data,
+                        &index,
+                        &updates,
+                        &projection_error_count,
+                    )
+                    .await;
+                }
+                Ok(None) => {
+                    projection_healthy.store(false, Ordering::SeqCst);
+                    projection_error_count.fetch_add(1, Ordering::SeqCst);
+                    warn!(stream_url = %stream_url, "resource registry stream closed");
+                    return;
+                }
+                Err(error) => {
+                    projection_healthy.store(false, Ordering::SeqCst);
+                    projection_error_count.fetch_add(1, Ordering::SeqCst);
+                    warn!(
+                        error = %error,
+                        stream_url = %stream_url,
+                        "resource registry stream read error"
+                    );
+                    if !error.is_retryable() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(PROJECTION_RETRY_DELAY_MS)).await;
+                    break;
+                }
+            }
         }
     }
 }
 
 async fn apply_chunk_bytes(
+    stream_url: &str,
     bytes: &[u8],
     index: &Arc<RwLock<ResourceIndex>>,
     updates: &broadcast::Sender<Vec<ResourceEntry>>,
+    projection_error_count: &Arc<AtomicU64>,
 ) {
     let events: Vec<Value> = match serde_json::from_slice(bytes) {
         Ok(events) => events,
-        Err(_) => return,
+        Err(error) => {
+            projection_error_count.fetch_add(1, Ordering::SeqCst);
+            warn!(
+                error = %error,
+                stream_url = %stream_url,
+                chunk_size = bytes.len(),
+                "resource registry chunk was not a JSON array"
+            );
+            return;
+        }
     };
 
     let mut changed = false;
     {
         let mut index = index.write().await;
         for event in events {
+            let event_type = event_type_name(&event).unwrap_or("unknown").to_string();
+            let resource_id = event_resource_id(&event).unwrap_or("unknown").to_string();
             let Ok(event) = serde_json::from_value::<ResourceEvent>(event) else {
+                projection_error_count.fetch_add(1, Ordering::SeqCst);
+                warn!(
+                    stream_url = %stream_url,
+                    event_type = %event_type,
+                    resource_id = %resource_id,
+                    "resource registry event did not match ResourceEvent schema"
+                );
                 continue;
             };
+            let event_type = resource_event_type(&event);
+            let resource_id = resource_event_id(&event).to_string();
             match index.apply(event) {
                 Ok(applied) => changed |= applied,
-                Err(_) => continue,
+                Err(error) => {
+                    projection_error_count.fetch_add(1, Ordering::SeqCst);
+                    warn!(
+                        error = %error,
+                        stream_url = %stream_url,
+                        event_type,
+                        resource_id = %resource_id,
+                        "resource registry failed to apply event"
+                    );
+                    continue;
+                }
             }
         }
 
@@ -176,6 +270,30 @@ async fn apply_chunk_bytes(
 
         let snapshot = index.list().cloned().collect::<Vec<_>>();
         let _ = updates.send(snapshot);
+    }
+}
+
+fn event_type_name(event: &Value) -> Option<&str> {
+    event.get("type").and_then(Value::as_str)
+}
+
+fn event_resource_id(event: &Value) -> Option<&str> {
+    event.get("resource_id").and_then(Value::as_str)
+}
+
+fn resource_event_type(event: &ResourceEvent) -> &'static str {
+    match event {
+        ResourceEvent::ResourcePublished(_) => "resource_published",
+        ResourceEvent::ResourceUnpublished(_) => "resource_unpublished",
+        ResourceEvent::ResourceUpdated(_) => "resource_updated",
+    }
+}
+
+fn resource_event_id(event: &ResourceEvent) -> &str {
+    match event {
+        ResourceEvent::ResourcePublished(event) => &event.resource_id,
+        ResourceEvent::ResourceUnpublished(event) => &event.resource_id,
+        ResourceEvent::ResourceUpdated(event) => &event.resource_id,
     }
 }
 
