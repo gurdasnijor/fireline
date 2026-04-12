@@ -90,6 +90,8 @@ Semantics:
 import type {
   Client,
   ClientSideConnection,
+  RequestId,
+  SessionId,
 } from '@agentclientprotocol/sdk'
 
 export interface FirelineConnectOptions {
@@ -111,8 +113,8 @@ export interface FirelineAgent<Name extends string = string> {
 
   connect(options?: FirelineConnectOptions): Promise<ClientSideConnection>
   resolvePermission(
-    sessionId: string,
-    requestId: string,
+    sessionId: SessionId,
+    requestId: RequestId,
     outcome: ResolvePermissionOptions,
   ): Promise<void>
   stop(): Promise<SandboxDescriptor | null>
@@ -148,54 +150,38 @@ export interface FanoutTopology<Name extends string> {
 ```ts
 import type { Collection } from '@tanstack/db'
 import type {
-  ChildSessionEdgeRow,
   ChunkRow,
-  ConnectionRow,
-  PendingRequestRow,
   PermissionRow,
-  PromptTurnRow,
-  RuntimeInstanceRow,
+  PromptRequestRow,
   SessionRow,
-  TerminalRow,
 } from './types'
+import type { RequestId, SessionId, ToolCallId } from '@agentclientprotocol/sdk'
 
 export interface ObservableCollection<T extends object> extends Collection<T> {
   subscribe(callback: (rows: T[]) => void): { unsubscribe(): void }
 }
 
 export interface FirelineViews {
-  queuedTurns(): ObservableCollection<PromptTurnRow>
-  activeTurns(): ObservableCollection<PromptTurnRow>
   pendingPermissions(): ObservableCollection<PermissionRow>
-  sessionTurns(sessionId: string): ObservableCollection<PromptTurnRow>
-  connectionTurns(logicalConnectionId: string): ObservableCollection<PromptTurnRow>
-  turnChunks(promptTurnId: string): ObservableCollection<ChunkRow>
-  sessionPermissions(sessionId: string): ObservableCollection<PermissionRow>
+  sessionRequests(sessionId: SessionId): ObservableCollection<PromptRequestRow>
+  requestChunks(sessionId: SessionId, requestId: RequestId): ObservableCollection<ChunkRow>
+  toolCallChunks(sessionId: SessionId, toolCallId: ToolCallId): ObservableCollection<ChunkRow>
+  sessionPermissions(sessionId: SessionId): ObservableCollection<PermissionRow>
 }
 
 export interface FirelineDB {
-  readonly connections: ObservableCollection<ConnectionRow>
-  readonly promptTurns: ObservableCollection<PromptTurnRow>
-  readonly pendingRequests: ObservableCollection<PendingRequestRow>
-  readonly permissions: ObservableCollection<PermissionRow>
-  readonly terminals: ObservableCollection<TerminalRow>
-  readonly runtimeInstances: ObservableCollection<RuntimeInstanceRow>
   readonly sessions: ObservableCollection<SessionRow>
-  readonly childSessionEdges: ObservableCollection<ChildSessionEdgeRow>
+  readonly promptRequests: ObservableCollection<PromptRequestRow>
+  readonly permissions: ObservableCollection<PermissionRow>
   readonly chunks: ObservableCollection<ChunkRow>
 
   readonly views: FirelineViews
 
   // Compatibility alias for one release cycle.
   readonly collections: {
-    readonly connections: ObservableCollection<ConnectionRow>
-    readonly promptTurns: ObservableCollection<PromptTurnRow>
-    readonly pendingRequests: ObservableCollection<PendingRequestRow>
-    readonly permissions: ObservableCollection<PermissionRow>
-    readonly terminals: ObservableCollection<TerminalRow>
-    readonly runtimeInstances: ObservableCollection<RuntimeInstanceRow>
     readonly sessions: ObservableCollection<SessionRow>
-    readonly childSessionEdges: ObservableCollection<ChildSessionEdgeRow>
+    readonly promptRequests: ObservableCollection<PromptRequestRow>
+    readonly permissions: ObservableCollection<PermissionRow>
     readonly chunks: ObservableCollection<ChunkRow>
   }
 
@@ -212,9 +198,29 @@ export interface FirelineDbOptions {
 Notes:
 
 - `fireline.db()` is global, not agent-scoped
-- `db.sessions` and `db.promptTurns` are top-level aliases, not `db.collections.*` only
-- the seven existing query builders become `db.views.*`
+- `db.sessions` and `db.promptRequests` are top-level aliases, not `db.collections.*` only
+- `db.views.*` stays keyed by ACP schema ids: `SessionId`, `RequestId`, and `ToolCallId`
+- infrastructure rows such as connections, terminals, and runtime instances stay on admin APIs, not in `fireline.db()`
 - `@fireline/state` stays the implementation underneath, but is not the public import path
+
+### Infrastructure / admin surface
+
+`fireline.db()` stays agent-plane only. Infrastructure-plane rows remain on
+`SandboxAdmin` (or a small admin wrapper layered on top of it).
+
+```ts
+import type {
+  ConnectionRow,
+  RuntimeInstanceRow,
+  TerminalRow,
+} from './types'
+
+export interface SandboxAdmin {
+  listConnections(): Promise<readonly ConnectionRow[]>
+  listRuntimeInstances(): Promise<readonly RuntimeInstanceRow[]>
+  listTerminals(): Promise<readonly TerminalRow[]>
+}
+```
 
 ## `fireline.db()` Resolution Rules
 
@@ -317,7 +323,7 @@ Internally:
 
 - `@fireline/client` keeps depending on `@fireline/state`
 - `fireline.db()` calls the existing `createFirelineDB()`
-- `db.views.*` call the existing seven builders from `packages/state/src/collections/`
+- `db.views.*` call the existing agent-plane builders from `packages/state/src/collections/`
 
 Compatibility plan:
 
@@ -392,14 +398,21 @@ Before:
 
 ```ts
 db.collections.permissions
-createSessionTurnsCollection({ promptTurns: db.collections.promptTurns, sessionId })
+createSessionRequestsCollection({ promptRequests: db.collections.promptRequests, sessionId })
 ```
 
 After:
 
 ```ts
 db.permissions
-db.views.sessionTurns(sessionId)
+db.views.sessionRequests(sessionId)
+db.views.requestChunks(sessionId, requestId)
+```
+
+Infrastructure rows stay separate:
+
+```ts
+await admin.listRuntimeInstances()
 ```
 
 ### Transition compatibility
@@ -438,6 +451,7 @@ For one release:
 ### `packages/client/src/admin.ts`
 
 - add `stop(id: string): Promise<SandboxDescriptor | null>`
+- expose infra-plane row accessors for connections, terminals, and runtime instances
 - keep `get`, `list`, `destroy`, `status`, `healthCheck`
 
 ### `packages/client/src/events.ts`
@@ -477,6 +491,7 @@ For one release:
 
 - no new query logic
 - reused via `db.views.*`
+- rename prompt-turn builders to prompt-request builders keyed by `SessionId` and `RequestId`
 
 ## Scope Boundaries
 
