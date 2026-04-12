@@ -160,6 +160,11 @@ struct Cli {
     #[arg(long, hide = true)]
     mounted_resources_json: Option<String>,
 
+    /// Optional file to write the bound listener address to after binding.
+    /// Useful for tests that bind on port 0 and need to learn the bound port.
+    #[arg(long, hide = true)]
+    listen_addr_file: Option<PathBuf>,
+
     /// The agent command to run, e.g. `npx -y @zed-industries/claude-code-acp`.
     #[arg(trailing_var_arg = true)]
     agent_command: Vec<String>,
@@ -264,6 +269,7 @@ async fn run_control_plane_host(cli: Cli, host: IpAddr) -> Result<()> {
         docker_build_context: cli.docker_build_context,
         dockerfile: cli.dockerfile,
         docker_image: cli.docker_image,
+        listen_addr_file: cli.listen_addr_file,
     })
     .await
 }

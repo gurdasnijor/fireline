@@ -33,6 +33,9 @@ pub struct HostConfig {
     pub docker_build_context: Option<PathBuf>,
     pub dockerfile: PathBuf,
     pub docker_image: String,
+    /// Optional path to write the bound listener address to after binding.
+    /// Enables tests that bind on port 0 to discover the actual bound port.
+    pub listen_addr_file: Option<PathBuf>,
 }
 
 pub async fn run_host(config: HostConfig) -> Result<()> {
@@ -79,6 +82,12 @@ pub async fn run_host(config: HostConfig) -> Result<()> {
     });
 
     tracing::info!(addr = %bound_addr, "fireline host listening");
+
+    if let Some(path) = &config.listen_addr_file {
+        std::fs::write(path, bound_addr.to_string())
+            .with_context(|| format!("write listen-addr-file at {}", path.display()))?;
+    }
+
     axum::serve(listener, app).await.context("serve host")
 }
 

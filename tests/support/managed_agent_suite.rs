@@ -272,7 +272,6 @@ impl LocalRuntimeHarness {
 pub(crate) struct ControlPlaneHarness {
     pub http: reqwest::Client,
     pub base_url: String,
-    pub runtime_registry_path: PathBuf,
     pub peer_directory_path: PathBuf,
     pub shared_state_stream_name: String,
     shared_stream_server: stream_server::TestStreamServer,
@@ -280,28 +279,19 @@ pub(crate) struct ControlPlaneHarness {
 }
 
 impl ControlPlaneHarness {
-    pub(crate) async fn spawn(prefer_push: bool) -> Result<Self> {
+    pub(crate) async fn spawn(_prefer_push: bool) -> Result<Self> {
         init_test_tracing();
         ensure_control_plane_binaries_built()?;
 
-        let runtime_registry_path = temp_path("fireline-managed-agent-runtimes");
         let peer_directory_path = temp_path("fireline-managed-agent-peers");
         let shared_state_stream_name = format!("fireline-managed-agent-suite-{}", Uuid::new_v4());
         let shared_stream_server = stream_server::TestStreamServer::spawn().await?;
-        let (child, base_url) = spawn_control_plane(
-            &runtime_registry_path,
-            &peer_directory_path,
-            &shared_stream_server.base_url,
-            prefer_push,
-            5_000,
-            30_000,
-        )
-        .await?;
+        let (child, base_url) =
+            spawn_control_plane(&peer_directory_path, &shared_stream_server.base_url).await?;
 
         Ok(Self {
             http: reqwest::Client::new(),
             base_url,
-            runtime_registry_path,
             peer_directory_path,
             shared_state_stream_name,
             shared_stream_server,
@@ -681,12 +671,8 @@ impl sacp::ConnectTo<sacp::Client> for WebSocketTransport {
     stale_timeout_ms
 ))]
 async fn spawn_control_plane(
-    runtime_registry_path: &PathBuf,
     peer_directory_path: &PathBuf,
     shared_stream_base_url: &str,
-    prefer_push: bool,
-    heartbeat_scan_interval_ms: u64,
-    stale_timeout_ms: u64,
 ) -> Result<(Child, String)> {
     let listen_addr_file = temp_path("fireline-control-plane-listen-addr");
     // The control plane binds on --port 0 and writes its actual bound address
@@ -705,27 +691,18 @@ async fn spawn_control_plane(
         .arg(&listen_addr_file)
         .arg("--fireline-bin")
         .arg(fireline_bin())
-        .arg("--runtime-registry-path")
-        .arg(runtime_registry_path)
         .arg("--peer-directory-path")
         .arg(peer_directory_path)
         .arg("--startup-timeout-ms")
         .arg("20000")
         .arg("--stop-timeout-ms")
         .arg("10000")
-        .arg("--heartbeat-scan-interval-ms")
-        .arg(heartbeat_scan_interval_ms.to_string())
-        .arg("--stale-timeout-ms")
-        .arg(stale_timeout_ms.to_string())
         .arg("--durable-streams-url")
         .arg(shared_stream_base_url);
     if inherit_child_logs {
         command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     } else {
         command.stdout(Stdio::null()).stderr(Stdio::null());
-    }
-    if prefer_push {
-        command.arg("--prefer-push");
     }
 
     let mut child = command.spawn().context("spawn fireline --control-plane")?;
