@@ -124,8 +124,14 @@ impl StreamProjection for SessionIndex {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::path::PathBuf;
+
     use super::SessionIndex;
-    use crate::{PersistedHostSpec, projection::StateEnvelope};
+    use crate::{
+        PersistedHostSpec, ProvisionSpec, SandboxProviderRequest, TopologySpec,
+        projection::StateEnvelope,
+    };
 
     #[tokio::test]
     async fn materializes_session_rows_from_state_events() {
@@ -164,18 +170,21 @@ mod tests {
         let host_spec = PersistedHostSpec::new(
             "runtime:1",
             "node:test",
-            serde_json::json!({
-                "provider": "local",
-                "host": "127.0.0.1",
-                "port": 0,
-                "name": "resume-test",
-                "agentCommand": ["/bin/echo"],
-                "resources": [],
-                "stateStream": "state-test",
-                "streamStorage": null,
-                "peerDirectoryPath": "/tmp/peers.toml",
-                "topology": { "components": [] }
-            }),
+            ProvisionSpec {
+                host_key: None,
+                node_id: None,
+                provider: SandboxProviderRequest::Local,
+                host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                port: 0,
+                name: "resume-test".to_string(),
+                agent_command: vec!["/bin/echo".to_string()],
+                durable_streams_url: "http://127.0.0.1:8787/v1/stream".to_string(),
+                resources: Vec::new(),
+                state_stream: Some("state-test".to_string()),
+                stream_storage: None,
+                peer_directory_path: Some(PathBuf::from("/tmp/peers.toml")),
+                topology: TopologySpec::default(),
+            },
         );
         let host_spec_envelope: StateEnvelope = serde_json::from_value(serde_json::json!({
             "type":"runtime_spec",

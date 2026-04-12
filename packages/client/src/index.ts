@@ -27,6 +27,13 @@ export { Sandbox, agent, compose, middleware, sandbox }
 export { fanout, peer, pipe }
 export { appendApprovalResolved } from './events.js'
 export { connectAcp } from './connect.js'
+export type {
+  SessionId,
+  RequestId,
+  ToolCallId,
+  PromptRequestRef,
+  ToolInvocationRef,
+} from './acp-ids.js'
 
 export type { FirelineDB, FirelineDbOptions } from './db.js'
 export type { ResolvePermissionOutcome } from './agent.js'

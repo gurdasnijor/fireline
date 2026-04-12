@@ -411,6 +411,7 @@ mod tests {
         SecretsInjectionComponent, InjectionRule, InjectionScope, InjectionTarget,
         normalize_env_name, oauth_env_var_name, secret_env_var_name,
     };
+    use async_trait::async_trait;
     use fireline_tools::CredentialRef;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
