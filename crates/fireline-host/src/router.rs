@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -8,7 +6,7 @@ use fireline_sandbox::RuntimeHost;
 use fireline_session::{
     CreateRuntimeSpec, HeartbeatReport, RuntimeDescriptor, RuntimeRegistration, RuntimeStatus,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::auth::{RuntimeTokenClaims, RuntimeTokenStore, require_runtime_bearer};
 use crate::heartbeat::HeartbeatTracker;
@@ -31,7 +29,6 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/healthz", get(healthz))
-        .route("/v1/auth/runtime-token", post(issue_runtime_token))
         .route("/v1/runtimes", get(list_runtimes).post(create_runtime))
         .route(
             "/v1/runtimes/{runtime_key}",
@@ -96,26 +93,6 @@ async fn delete_runtime(
         tracing::warn!(?error, runtime_key, "forget liveness after delete");
     }
     Ok(Json(runtime))
-}
-
-async fn issue_runtime_token(
-    State(state): State<AppState>,
-    Json(request): Json<IssueRuntimeTokenRequest>,
-) -> Result<Json<IssueRuntimeTokenResponse>, ControlPlaneError> {
-    let runtime_key = request.runtime_key;
-    if state.runtime_host.get(&runtime_key)?.is_none() {
-        return Err(ControlPlaneError::not_found(format!(
-            "runtime '{runtime_key}' not found"
-        )));
-    }
-
-    let issued = state
-        .token_store
-        .issue(&runtime_key, Duration::from_secs(60 * 60 * 24));
-    Ok(Json(IssueRuntimeTokenResponse {
-        token: issued.token,
-        expires_at: issued.expires_at_ms,
-    }))
 }
 
 async fn register_runtime(
@@ -249,19 +226,6 @@ impl axum::response::IntoResponse for ControlPlaneError {
         )
             .into_response()
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct IssueRuntimeTokenRequest {
-    runtime_key: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct IssueRuntimeTokenResponse {
-    token: String,
-    expires_at: i64,
 }
 
 #[derive(Serialize)]

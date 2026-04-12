@@ -370,25 +370,6 @@ impl ControlPlaneHarness {
         }
     }
 
-    pub(crate) async fn issue_runtime_token(&self, runtime_key: &str) -> Result<String> {
-        let response = self
-            .http
-            .post(format!("{}/v1/auth/runtime-token", self.base_url))
-            .json(&json!({
-                "runtimeKey": runtime_key,
-                "scope": "runtime.write"
-            }))
-            .send()
-            .await?
-            .error_for_status()?;
-        let payload = response.json::<serde_json::Value>().await?;
-        payload
-            .get("token")
-            .and_then(|value| value.as_str())
-            .map(ToString::to_string)
-            .ok_or_else(|| anyhow!("missing runtime token"))
-    }
-
     /// Return the fully-qualified shared state stream URL for this
     /// harness — the same URL the control plane passes to its spawned
     /// runtimes as `FIRELINE_ADVERTISED_STATE_STREAM_URL`. Callers of

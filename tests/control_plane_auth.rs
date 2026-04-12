@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -20,7 +21,7 @@ use fireline_session::{
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tower::util::ServiceExt;
 use uuid::Uuid;
 
@@ -173,6 +174,7 @@ async fn register_round_trips_provider_identity_and_advertised_endpoints() -> Re
 struct TestHarness {
     app: axum::Router,
     runtime_host: RuntimeHost,
+    token_store: RuntimeTokenStore,
 }
 
 impl TestHarness {
@@ -187,10 +189,14 @@ impl TestHarness {
         let app = build_router(AppState {
             runtime_host: runtime_host.clone(),
             heartbeat_tracker,
-            token_store,
+            token_store: token_store.clone(),
         });
 
-        Ok(Self { app, runtime_host })
+        Ok(Self {
+            app,
+            runtime_host,
+            token_store,
+        })
     }
 
     async fn create_runtime(&self, name: &str) -> Result<RuntimeDescriptor> {
@@ -214,23 +220,10 @@ impl TestHarness {
     }
 
     async fn issue_runtime_token(&self, runtime_key: &str) -> Result<String> {
-        let response = self
-            .post_json(
-                "/v1/auth/runtime-token",
-                json!({
-                    "runtimeKey": runtime_key,
-                    "scope": "runtime.write",
-                }),
-                None,
-            )
-            .await?;
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let payload: Value = read_json(response).await?;
-        Ok(payload["token"]
-            .as_str()
-            .expect("token response should include token")
-            .to_string())
+        Ok(self
+            .token_store
+            .issue(runtime_key, Duration::from_secs(60 * 60 * 24))
+            .token)
     }
 
     async fn get_runtime(&self, runtime_key: &str) -> Result<RuntimeDescriptor> {

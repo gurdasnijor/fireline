@@ -9,7 +9,6 @@ use axum::Router;
 use durable_streams::{Client as DsClient, Offset};
 use fireline_session::{RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
 use futures::{SinkExt, StreamExt};
-use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tokio::process::{Child, Command};
 use tokio::sync::oneshot;
@@ -161,25 +160,6 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
                 runtime.state
             );
         }
-
-        let token_for_local =
-            issue_runtime_token(&client, &base_url, &local_ready.runtime_key).await?;
-        let cross_runtime_heartbeat = client
-            .post(format!(
-                "{base_url}/v1/runtimes/{}/heartbeat",
-                docker_ready[0].runtime_key
-            ))
-            .bearer_auth(&token_for_local)
-            .json(&json!({
-                "tsMs": now_ms(),
-                "metrics": null
-            }))
-            .send()
-            .await?;
-        assert!(matches!(
-            cross_runtime_heartbeat.status(),
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-        ));
 
         let peers = yopo::prompt(
             WebSocketTransport {
@@ -346,28 +326,6 @@ async fn wait_for_status(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-}
-
-async fn issue_runtime_token(
-    client: &reqwest::Client,
-    base_url: &str,
-    runtime_key: &str,
-) -> Result<String> {
-    let response = client
-        .post(format!("{base_url}/v1/auth/runtime-token"))
-        .json(&json!({
-            "runtimeKey": runtime_key,
-            "scope": "runtime.write"
-        }))
-        .send()
-        .await?
-        .error_for_status()?;
-    let payload = response.json::<serde_json::Value>().await?;
-    payload
-        .get("token")
-        .and_then(|value| value.as_str())
-        .map(ToString::to_string)
-        .ok_or_else(|| anyhow!("missing runtime token"))
 }
 
 async fn read_state_stream(state_stream_url: &str) -> Result<String> {

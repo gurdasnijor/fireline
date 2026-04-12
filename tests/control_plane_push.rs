@@ -4,9 +4,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use fireline_sandbox::RuntimeRegistry;
-use fireline_session::{Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
-use reqwest::StatusCode;
+use fireline_session::{RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
 use serde_json::json;
 use tokio::process::{Child, Command};
 use uuid::Uuid;
@@ -109,64 +107,6 @@ async fn assert_runtime_lifecycle_round_trip(prefer_push: bool) -> Result<()> {
     result
 }
 
-#[tokio::test]
-async fn register_becomes_stale_and_recovers_on_heartbeat() -> Result<()> {
-    ensure_control_plane_binaries_built()?;
-    let runtime_registry_path = temp_path("fireline-control-plane-runtimes");
-    let peer_directory_path = temp_path("fireline-control-plane-peers");
-    let base_url = format!("http://127.0.0.1:{}", reserve_port()?);
-    let registry = RuntimeRegistry::load(runtime_registry_path.clone())?;
-    registry.upsert(seed_runtime("runtime:test"))?;
-
-    let mut control_plane = spawn_control_plane(
-        &base_url,
-        &runtime_registry_path,
-        &peer_directory_path,
-        false,
-        50,
-        200,
-    )
-    .await?;
-
-    let result = async {
-        let client = reqwest::Client::new();
-        let token = issue_runtime_token(&client, &base_url, "runtime:test").await?;
-
-        let register_response = client
-            .post(format!("{base_url}/v1/runtimes/runtime:test/register"))
-            .bearer_auth(&token)
-            .json(&registration_body())
-            .send()
-            .await?;
-        assert_eq!(register_response.status(), StatusCode::OK);
-
-        let ready = wait_for_status(&base_url, "runtime:test", RuntimeStatus::Ready).await?;
-        assert_eq!(ready.runtime_id, "fireline:test:1");
-
-        let stale = wait_for_status(&base_url, "runtime:test", RuntimeStatus::Stale).await?;
-        assert_eq!(stale.status, RuntimeStatus::Stale);
-
-        let heartbeat_response = client
-            .post(format!("{base_url}/v1/runtimes/runtime:test/heartbeat"))
-            .bearer_auth(&token)
-            .json(&json!({
-                "tsMs": 123_456,
-                "metrics": null
-            }))
-            .send()
-            .await?;
-        assert_eq!(heartbeat_response.status(), StatusCode::OK);
-
-        let recovered = wait_for_status(&base_url, "runtime:test", RuntimeStatus::Ready).await?;
-        assert_eq!(recovered.updated_at_ms, 123_456);
-        Ok(())
-    }
-    .await;
-
-    shutdown_process(&mut control_plane).await;
-    result
-}
-
 fn ensure_control_plane_binaries_built() -> Result<()> {
     let status = std::process::Command::new("cargo")
         .args(["build", "--quiet", "-p", "fireline", "--bins"])
@@ -239,28 +179,6 @@ async fn spawn_control_plane(
     Ok(child)
 }
 
-async fn issue_runtime_token(
-    client: &reqwest::Client,
-    base_url: &str,
-    runtime_key: &str,
-) -> Result<String> {
-    let response = client
-        .post(format!("{base_url}/v1/auth/runtime-token"))
-        .json(&json!({
-            "runtimeKey": runtime_key,
-            "scope": "runtime.write"
-        }))
-        .send()
-        .await?
-        .error_for_status()?;
-    let payload = response.json::<serde_json::Value>().await?;
-    payload
-        .get("token")
-        .and_then(|value| value.as_str())
-        .map(ToString::to_string)
-        .ok_or_else(|| anyhow!("missing runtime token"))
-}
-
 async fn wait_for_status(
     base_url: &str,
     runtime_key: &str,
@@ -323,32 +241,4 @@ fn reserve_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
         .context("bind ephemeral port")?;
     Ok(listener.local_addr()?.port())
-}
-
-fn registration_body() -> serde_json::Value {
-    json!({
-        "runtimeId": "fireline:test:1",
-        "nodeId": "node:test",
-        "provider": "local",
-        "providerInstanceId": "instance:test",
-        "advertisedAcpUrl": "ws://127.0.0.1:4000/acp",
-        "advertisedStateStreamUrl": "http://127.0.0.1:4000/v1/stream/fireline",
-        "helperApiBaseUrl": null
-    })
-}
-
-fn seed_runtime(runtime_key: &str) -> RuntimeDescriptor {
-    RuntimeDescriptor {
-        runtime_key: runtime_key.to_string(),
-        runtime_id: String::new(),
-        node_id: "node:seed".to_string(),
-        provider: RuntimeProviderKind::Local,
-        provider_instance_id: runtime_key.to_string(),
-        status: RuntimeStatus::Starting,
-        acp: Endpoint::new(""),
-        state: Endpoint::new(""),
-        helper_api_base_url: None,
-        created_at_ms: 1,
-        updated_at_ms: 1,
-    }
 }
