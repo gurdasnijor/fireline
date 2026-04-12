@@ -7,12 +7,16 @@ use agent_client_protocol_test::testy::TestyCommand;
 use anyhow::{Context, Result, anyhow};
 use axum::Router;
 use durable_streams::{Client as DsClient, Offset};
-use fireline_session::{HostDescriptor, SandboxProviderKind, HostStatus};
+use fireline_sandbox::{SandboxDescriptor, SandboxHandle, SandboxStatus};
+use fireline_session::{HostStatus, SandboxProviderKind};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::process::{Child, Command};
 use tokio::sync::oneshot;
 use uuid::Uuid;
+
+#[path = "support/control_plane_harness.rs"]
+mod control_plane_harness;
 
 struct WebSocketTransport {
     url: String,
@@ -76,76 +80,78 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
 
     ensure_control_plane_binaries_built()?;
     let shared_ds = SharedStreamServer::spawn().await?;
-    let runtime_registry_path = temp_path("fireline-control-plane-runtimes");
     let peer_directory_path = temp_path("fireline-control-plane-peers");
     let base_url = format!("http://127.0.0.1:{}", reserve_port()?);
     let docker_image = format!("fireline-runtime:test-{}", Uuid::new_v4());
     let mut control_plane = spawn_control_plane(
         &base_url,
-        &runtime_registry_path,
         &peer_directory_path,
         &shared_ds.base_url,
         &docker_image,
     )
     .await?;
-    let mut created_host_keys = Vec::new();
+    let mut created_sandbox_ids = Vec::new();
 
     let result = async {
         let client = reqwest::Client::new();
         let local = create_runtime(
             &client,
             &base_url,
-            &shared_ds.base_url,
             SandboxProviderKind::Local,
             "agent-local",
             vec![testy_bin()],
         )
         .await?;
-        created_host_keys.push(local.host_key.clone());
+        created_sandbox_ids.push(local.id.clone());
 
-        let mut docker_runtimes = Vec::new();
+        let mut docker_sandboxes = Vec::new();
         for index in 0..4 {
-            let runtime = create_runtime(
+            let sandbox = create_runtime(
                 &client,
                 &base_url,
-                &shared_ds.base_url,
                 SandboxProviderKind::Docker,
                 &format!("agent-docker-{}", index + 1),
                 vec!["/usr/local/bin/fireline-testy".to_string()],
             )
             .await?;
-            created_host_keys.push(runtime.host_key.clone());
-            docker_runtimes.push(runtime);
+            created_sandbox_ids.push(sandbox.id.clone());
+            docker_sandboxes.push(sandbox);
         }
 
         let local_ready =
-            wait_for_status(&base_url, &local.host_key, HostStatus::Ready).await?;
+            control_plane_harness::wait_for_host_status(&base_url, &local.id, HostStatus::Ready)
+                .await?;
         let mut docker_ready = Vec::new();
-        for runtime in &docker_runtimes {
+        for sandbox in &docker_sandboxes {
             docker_ready.push(
-                wait_for_status(&base_url, &runtime.host_key, HostStatus::Ready).await?,
+                control_plane_harness::wait_for_host_status(
+                    &base_url,
+                    &sandbox.id,
+                    HostStatus::Ready,
+                )
+                .await?,
             );
         }
 
         let listed = client
-            .get(format!("{base_url}/v1/runtimes"))
+            .get(format!("{base_url}/v1/sandboxes"))
             .send()
             .await?
             .error_for_status()?
-            .json::<Vec<HostDescriptor>>()
+            .json::<Vec<SandboxDescriptor>>()
             .await?;
         assert_eq!(listed.len(), 5);
         assert_eq!(
             listed
                 .iter()
-                .filter(|runtime| runtime.provider == SandboxProviderKind::Local)
+                .filter(|sandbox| sandbox.provider == "local")
                 .count(),
             1
         );
         assert_eq!(
             listed
                 .iter()
-                .filter(|runtime| runtime.provider == SandboxProviderKind::Docker)
+                .filter(|sandbox| sandbox.provider == "docker")
                 .count(),
             4
         );
@@ -250,21 +256,21 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
 
         let stopped = client
             .post(format!(
-                "{base_url}/v1/runtimes/{}/stop",
+                "{base_url}/v1/sandboxes/{}/stop",
                 docker_ready[0].host_key
             ))
             .send()
             .await?
             .error_for_status()?
-            .json::<HostDescriptor>()
+            .json::<SandboxDescriptor>()
             .await?;
-        assert_eq!(stopped.status, HostStatus::Stopped);
+        assert_eq!(stopped.status, SandboxStatus::Stopped);
 
         Ok(())
     }
     .await;
 
-    cleanup_runtimes(&base_url, &created_host_keys).await;
+    cleanup_runtimes(&base_url, &created_sandbox_ids).await;
     shutdown_process(&mut control_plane).await;
     shared_ds.shutdown().await;
     result
@@ -273,59 +279,27 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
 async fn create_runtime(
     client: &reqwest::Client,
     base_url: &str,
-    durable_streams_url: &str,
     provider: SandboxProviderKind,
     name: &str,
     agent_command: Vec<String>,
-) -> Result<HostDescriptor> {
+) -> Result<SandboxHandle> {
     client
-        .post(format!("{base_url}/v1/runtimes"))
+        .post(format!("{base_url}/v1/sandboxes"))
         .json(&json!({
             "provider": match provider {
                 SandboxProviderKind::Local => "local",
                 SandboxProviderKind::Docker => "docker",
             },
-            "host": "127.0.0.1",
-            "port": 0,
             "name": name,
             "agentCommand": agent_command,
-            "durableStreamsUrl": durable_streams_url,
             "topology": { "components": [] }
         }))
         .send()
         .await?
         .error_for_status()?
-        .json::<HostDescriptor>()
+        .json::<SandboxHandle>()
         .await
         .context("decode create runtime response")
-}
-
-async fn wait_for_status(
-    base_url: &str,
-    host_key: &str,
-    expected: HostStatus,
-) -> Result<HostDescriptor> {
-    let client = reqwest::Client::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    loop {
-        let response = client
-            .get(format!("{base_url}/v1/runtimes/{host_key}"))
-            .send()
-            .await?;
-        if response.status().is_success() {
-            let descriptor = response.json::<HostDescriptor>().await?;
-            if descriptor.status == expected {
-                return Ok(descriptor);
-            }
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            return Err(anyhow!(
-                "timed out waiting for runtime '{host_key}' to become '{expected:?}'"
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
 }
 
 async fn read_state_stream(state_stream_url: &str) -> Result<String> {
@@ -436,7 +410,6 @@ fn target_bin(name: &str) -> PathBuf {
 
 async fn spawn_control_plane(
     base_url: &str,
-    runtime_registry_path: &PathBuf,
     peer_directory_path: &PathBuf,
     shared_stream_base_url: &str,
     docker_image: &str,
@@ -454,14 +427,11 @@ async fn spawn_control_plane(
         .arg(port)
         .arg("--fireline-bin")
         .arg(fireline_bin())
-        .arg("--runtime-registry-path")
-        .arg(runtime_registry_path)
         .arg("--peer-directory-path")
         .arg(peer_directory_path)
         .arg("--provider")
         .arg("docker")
-        .arg("--prefer-push")
-        .arg("--shared-stream-base-url")
+        .arg("--durable-streams-url")
         .arg(shared_stream_base_url)
         .arg("--docker-build-context")
         .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")))
@@ -510,7 +480,7 @@ async fn cleanup_runtimes(base_url: &str, host_keys: &[String]) {
     let client = reqwest::Client::new();
     for host_key in host_keys {
         let _ = client
-            .delete(format!("{base_url}/v1/runtimes/{host_key}"))
+            .delete(format!("{base_url}/v1/sandboxes/{host_key}"))
             .send()
             .await;
     }

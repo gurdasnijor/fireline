@@ -4,11 +4,14 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use fireline_session::{HostDescriptor, SandboxProviderKind, HostStatus};
+use fireline_sandbox::{SandboxDescriptor, SandboxHandle, SandboxStatus};
+use fireline_session::{HostStatus, SandboxProviderKind};
 use serde_json::json;
 use tokio::process::{Child, Command};
 use uuid::Uuid;
 
+#[path = "support/control_plane_harness.rs"]
+mod control_plane_harness;
 #[path = "support/stream_server.rs"]
 mod stream_server;
 
@@ -36,40 +39,34 @@ async fn polling_runtime_publishes_final_descriptor_through_control_plane() -> R
     assert_runtime_lifecycle_round_trip(false).await
 }
 
-async fn assert_runtime_lifecycle_round_trip(prefer_push: bool) -> Result<()> {
-    let runtime_registry_path = temp_path("fireline-control-plane-runtimes");
+async fn assert_runtime_lifecycle_round_trip(_prefer_push: bool) -> Result<()> {
     let peer_directory_path = temp_path("fireline-control-plane-peers");
     let shared_stream_server = stream_server::TestStreamServer::spawn().await?;
     let base_url = format!("http://127.0.0.1:{}", reserve_port()?);
     let mut control_plane = spawn_control_plane(
         &base_url,
-        &runtime_registry_path,
         &peer_directory_path,
-        prefer_push,
-        5_000,
-        30_000,
+        &shared_stream_server.base_url,
     )
     .await?;
 
     let result = async {
         let client = reqwest::Client::new();
         let response = client
-            .post(format!("{base_url}/v1/runtimes"))
+            .post(format!("{base_url}/v1/sandboxes"))
             .json(&json!({
                 "provider": "local",
-                "host": "127.0.0.1",
-                "port": 0,
                 "name": "push-test",
                 "agentCommand": [testy_bin()],
-                "durableStreamsUrl": shared_stream_server.base_url.clone(),
                 "topology": { "components": [] }
             }))
             .send()
             .await?
             .error_for_status()?;
-        let created = response.json::<HostDescriptor>().await?;
+        let created = response.json::<SandboxHandle>().await?;
         let runtime =
-            wait_for_status(&base_url, &created.host_key, HostStatus::Ready).await?;
+            control_plane_harness::wait_for_host_status(&base_url, &created.id, HostStatus::Ready)
+                .await?;
 
         assert_eq!(runtime.status, HostStatus::Ready);
         assert_eq!(runtime.provider, SandboxProviderKind::Local);
@@ -79,25 +76,19 @@ async fn assert_runtime_lifecycle_round_trip(prefer_push: bool) -> Result<()> {
         assert!(runtime.state.url.starts_with("http://"));
 
         let stopped = client
-            .post(format!(
-                "{base_url}/v1/runtimes/{}/stop",
-                runtime.host_key
-            ))
+            .post(format!("{base_url}/v1/sandboxes/{}/stop", runtime.host_key))
             .send()
             .await?
             .error_for_status()?
-            .json::<HostDescriptor>()
+            .json::<SandboxDescriptor>()
             .await?;
-        assert_eq!(stopped.status, HostStatus::Stopped);
+        assert_eq!(stopped.status, SandboxStatus::Stopped);
 
         let deleted = client
-            .delete(format!("{base_url}/v1/runtimes/{}", runtime.host_key))
+            .delete(format!("{base_url}/v1/sandboxes/{}", runtime.host_key))
             .send()
-            .await?
-            .error_for_status()?
-            .json::<HostDescriptor>()
             .await?;
-        assert_eq!(deleted.host_key, runtime.host_key);
+        assert_eq!(deleted.status(), reqwest::StatusCode::NOT_FOUND);
         Ok(())
     }
     .await;
@@ -137,11 +128,8 @@ fn target_bin(name: &str) -> PathBuf {
 
 async fn spawn_control_plane(
     base_url: &str,
-    runtime_registry_path: &PathBuf,
     peer_directory_path: &PathBuf,
-    prefer_push: bool,
-    heartbeat_scan_interval_ms: u64,
-    stale_timeout_ms: u64,
+    durable_streams_url: &str,
 ) -> Result<Child> {
     let port = base_url
         .rsplit(':')
@@ -156,55 +144,20 @@ async fn spawn_control_plane(
         .arg(port)
         .arg("--fireline-bin")
         .arg(fireline_bin())
-        .arg("--runtime-registry-path")
-        .arg(runtime_registry_path)
         .arg("--peer-directory-path")
         .arg(peer_directory_path)
         .arg("--startup-timeout-ms")
         .arg("20000")
         .arg("--stop-timeout-ms")
         .arg("10000")
-        .arg("--heartbeat-scan-interval-ms")
-        .arg(heartbeat_scan_interval_ms.to_string())
-        .arg("--stale-timeout-ms")
-        .arg(stale_timeout_ms.to_string())
+        .arg("--durable-streams-url")
+        .arg(durable_streams_url)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if prefer_push {
-        command.arg("--prefer-push");
-    }
 
     let mut child = command.spawn().context("spawn fireline --control-plane")?;
     wait_for_http_ok(&format!("{base_url}/healthz"), &mut child).await?;
     Ok(child)
-}
-
-async fn wait_for_status(
-    base_url: &str,
-    host_key: &str,
-    expected: HostStatus,
-) -> Result<HostDescriptor> {
-    let client = reqwest::Client::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let response = client
-            .get(format!("{base_url}/v1/runtimes/{host_key}"))
-            .send()
-            .await?;
-        if response.status().is_success() {
-            let descriptor = response.json::<HostDescriptor>().await?;
-            if descriptor.status == expected {
-                return Ok(descriptor);
-            }
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            return Err(anyhow!(
-                "timed out waiting for runtime '{host_key}' to become '{expected:?}'"
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
 }
 
 async fn wait_for_http_ok(url: &str, child: &mut Child) -> Result<()> {
