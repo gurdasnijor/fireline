@@ -3,8 +3,10 @@ import { agent, compose, middleware, sandbox } from '@fireline/client'
 import { approve, trace } from '@fireline/client/middleware'
 import { createFirelineDB } from '@fireline/state'
 
-// User code
+// Third-party
 import { createServer, type IncomingMessage } from 'node:http'
+
+// User code
 import { openNodeAcpConnection } from '../shared/acp-node.js'
 import { waitForRows } from '../shared/state-subscribe.js'
 import { appendApprovalResolved } from './approval.js'
@@ -26,7 +28,7 @@ await new Promise<void>((resolve) => broker.listen(Number(webhook.port || 8787),
 
 const handle = await compose(
   sandbox({ labels: { demo: 'approval-broker' } }),
-  middleware([trace({ includeMethods: ['session/prompt'] }), approve({ scope: 'tool_calls', webhook: webhookUrl })]),
+  middleware([trace({ includeMethods: ['session/prompt'] }), approve({ scope: 'tool_calls' })]),
   agent(agentCommand),
 ).start({ serverUrl, name: 'approval-broker' })
 
@@ -44,7 +46,7 @@ db.collections.permissions.subscribeChanges(() => {
   })
 })
 
-const acp = await openNodeAcpConnection(import.meta.url, handle.acp.url, 'approval-broker')
+const acp = await openNodeAcpConnection(handle.acp.url, 'approval-broker')
 const { sessionId } = await acp.connection.newSession({ cwd: '/', mcpServers: [] })
 await acp.connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'Take whatever action you need to answer this request.' }] })
 

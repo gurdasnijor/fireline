@@ -1,4 +1,6 @@
-// Third-party
+// This is NOT a Fireline library. It's a documented recipe for connecting to
+// an ACP endpoint from Node. For React/browser, use 'use-acp' instead.
+// See: https://github.com/marimo-team/use-acp
 import {
   ClientSideConnection,
   PROTOCOL_VERSION,
@@ -7,86 +9,31 @@ import {
 } from '@agentclientprotocol/sdk'
 import WebSocket, { type RawData } from 'ws'
 
+const unsupported = (name: string): never => {
+  throw new Error(`ACP SDK requires stub client method '${name}'. For React/browser, use use-acp instead.`)
+}
+const client = {
+  requestPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
+  sessionUpdate: async () => {},
+  writeTextFile: async () => unsupported('writeTextFile'),
+  readTextFile: async () => unsupported('readTextFile'),
+  createTerminal: async () => unsupported('createTerminal'),
+  terminalOutput: async () => unsupported('terminalOutput'),
+  releaseTerminal: async () => unsupported('releaseTerminal'),
+  waitForTerminalExit: async () => unsupported('waitForTerminalExit'),
+  killTerminal: async () => unsupported('killTerminal'),
+  extMethod: async (method: string) => unsupported(`extMethod:${method}`),
+  extNotification: async () => {},
+} satisfies Client
+
 export async function openNodeAcpConnection(url: string, clientName: string) {
   const socket = new WebSocket(url)
-  await new Promise<void>((resolve, reject) => {
-    socket.once('open', () => resolve())
-    socket.once('error', (error: Error) => reject(error))
-  })
-
-  const connection = new ClientSideConnection(() => createClient(), createStream(socket))
-  await connection.initialize({
-    protocolVersion: PROTOCOL_VERSION,
-    clientInfo: { name: clientName, version: '0.0.1' },
-    clientCapabilities: { fs: { readTextFile: false } },
-  })
-
-  return {
-    connection,
-    async close() {
-      socket.close()
-      await new Promise<void>((resolve) => socket.once('close', () => resolve()))
-    },
+  await new Promise<void>((resolve, reject) => { socket.once('open', () => resolve()); socket.once('error', reject) })
+  const stream: Stream = {
+    readable: new ReadableStream({ start(controller) { socket.on('message', (data: RawData) => controller.enqueue(JSON.parse(Buffer.isBuffer(data) ? data.toString('utf8') : String(data)))); socket.once('close', () => controller.close()); socket.once('error', (error: Error) => controller.error(error)) } }),
+    writable: new WritableStream({ write(message) { socket.send(JSON.stringify(message)) }, close() { socket.close() }, abort() { socket.close() } }),
   }
-}
-
-function createClient(): Client {
-  return {
-    async requestPermission() {
-      return { outcome: { outcome: 'cancelled' } }
-    },
-    async sessionUpdate() {},
-    async writeTextFile(): Promise<never> { throw new Error('not implemented') },
-    async readTextFile(): Promise<never> { throw new Error('not implemented') },
-    async createTerminal(): Promise<never> { throw new Error('not implemented') },
-    async terminalOutput(): Promise<never> { throw new Error('not implemented') },
-    async releaseTerminal(): Promise<never> { throw new Error('not implemented') },
-    async waitForTerminalExit(): Promise<never> { throw new Error('not implemented') },
-    async killTerminal(): Promise<never> { throw new Error('not implemented') },
-    async extMethod(method: string): Promise<Record<string, unknown>> {
-      throw new Error(`unsupported ext method: ${method}`)
-    },
-    async extNotification() {},
-  }
-}
-
-function createStream(socket: WebSocket): Stream {
-  return {
-    writable: new WritableStream({
-      write(message) {
-        return new Promise<void>((resolve, reject) => {
-          socket.send(JSON.stringify(message), (error?: Error) => (error ? reject(error) : resolve()))
-        })
-      },
-      close() {
-        socket.close()
-      },
-      abort() {
-        socket.close()
-      },
-    }) as Stream['writable'],
-    readable: new ReadableStream({
-      start(controller) {
-        socket.on('message', (data: RawData) => controller.enqueue(JSON.parse(toText(data))))
-        socket.once('close', () => controller.close())
-        socket.once('error', (error: Error) => controller.error(error))
-      },
-      cancel() {
-        socket.close()
-      },
-    }) as Stream['readable'],
-  }
-}
-
-function toText(data: RawData): string {
-  if (typeof data === 'string') {
-    return data
-  }
-  if (data instanceof ArrayBuffer) {
-    return Buffer.from(data).toString('utf8')
-  }
-  if (Array.isArray(data)) {
-    return Buffer.concat(data).toString('utf8')
-  }
-  return data.toString('utf8')
+  const connection = new ClientSideConnection(() => client, stream)
+  await connection.initialize({ protocolVersion: PROTOCOL_VERSION, clientInfo: { name: clientName, version: '0.0.1' }, clientCapabilities: { fs: { readTextFile: false } } })
+  return { connection, close: () => new Promise<void>((resolve) => { socket.once('close', () => resolve()); socket.close() }) }
 }

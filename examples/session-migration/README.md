@@ -40,6 +40,7 @@ fireline --durable-streams-url=http://127.0.0.1:7474 --host 127.0.0.1 --port 544
 Install deps for the example and run it:
 
 ```bash
+pnpm --dir .. install --ignore-workspace --lockfile=false
 cd examples/session-migration
 pnpm install
 FIRELINE_LOCAL_URL=http://127.0.0.1:4440 \

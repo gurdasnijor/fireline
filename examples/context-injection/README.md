@@ -20,7 +20,12 @@ compose(
   sandbox({ resources: [localPath('/tmp/demo-workspace', '/workspace', true)] }),
   middleware([
     trace({ includeMethods: ['session/prompt'] }),
-    contextInjection({ files: ['/workspace/RULES.md', '/workspace/CONTEXT.md'] }),
+    contextInjection({
+      sources: [
+        { kind: 'workspaceFile', path: '/workspace/RULES.md' },
+        { kind: 'workspaceFile', path: '/workspace/CONTEXT.md' },
+      ],
+    }),
   ]),
   agent(['fireline-testy-prompt']),
 ).start({ serverUrl: 'http://127.0.0.1:4440' })
@@ -35,6 +40,7 @@ The demo uses `fireline-testy-prompt`, which echoes the exact prompt it saw. Tha
 
 ```bash
 cargo build -q -p fireline --bin fireline --bin fireline-testy-prompt
+pnpm --dir .. install --ignore-workspace --lockfile=false
 cd examples/context-injection
 pnpm install
 pnpm start

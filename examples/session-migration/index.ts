@@ -4,6 +4,8 @@ import { trace } from '@fireline/client/middleware'
 import { localPath } from '@fireline/client/resources'
 import { createFirelineDB } from '@fireline/state'
 
+// Third-party
+
 // User code
 import { openNodeAcpConnection } from '../shared/acp-node.js'
 import { waitForRows } from '../shared/state-subscribe.js'
@@ -32,11 +34,7 @@ const localHandle = await harness.start({
 const db = createFirelineDB({ stateStreamUrl: localHandle.state.url })
 await db.preload()
 
-const localAcp = await openNodeAcpConnection(
-  import.meta.url,
-  localHandle.acp.url,
-  'session-migration-local',
-)
+const localAcp = await openNodeAcpConnection(localHandle.acp.url, 'session-migration-local')
 const { sessionId } = await localAcp.connection.newSession({ cwd: '/workspace', mcpServers: [] })
 await localAcp.connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'turn 1 on localhost' }] })
 await localAcp.connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'turn 2 on localhost' }] })
@@ -46,11 +44,7 @@ const remoteHandle = await harness.start({
   name: 'session-migration-remote',
   stateStream,
 })
-const remoteAcp = await openNodeAcpConnection(
-  import.meta.url,
-  remoteHandle.acp.url,
-  'session-migration-remote',
-)
+const remoteAcp = await openNodeAcpConnection(remoteHandle.acp.url, 'session-migration-remote')
 await remoteAcp.connection.loadSession({ sessionId, cwd: '/workspace', mcpServers: [] })
 await remoteAcp.connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'turn 3 on remote' }] })
 

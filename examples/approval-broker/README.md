@@ -20,7 +20,7 @@ compose(
   sandbox({}),
   middleware([
     trace(),
-    approve({ scope: 'tool_calls', webhook: 'http://127.0.0.1:8787/approve' }),
+    approve({ scope: 'tool_calls' }),
   ]),
   agent(['fireline-testy-prompt']),
 ).start({ serverUrl: 'http://127.0.0.1:4440' })
@@ -30,7 +30,7 @@ Then:
 
 1. the prompt is suspended
 2. a `permission` row appears in `@fireline/state`
-3. the broker POSTs that request to a webhook
+3. the broker observes that row and POSTs it to an external webhook
 4. the webhook appends `approval_resolved`
 5. the same prompt continues without reopening the session
 
@@ -38,6 +38,7 @@ Then:
 
 ```bash
 cargo build -q -p fireline --bin fireline --bin fireline-testy-prompt
+pnpm --dir .. install --ignore-workspace --lockfile=false
 cd examples/approval-broker
 pnpm install
 pnpm start

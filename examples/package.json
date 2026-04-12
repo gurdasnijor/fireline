@@ -1,0 +1,12 @@
+{
+  "name": "fireline-examples-shared",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.18.2",
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1"
+  }
+}

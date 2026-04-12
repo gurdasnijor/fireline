@@ -4,10 +4,12 @@ import { contextInjection, trace } from '@fireline/client/middleware'
 import { localPath } from '@fireline/client/resources'
 import { createFirelineDB } from '@fireline/state'
 
-// User code
+// Third-party
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+// User code
 import { openNodeAcpConnection } from '../shared/acp-node.js'
 import { waitForRows } from '../shared/state-subscribe.js'
 
@@ -20,14 +22,19 @@ const handle = await compose(
   sandbox({ resources: [localPath(workspace, '/workspace', true)], labels: { demo: 'context-injection' } }),
   middleware([
     trace({ includeMethods: ['session/prompt'] }),
-    contextInjection({ files: ['/workspace/RULES.md', '/workspace/CONTEXT.md'] }),
+    contextInjection({
+      sources: [
+        { kind: 'workspaceFile', path: '/workspace/RULES.md' },
+        { kind: 'workspaceFile', path: '/workspace/CONTEXT.md' },
+      ],
+    }),
   ]),
   agent((process.env.AGENT_COMMAND ?? '../../target/debug/fireline-testy-prompt').split(' ')),
 ).start({ serverUrl, name: 'context-injection' })
 
 const db = createFirelineDB({ stateStreamUrl: handle.state.url })
 await db.preload()
-const acp = await openNodeAcpConnection(import.meta.url, handle.acp.url, 'context-injection')
+const acp = await openNodeAcpConnection(handle.acp.url, 'context-injection')
 const { sessionId } = await acp.connection.newSession({ cwd: '/workspace', mcpServers: [] })
 await acp.connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'What is the codename?' }] })
 
