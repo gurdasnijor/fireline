@@ -40,7 +40,7 @@ The agent running inside the runtime is **`fireline-testy-load`** — a minimal 
   - `statePlane` flips from `idle until runtime is ready` to the DB fields.
 - The right-hand **State Explorer** panel flips from *"Idle until a runtime is ready"* to showing the five tabs `sessions / turns / edges / chunks / connections`. The `sessions` tab is the default; it's empty because no ACP session has been opened yet, but the preload has completed against `http://localhost:5173/v1/stream/fireline-harness-state` — durable-streams is HTTP+SSE, not WebSocket — which vite's `/v1` proxy forwards to `127.0.0.1:4437`.
 
-**Primitive path:** the button calls `host.createSession({ agentCommand, metadata })` via `createFirelineHost` from `@fireline/client/host-fireline`. The satisfier POSTs to `/cp/v1/runtimes` with `{ provider: 'local', host: '127.0.0.1', port: 0, ... }` — Vite proxies `/cp` to `http://127.0.0.1:4440` after stripping the prefix, so this hits the `fireline-control-plane` binary on port 4440. The control plane spawns a `fireline` binary child process which binds on an OS-assigned port for its ACP WebSocket and state-stream routes (the vite proxy config pins `/acp` and `/v1` to `127.0.0.1:4437`, so the dev environment relies on the spawned runtime landing there — see the runbook port table for the caveats). The control plane waits for the runtime to advertise `Ready` and returns a `RuntimeDescriptor` to the browser. The browser wraps the `runtimeKey` into a `SessionHandle { id, kind: 'fireline' }` per the `Host.createSession` contract in [`./proposals/client-primitives.md`](./proposals/client-primitives.md) §Module 2.
+**Primitive path:** the button calls `host.provision({ agentCommand, metadata })` via `createFirelineHost` from `@fireline/client/host-fireline`. The satisfier POSTs to `/cp/v1/runtimes` with `{ provider: 'local', host: '127.0.0.1', port: 0, ... }` — Vite proxies `/cp` to `http://127.0.0.1:4440` after stripping the prefix, so this hits the `fireline-control-plane` binary on port 4440. The control plane spawns a `fireline` binary child process which binds on an OS-assigned port for its ACP WebSocket and state-stream routes (the vite proxy config pins `/acp` and `/v1` to `127.0.0.1:4437`, so the dev environment relies on the spawned runtime landing there — see the runbook port table for the caveats). The control plane waits for the runtime to advertise `Ready` and returns a `RuntimeDescriptor` to the browser. `createFirelineHost` wraps the `runtimeKey` and the descriptor's `acp` + `state` endpoints into a `HostHandle { id, kind: 'fireline', acp, state }` per the `Host.provision` contract in [`./proposals/client-primitives.md`](./proposals/client-primitives.md) §Module 2. (The `provision` verb is the post-`37db346` rename of the old `createSession` verb — the Host primitive hands out a *runtime*, and ACP sessions live inside it via `session/new` on `handle.acp.url`.)
 
 **TLA tie-in:** at this point `runtimeIndex[runtime_key].status = "ready"` in the spec's state, and `ProvisionReturnsReachableRuntime` (at `verification/spec/managed_agents.tla:814`) says "ready runtimes are reachable" — which is exactly what the browser proves by opening a WebSocket to the same runtime in step 2.2.
 
@@ -162,7 +162,7 @@ WakeOnStoppedChangesRuntimeId ==
 
 **Say:** *"The control plane is the one component of the demo that's a separate process outside Vite. It's a Rust binary at `target/debug/fireline-control-plane` spawned by the dev server on port 4440. We're going to switch to the runbook's fallback — run it by hand."* Then go to [`./demo-runbook.md`](./demo-runbook.md) §"Known issues — 5a: control plane refuses to start" for the hand-start invocation.
 
-**Narrative recovery:** *"While that comes up — the important thing to internalize is that the control plane is implementing the `POST /v1/runtimes` half of the `Host` primitive's contract. The browser is host-agnostic; if it were pointed at a `ClaudeHost` satisfier instead, the same UI would drive Claude Agent SDK v2 `unstable_v2_createSession` + `unstable_v2_resumeSession` under the hood. The contract is the four-verb `Host` trait in `@fireline/client/host`, not any particular backend."*
+**Narrative recovery:** *"While that comes up — the important thing to internalize is that the control plane is implementing the `POST /v1/runtimes` half of the `Host` primitive's contract. The browser is host-agnostic; any second satisfier (a remote hosted-API host, a stub for testing, whatever lands after demo day) would drive the same four-verb surface. The contract is `provision / wake / status / stop` on the `Host` trait in `@fireline/client/host`, not any particular backend."*
 
 ### 5b. Runtime boots, but prompts 404
 
@@ -197,13 +197,13 @@ WakeOnStoppedChangesRuntimeId ==
 
 | UI element | Host verb | Primitive | TLA invariant (if any) |
 |---|---|---|---|
-| "Launch Agent" button | `host.createSession(spec)` | Host + Sandbox | `ProvisionReturnsReachableRuntime` (line 814) |
+| "Launch Agent" button | `host.provision(spec)` | Host + Sandbox | `ProvisionReturnsReachableRuntime` (line 814) |
 | "New Session" button | ACP `session/new` via WebSocket (not a Host verb) | Session | `SessionAppendOnly` (line 755) |
 | "Send" (prompt form) | ACP `session/prompt` | Harness + Session | `HarnessEveryEffectLogged` (line 776), `HarnessAppendOrderStable` (line 783) |
 | "Reconnect + Load" button | ACP `session/load` | Session | `SessionDurableAcrossRuntimeDeath` (line 763) |
 | "Disconnect" button | WebSocket close (not a Host verb) | Session (read side continues) | — |
 | "Wake" button | `host.wake(handle)` | Orchestration | `WakeOnReadyIsNoop` (line 789), `ConcurrentWakeSingleWinner` (line 794), `WakeOnStoppedChangesRuntimeId` (line 802) |
-| "Stop Runtime" button | `host.stopSession(handle)` | Host | (no direct invariant; complements the Wake pair) |
+| "Stop Runtime" button | `host.stop(handle)` | Host | (no direct invariant; complements the Wake pair) |
 | "Reset" button | `disconnect + clear events` (not a Host verb) | — | — |
 | State explorer tabs | `@fireline/state` live queries | Session (read surface) | `SessionAppendOnly` (line 755), `SessionScopedIdempotentAppend` (line 769) |
 | Inspector card's `handleId` / `sessionStatus` | `host.status(handle)` polled after every verb | Host | — |
