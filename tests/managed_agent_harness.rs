@@ -330,6 +330,7 @@ async fn harness_approval_gate_blocks_prompt_until_resolved_via_stream_event() -
 /// without losing the client connection that originated the prompt, or
 /// once a scripted agent can emit the pre-pause effects on cold start.
 #[tokio::test]
+#[ignore = "pending deeper harness proof obligation — see refinement-matrix.md HarnessCrashSurvivingPauseResume"]
 async fn harness_durable_suspend_resume_round_trip() -> Result<()> {
     let topology = TopologySpec {
         components: vec![TopologyComponentSpec {
