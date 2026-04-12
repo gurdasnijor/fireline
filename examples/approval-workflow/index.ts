@@ -1,6 +1,7 @@
 import fireline, { agent, compose, middleware, sandbox } from '@fireline/client'
 import { approve, secretsProxy, trace } from '@fireline/client/middleware'
 import { createServer, type IncomingMessage } from 'node:http'
+import { waitForRows } from '../shared/wait.ts'
 
 const serverUrl = process.env.FIRELINE_URL ?? 'http://127.0.0.1:4440'
 const webhookUrl = process.env.APPROVAL_WEBHOOK ?? 'http://127.0.0.1:8787/approve'
@@ -25,47 +26,14 @@ db.permissions.subscribe((rows) => { const pending = rows.find((row) => row.stat
 const acp = await handle.connect('approval-workflow')
 const { sessionId } = await acp.newSession({ cwd: '/workspace', mcpServers: [] })
 await acp.prompt({ sessionId, prompt: [{ type: 'text', text: 'Delete the build output with rm -rf dist, but wait for human approval first.' }] })
-const approvals = await waitForResolvedPermissions(db.permissions, sessionId, 15_000)
+const approvals = await waitForRows(
+  db.permissions,
+  (rows) => rows.some((row) => row.sessionId === sessionId && row.state === 'resolved'),
+  15_000,
+)
 console.log(JSON.stringify({ question: 'How do I require human approval for dangerous operations?', sessionId, approvals: approvals.filter((row) => row.sessionId === sessionId).map((row) => ({ requestId: row.requestId, state: row.state, outcome: row.outcome })) }, null, 2))
 await acp.close(); db.close(); broker.close()
 
 function readBody(req: IncomingMessage) {
   return new Promise<string>((resolve, reject) => { const chunks: Uint8Array[] = []; req.on('data', (chunk: Uint8Array) => chunks.push(chunk)); req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8'))); req.on('error', reject) })
-}
-
-function waitForResolvedPermissions(
-  collection: {
-    readonly toArray: readonly {
-      readonly sessionId: string
-      readonly requestId: string
-      readonly state: string
-      readonly outcome?: string
-    }[]
-    subscribe(callback: (rows: readonly {
-      readonly sessionId: string
-      readonly requestId: string
-      readonly state: string
-      readonly outcome?: string
-    }[]) => void): { unsubscribe(): void }
-  },
-  sessionId: string,
-  timeoutMs: number,
-) {
-  return new Promise<readonly {
-    readonly sessionId: string
-    readonly requestId: string
-    readonly state: string
-    readonly outcome?: string
-  }[]>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      subscription.unsubscribe()
-      reject(new Error(`timed out after ${timeoutMs}ms`))
-    }, timeoutMs)
-    const subscription = collection.subscribe((rows) => {
-      if (!rows.some((row) => row.sessionId === sessionId && row.state === 'resolved')) return
-      clearTimeout(timeout)
-      subscription.unsubscribe()
-      resolve([...rows])
-    })
-  })
 }

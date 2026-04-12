@@ -10,14 +10,19 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "types": ["node", "ws"],
-    "typeRoots": ["../packages/client/node_modules/@types"],
+    "typeRoots": [
+      "../packages/client/node_modules/@types",
+      "./live-monitoring/node_modules/@types",
+      "./flamecast-client/node_modules/@types"
+    ],
     "baseUrl": ".",
     "paths": {
       "@fireline/client": ["../packages/client/src/index.ts"],
       "@fireline/client/admin": ["../packages/client/src/admin.ts"],
       "@fireline/client/middleware": ["../packages/client/src/middleware.ts"],
       "@fireline/client/resources": ["../packages/client/src/resources.ts"],
-      "@fireline/state": ["../packages/state/src/index.ts"]
+      "@fireline/state": ["../packages/state/src/index.ts"],
+      "@agentclientprotocol/sdk": ["../packages/client/node_modules/@agentclientprotocol/sdk"]
     }
   },
   "include": ["./*/index.ts", "./shared/**/*.ts"]

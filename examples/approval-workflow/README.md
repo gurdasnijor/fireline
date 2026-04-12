@@ -8,7 +8,7 @@ This demo shows the Fireline answer. The agent reaches for a risky operation, Fi
 
 1. `approve({ scope: 'tool_calls' })` turns dangerous tool calls into approval checkpoints.
 2. A tiny webhook server receives the approval request.
-3. The approval decision is appended back into the same state stream.
+3. The webhook resolves the request through `handle.resolvePermission(...)`.
 4. The original prompt resumes instead of restarting.
 
 ## The Code
@@ -25,7 +25,7 @@ const handle = await compose(
 ).start({ serverUrl, name: 'approval-workflow' })
 ```
 
-That is the product surface. The rest of the demo is ordinary glue around the durable approval event: send a notification out, receive a decision back, append the resolution, continue the run.
+That is the product surface. The rest of the demo is ordinary glue around the durable approval event: send a notification out, receive a decision back, call `handle.resolvePermission(...)`, continue the run.
 
 ## Run It
 

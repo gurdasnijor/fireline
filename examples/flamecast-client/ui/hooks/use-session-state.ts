@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLiveQuery } from "@tanstack/react-db";
 import { useAcpClient } from "use-acp";
-import { appendApprovalResolved } from "@fireline/client";
 import {
   createSessionPermissionsCollection,
   createSessionTurnsCollection,
@@ -119,8 +118,8 @@ export function useSessionState(sessionId: string, _ws: RuntimeWebSocketHandle) 
   );
   const markdownSegments = useMemo(() => sessionLogsToSegments(logs), [logs]);
   const pendingPermissions = useMemo(
-    () => sessionPermissions.filter((permission) => permission.state === "pending").map(toPendingPermission),
-    [sessionPermissions],
+    () => (acp.pendingPermission?.sessionId === sessionId ? [toPendingPermissionRequest(acp.pendingPermission)] : []),
+    [acp.pendingPermission, sessionId],
   );
   const isProcessing = useMemo(
     () => sessionTurns.some((turn) => turn.state === "queued" || turn.state === "active"),
@@ -129,18 +128,17 @@ export function useSessionState(sessionId: string, _ws: RuntimeWebSocketHandle) 
 
   const respondToPermission = useCallback(
     (requestId: string, body: PermissionResponseBody) => {
-      if (!session?.stateStreamUrl) {
-        throw new Error("Session state stream is not available yet");
+      if (acp.pendingPermission?.deferredId !== requestId) {
+        throw new Error("Permission is no longer active on the ACP connection");
       }
-      void appendApprovalResolved({
-        streamUrl: session.stateStreamUrl,
-        sessionId,
-        requestId,
-        allow: "optionId" in body,
-        resolvedBy: "flamecast-client",
+      acp.resolvePermission({
+        outcome:
+          "optionId" in body
+            ? { outcome: "selected", optionId: body.optionId }
+            : { outcome: "cancelled" },
       });
     },
-    [session?.stateStreamUrl, sessionId],
+    [acp],
   );
 
   const prompt = useCallback(
@@ -339,17 +337,17 @@ function permissionLogType(permission: PermissionRow): string {
   }
 }
 
-function toPendingPermission(permission: PermissionRow): PendingPermission {
+function toPendingPermissionRequest(permission: NonNullable<ReturnType<typeof useAcpClient>["pendingPermission"]>): PendingPermission {
   return {
-    requestId: permission.requestId,
-    toolCallId: permission.toolCallId ?? "",
-    title: permission.title ?? "Permission required",
-    options:
-      permission.options?.map((option) => ({
+    requestId: permission.deferredId,
+    toolCallId: permission.toolCall.toolCallId ?? "",
+    title: permission.toolCall.title ?? "Permission required",
+    kind: permission.toolCall.kind ?? undefined,
+    options: permission.options.map((option) => ({
         optionId: option.optionId,
         name: option.name,
         kind: option.kind,
-      })) ?? [],
+      })),
   };
 }
 
