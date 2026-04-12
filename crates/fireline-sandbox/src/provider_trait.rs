@@ -7,7 +7,7 @@ use crate::provider::RuntimeLaunch;
 
 #[async_trait]
 pub trait LocalRuntimeLauncher: Send + Sync {
-    async fn start_local_runtime(
+    async fn launch_local_runtime(
         &self,
         spec: CreateRuntimeSpec,
         runtime_key: String,

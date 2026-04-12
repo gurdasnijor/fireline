@@ -29,7 +29,7 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/healthz", get(healthz))
-        .route("/v1/runtimes", get(list_runtimes).post(create_runtime))
+        .route("/v1/runtimes", get(list_runtimes).post(provision_runtime))
         .route(
             "/v1/runtimes/{runtime_key}",
             get(get_runtime).delete(delete_runtime),
@@ -59,11 +59,11 @@ async fn get_runtime(
     Ok(Json(runtime))
 }
 
-async fn create_runtime(
+async fn provision_runtime(
     State(state): State<AppState>,
     Json(spec): Json<CreateRuntimeSpec>,
 ) -> Result<(StatusCode, Json<RuntimeDescriptor>), ControlPlaneError> {
-    let runtime = state.runtime_host.create(spec).await?;
+    let runtime = state.runtime_host.provision(spec).await?;
     Ok((StatusCode::CREATED, Json(runtime)))
 }
 

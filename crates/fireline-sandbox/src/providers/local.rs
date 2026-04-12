@@ -41,7 +41,7 @@ impl RuntimeProvider for LocalProvider {
         let mounted_resources =
             prepare_resources(&spec.resources, &self.mounters, &runtime_key).await?;
         self.launcher
-            .start_local_runtime(spec, runtime_key, node_id, mounted_resources)
+            .launch_local_runtime(spec, runtime_key, node_id, mounted_resources)
             .await
     }
 }

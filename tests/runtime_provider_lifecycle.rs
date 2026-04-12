@@ -77,7 +77,7 @@ async fn sandbox_runtime_host_stays_starting_until_register_arrives() -> Result<
     );
 
     let descriptor = runtime_host
-        .create(CreateRuntimeSpec {
+        .provision(CreateRuntimeSpec {
             runtime_key: None,
             node_id: None,
             provider: RuntimeProviderRequest::Local,
@@ -128,7 +128,7 @@ struct FakeRuntimeLauncher;
 
 #[async_trait]
 impl LocalRuntimeLauncher for FakeRuntimeLauncher {
-    async fn start_local_runtime(
+    async fn launch_local_runtime(
         &self,
         spec: CreateRuntimeSpec,
         _runtime_key: String,

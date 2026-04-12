@@ -69,7 +69,7 @@ impl RuntimeHost {
     }
 
     #[instrument(skip(self, spec), fields(runtime_key = spec.runtime_key.as_deref().unwrap_or("<generated>"), provider = ?spec.provider))]
-    pub async fn create(&self, spec: CreateRuntimeSpec) -> Result<RuntimeDescriptor> {
+    pub async fn provision(&self, spec: CreateRuntimeSpec) -> Result<RuntimeDescriptor> {
         let runtime_key = spec
             .runtime_key
             .clone()
@@ -157,7 +157,7 @@ impl RuntimeHost {
                     .await
                     .remove(&runtime_key);
             }
-            info!(runtime_key, status = ?descriptor.status, "runtime host create returned existing descriptor");
+            info!(runtime_key, status = ?descriptor.status, "runtime host provision returned existing descriptor");
             return Ok(descriptor);
         }
 
@@ -193,7 +193,7 @@ impl RuntimeHost {
                 .remove(&runtime_key);
         }
 
-        info!(runtime_key, status = ?descriptor.status, "runtime host created runtime descriptor");
+        info!(runtime_key, status = ?descriptor.status, "runtime host provisioned runtime descriptor");
         Ok(descriptor)
     }
 

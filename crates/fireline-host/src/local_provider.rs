@@ -103,7 +103,7 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
         skip(self, spec, mounted_resources),
         fields(runtime_key, node_id, provider = "local")
     )]
-    async fn start_local_runtime(
+    async fn launch_local_runtime(
         &self,
         spec: CreateRuntimeSpec,
         runtime_key: String,
