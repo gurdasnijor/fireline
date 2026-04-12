@@ -7,7 +7,21 @@ COPY crates ./crates
 COPY src ./src
 COPY verification ./verification
 
-RUN cargo build --release --features anthropic-provider --bin fireline --bin fireline-streams
+RUN cargo build --release --features anthropic-provider --bin fireline --bin fireline-streams --bin fireline-testy-load
+
+FROM node:22-bookworm-slim AS embedded-spec-bootstrap
+
+WORKDIR /opt/fireline-bootstrap
+
+COPY docker/bin ./docker/bin
+COPY packages/client/src ./packages/client/src
+
+RUN npm init -y \
+    && npm install --no-package-lock --omit=dev \
+      tsx@4.20.6 \
+      @agentclientprotocol/sdk@0.18.1 \
+      ws@8.18.3 \
+      @durable-streams/client@0.2.3
 
 FROM debian:bookworm-slim
 
@@ -21,6 +35,9 @@ RUN useradd --system --create-home --home-dir /var/lib/fireline --uid 10001 fire
 
 COPY --from=builder /app/target/release/fireline /usr/local/bin/fireline
 COPY --from=builder /app/target/release/fireline-streams /usr/local/bin/fireline-streams
+COPY --from=builder /app/target/release/fireline-testy-load /usr/local/bin/fireline-testy-load
+COPY --from=embedded-spec-bootstrap /usr/local /usr/local
+COPY --from=embedded-spec-bootstrap /opt/fireline-bootstrap /opt/fireline-bootstrap
 COPY docker/bin/fireline-host-quickstart-entrypoint.sh /usr/local/bin/fireline-host-quickstart-entrypoint
 COPY docker/bin/healthcheck-http.sh /usr/local/bin/healthcheck-http
 COPY ${SPEC} /etc/fireline/spec.json

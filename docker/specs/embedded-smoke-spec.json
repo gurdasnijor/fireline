@@ -1,0 +1,19 @@
+{
+  "kind": "harness",
+  "name": "embedded-smoke",
+  "stateStream": "embedded-smoke-stream",
+  "sandbox": {
+    "kind": "sandbox",
+    "provider": "local"
+  },
+  "middleware": {
+    "kind": "middleware",
+    "chain": []
+  },
+  "agent": {
+    "kind": "agent",
+    "command": [
+      "/usr/local/bin/fireline-testy-load"
+    ]
+  }
+}

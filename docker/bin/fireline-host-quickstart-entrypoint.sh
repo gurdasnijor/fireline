@@ -56,6 +56,15 @@ if [[ "$streams_ready" -ne 1 ]]; then
   exit 1
 fi
 
+if [[ -n "${FIRELINE_EMBEDDED_SPEC_PATH:-}" ]]; then
+  FIRELINE_DURABLE_STREAMS_URL="http://127.0.0.1:${FIRELINE_STREAMS_INTERNAL_PORT}/v1/stream" \
+    /opt/fireline-bootstrap/node_modules/.bin/tsx \
+    /opt/fireline-bootstrap/docker/bin/fireline-embedded-spec-bootstrap.ts &
+  host_pid=$!
+  wait -n "$streams_pid" "$proxy_pid" "$host_pid"
+  exit $?
+fi
+
 args=(
   /usr/local/bin/fireline
   --control-plane
