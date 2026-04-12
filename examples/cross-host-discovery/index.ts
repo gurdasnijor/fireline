@@ -1,7 +1,6 @@
 // Fireline
-import { agent, compose, connectAcp, middleware, sandbox } from '@fireline/client'
+import fireline, { agent, compose, connectAcp, middleware, sandbox, type FirelineDB } from '@fireline/client'
 import { peer } from '@fireline/client/middleware'
-import { createFirelineDB } from '@fireline/state'
 
 const agentBin = process.env.AGENT_BIN ?? '../../target/debug/fireline-testy'
 const serverA = 'http://127.0.0.1:4440'
@@ -11,7 +10,7 @@ const [agentA, agentB] = await Promise.all([
   startHarness('agent-a', serverA),
   startHarness('agent-b', serverB),
 ])
-const db = createFirelineDB({ stateStreamUrl: agentB.state.url }); await db.preload()
+const db = await fireline.db({ stateStreamUrl: agentB.state.url })
 const acp = await connectAcp(agentB.acp, 'cross-host-discovery')
 const { sessionId } = await acp.newSession({ cwd: process.cwd(), mcpServers: [] })
 await acp.prompt({ sessionId, prompt: [{ type: 'text', text: toolCall('list_peers') }] })
@@ -31,15 +30,15 @@ function toolCall(tool: string, params: Record<string, unknown> = {}) {
 }
 
 function observeSessionText(
-  db: ReturnType<typeof createFirelineDB>,
+  db: FirelineDB,
   sessionId: string,
   predicate: (text: string) => boolean,
 ) {
   return new Promise<string>((resolve) => {
-    const read = () => db.collections.chunks.toArray.filter((chunk) => db.collections.promptTurns.toArray.some((turn) => turn.sessionId === sessionId && turn.promptTurnId === chunk.promptTurnId)).map((chunk) => chunk.content).join('\n')
+    const read = () => db.chunks.toArray.filter((chunk) => db.promptTurns.toArray.some((turn) => turn.sessionId === sessionId && turn.promptTurnId === chunk.promptTurnId)).map((chunk) => chunk.content).join('\n')
     const maybeResolve = () => { const text = read(); if (!predicate(text)) return; turns.unsubscribe(); chunks.unsubscribe(); resolve(text) }
-    const turns = db.collections.promptTurns.subscribe(maybeResolve)
-    const chunks = db.collections.chunks.subscribe(maybeResolve)
+    const turns = db.promptTurns.subscribe(maybeResolve)
+    const chunks = db.chunks.subscribe(maybeResolve)
     maybeResolve()
   })
 }

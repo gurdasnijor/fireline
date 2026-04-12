@@ -89,6 +89,8 @@ type SandboxDefinitionBase = {
   readonly resources?: readonly ResourceRef[]
   /** Environment variables that the provider may inject into the sandbox. */
   readonly envVars?: Readonly<Record<string, string>>
+  /** Optional filesystem backend used by ACP file helpers inside the sandbox. */
+  readonly fsBackend?: 'local' | 'streamFs'
   /** Labels used for lookup, routing, or fleet bookkeeping. */
   readonly labels?: Readonly<Record<string, string>>
 }
@@ -185,6 +187,104 @@ export interface PeerMiddleware {
 }
 
 /**
+ * Anthropic-shaped tool descriptor advertised to the agent.
+ *
+ * @example `const descriptor: ToolDescriptor = { name: 'github', description: 'GitHub MCP tools', inputSchema: { type: 'object' } }`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export interface ToolDescriptor {
+  /** Stable tool name exposed to the agent. */
+  readonly name: string
+  /** Human-readable description shown by ACP-capable clients. */
+  readonly description: string
+  /** JSON Schema describing the tool input payload. */
+  readonly inputSchema: Record<string, unknown>
+}
+
+/**
+ * Portable transport handle describing where the conductor should fetch a tool.
+ *
+ * Mirrors `fireline_tools::TransportRef` on the Rust side.
+ *
+ * @example `const transport: TransportRef = { kind: 'mcpUrl', url: 'https://example.com/mcp' }`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export type TransportRef =
+  | { readonly kind: 'peerRuntime'; readonly hostKey: string }
+  | { readonly kind: 'smithery'; readonly catalog: string; readonly tool: string }
+  | { readonly kind: 'mcpUrl'; readonly url: string }
+  | { readonly kind: 'inProcess'; readonly componentName: string }
+
+/**
+ * Portable credential handle resolved by the host at call time.
+ *
+ * Mirrors `fireline_tools::CredentialRef` on the Rust side.
+ *
+ * @example `const credential: CredentialRef = { kind: 'secret', key: 'gh-pat' }`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export type CredentialRef =
+  | { readonly kind: 'env'; readonly var: string }
+  | { readonly kind: 'secret'; readonly key: string }
+  | { readonly kind: 'oauthToken'; readonly provider: string; readonly account?: string }
+
+/**
+ * Rust-aligned capability handle consumed by the `attach_tool` topology component.
+ *
+ * @example `const capability: CapabilityRef = { descriptor, transportRef: { kind: 'mcpUrl', url: 'https://example.com/mcp' } }`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export interface CapabilityRef {
+  /** Agent-visible tool descriptor. */
+  readonly descriptor: ToolDescriptor
+  /** Conductor-facing transport reference used to fetch the tool. */
+  readonly transportRef: TransportRef
+  /** Optional credential reference resolved by the host. */
+  readonly credentialRef?: CredentialRef
+}
+
+/**
+ * Ergonomic shorthand for declaring a capability attachment in TypeScript.
+ *
+ * `attachTools()` expands this into the Rust wire shape expected by the
+ * `attach_tool` topology component.
+ *
+ * @example `const tool: ToolAttachment = { name: 'github', transport: 'mcp:https://example.com/mcp', credential: 'secret:gh-pat' }`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export interface ToolAttachment {
+  /** Agent-visible tool name. */
+  readonly name: string
+  /** Optional human-readable description. Defaults to an empty string. */
+  readonly description?: string
+  /** Optional JSON Schema. Defaults to `{ type: 'object' }`. */
+  readonly inputSchema?: Record<string, unknown>
+  /** Tool transport reference, either as a shorthand string or structured ref. */
+  readonly transport: string | TransportRef
+  /** Optional credential reference, either as a shorthand string or structured ref. */
+  readonly credential?: string | CredentialRef
+}
+
+/**
+ * Middleware spec that attaches launch-time capabilities to the harness topology.
+ *
+ * @example `const mw: AttachToolsMiddleware = { kind: 'attachTools', tools: [{ name: 'github', transport: 'mcp:https://example.com/mcp' }] }`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export interface AttachToolsMiddleware {
+  /** Stable discriminator for capability-attachment middleware. */
+  readonly kind: 'attachTools'
+  /** Capability attachments declared for this harness. */
+  readonly tools: readonly (ToolAttachment | CapabilityRef)[]
+}
+
+/**
  * A single secret binding that maps a logical name to a credential reference
  * and an optional domain allow-list for outbound injection.
  *
@@ -227,6 +327,7 @@ export type Middleware =
   | BudgetMiddleware
   | ContextInjectionMiddleware
   | PeerMiddleware
+  | AttachToolsMiddleware
   | SecretsProxyMiddleware
 
 /**

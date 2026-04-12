@@ -2,6 +2,8 @@ import { FirelineAgent } from './agent.js'
 import { requestControlPlane } from './control-plane.js'
 import type {
   AgentConfig,
+  CapabilityRef,
+  CredentialRef,
   Harness,
   HarnessSpec,
   MiddlewareChain,
@@ -12,6 +14,8 @@ import type {
   StartOptions,
   TopologyComponentSpec,
   TopologySpec,
+  ToolAttachment,
+  TransportRef,
 } from './types.js'
 
 /**
@@ -156,7 +160,11 @@ function buildProvisionRequest(config: SandboxConfig): ProvisionRequest {
   return {
     name,
     agentCommand: [...config.agent.command],
-    topology: buildTopology(config.middleware.chain, name),
+    topology: buildTopology(
+      config.middleware.chain,
+      name,
+      config.sandbox.fsBackend,
+    ),
     resources: [...(config.sandbox.resources ?? [])],
     envVars: config.sandbox.envVars,
     labels: config.sandbox.labels,
@@ -188,9 +196,29 @@ function resolveProviderConfig(
   }
 }
 
-function buildTopology(middleware: readonly Middleware[], name: string): TopologySpec {
-  return {
-    components: middleware.flatMap((entry) => middlewareToComponents(entry, name)),
+function buildTopology(
+  middleware: readonly Middleware[],
+  name: string,
+  fsBackend?: SandboxDefinition['fsBackend'],
+): TopologySpec {
+  const components = middleware.flatMap((entry) => middlewareToComponents(entry, name))
+  if (fsBackend) {
+    components.push({
+      name: 'fs_backend',
+      config: fsBackendToConfig(fsBackend),
+    })
+  }
+  return { components }
+}
+
+function fsBackendToConfig(
+  fsBackend: NonNullable<SandboxDefinition['fsBackend']>,
+): Record<string, string> {
+  switch (fsBackend) {
+    case 'local':
+      return { backend: 'local' }
+    case 'streamFs':
+      return { backend: 'runtime_stream' }
   }
 }
 
@@ -252,6 +280,15 @@ function middlewareToComponents(middleware: Middleware, name: string): TopologyC
           ...(middleware.peers?.length ? { config: { peers: [...middleware.peers] } } : {}),
         },
       ]
+    case 'attachTools':
+      return [
+        {
+          name: 'attach_tool',
+          config: {
+            capabilities: middleware.tools.map(normalizeCapabilityRef),
+          },
+        },
+      ]
     case 'secretsProxy':
       return [
         {
@@ -265,6 +302,162 @@ function middlewareToComponents(middleware: Middleware, name: string): TopologyC
           },
         },
       ]
+  }
+}
+
+function normalizeCapabilityRef(
+  capability: ToolAttachment | CapabilityRef,
+): CapabilityRef {
+  if ('descriptor' in capability) {
+    return {
+      descriptor: {
+        name: capability.descriptor.name,
+        description: capability.descriptor.description,
+        inputSchema: capability.descriptor.inputSchema,
+      },
+      transportRef: cloneTransportRef(capability.transportRef),
+      ...(capability.credentialRef
+        ? { credentialRef: cloneCredentialRef(capability.credentialRef) }
+        : {}),
+    }
+  }
+
+  return {
+    descriptor: {
+      name: capability.name,
+      description: capability.description ?? '',
+      inputSchema: capability.inputSchema ?? { type: 'object' },
+    },
+    transportRef: parseTransportRef(capability.transport),
+    ...(capability.credential
+      ? { credentialRef: parseCredentialRef(capability.credential) }
+      : {}),
+  }
+}
+
+function parseTransportRef(ref: string | TransportRef): TransportRef {
+  if (typeof ref !== 'string') {
+    return cloneTransportRef(ref)
+  }
+
+  if (ref.startsWith('mcp:')) {
+    const url = ref.slice(4)
+    if (!url) {
+      throw new Error("invalid transport ref 'mcp:': missing MCP URL")
+    }
+    return { kind: 'mcpUrl', url }
+  }
+
+  if (ref.startsWith('peer:')) {
+    const hostKey = ref.slice(5)
+    if (!hostKey) {
+      throw new Error("invalid transport ref 'peer:': missing host key")
+    }
+    return { kind: 'peerRuntime', hostKey }
+  }
+
+  if (ref.startsWith('smithery:')) {
+    const [catalog, tool, extra] = ref.slice(9).split(':')
+    if (!catalog || !tool || extra) {
+      throw new Error(
+        `invalid transport ref '${ref}': expected smithery:<catalog>:<tool>`,
+      )
+    }
+    return { kind: 'smithery', catalog, tool }
+  }
+
+  if (ref.startsWith('inprocess:')) {
+    const componentName = ref.slice(10)
+    if (!componentName) {
+      throw new Error(
+        "invalid transport ref 'inprocess:': missing component name",
+      )
+    }
+    return { kind: 'inProcess', componentName }
+  }
+
+  if (ref.startsWith('component:')) {
+    const componentName = ref.slice(10)
+    if (!componentName) {
+      throw new Error(
+        "invalid transport ref 'component:': missing component name",
+      )
+    }
+    return { kind: 'inProcess', componentName }
+  }
+
+  return { kind: 'mcpUrl', url: ref }
+}
+
+function parseCredentialRef(ref: string | CredentialRef): CredentialRef {
+  if (typeof ref !== 'string') {
+    return cloneCredentialRef(ref)
+  }
+
+  if (ref.startsWith('env:')) {
+    const variable = ref.slice(4)
+    if (!variable) {
+      throw new Error(
+        `invalid env credential ref '${ref}': missing variable name`,
+      )
+    }
+    return { kind: 'env', var: variable }
+  }
+
+  if (ref.startsWith('secret:')) {
+    const key = ref.slice(7)
+    if (!key) {
+      throw new Error(`invalid secret credential ref '${ref}': missing key`)
+    }
+    return { kind: 'secret', key }
+  }
+
+  if (ref.startsWith('oauth:')) {
+    const parts = ref.slice(6).split(':')
+    const provider = parts[0] ?? ''
+    const account = parts[1]
+    if (!provider || parts.length > 2) {
+      throw new Error(
+        `invalid oauth credential ref '${ref}': expected oauth:<provider>[:account]`,
+      )
+    }
+    return cloneDefined({
+      kind: 'oauthToken' as const,
+      provider,
+      account,
+    })
+  }
+
+  throw new Error(
+    `unsupported credential ref '${ref}': expected env:, secret:, or oauth:`,
+  )
+}
+
+function cloneTransportRef(ref: TransportRef): TransportRef {
+  switch (ref.kind) {
+    case 'peerRuntime':
+      return { kind: 'peerRuntime', hostKey: ref.hostKey }
+    case 'smithery':
+      return { kind: 'smithery', catalog: ref.catalog, tool: ref.tool }
+    case 'mcpUrl':
+      return { kind: 'mcpUrl', url: ref.url }
+    case 'inProcess':
+      return { kind: 'inProcess', componentName: ref.componentName }
+  }
+}
+
+function cloneCredentialRef(ref: CredentialRef): CredentialRef {
+  switch (ref.kind) {
+    case 'env':
+      return { kind: 'env', var: ref.var }
+    case 'secret':
+      return { kind: 'secret', key: ref.key }
+    case 'oauthToken':
+      return cloneDefined({
+        kind: 'oauthToken' as const,
+        provider: ref.provider,
+        account: ref.account,
+      })
   }
 }
 

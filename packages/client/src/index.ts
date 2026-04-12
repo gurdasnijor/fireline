@@ -34,6 +34,9 @@ export type { SandboxClientOptions } from './sandbox.js'
 export type { ConnectedAcp } from './connect.js'
 export type {
   AgentConfig,
+  AttachToolsMiddleware,
+  CapabilityRef,
+  CredentialRef,
   Endpoint,
   Harness,
   HarnessConfig,
@@ -50,4 +53,7 @@ export type {
   SecretBinding,
   SecretsProxyMiddleware,
   StartOptions,
+  ToolAttachment,
+  ToolDescriptor,
+  TransportRef,
 } from './types.js'

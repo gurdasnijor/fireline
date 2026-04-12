@@ -1,11 +1,14 @@
 import type {
+  AttachToolsMiddleware,
   ApproveMiddleware,
   BudgetMiddleware,
+  CapabilityRef,
   ContextInjectionMiddleware,
   ContextSourceSpec,
   PeerMiddleware,
   SecretBinding,
   SecretsProxyMiddleware,
+  ToolAttachment,
   TraceMiddleware,
 } from './types.js'
 
@@ -110,6 +113,26 @@ export function peer(options: {
   return {
     kind: 'peer',
     ...cloneDefined(options),
+  }
+}
+
+/**
+ * Builds a capability-attachment middleware spec for the `attach_tool`
+ * topology component.
+ *
+ * Accepts either ergonomic shorthand entries or full Rust-aligned
+ * capability refs.
+ *
+ * @example `const mw = attachTools([{ name: 'github', transport: 'mcp:https://example.com/mcp', credential: 'secret:gh-pat' }])`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export function attachTools(
+  tools: readonly (ToolAttachment | CapabilityRef)[],
+): AttachToolsMiddleware {
+  return {
+    kind: 'attachTools',
+    tools: [...tools],
   }
 }
 
