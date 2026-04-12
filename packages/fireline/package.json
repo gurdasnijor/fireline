@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc",
     "lint": "tsc --noEmit",
-    "test": "echo 'no tests yet'"
+    "test": "pnpm run build && node --test dist/cli.test.js"
   },
   "dependencies": {
     "@fireline/client": "workspace:*",

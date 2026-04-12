@@ -5,7 +5,8 @@ import { tsImport } from 'tsx/esm/api'
 import { resolveBinary } from './resolve-binary.js'
 
 interface ParsedArgs {
-  readonly command: 'run' | 'help'
+  readonly command: 'run' | 'deploy' | 'help'
+  readonly helpFor: 'general' | 'run' | 'deploy'
   readonly file: string | null
   readonly port: number
   readonly streamsPort: number
@@ -13,20 +14,31 @@ interface ParsedArgs {
   readonly name: string | null
   readonly repl: boolean
   readonly providerOverride: string | null
+  readonly remote: string | null
+  readonly token: string | null
 }
 
-const HELP = `
-fireline — run declarative agent specs
+const GENERAL_HELP = `
+fireline — run or deploy declarative agent specs
 
 Usage:
-  fireline [run] <file.ts>           Boot conductor + streams, provision agent
+  fireline [run] <file.ts>           Boot conductor + streams, provision agent locally
+  fireline deploy <file.ts>          Push spec to a remote Fireline instance
   fireline --help                    Show this help
 
-Flags:
+Run flags:
   --port <n>           ACP control-plane port (default: 4440)
   --streams-port <n>   Durable-streams port   (default: 7474)
   --state-stream <s>   Explicit durable state stream name (enables resume)
   --name <s>           Logical agent name     (default: from spec or 'default')
+  --provider <p>       Override sandbox.provider from spec
+  --repl               Print ACP URL and wait (TODO: interactive REPL)
+
+Deploy flags:
+  --remote <url>       Hosted Fireline base URL (required)
+  --token <token>      Bearer token for the remote instance
+  --state-stream <s>   Explicit durable state stream name
+  --name <s>           Logical deployment name (default: from spec or 'default')
   --provider <p>       Override sandbox.provider from spec
   --repl               Print ACP URL and wait (TODO: interactive REPL)
 
@@ -36,6 +48,39 @@ Env:
 
 Example:
   fireline run examples/code-review-agent/index.ts
+  fireline deploy agent.ts --remote https://agents.example.com
+`.trim()
+
+const RUN_HELP = `
+fireline run — boot Fireline locally and provision a spec
+
+Usage:
+  fireline [run] <file.ts> [flags]
+
+Flags:
+  --port <n>           ACP control-plane port (default: 4440)
+  --streams-port <n>   Durable-streams port   (default: 7474)
+  --state-stream <s>   Explicit durable state stream name (enables resume)
+  --name <s>           Logical agent name     (default: from spec or 'default')
+  --provider <p>       Override sandbox.provider from spec
+  --repl               Print ACP URL and wait (TODO: interactive REPL)
+  --help               Show this help
+`.trim()
+
+const DEPLOY_HELP = `
+fireline deploy — push a spec to a remote Fireline instance
+
+Usage:
+  fireline deploy <file.ts> --remote <url> [flags]
+
+Flags:
+  --remote <url>       Hosted Fireline base URL (required)
+  --token <token>      Bearer token for the remote instance
+  --state-stream <s>   Explicit durable state stream name
+  --name <s>           Logical deployment name (default: from spec or 'default')
+  --provider <p>       Override sandbox.provider from spec
+  --repl               Print ACP URL and wait (TODO: interactive REPL)
+  --help               Show this help
 `.trim()
 
 export async function main(argv: readonly string[]): Promise<void> {
@@ -43,10 +88,12 @@ export async function main(argv: readonly string[]): Promise<void> {
   try {
     const args = parseArgs(argv)
     if (args.command === 'help' || !args.file) {
-      console.log(HELP)
+      console.log(helpText(args.helpFor))
       return
     }
-    exitCode = await run(args)
+    exitCode = args.command === 'deploy'
+      ? await deploy(args)
+      : await run(args)
   } catch (error) {
     console.error(`fireline: ${(error as Error).message}`)
     exitCode = 1
@@ -54,9 +101,10 @@ export async function main(argv: readonly string[]): Promise<void> {
   process.exit(exitCode)
 }
 
-function parseArgs(argv: readonly string[]): ParsedArgs {
+export function parseArgs(argv: readonly string[]): ParsedArgs {
   const out = {
-    command: 'run' as 'run' | 'help',
+    command: 'run' as 'run' | 'deploy' | 'help',
+    helpFor: 'run' as 'general' | 'run' | 'deploy',
     file: null as string | null,
     port: 4440,
     streamsPort: 7474,
@@ -64,10 +112,18 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     name: null as string | null,
     repl: false,
     providerOverride: null as string | null,
+    remote: null as string | null,
+    token: null as string | null,
   }
   let i = 0
-  if (argv[0] === 'run') i++
-  if (argv[0] === '--help' || argv[0] === '-h') return { ...out, command: 'help' }
+  if (argv[0] === 'run' || argv[0] === 'deploy') {
+    out.command = argv[0]
+    out.helpFor = argv[0]
+    i++
+  }
+  if (argv[0] === '--help' || argv[0] === '-h') {
+    return { ...out, command: 'help', helpFor: 'general' }
+  }
 
   for (; i < argv.length; i++) {
     const arg = argv[i]
@@ -90,6 +146,12 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       case '--provider':
         out.providerOverride = required(argv[++i], '--provider')
         break
+      case '--remote':
+        out.remote = required(argv[++i], '--remote')
+        break
+      case '--token':
+        out.token = required(argv[++i], '--token')
+        break
       case '--repl':
         out.repl = true
         break
@@ -99,7 +161,29 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
         out.file = arg
     }
   }
+
+  if (out.command === 'deploy' && !out.remote) {
+    throw new Error('deploy requires --remote <url>')
+  }
+  if (out.command === 'run' && out.remote) {
+    throw new Error('--remote is only valid with deploy')
+  }
+  if (out.command === 'run' && out.token) {
+    throw new Error('--token is only valid with deploy')
+  }
+
   return out
+}
+
+function helpText(topic: ParsedArgs['helpFor']): string {
+  switch (topic) {
+    case 'run':
+      return RUN_HELP
+    case 'deploy':
+      return DEPLOY_HELP
+    case 'general':
+      return GENERAL_HELP
+  }
 }
 
 function parseIntArg(value: string | undefined, flag: string): number {
@@ -191,8 +275,54 @@ async function run(args: ParsedArgs): Promise<number> {
   }
 }
 
+interface DeployRequestBody {
+  readonly name: string
+  readonly spec: Record<string, unknown>
+}
+
+async function deploy(args: ParsedArgs): Promise<number> {
+  const specPath = resolvePath(process.cwd(), args.file!)
+  const spec = await loadSpec(specPath)
+  const effectiveSpec = materializeSpec(spec, args)
+  const remoteBaseUrl = args.remote!.replace(/\/+$/, '')
+
+  const response = await fetch(`${remoteBaseUrl}/v1/deployments`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(args.token ? { authorization: `Bearer ${args.token}` } : {}),
+    },
+    body: JSON.stringify({
+      name: effectiveSpec.name,
+      spec: effectiveSpec,
+    } satisfies DeployRequestBody),
+    signal: AbortSignal.timeout(15_000),
+  })
+
+  if (!response.ok) {
+    const detail = await readResponseDetail(response)
+    throw new Error(
+      `deploy failed (${response.status} ${response.statusText})` +
+        (detail ? `: ${detail}` : ''),
+    )
+  }
+
+  const handle = await response.json() as PrintedHandle
+  validatePrintedHandle(handle, 'deploy')
+  printReady(handle, args)
+  if (args.repl) {
+    console.log('\nREPL mode coming soon. Connect any ACP client to the URL above.')
+  }
+  return 0
+}
+
 interface LoadedSpec {
+  readonly kind: 'harness'
+  readonly name: string
+  readonly stateStream?: string
   readonly sandbox: { readonly provider?: unknown }
+  readonly middleware: unknown
+  readonly agent: unknown
   readonly start: (options: Record<string, unknown>) => Promise<{ readonly id: string; readonly acp: { readonly url: string }; readonly state: { readonly url: string } }>
 }
 
@@ -259,14 +389,57 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolveWait) => setTimeout(resolveWait, ms))
 }
 
+interface PrintedHandle {
+  readonly id: string
+  readonly acp: { readonly url: string }
+  readonly state: { readonly url: string }
+}
+
+interface SerializedHarnessSpec extends Record<string, unknown> {
+  readonly name: string
+  readonly sandbox: Record<string, unknown>
+}
+
+function materializeSpec(spec: LoadedSpec, args: ParsedArgs): SerializedHarnessSpec {
+  const baseSpec = serializeHarnessSpec(spec)
+  return {
+    ...baseSpec,
+    ...(args.name ? { name: args.name } : {}),
+    ...(args.stateStream ? { stateStream: args.stateStream } : {}),
+    ...(args.providerOverride
+      ? {
+          sandbox: {
+            ...baseSpec.sandbox,
+            provider: args.providerOverride,
+          },
+        }
+      : {}),
+  }
+}
+
+function serializeHarnessSpec(spec: LoadedSpec): SerializedHarnessSpec {
+  return JSON.parse(JSON.stringify(spec)) as SerializedHarnessSpec
+}
+
+async function readResponseDetail(response: Response): Promise<string> {
+  const text = await response.text()
+  return text.trim()
+}
+
+function validatePrintedHandle(handle: PrintedHandle, label: string): void {
+  if (!handle?.id || !handle.acp?.url || !handle.state?.url) {
+    throw new Error(`${label} response missing id/acp/state endpoints`)
+  }
+}
+
 function printReady(
-  handle: { readonly id: string; readonly acp: { readonly url: string }; readonly state: { readonly url: string } },
+  handle: PrintedHandle,
   args: ParsedArgs,
 ): void {
   console.log('')
   console.log('  \x1b[32m✓\x1b[0m fireline ready')
   console.log('')
-  console.log(`    sandbox:   ${handle.id}`)
+  console.log(`    ${args.command === 'deploy' ? 'deployment' : 'sandbox'}:   ${handle.id}`)
   console.log(`    ACP:       ${handle.acp.url}`)
   console.log(`    state:     ${handle.state.url}`)
   if (args.stateStream) console.log(`    stream:    ${args.stateStream}`)

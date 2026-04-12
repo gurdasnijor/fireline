@@ -3,7 +3,8 @@
 The `fireline` CLI runs declarative agent specs — `npx fireline agent.ts`
 boots a durable-streams server, a Fireline control plane, and provisions
 the sandbox defined by the spec's default export. Any ACP client can
-then connect to the printed URL.
+then connect to the printed URL. It also ships a `deploy` subcommand
+that pushes the same spec to a remote hosted Fireline instance.
 
 ## Usage
 
@@ -19,6 +20,9 @@ npx fireline run agent.ts --state-stream my-session
 
 # Override the sandbox provider from the spec
 npx fireline run agent.ts --provider docker
+
+# Deploy the spec to a hosted Fireline instance
+npx fireline deploy agent.ts --remote https://agents.example.com
 ```
 
 ## Spec shape
@@ -46,9 +50,11 @@ be invoked with `npx tsx` directly.
 - The existing examples in `examples/` do not export a default spec; they
   call `.start()` imperatively at module scope. They still run with
   `npx tsx examples/<name>/index.ts` (unchanged).
-- `fireline deploy` is not implemented yet — only `run`.
-- The `--repl` flag is a stub. For now, connect any ACP client to the
-  printed ACP URL.
+- `fireline deploy` is currently an MVP shell. It requires `--remote`,
+  supports only a direct `--token` auth override, and does not yet wire
+  always-on deployment policy.
+- The `--repl` flag is still a stub. For now, connect any ACP client to
+  the printed ACP URL.
 
 ## Binary resolution
 
