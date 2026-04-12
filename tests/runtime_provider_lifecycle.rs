@@ -7,10 +7,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use durable_streams::{Client as DsClient, Offset};
 use fireline_harness::TopologySpec;
-use fireline_host::runtime_host::RuntimeHost;
+use fireline_host::bootstrap::{self, BootstrapConfig};
 use fireline_sandbox::{
     CreateRuntimeSpec, Endpoint, LocalProvider, LocalRuntimeLauncher, ManagedRuntime,
-    MountedResource, RuntimeHost as ConductorRuntimeHost, RuntimeLaunch, RuntimeManager,
+    MountedResource, RuntimeHost as SandboxRuntimeHost, RuntimeLaunch, RuntimeManager,
     RuntimeProviderKind, RuntimeProviderRequest, RuntimeRegistration, RuntimeRegistry,
     RuntimeStatus,
 };
@@ -35,68 +35,43 @@ fn temp_peer_directory() -> PathBuf {
 }
 
 #[tokio::test]
-async fn runtime_host_pins_provider_and_persists_runtime_descriptor() -> Result<()> {
-    let registry = RuntimeRegistry::load(temp_runtime_registry())?;
-    let runtime_host = RuntimeHost::new(registry);
+async fn direct_host_bootstrap_emits_runtime_spec_and_exposes_runtime_endpoints() -> Result<()> {
     let stream_server = stream_server::TestStreamServer::spawn().await?;
+    let runtime_key = format!("runtime:{}", Uuid::new_v4());
+    let node_id = "node:provider-test".to_string();
 
-    let descriptor = runtime_host
-        .create(CreateRuntimeSpec {
-            runtime_key: None,
-            node_id: None,
-            provider: RuntimeProviderRequest::Auto,
-            host: "127.0.0.1".parse::<IpAddr>()?,
-            port: 0,
-            name: "provider-test".to_string(),
-            agent_command: vec![testy_bin()],
-            durable_streams_url: stream_server.base_url.clone(),
-            resources: Vec::new(),
-            state_stream: None,
-            stream_storage: None,
-            peer_directory_path: Some(temp_peer_directory()),
-            topology: TopologySpec::default(),
-        })
-        .await?;
+    let handle = bootstrap::start(BootstrapConfig {
+        host: "127.0.0.1".parse::<IpAddr>()?,
+        port: 0,
+        name: "provider-test".to_string(),
+        runtime_key: runtime_key.clone(),
+        node_id,
+        agent_command: vec![testy_bin()],
+        mounted_resources: Vec::new(),
+        state_stream: None,
+        durable_streams_url: stream_server.base_url.clone(),
+        peer_directory_path: temp_peer_directory(),
+        control_plane_url: None,
+        topology: TopologySpec::default(),
+    })
+    .await?;
+    wait_for_health(&handle.health_url).await?;
 
-    assert_eq!(descriptor.provider, RuntimeProviderKind::Local);
-    assert_eq!(descriptor.status, RuntimeStatus::Ready);
-    assert!(descriptor.runtime_key.starts_with("runtime:"));
-    assert!(descriptor.runtime_id.starts_with("fireline:provider-test:"));
-    assert!(descriptor.acp.url.starts_with("ws://"));
-    assert!(descriptor.state.url.starts_with("http://"));
-    assert_runtime_spec_event(&descriptor.state.url, &descriptor.runtime_key).await?;
+    assert!(handle.runtime_id.starts_with("fireline:provider-test:"));
+    assert!(handle.acp_url.starts_with("ws://"));
+    assert!(handle.state_stream_url.starts_with("http://"));
+    assert_runtime_spec_event(&handle.state_stream_url, &runtime_key).await?;
 
-    let listed = runtime_host.list()?;
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0], descriptor);
-
-    let fetched = runtime_host.get(&descriptor.runtime_key)?;
-    assert_eq!(fetched, Some(descriptor.clone()));
-
-    let stopped = runtime_host.stop(&descriptor.runtime_key).await?;
-    assert_eq!(stopped.status, RuntimeStatus::Stopped);
-
-    let fetched_after_stop = runtime_host
-        .get(&descriptor.runtime_key)?
-        .expect("stopped descriptor should remain in the registry");
-    assert_eq!(fetched_after_stop.status, RuntimeStatus::Stopped);
-
-    let runtime_key = descriptor.runtime_key.clone();
-    let deleted = runtime_host.delete(&runtime_key).await?;
-    assert_eq!(
-        deleted.map(|runtime| runtime.runtime_key),
-        Some(runtime_key.clone())
-    );
-    assert!(runtime_host.get(&runtime_key)?.is_none());
+    handle.shutdown().await?;
     stream_server.shutdown().await;
 
     Ok(())
 }
 
 #[tokio::test]
-async fn conductor_runtime_host_stays_starting_until_register_arrives() -> Result<()> {
+async fn sandbox_runtime_host_stays_starting_until_register_arrives() -> Result<()> {
     let registry = RuntimeRegistry::load(temp_runtime_registry())?;
-    let runtime_host = ConductorRuntimeHost::new(
+    let runtime_host = SandboxRuntimeHost::new(
         registry,
         RuntimeManager::new(Arc::new(LocalProvider::new(Arc::new(FakeRuntimeLauncher)))),
     );
@@ -222,5 +197,20 @@ async fn assert_runtime_spec_event(state_stream_url: &str, runtime_key: &str) ->
         }
 
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_health(health_url: &str) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
+    loop {
+        match reqwest::get(health_url).await {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(_) | Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Ok(response) => anyhow::bail!("health check failed with status {}", response.status()),
+            Err(error) => return Err(error.into()),
+        }
     }
 }

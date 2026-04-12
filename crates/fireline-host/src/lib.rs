@@ -8,5 +8,3 @@ pub mod control_plane_peer_registry;
 pub mod heartbeat;
 pub mod local_provider;
 pub mod router;
-pub mod runtime_host;
-pub mod runtime_provider;

@@ -34,15 +34,12 @@
 //! empirical proof that the current wire shape is sufficient for a
 //! stream-as-truth refactor.
 //!
-//! # Known gap: direct-host mode
+//! # Direct-host parity
 //!
-//! `src/bootstrap.rs::start` — Fireline's direct-host path — emits
-//! `runtime_instance` events but NOT `runtime_spec`. Control-plane-
-//! managed runtimes go through `RuntimeHost::create`, which emits both.
-//! So the `runtime_specs` map only sees control-plane-managed
-//! runtimes today. This is documented and known; closing it is a
-//! prerequisite for fully replacing `RuntimeRegistry` with a
-//! stream-derived view.
+//! `fireline_host::bootstrap::start` — Fireline's direct-host path —
+//! emits both `runtime_instance` and `runtime_spec` envelopes. Control-
+//! plane-managed runtimes do the same through the sandbox host create
+//! path, so the `runtime_specs` map now sees both launch paths.
 
 use std::collections::HashMap;
 use std::sync::Arc;

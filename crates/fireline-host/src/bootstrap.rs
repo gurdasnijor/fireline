@@ -215,10 +215,10 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     let runtime_materializer_task = runtime_materializer.connect(state_stream_url.clone());
     runtime_materializer_task.preload().await?;
 
-    // Direct-host analogue of the control-plane `runtime_spec_persisted`
-    // emit that `RuntimeHost::create` performs at
-    // `crates/fireline-conductor/src/runtime/mod.rs:130`. Without this,
-    // direct-host bootstraps are invisible to stream-derived projections
+    // Direct-host bootstraps emit the same `runtime_spec_persisted`
+    // envelope that control-plane-managed runtimes emit through the
+    // sandbox host create path. Without this, direct-host
+    // bootstraps are invisible to stream-derived projections
     // like `crate::runtime_index::RuntimeIndex` — the `runtime_instance`
     // row lands on the stream but nothing describes what the runtime
     // was asked to be. Closing this gap is a prerequisite for replacing
