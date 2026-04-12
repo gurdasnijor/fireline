@@ -2,6 +2,7 @@ import type {
   ApproveMiddleware,
   BudgetMiddleware,
   ContextInjectionMiddleware,
+  ContextSourceSpec,
   PeerMiddleware,
   TraceMiddleware,
 } from './types.js'
@@ -72,6 +73,26 @@ export function contextInjection(options: {
     kind: 'contextInjection',
     ...cloneDefined(options),
   }
+}
+
+/**
+ * Builds a context-injection middleware spec from a source list.
+ *
+ * @example `const mw = inject([{ kind: 'workspaceFile', path: '/workspace/README.md' }])`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export function inject(
+  sources: readonly ContextSourceSpec[],
+  options: {
+    readonly placement?: ContextInjectionMiddleware['placement']
+    readonly prependText?: string
+  } = {},
+): ContextInjectionMiddleware {
+  return contextInjection({
+    ...options,
+    sources,
+  })
 }
 
 /**

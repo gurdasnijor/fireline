@@ -65,3 +65,58 @@ export type PublishedResourceRef = {
 }
 
 export type ResourceRef = PublishedResourceRef
+
+/**
+ * Creates a local-path resource ref mounted into the sandbox.
+ */
+export function localPath(path: string, mountPath: string, readOnly = false): ResourceRef {
+  return {
+    source_ref: { kind: 'localPath', host_id: 'local', path },
+    mount_path: mountPath,
+    ...(readOnly ? { read_only: true } : {}),
+  }
+}
+
+/**
+ * Creates a durable-stream blob resource ref mounted into the sandbox.
+ */
+export function streamBlob(stream: string, key: string, mountPath: string): ResourceRef {
+  return {
+    source_ref: { kind: 'durableStreamBlob', stream, key },
+    mount_path: mountPath,
+    read_only: true,
+  }
+}
+
+/**
+ * Creates a git repository resource ref mounted into the sandbox.
+ */
+export function gitRepo(url: string, ref: string, mountPath: string): ResourceRef {
+  return {
+    source_ref: { kind: 'gitRepo', url, ref, path: '/' },
+    mount_path: mountPath,
+    read_only: false,
+  }
+}
+
+/**
+ * Creates an OCI image layer resource ref mounted into the sandbox.
+ */
+export function ociImage(image: string, path: string, mountPath: string): ResourceRef {
+  return {
+    source_ref: { kind: 'ociImageLayer', image, path },
+    mount_path: mountPath,
+    read_only: true,
+  }
+}
+
+/**
+ * Creates an HTTP resource ref mounted into the sandbox.
+ */
+export function httpUrl(url: string, mountPath: string): ResourceRef {
+  return {
+    source_ref: { kind: 'httpUrl', url },
+    mount_path: mountPath,
+    read_only: true,
+  }
+}

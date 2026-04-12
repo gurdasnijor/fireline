@@ -1,11 +1,15 @@
 import { requestControlPlane } from './control-plane.js'
 import type {
   AgentConfig,
-  HarnessConfig,
+  Harness,
+  HarnessHandle,
+  HarnessSpec,
+  MiddlewareChain,
   Middleware,
   SandboxConfig,
   SandboxDefinition,
   SandboxHandle,
+  StartOptions,
   TopologyComponentSpec,
   TopologySpec,
 } from './types.js'
@@ -45,7 +49,7 @@ export class Sandbox {
   /**
    * Provisions a sandbox for the supplied harness config and returns ACP/state endpoints.
    *
-   * @example `const handle = await client.provision(compose(sandbox(), [trace()], agent(['node', 'agent.mjs'])))`
+   * @example `const handle = await client.provision(compose(sandbox(), middleware([trace()]), agent(['node', 'agent.mjs'])).spec)`
    *
    * @remarks Anthropic primitive: Sandbox.
    */
@@ -95,24 +99,38 @@ export function sandbox(config: Omit<SandboxDefinition, 'kind'> = {}): SandboxDe
 }
 
 /**
- * Composes sandbox, middleware, and agent specs into a runnable harness config.
+ * Wraps a middleware array in a serializable middleware-chain value.
  *
- * @example `const config = compose(sandbox(), [trace()], agent(['node', 'agent.mjs']))`
+ * @example `const chain = middleware([trace(), approve({ scope: 'tool_calls' })])`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export function middleware(chain: readonly Middleware[]): MiddlewareChain {
+  return {
+    kind: 'middleware',
+    chain: [...chain],
+  }
+}
+
+/**
+ * Composes sandbox, middleware, and agent specs into a runnable harness value.
+ *
+ * @example `const harness = compose(sandbox(), middleware([trace()]), agent(['node', 'agent.mjs']))`
  *
  * @remarks Anthropic primitive: Harness.
  */
 export function compose(
   sandboxConfig: SandboxDefinition,
-  middleware: readonly Middleware[],
+  middlewareConfig: MiddlewareChain,
   agentConfig: AgentConfig,
-): HarnessConfig<'default'> {
-  return {
+): Harness<'default'> {
+  return createHarness({
     kind: 'harness',
     name: 'default',
     sandbox: sandboxConfig,
-    middleware: [...middleware],
+    middleware: middlewareConfig,
     agent: agentConfig,
-  }
+  })
 }
 
 interface ProvisionRequest {
@@ -131,7 +149,7 @@ function buildProvisionRequest(config: SandboxConfig): ProvisionRequest {
   return {
     name,
     agentCommand: [...config.agent.command],
-    topology: buildTopology(config.middleware, name),
+    topology: buildTopology(config.middleware.chain, name),
     resources: [...(config.sandbox.resources ?? [])],
     envVars: config.sandbox.envVars,
     labels: config.sandbox.labels,
@@ -209,3 +227,24 @@ function cloneDefined<T extends object>(value: T): T {
 }
 
 export type { SandboxConfig, SandboxHandle }
+
+function createHarness<Name extends string>(spec: HarnessSpec<Name>): Harness<Name> {
+  return {
+    ...spec,
+    as<NextName extends string>(name: NextName): Harness<NextName> {
+      return createHarness({
+        ...spec,
+        name,
+      })
+    },
+    async start(options: StartOptions): Promise<HarnessHandle<Name>> {
+      const name = options.name ?? spec.name
+      const handle = await new Sandbox(options).provision({
+        ...spec,
+        name,
+        stateStream: options.stateStream ?? spec.stateStream,
+      })
+      return { ...handle, name: spec.name }
+    },
+  }
+}

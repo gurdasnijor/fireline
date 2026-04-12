@@ -168,13 +168,47 @@ export type Middleware =
   | PeerMiddleware
 
 /**
- * Runnable harness specification produced by `compose()`.
+ * Serializable middleware chain accepted by `compose()`.
  *
- * @example `const harness: HarnessConfig<'default'> = compose(sandbox(), [], agent(['node', 'agent.mjs']))`
+ * @example `const chain = middleware([trace(), approve({ scope: 'tool_calls' })])`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export interface MiddlewareChain {
+  /** Stable discriminator for serialized middleware chains. */
+  readonly kind: 'middleware'
+  /** Ordered middleware list applied to the ACP channel. */
+  readonly chain: readonly Middleware[]
+}
+
+/**
+ * Options accepted by `Harness.start()` and topology `start()` helpers.
+ *
+ * @example `await harness.start({ serverUrl: 'http://127.0.0.1:4440', name: 'demo' })`
  *
  * @remarks Anthropic primitive: Harness.
  */
-export interface HarnessConfig<Name extends string = string> {
+export interface StartOptions {
+  /** Base URL for the Fireline host or control plane. */
+  readonly serverUrl: string
+  /** Optional bearer token forwarded to provisioning requests. */
+  readonly token?: string
+  /** Optional runtime name override for this launch. */
+  readonly name?: string
+  /** Optional durable state stream name shared across launches. */
+  readonly stateStream?: string
+  /** Reserved for future startup timeout wiring. */
+  readonly startupTimeoutMs?: number
+}
+
+/**
+ * Runnable harness specification produced by `compose()`.
+ *
+ * @example `const spec: HarnessSpec<'default'> = compose(sandbox(), middleware([]), agent(['node', 'agent.mjs'])).spec`
+ *
+ * @remarks Anthropic primitive: Harness.
+ */
+export interface HarnessSpec<Name extends string = string> {
   /** Stable discriminator for serialized harness configs. */
   readonly kind: 'harness'
   /** Logical harness name used in stream names and future topologies. */
@@ -182,7 +216,7 @@ export interface HarnessConfig<Name extends string = string> {
   /** Sandbox definition used to provision the execution environment. */
   readonly sandbox: SandboxDefinition
   /** Middleware chain wired into the ACP path. */
-  readonly middleware: readonly Middleware[]
+  readonly middleware: MiddlewareChain
   /** Agent process definition launched inside the sandbox. */
   readonly agent: AgentConfig
   /** Optional explicit durable state stream name. */
@@ -192,11 +226,18 @@ export interface HarnessConfig<Name extends string = string> {
 /**
  * Public alias for the config accepted by `Sandbox.provision()`.
  *
- * @example `const config: SandboxConfig = compose(sandbox(), [trace()], agent(['node', 'agent.mjs']))`
+ * @example `const config: SandboxConfig = compose(sandbox(), middleware([trace()]), agent(['node', 'agent.mjs'])).spec`
  *
  * @remarks Anthropic primitive: Harness.
  */
-export type SandboxConfig<Name extends string = string> = HarnessConfig<Name>
+export type SandboxConfig<Name extends string = string> = HarnessSpec<Name>
+
+/**
+ * Backwards-compatible alias for serialized harness specs.
+ *
+ * @remarks Anthropic primitive: Harness.
+ */
+export type HarnessConfig<Name extends string = string> = HarnessSpec<Name>
 
 /**
  * Minimal handle returned after provisioning succeeds.
@@ -214,6 +255,32 @@ export interface SandboxHandle {
   readonly acp: Endpoint
   /** Durable state endpoint used by `@fireline/state`. */
   readonly state: Endpoint
+}
+
+/**
+ * Harness-scoped handle returned by `Harness.start()`.
+ *
+ * @example `const handle = await harness.start({ serverUrl })`
+ *
+ * @remarks Anthropic primitive: Harness.
+ */
+export interface HarnessHandle<Name extends string = string> extends SandboxHandle {
+  /** Logical harness name used when the handle was launched. */
+  readonly name: Name
+}
+
+/**
+ * Runnable harness value created by `compose()`.
+ *
+ * @example `const reviewer = compose(sandbox(), middleware([trace()]), agent(['agent'])).as('reviewer')`
+ *
+ * @remarks Anthropic primitive: Harness.
+ */
+export interface Harness<Name extends string = string> extends HarnessSpec<Name> {
+  /** Returns a renamed harness while preserving sandbox, middleware, and agent config. */
+  as<NextName extends string>(name: NextName): Harness<NextName>
+  /** Provisions the harness and returns ACP/state endpoints. */
+  start(options: StartOptions): Promise<HarnessHandle<Name>>
 }
 
 /**

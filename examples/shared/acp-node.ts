@@ -1,47 +1,22 @@
-// User code
-import { createRequire } from 'node:module'
+// Third-party
+import {
+  ClientSideConnection,
+  PROTOCOL_VERSION,
+  type Client,
+  type Stream,
+} from '@agentclientprotocol/sdk'
+import WebSocket, { type RawData } from 'ws'
 
-type TextPrompt = { type: 'text'; text: string }
-
-export interface NodeAcpConnection {
-  connection: {
-    initialize(opts: object): Promise<unknown>
-    newSession(opts: { cwd: string; mcpServers: unknown[] }): Promise<{ sessionId: string }>
-    prompt(opts: { sessionId: string; prompt: TextPrompt[] }): Promise<unknown>
-    loadSession(opts: { sessionId: string; cwd: string; mcpServers: unknown[] }): Promise<unknown>
-  }
-  close(): Promise<void>
-}
-
-export async function openNodeAcpConnection(
-  callerUrl: string,
-  url: string,
-  clientName: string,
-): Promise<NodeAcpConnection> {
-  const requireFromCaller = createRequire(callerUrl)
-  const sdk = (await import(requireFromCaller.resolve('@agentclientprotocol/sdk'))) as {
-    ClientSideConnection: new (client: () => object, stream: object) => NodeAcpConnection['connection']
-    PROTOCOL_VERSION: number
-  }
-  const wsModule = (await import(requireFromCaller.resolve('ws'))) as {
-    default: new (url: string) => {
-      readyState: number
-      once(event: string, cb: (...args: unknown[]) => void): void
-      on(event: string, cb: (...args: unknown[]) => void): void
-      send(payload: string, cb?: (error?: Error) => void): void
-      close(): void
-    }
-  }
-  const socket = new wsModule.default(url)
-
+export async function openNodeAcpConnection(url: string, clientName: string) {
+  const socket = new WebSocket(url)
   await new Promise<void>((resolve, reject) => {
     socket.once('open', () => resolve())
-    socket.once('error', (error) => reject(error))
+    socket.once('error', (error: Error) => reject(error))
   })
 
-  const connection = new sdk.ClientSideConnection(() => createClient(), createStream(socket))
+  const connection = new ClientSideConnection(() => createClient(), createStream(socket))
   await connection.initialize({
-    protocolVersion: sdk.PROTOCOL_VERSION,
+    protocolVersion: PROTOCOL_VERSION,
     clientInfo: { name: clientName, version: '0.0.1' },
     clientCapabilities: { fs: { readTextFile: false } },
   })
@@ -55,7 +30,7 @@ export async function openNodeAcpConnection(
   }
 }
 
-function createClient() {
+function createClient(): Client {
   return {
     async requestPermission() {
       return { outcome: { outcome: 'cancelled' } }
@@ -75,17 +50,12 @@ function createClient() {
   }
 }
 
-function createStream(socket: {
-  on(event: string, cb: (...args: unknown[]) => void): void
-  once(event: string, cb: (...args: unknown[]) => void): void
-  send(payload: string, cb?: (error?: Error) => void): void
-  close(): void
-}) {
+function createStream(socket: WebSocket): Stream {
   return {
     writable: new WritableStream({
       write(message) {
         return new Promise<void>((resolve, reject) => {
-          socket.send(JSON.stringify(message), (error) => (error ? reject(error) : resolve()))
+          socket.send(JSON.stringify(message), (error?: Error) => (error ? reject(error) : resolve()))
         })
       },
       close() {
@@ -94,21 +64,21 @@ function createStream(socket: {
       abort() {
         socket.close()
       },
-    }),
+    }) as Stream['writable'],
     readable: new ReadableStream({
       start(controller) {
-        socket.on('message', (data) => controller.enqueue(JSON.parse(toText(data))))
+        socket.on('message', (data: RawData) => controller.enqueue(JSON.parse(toText(data))))
         socket.once('close', () => controller.close())
-        socket.once('error', (error) => controller.error(error))
+        socket.once('error', (error: Error) => controller.error(error))
       },
       cancel() {
         socket.close()
       },
-    }),
+    }) as Stream['readable'],
   }
 }
 
-function toText(data: unknown): string {
+function toText(data: RawData): string {
   if (typeof data === 'string') {
     return data
   }
@@ -116,7 +86,7 @@ function toText(data: unknown): string {
     return Buffer.from(data).toString('utf8')
   }
   if (Array.isArray(data)) {
-    return Buffer.concat(data as Uint8Array[]).toString('utf8')
+    return Buffer.concat(data).toString('utf8')
   }
-  return Buffer.from(data as Uint8Array).toString('utf8')
+  return data.toString('utf8')
 }

@@ -19,6 +19,10 @@
       "types": "./dist/admin.d.ts",
       "default": "./dist/admin.js"
     },
+    "./events": {
+      "types": "./dist/events.d.ts",
+      "default": "./dist/events.js"
+    },
     "./resources": {
       "types": "./dist/resources.d.ts",
       "default": "./dist/resources.js"
