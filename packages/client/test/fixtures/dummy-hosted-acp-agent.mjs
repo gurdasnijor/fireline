@@ -3,7 +3,7 @@ import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
 
 export async function start() {
-  const sessions = new Map()
+  const runtimes = new Map()
   const timers = new Set()
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
@@ -11,28 +11,33 @@ export async function start() {
       res.writeHead(status, { 'content-type': 'application/json' })
       res.end(JSON.stringify(body))
     }
-    if (req.method === 'POST' && url.pathname === '/v1/sessions') {
+    if (req.method === 'POST' && url.pathname === '/v1/runtimes') {
       const handle_id = randomUUID()
-      const session = { handle_id, status: 'starting' }
-      sessions.set(handle_id, session)
+      const runtime = {
+        handle_id,
+        status: 'starting',
+        acp: { url: `http://127.0.0.1/runtimes/${handle_id}/acp` },
+        state: { url: `http://127.0.0.1/runtimes/${handle_id}/state` },
+      }
+      runtimes.set(handle_id, runtime)
       const timer = setTimeout(() => {
-        if (session.status === 'starting') session.status = 'ready'
+        if (runtime.status === 'starting') runtime.status = 'ready'
         timers.delete(timer)
       }, 25)
       timers.add(timer)
-      return send(200, session)
+      return send(200, runtime)
     }
-    const match = url.pathname.match(/^\/v1\/sessions\/([^/]+)(?:\/(wake|stop))?$/)
+    const match = url.pathname.match(/^\/v1\/runtimes\/([^/]+)(?:\/(wake|stop))?$/)
     if (!match) return send(404, { error: 'not_found' })
-    const session = sessions.get(decodeURIComponent(match[1]))
-    if (!session) return send(404, { error: 'not_found' })
-    if (req.method === 'GET' && !match[2]) return send(200, session)
+    const runtime = runtimes.get(decodeURIComponent(match[1]))
+    if (!runtime) return send(404, { error: 'not_found' })
+    if (req.method === 'GET' && !match[2]) return send(200, runtime)
     if (req.method === 'POST' && match[2] === 'wake') {
-      return send(200, session.status === 'ready' ? { outcome: 'noop' } : { outcome: 'advanced', steps: 1 })
+      return send(200, runtime.status === 'ready' ? { outcome: 'noop' } : { outcome: 'advanced', steps: 1 })
     }
     if (req.method === 'POST' && match[2] === 'stop') {
-      session.status = 'stopped'
-      return send(200, session)
+      runtime.status = 'stopped'
+      return send(200, runtime)
     }
     return send(405, { error: 'method_not_allowed' })
   })

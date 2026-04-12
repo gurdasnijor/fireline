@@ -3,9 +3,9 @@
  * satisfier from `docs/proposals/client-primitives.md`, mapped onto the
  * substrate plan in `docs/explorations/managed-agents-mapping.md`.
  */
-import type { Unsubscribe } from '../core/session.js'
+import type { Unsubscribe } from '../core/index.js'
 
-export type { Unsubscribe } from '../core/session.js'
+export type { Unsubscribe } from '../core/index.js'
 
 export type WakeHandler = (session_id: string) => Promise<void>
 

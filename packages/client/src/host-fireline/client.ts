@@ -1,10 +1,18 @@
 /**
  * Fireline-specific Host satisfier that wraps the control-plane HTTP surface
  * described in `docs/proposals/client-primitives.md` and grounded in
- * `docs/explorations/managed-agents-mapping.md`.
+ * `docs/proposals/runtime-host-split.md` §7. A Host provisions a runtime
+ * instance and returns a handle carrying the runtime's ACP + state-stream
+ * endpoints; session lifecycle lives on the ACP data plane inside the
+ * provisioned runtime, not on this interface.
  */
-import type { SessionSpec } from '../core/index.js'
-import type { Host, SessionStatus, WakeOutcome } from '../host/index.js'
+import type {
+  Host,
+  HostHandle,
+  HostStatus,
+  ProvisionSpec,
+  WakeOutcome,
+} from '../host/index.js'
 
 export interface FirelineHostOptions {
   readonly controlPlaneUrl: string
@@ -21,9 +29,16 @@ type FirelineRuntimeStatus =
   | 'broken'
   | 'stopped'
 
+type FirelineEndpointWire = {
+  readonly url: string
+  readonly headers?: Readonly<Record<string, string>>
+}
+
 type FirelineRuntimeDescriptor = {
   readonly runtimeKey: string
   readonly status: FirelineRuntimeStatus
+  readonly acp?: FirelineEndpointWire
+  readonly state?: FirelineEndpointWire
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 100
@@ -35,9 +50,7 @@ export function createFirelineHost(opts: FirelineHostOptions): Host {
   const sharedStateUrl = opts.sharedStateUrl
 
   return {
-    async createSession(spec) {
-      void spec.initialPrompt
-
+    async provision(spec) {
       const runtimeName = readMetadataString(spec.metadata, 'name') ?? `fireline-ts-${crypto.randomUUID()}`
       const stateStream = readMetadataString(spec.metadata, 'stateStream')
       const explicitPort = readMetadataNumber(spec.metadata, 'port')
@@ -61,12 +74,12 @@ export function createFirelineHost(opts: FirelineHostOptions): Host {
       return {
         id: ready.runtimeKey,
         kind: 'fireline',
+        acp: ready.acp ?? { url: '' },
+        state: ready.state ?? { url: sharedStateUrl },
       }
     },
 
     async wake(handle) {
-      void sharedStateUrl
-
       const descriptor = await getRuntime(baseUrl, token, handle.id)
       if (!descriptor) {
         return blockedWakeOutcome()
@@ -91,7 +104,7 @@ export function createFirelineHost(opts: FirelineHostOptions): Host {
       return mapRuntimeStatus(descriptor.status)
     },
 
-    async stopSession(handle) {
+    async stop(handle) {
       await requestControlPlane<FirelineRuntimeDescriptor | null>(
         baseUrl,
         `/v1/runtimes/${encodeURIComponent(handle.id)}/stop`,
@@ -112,7 +125,7 @@ function blockedWakeOutcome(): WakeOutcome {
   }
 }
 
-function mapRuntimeStatus(status: FirelineRuntimeStatus): SessionStatus {
+function mapRuntimeStatus(status: FirelineRuntimeStatus): HostStatus {
   switch (status) {
     case 'ready':
     case 'busy':
@@ -206,7 +219,7 @@ async function readControlPlaneError(response: Response): Promise<string> {
 }
 
 function readMetadataString(
-  metadata: SessionSpec['metadata'] | undefined,
+  metadata: ProvisionSpec['metadata'] | undefined,
   key: string,
 ): string | undefined {
   const value = metadata?.[key]
@@ -214,7 +227,7 @@ function readMetadataString(
 }
 
 function readMetadataNumber(
-  metadata: SessionSpec['metadata'] | undefined,
+  metadata: ProvisionSpec['metadata'] | undefined,
   key: string,
 ): number | undefined {
   const value = metadata?.[key]

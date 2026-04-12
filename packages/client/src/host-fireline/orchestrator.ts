@@ -35,7 +35,12 @@ function buildFirelineHostOrchestrator(
 ): Orchestrator {
   const registry = createStreamSessionRegistry({ sharedStateUrl: opts.sharedStateUrl })
   const handler: WakeHandler = async (session_id) => {
-    const outcome = await host.wake({ id: session_id, kind: 'fireline' })
+    const outcome = await host.wake({
+      id: session_id,
+      kind: 'fireline',
+      acp: { url: '' },
+      state: { url: opts.sharedStateUrl },
+    })
     if (outcome.kind === 'blocked') {
       throw new Error(`wake blocked on ${session_id}: ${JSON.stringify(outcome.reason)}`)
     }

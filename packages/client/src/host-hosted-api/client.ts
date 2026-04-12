@@ -1,10 +1,22 @@
 /**
- * Hosted-API Host satisfier for the session lifecycle primitive described in
- * `docs/proposals/client-primitives.md`, aligned with
- * `docs/explorations/managed-agents-mapping.md`.
+ * Hosted-API Host satisfier — proves the `Host` primitive interface
+ * accommodates a remote-hosted programming model alongside the
+ * local-subprocess model implemented by `createFirelineHost`, per
+ * `docs/proposals/client-primitives.md` and
+ * `docs/proposals/runtime-host-split.md` §7.
+ *
+ * A Host provisions a runtime and returns a handle carrying the runtime's
+ * ACP + state endpoints. Session lifecycle is an ACP data-plane concern,
+ * not a Host-primitive verb — clients open an ACP connection against
+ * `handle.acp.url` and call `session/new` directly.
  */
-import type { SessionSpec, SuspendReasonSpec } from '../core/index.js'
-import type { Host, SessionStatus, WakeOutcome } from '../host/index.js'
+import type { SuspendReasonSpec } from '../core/index.js'
+import type {
+  Endpoint,
+  Host,
+  HostStatus,
+  WakeOutcome,
+} from '../host/index.js'
 
 export interface HostedApiHostOptions {
   readonly endpointUrl: string
@@ -13,9 +25,11 @@ export interface HostedApiHostOptions {
   readonly pollIntervalMs?: number
 }
 
-type HostedApiSessionDescriptor = {
+type HostedApiRuntimeDescriptor = {
   readonly handle_id: string
   readonly status: string
+  readonly acp?: Endpoint
+  readonly state?: Endpoint
 }
 
 type HostedApiWakeResponse = {
@@ -34,14 +48,14 @@ export function createHostedApiHost(opts: HostedApiHostOptions): Host {
   const startupTimeoutMs = opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS
 
   return {
-    async createSession(spec) {
-      const descriptor = await requestHostedApi<HostedApiSessionDescriptor>(baseUrl, '/v1/sessions', {
+    async provision(spec) {
+      const descriptor = await requestHostedApi<HostedApiRuntimeDescriptor>(baseUrl, '/v1/runtimes', {
         apiKey,
         method: 'POST',
         body: JSON.stringify(spec),
       })
 
-      const ready = await waitForSessionReady(
+      const ready = await waitForRuntimeReady(
         baseUrl,
         apiKey,
         descriptor.handle_id,
@@ -52,13 +66,15 @@ export function createHostedApiHost(opts: HostedApiHostOptions): Host {
       return {
         id: ready.handle_id,
         kind: 'hosted-api',
+        acp: ready.acp ?? { url: `${baseUrl}/v1/runtimes/${encodeURIComponent(ready.handle_id)}/acp` },
+        state: ready.state ?? { url: `${baseUrl}/v1/runtimes/${encodeURIComponent(ready.handle_id)}/state` },
       }
     },
 
     async wake(handle) {
       const response = await requestHostedApi<HostedApiWakeResponse>(
         baseUrl,
-        `/v1/sessions/${encodeURIComponent(handle.id)}/wake`,
+        `/v1/runtimes/${encodeURIComponent(handle.id)}/wake`,
         {
           apiKey,
           method: 'POST',
@@ -68,9 +84,9 @@ export function createHostedApiHost(opts: HostedApiHostOptions): Host {
     },
 
     async status(handle) {
-      const descriptor = await requestHostedApi<HostedApiSessionDescriptor | null>(
+      const descriptor = await requestHostedApi<HostedApiRuntimeDescriptor | null>(
         baseUrl,
-        `/v1/sessions/${encodeURIComponent(handle.id)}`,
+        `/v1/runtimes/${encodeURIComponent(handle.id)}`,
         {
           apiKey,
           allowNotFound: true,
@@ -84,10 +100,10 @@ export function createHostedApiHost(opts: HostedApiHostOptions): Host {
       return mapHostedApiStatus(descriptor.status)
     },
 
-    async stopSession(handle) {
-      await requestHostedApi<HostedApiSessionDescriptor | null>(
+    async stop(handle) {
+      await requestHostedApi<HostedApiRuntimeDescriptor | null>(
         baseUrl,
-        `/v1/sessions/${encodeURIComponent(handle.id)}/stop`,
+        `/v1/runtimes/${encodeURIComponent(handle.id)}/stop`,
         {
           apiKey,
           method: 'POST',
@@ -112,7 +128,7 @@ function mapWakeOutcome(response: HostedApiWakeResponse): WakeOutcome {
   }
 }
 
-function mapHostedApiStatus(status: string): SessionStatus {
+function mapHostedApiStatus(status: string): HostStatus {
   switch (status) {
     case 'ready':
     case 'busy':
@@ -128,14 +144,14 @@ function mapHostedApiStatus(status: string): SessionStatus {
   }
 }
 
-async function getSession(
+async function getRuntime(
   baseUrl: string,
   apiKey: string | undefined,
   handleId: string,
-): Promise<HostedApiSessionDescriptor | null> {
-  return requestHostedApi<HostedApiSessionDescriptor | null>(
+): Promise<HostedApiRuntimeDescriptor | null> {
+  return requestHostedApi<HostedApiRuntimeDescriptor | null>(
     baseUrl,
-    `/v1/sessions/${encodeURIComponent(handleId)}`,
+    `/v1/runtimes/${encodeURIComponent(handleId)}`,
     {
       apiKey,
       allowNotFound: true,
@@ -143,19 +159,19 @@ async function getSession(
   )
 }
 
-async function waitForSessionReady(
+async function waitForRuntimeReady(
   baseUrl: string,
   apiKey: string | undefined,
   handleId: string,
   timeoutMs: number,
   pollIntervalMs: number,
-): Promise<HostedApiSessionDescriptor> {
+): Promise<HostedApiRuntimeDescriptor> {
   const deadline = Date.now() + timeoutMs
 
   while (Date.now() < deadline) {
-    const descriptor = await getSession(baseUrl, apiKey, handleId)
+    const descriptor = await getRuntime(baseUrl, apiKey, handleId)
     if (!descriptor) {
-      throw new Error(`hosted API session '${handleId}' was not found while waiting for readiness`)
+      throw new Error(`hosted API runtime '${handleId}' was not found while waiting for readiness`)
     }
 
     if (descriptor.status === 'ready') {
@@ -163,17 +179,17 @@ async function waitForSessionReady(
     }
 
     if (mapHostedApiStatus(descriptor.status).kind === 'error') {
-      throw new Error(`hosted API session '${handleId}' reported error status '${descriptor.status}'`)
+      throw new Error(`hosted API runtime '${handleId}' reported error status '${descriptor.status}'`)
     }
 
     if (descriptor.status === 'stopped') {
-      throw new Error(`hosted API session '${handleId}' stopped before becoming ready`)
+      throw new Error(`hosted API runtime '${handleId}' stopped before becoming ready`)
     }
 
     await delay(pollIntervalMs)
   }
 
-  throw new Error(`timed out waiting for hosted API session '${handleId}' to become ready`)
+  throw new Error(`timed out waiting for hosted API runtime '${handleId}' to become ready`)
 }
 
 async function requestHostedApi<T>(

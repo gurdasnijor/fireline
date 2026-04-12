@@ -35,10 +35,6 @@
       "types": "./dist/host-fireline/index.d.ts",
       "default": "./dist/host-fireline/index.js"
     },
-    "./host-claude": {
-      "types": "./dist/host-claude/index.d.ts",
-      "default": "./dist/host-claude/index.js"
-    },
     "./host-hosted-api": {
       "types": "./dist/host-hosted-api/index.d.ts",
       "default": "./dist/host-hosted-api/index.js"

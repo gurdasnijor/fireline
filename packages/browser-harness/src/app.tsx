@@ -19,7 +19,7 @@ import {
 import { useLiveQuery } from '@tanstack/react-db'
 import { createFirelineDB, type FirelineDB } from '@fireline/state'
 import { createFirelineHost } from '@fireline/client/host-fireline'
-import type { Host, SessionHandle, SessionStatus } from '@fireline/client/host'
+import type { Host, HostHandle, HostStatus } from '@fireline/client/host'
 
 const STATE_STREAM_NAME =
   import.meta.env.VITE_FIRELINE_STATE_STREAM ?? 'fireline-harness-state'
@@ -173,7 +173,7 @@ function SessionHarness({
   dbActive: boolean
   dbReady: boolean
   dbError: string | null
-  onHandleChanged(handle: SessionHandle | null, status: SessionStatus | null): void
+  onHandleChanged(handle: HostHandle | null, status: HostStatus | null): void
 }) {
   const host = useMemo<Host>(
     () =>
@@ -191,8 +191,8 @@ function SessionHarness({
   const [pendingPermission, setPendingPermission] = useState<RequestPermissionRequest | null>(null)
   const [agents, setAgents] = useState<CatalogAgent[]>([])
   const [selectedAgentId, setSelectedAgentId] = useState<string>('')
-  const [handle, setHandle] = useState<SessionHandle | null>(null)
-  const [sessionStatus, setSessionStatus] = useState<SessionStatus | null>(null)
+  const [handle, setHandle] = useState<HostHandle | null>(null)
+  const [hostStatus, setHostStatus] = useState<HostStatus | null>(null)
   const [runtimePending, setRuntimePending] = useState(false)
   const connectionRef = useRef<ClientSideConnection | null>(null)
   const websocketRef = useRef<WebSocket | null>(null)
@@ -200,7 +200,7 @@ function SessionHarness({
   const permissionResolverRef = useRef<PermissionResolver | null>(null)
   const bottomRef = useRef<HTMLDivElement | null>(null)
   const runtimeReady =
-    sessionStatus?.kind === 'running' || sessionStatus?.kind === 'idle'
+    hostStatus?.kind === 'running' || hostStatus?.kind === 'idle'
 
   useEffect(() => {
     void refreshAgents()
@@ -218,7 +218,7 @@ function SessionHarness({
     if (!runtimeReady) {
       if (handle) {
         setLastError(
-          `Runtime is not ready yet (${sessionStatus?.kind ?? 'unknown'})`,
+          `Runtime is not ready yet (${hostStatus?.kind ?? 'unknown'})`,
         )
         setStatus('error')
         return
@@ -403,10 +403,10 @@ function SessionHarness({
     }
   }
 
-  async function refreshStatus(currentHandle: SessionHandle): Promise<SessionStatus | null> {
+  async function refreshStatus(currentHandle: HostHandle): Promise<HostStatus | null> {
     try {
       const next = await host.status(currentHandle)
-      setSessionStatus(next)
+      setHostStatus(next)
       onHandleChanged(currentHandle, next)
       return next
     } catch (error) {
@@ -431,7 +431,7 @@ function SessionHarness({
         `${HARNESS_API_BASE}/resolve?agentId=${encodeURIComponent(selectedAgentId)}`,
       )
 
-      const next = await host.createSession({
+      const next = await host.provision({
         agentCommand: resolved.agentCommand,
         metadata: {
           name: 'browser-harness',
@@ -465,10 +465,10 @@ function SessionHarness({
       setEvents([])
       const current = handle
       if (current) {
-        await host.stopSession(current)
+        await host.stop(current)
       }
       setHandle(null)
-      setSessionStatus(null)
+      setHostStatus(null)
       onHandleChanged(null, null)
       pushEvent('runtime_stop', {})
     } catch (error) {
@@ -688,8 +688,8 @@ function SessionHarness({
             <KeyValueRow label="status" value={status} />
             <KeyValueRow label="sessionId" value={sessionId ?? 'none'} mono />
             <KeyValueRow
-              label="sessionStatus"
-              value={sessionStatus?.kind ?? 'not running'}
+              label="hostStatus"
+              value={hostStatus?.kind ?? 'not running'}
             />
             <KeyValueRow
               label="lastError"

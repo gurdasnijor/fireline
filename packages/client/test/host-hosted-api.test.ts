@@ -19,14 +19,13 @@ describe('host-hosted-api', () => {
     await fixture?.stop()
   })
 
-  it('creates, wakes, and stops a hosted API session through the Host interface', async () => {
+  it('provisions, wakes, and stops a hosted runtime through the Host interface', async () => {
     const host = createHostedApiHost({
       endpointUrl: fixture!.url,
     } satisfies HostedApiHostOptions)
 
-    const handle = await host.createSession({
+    const handle = await host.provision({
       model: 'dummy-hosted-model',
-      initialPrompt: 'hello from test',
       metadata: {
         name: 'dummy-hosted-api-test',
       },
@@ -34,10 +33,12 @@ describe('host-hosted-api', () => {
 
     expect(handle.kind).toBe('hosted-api')
     expect(handle.id).toMatch(/\S+/)
+    expect(handle.acp.url).toMatch(/\/acp$/)
+    expect(handle.state.url).toMatch(/\/state$/)
     expect(await host.status(handle)).toEqual({ kind: 'running' })
     expect(await host.wake(handle)).toEqual({ kind: 'noop' })
 
-    await host.stopSession(handle)
+    await host.stop(handle)
 
     expect(await host.status(handle)).toEqual({ kind: 'stopped' })
   })

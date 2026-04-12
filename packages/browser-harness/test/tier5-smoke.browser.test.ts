@@ -74,7 +74,7 @@ describe('browser harness Tier 5 smoke flow', () => {
     expect(fetchState.runtime?.createBody).toMatchObject({
       provider: 'local',
       host: '127.0.0.1',
-      port: 0,
+      port: 4437,
       name: 'browser-harness',
       agentCommand: resolvedAgentCommand,
       topology: { components: [] },
@@ -92,7 +92,7 @@ describe('browser harness Tier 5 smoke flow', () => {
     await expect.element(page.getByText(/^runtime_stop$/)).toBeInTheDocument()
 
     const inspectorText = document.body.textContent ?? ''
-    expect(inspectorText).toContain('sessionStatus')
+    expect(inspectorText).toContain('hostStatus')
     expect(inspectorText).toContain('handleId')
     expect((inspectorText.match(/not running/g) ?? []).length).toBeGreaterThanOrEqual(2)
     expect(inspectorText).not.toContain('runtime-1')
@@ -141,7 +141,7 @@ describe('browser harness Tier 5 smoke flow', () => {
     expect(inspectorText).toContain('lastError')
     expect(inspectorText).toContain('runtime_stop_failed')
     expect(inspectorText).toContain('handleId')
-    expect(inspectorText).toContain('sessionStatus')
+    expect(inspectorText).toContain('hostStatus')
     expect(inspectorText).toContain('runtime-1')
     expect(inspectorText).toContain('running')
   })
@@ -165,7 +165,7 @@ async function launchAgent(): Promise<void> {
 
 function expectNotRunningState(): void {
   const inspectorText = document.body.textContent ?? ''
-  expect(inspectorText).toContain('sessionStatus')
+  expect(inspectorText).toContain('hostStatus')
   expect(inspectorText).toContain('handleId')
   expect((inspectorText.match(/not running/g) ?? []).length).toBeGreaterThanOrEqual(2)
   expect(inspectorText).not.toContain('runtime-1')
