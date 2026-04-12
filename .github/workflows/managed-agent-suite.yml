@@ -9,6 +9,7 @@ on:
       - crates/**
       - tests/**
       - docker/**
+      - docker-compose.yml
       - .github/workflows/managed-agent-suite.yml
   push:
     branches:
@@ -20,6 +21,7 @@ on:
       - crates/**
       - tests/**
       - docker/**
+      - docker-compose.yml
       - .github/workflows/managed-agent-suite.yml
   workflow_dispatch:
 
@@ -70,3 +72,78 @@ jobs:
       # tests/managed_agent_{sandbox,resources,primitives_suite}.rs
       # for the invariants that would be validated in CI once this
       # lands. Tracked as post-demo follow-up.
+
+  docker-host-images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate multi-arch host images
+        run: |
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --file docker/fireline-host.Dockerfile \
+            --tag fireline-host:ci \
+            .
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --file docker/fireline-streams.Dockerfile \
+            --tag fireline-streams:ci \
+            .
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --file docker/fireline-host-quickstart.Dockerfile \
+            --tag fireline-host-quickstart:ci \
+            .
+
+      - name: Smoke test sidecar compose topology
+        run: |
+          cleanup() {
+            docker compose down -v --remove-orphans || true
+          }
+          trap cleanup EXIT
+          docker compose up -d --build
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:4440/healthz >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:4440/healthz | grep -q '^ok$'
+
+      - name: Smoke test bundled quickstart image
+        run: |
+          mkdir -p .tmp/fireline-host-quickstart
+          chmod 0777 .tmp/fireline-host-quickstart
+          cleanup() {
+            docker rm -f fireline-host-quickstart-smoke >/dev/null 2>&1 || true
+            rm -rf .tmp/fireline-host-quickstart
+          }
+          trap cleanup EXIT
+          docker build \
+            --file docker/fireline-host-quickstart.Dockerfile \
+            --tag fireline-host-quickstart:smoke \
+            .
+          docker run -d \
+            --name fireline-host-quickstart-smoke \
+            -p 4441:4440 \
+            -p 7475:7474 \
+            -v "$PWD/.tmp/fireline-host-quickstart:/var/lib/fireline" \
+            fireline-host-quickstart:smoke
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:4441/healthz >/dev/null && \
+               curl -fsS http://127.0.0.1:7475/healthz >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:4441/healthz | grep -q '^ok$'
+          curl -fsS http://127.0.0.1:7475/healthz | grep -q '^ok$'

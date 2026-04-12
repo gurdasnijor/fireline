@@ -1,0 +1,36 @@
+services:
+  fireline-streams:
+    build:
+      context: .
+      dockerfile: docker/fireline-streams.Dockerfile
+    image: fireline-streams:compose
+    environment:
+      FIRELINE_STREAMS_PORT: "7474"
+      DS_STORAGE__MODE: file-durable
+      DS_STORAGE__DATA_DIR: /var/lib/fireline/durable-streams
+    expose:
+      - "7474"
+    volumes:
+      - fireline-streams-data:/var/lib/fireline
+
+  fireline-host:
+    build:
+      context: .
+      dockerfile: docker/fireline-host.Dockerfile
+    image: fireline-host:compose
+    depends_on:
+      fireline-streams:
+        condition: service_healthy
+    environment:
+      FIRELINE_PORT: "4440"
+      FIRELINE_HOST: 0.0.0.0
+      FIRELINE_NAME: hosted-fireline
+      FIRELINE_CONTROL_PLANE_PROVIDER: local
+      FIRELINE_DURABLE_STREAMS_URL: http://fireline-streams:7474/v1/stream
+    ports:
+      - "4440:4440"
+    volumes:
+      - fireline-streams-data:/var/lib/fireline/shared-state:ro
+
+volumes:
+  fireline-streams-data:
