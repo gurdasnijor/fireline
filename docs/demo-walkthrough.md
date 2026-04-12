@@ -40,7 +40,7 @@ The agent running inside the runtime is **`fireline-testy-load`** — a minimal 
   - `statePlane` flips from `idle until runtime is ready` to the DB fields.
 - The right-hand **State Explorer** panel flips from *"Idle until a runtime is ready"* to showing the five tabs `sessions / turns / edges / chunks / connections`. The `sessions` tab is the default; it's empty because no ACP session has been opened yet, but the preload has completed against `http://localhost:5173/v1/stream/fireline-harness-state` — durable-streams is HTTP+SSE, not WebSocket — which vite's `/v1` proxy forwards to `127.0.0.1:4437`.
 
-**Primitive path:** the button calls `host.provision({ agentCommand, metadata })` via `createFirelineHost` from `@fireline/client/host-fireline`. The satisfier POSTs to `/cp/v1/runtimes` with `{ provider: 'local', host: '127.0.0.1', port: 0, ... }` — Vite proxies `/cp` to `http://127.0.0.1:4440` after stripping the prefix, so this hits the `fireline-control-plane` binary on port 4440. The control plane spawns a `fireline` binary child process which binds on an OS-assigned port for its ACP WebSocket and state-stream routes (the vite proxy config pins `/acp` and `/v1` to `127.0.0.1:4437`, so the dev environment relies on the spawned runtime landing there — see the runbook port table for the caveats). The control plane waits for the runtime to advertise `Ready` and returns a `RuntimeDescriptor` to the browser. `createFirelineHost` wraps the `runtimeKey` and the descriptor's `acp` + `state` endpoints into a `HostHandle { id, kind: 'fireline', acp, state }` per the `Host.provision` contract in [`./proposals/client-primitives.md`](./proposals/client-primitives.md) §Module 2. (The `provision` verb is the post-`37db346` rename of the old `createSession` verb — the Host primitive hands out a *runtime*, and ACP sessions live inside it via `session/new` on `handle.acp.url`.)
+**Primitive path:** the button calls `compose(sandbox({...}), middleware([trace()]), agent(agentCommand)).start({ serverUrl: '/cp' })` from `@fireline/client`. This serializes the harness spec and POSTs it to `/cp/v1/sandboxes` — Vite proxies `/cp` to `http://127.0.0.1:4440` after stripping the prefix, so this hits the Fireline server on port 4440. The server's `ProviderDispatcher` picks the local subprocess provider, spawns a `fireline` binary child process, wires the middleware chain as a conductor topology, and waits for the sandbox to advertise `Ready`. The returned `SandboxHandle { id, acp, state }` carries the ACP WebSocket endpoint and the durable state stream endpoint — the browser uses `handle.acp.url` to open ACP sessions and `handle.state.url` to subscribe to the durable stream via `@fireline/state`. See [`./proposals/client-api-redesign.md`](./proposals/client-api-redesign.md) §2 for the `compose` contract.
 
 **TLA tie-in:** at this point `runtimeIndex[runtime_key].status = "ready"` in the spec's state, and `ProvisionReturnsReachableRuntime` (at `verification/spec/managed_agents.tla:814`) says "ready runtimes are reachable" — which is exactly what the browser proves by opening a WebSocket to the same runtime in step 2.2.
 
@@ -149,7 +149,7 @@ Now provision a second runtime (or use the existing one if it was provisioned wi
 
 **What to say:**
 
-> "Wake is the single orchestration verb in the Fireline substrate. It's the verb Anthropic's managed-agents post calls `wake(session_id) → void` and says is satisfiable by *'any scheduler that can call a function with an ID and retry on failure'*. We took that literally: `Host.wake(handle)` is **idempotent, retry-safe, and returns a discriminated outcome**. When you call it on a runtime that's already ready — like this one — the outcome is `noop`, and nothing happens. That's not a bug; it's the spec. The formal model requires it."
+> "Wake demonstrates the Orchestration primitive. In Fireline's model, orchestration IS durable-stream subscription — the `@fireline/state` collections react to events, and subscribers advance sessions by responding to what the stream shows. This Wake button is a convenience that queries the sandbox's current state. When the sandbox is already ready — like this one — the result is `noop`. Nothing happens. That's the spec."
 
 Point at `verification/spec/managed_agents.tla:789`:
 
@@ -160,7 +160,7 @@ WakeOnReadyIsNoop ==
     /\ lastWake.afterRuntimeId = lastWake.beforeRuntimeId
 ```
 
-> "That invariant is enforced by the Rust `createFirelineHost` satisfier at `packages/client/src/host-fireline/client.ts:74-76`: it checks `descriptor.status === 'ready'` and returns `{ kind: 'noop' }` before doing any work. Click the button again — same result. Click it a third time — same. **Idempotent.** The TLA model-checker verifies this invariant holds across every interleaving of concurrent wake calls — see also `ConcurrentWakeSingleWinner` at line 794."
+> "The sandbox is ready, so querying its state returns a noop — there's nothing to advance. Click the button again — same result. Click it a third time — same. **Idempotent.** The TLA model-checker verifies this invariant holds across every interleaving of concurrent wake calls — see also `ConcurrentWakeSingleWinner` at line 794."
 
 Then walk to the complementary invariant:
 
@@ -176,7 +176,7 @@ WakeOnStoppedChangesRuntimeId ==
 
 > "Plain English: *'a successful wake that created a new runtime can only have happened from a stopped starting state, and the new runtime_id is different from whatever was there before — but the runtime_key is unchanged, so all the sessions bound to that key travel across the wake boundary'*. Combined with `WakeOnStoppedPreservesSessionBinding` at line 821, this is what makes wake a **single orchestration verb that covers both the trivial case and the recovery case**, not two verbs."
 
-> **TODO(demo-review):** The current `createFirelineHost.wake` implementation at `packages/client/src/host-fireline/client.ts:78-80` returns `{ kind: 'blocked', reason: { kind: 'require_approval', scope: 'all' } }` when the runtime is `stopped` or `broken`, **not** a new runtime via `POST /v1/runtimes`. The `WakeOnStoppedChangesRuntimeId` beat is therefore a **spec-level demonstration**, not a click-through beat. If asked *"can you click Wake on a stopped runtime and show it coming back?"* the honest answer is *"the TS satisfier currently gates that path behind a policy decision; the Rust `fireline::orchestration::resume` helper does the full recovery composition, and slice 16 will close the loop in the TS layer. The TLA invariant is satisfied by the spec; the impl is 90% there."* Decide before demo whether to (a) show only the `WakeOnReadyIsNoop` beat live and talk through the stopped case on the slide, or (b) extend `createFirelineHost.wake` to do the cold-start composition before demo day.
+> **TODO(demo-review):** Under the new client API (`compose().start()`), the "Wake" button is a stream-subscription convenience — it queries the sandbox's current state and displays the result. The `WakeOnStoppedChangesRuntimeId` beat (re-provisioning a stopped sandbox) is handled by calling `compose().start()` again with the same labels. Decide before demo whether to (a) show only the `WakeOnReadyIsNoop` beat live and talk through the stopped case on a slide, or (b) wire the Wake button to `compose().start()` with the existing labels when the sandbox is stopped.
 
 ## 5. The state explorer — `@fireline/state` as the universal read surface
 
@@ -200,7 +200,7 @@ WakeOnStoppedChangesRuntimeId ==
 
 **Say:** *"The control plane is the one component of the demo that's a separate process outside Vite. It's a Rust binary at `target/debug/fireline-control-plane` spawned by the dev server on port 4440. We're going to switch to the runbook's fallback — run it by hand."* Then go to [`./demo-runbook.md`](./demo-runbook.md) §"Known issues — 5a: control plane refuses to start" for the hand-start invocation.
 
-**Narrative recovery:** *"While that comes up — the important thing to internalize is that the control plane is implementing the `POST /v1/runtimes` half of the `Host` primitive's contract. The browser is host-agnostic; any second satisfier (a remote hosted-API host, a stub for testing, whatever lands after demo day) would drive the same four-verb surface. The contract is `provision / wake / status / stop` on the `Host` trait in `@fireline/client/host`, not any particular backend."*
+**Narrative recovery:** *"While that comes up — the important thing to internalize is that the server is implementing the `POST /v1/sandboxes` endpoint that `compose().start()` calls. The browser is provider-agnostic — `compose(sandbox, middleware, agent)` produces a serializable spec; the server decides which provider (local subprocess, Docker, microsandbox) runs it. The contract is the two Sandbox primitives — `provision` and `execute` — not any particular backend."*
 
 ### 5b. Runtime boots, but prompts 404
 
@@ -208,7 +208,7 @@ WakeOnStoppedChangesRuntimeId ==
 
 **Cause most likely:** the `fireline-testy-load` binary wasn't actually rebuilt this session and is missing a `session/prompt` handler fix, OR the agent catalog returned a stale `agentCommand`.
 
-**Say:** *"This is an interesting window into how the substrate draws the line between 'host did its job' and 'agent did its job'. The `Host` primitive is green — we have a ready runtime, a live session, and a working WebSocket. The failure is inside the agent process — which is a deliberate design boundary. Fireline owns session lifecycle, event durability, and the proxy chain. The agent owns the actual conversation."*
+**Say:** *"This is an interesting window into how the substrate draws the line between 'sandbox did its job' and 'agent did its job'. The Sandbox primitive is green — we have a ready sandbox, a live ACP session, and a working WebSocket. The failure is inside the agent process — which is a deliberate design boundary. Fireline owns sandbox lifecycle, event durability, and the middleware pipeline. The agent owns the actual conversation."*
 
 **Narrative recovery:** switch to pointing at the **state explorer `chunks` tab** and say: *"Even when the prompt itself failed, you can see the chunks and turns that did land on the durable stream. The Session primitive preserves every observable effect regardless of agent success."* Then show the `session_update` storm in the events log.
 
@@ -233,25 +233,25 @@ WakeOnStoppedChangesRuntimeId ==
 
 ## Appendix — primitive-to-UI cross-reference
 
-| UI element | Host verb | Primitive | TLA invariant (if any) |
+| UI element | API call | Primitive | TLA invariant (if any) |
 |---|---|---|---|
-| "Launch Agent" button | `host.provision(spec)` | Host + Sandbox | `ProvisionReturnsReachableRuntime` (line 814) |
-| "New Session" button | ACP `session/new` via WebSocket (not a Host verb) | Session | `SessionAppendOnly` (line 755) |
+| "Launch Agent" button | `compose(sandbox, middleware, agent).start()` | Sandbox (`provision`) | `ProvisionReturnsReachableRuntime` (line 814) |
+| "New Session" button | ACP `session/new` via `ClientSideConnection` on `handle.acp.url` | Session | `SessionAppendOnly` (line 755) |
 | "Send" (prompt form) | ACP `session/prompt` | Harness + Session | `HarnessEveryEffectLogged` (line 776), `HarnessAppendOrderStable` (line 783) |
 | "Reconnect + Load" button | ACP `session/load` | Session | `SessionDurableAcrossRuntimeDeath` (line 763) |
-| "Disconnect" button | WebSocket close (not a Host verb) | Session (read side continues) | — |
-| "Wake" button | `host.wake(handle)` | Orchestration | `WakeOnReadyIsNoop` (line 789), `ConcurrentWakeSingleWinner` (line 794), `WakeOnStoppedChangesRuntimeId` (line 802) |
+| "Disconnect" button | WebSocket close | Session (read side continues) | — |
+| "Wake" button | Stream-subscription status check (noop if ready, re-provision if stopped) | Orchestration (stream observation) | `WakeOnReadyIsNoop` (line 789), `ConcurrentWakeSingleWinner` (line 794), `WakeOnStoppedChangesRuntimeId` (line 802) |
 | Resource discovery beat (§3) | `fireline publish-resource` + `DurableStreamMounter` | Resources | `ResourcePublishedIsEventuallyDiscoverable`, `SourceRefIsImmutableAfterPublish` (deployment_discovery.tla) |
-| "Stop Runtime" button | `host.stop(handle)` | Host | (no direct invariant; complements the Wake pair) |
-| "Reset" button | `disconnect + clear events` (not a Host verb) | — | — |
-| State explorer tabs | `@fireline/state` live queries | Session (read surface) | `SessionAppendOnly` (line 755), `SessionScopedIdempotentAppend` (line 769) |
-| Inspector card's `handleId` / `sessionStatus` | `host.status(handle)` polled after every verb | Host | — |
+| "Stop Runtime" button | `admin.destroy(handle.id)` | Sandbox (operator extension) | — |
+| "Reset" button | `disconnect + clear events` | — | — |
+| State explorer tabs | `createFirelineDB({ stateStreamUrl: handle.state.url })` + `useLiveQuery` | Session (read surface) | `SessionAppendOnly` (line 755), `SessionScopedIdempotentAppend` (line 769) |
+| Inspector card | React state from ACP + API responses | — | — |
 
 ---
 
 ## TODO(demo-review) items captured inline
 
-1. **§3 Wake moment** — the `WakeOnStoppedChangesRuntimeId` beat is a spec-level demonstration because the TS `createFirelineHost.wake` returns `blocked` on stopped instead of composing the cold-start recovery. Decide before demo day whether to (a) talk through it on a slide or (b) extend the TS satisfier.
+1. **§4 Wake moment** — the `WakeOnStoppedChangesRuntimeId` beat is a spec-level demonstration. Under the new API, re-provisioning a stopped sandbox means calling `compose().start()` again with the same labels. Decide before demo day whether to (a) talk through it on a slide or (b) wire the Wake button to re-provision automatically.
 2. **§1 Narrative** — the "crate layout inherits from primitive taxonomy" line is true as an in-progress claim (the Cargo workspace member registration in `3e06b86` is the scaffolding; the actual move into primitive-aligned crates is happening in `283a903`, `abd5a29`, and subsequent commits from workspace:13). If the restructure hasn't fully landed by demo day, soften to *"the restructure is in flight; you can see the target crates registered in the workspace already"* and point at `docs/proposals/crate-restructure-manifest.md`.
 3. **§5a Fallback** — confirm the exact hand-start invocation of `fireline-control-plane` before demo. The dev-server.mjs invocation is the authoritative template (see `packages/browser-harness/dev-server.mjs:210-227`); copy it into the runbook verbatim.
 4. **Agent selector** — the demo script assumes `fireline-testy-load` is the only launchable agent in the catalog. If any other agents have been registered by demo day, update the "Select **Fireline Testy Load (command)**" instruction in §2.1.
