@@ -30,22 +30,7 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Peer {
-    pub runtime_id: String,
-    pub agent_name: String,
-    pub acp_url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state_stream_url: Option<String>,
-    pub registered_at_ms: i64,
-}
-
-#[async_trait]
-pub trait PeerRegistry: Send + Sync {
-    async fn list_peers(&self) -> Result<Vec<Peer>>;
-
-    async fn lookup_peer(&self, agent_name: &str) -> Result<Option<Peer>>;
-}
+use super::{Peer, PeerRegistry};
 
 #[derive(Clone, Debug)]
 pub struct LocalPeerDirectory {

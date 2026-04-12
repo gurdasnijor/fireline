@@ -15,7 +15,7 @@ use std::time::Duration;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::directory::PeerRegistry;
+use super::PeerRegistry;
 use super::lookup::{ActiveTurnLookup, ChildSessionEdgeInput, ChildSessionEdgeSink};
 use super::transport;
 use crate::ToolDescriptor;
@@ -69,9 +69,8 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
     vec![
         ToolDescriptor {
             name: "list_peers".to_string(),
-            description:
-                "List running Fireline peers available through the local directory."
-                    .to_string(),
+            description: "List running Fireline peers available through the deployment stream."
+                .to_string(),
             input_schema: schemars::schema_for!(ListPeersInput).to_value(),
         },
         ToolDescriptor {
@@ -94,7 +93,7 @@ pub(crate) fn build_peer_mcp_server(
         .instructions("Discover and prompt peer Fireline runtimes over ACP.")
         .tool_fn(
             "list_peers",
-            "List running Fireline peers available through the local directory.",
+            "List running Fireline peers available through the deployment stream.",
             {
                 let peer_registry = peer_registry.clone();
                 async move |_input: ListPeersInput, _cx| {
