@@ -3,7 +3,7 @@
 //! Parses CLI args, calls [`fireline_host::bootstrap::start`], waits for
 //! the shutdown signal, and exits. Should stay under ~50 lines.
 //!
-//! All runtime assembly lives in the primitive crates, not in a root
+//! All host assembly lives in the primitive crates, not in a root
 //! `fireline` library shim.
 
 use anyhow::{Context, Result};
@@ -11,21 +11,18 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use durable_streams::{Client as DurableStreamsClient, CreateOptions};
 use fireline_harness::TopologySpec;
 use fireline_host::bootstrap::{self, BootstrapConfig};
-use fireline_host::control_plane::{self, ControlPlaneConfig, ProviderMode};
-use fireline_host::control_plane_client::ControlPlaneClient;
+use fireline_host::control_plane::{self, HostConfig, ProviderMode};
 use fireline_resources::{
     MountedResource, ResourceMetadata, ResourcePublisher, ResourceSourceRef,
     StreamResourcePublisher,
 };
-use fireline_sandbox::RuntimeRegistry;
+use fireline_sandbox::{SandboxDescriptor, SandboxStatus};
 use fireline_session::{
-    Endpoint, HeartbeatMetrics, HostDescriptor, SandboxProviderKind, HostRegistration,
-    HostStatus,
+    Endpoint, HostDescriptor, HostStatus, SandboxProviderKind,
 };
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -65,7 +62,7 @@ struct PublishResourceArgs {
 #[derive(Debug, Parser)]
 #[command(
     name = "fireline",
-    about = "Fireline runtime substrate for ACP-compatible agents"
+    about = "Fireline host substrate for ACP-compatible agents"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -87,21 +84,13 @@ struct Cli {
     #[arg(long)]
     state_stream: Option<String>,
 
-    /// Run the host/runtime HTTP API instead of bootstrapping a single ACP runtime.
+    /// Run the host HTTP API instead of bootstrapping a single ACP host.
     #[arg(long)]
     control_plane: bool,
 
     /// Base URL for the external durable-streams service, e.g. `http://127.0.0.1:8787/v1/stream`.
     #[arg(long)]
     durable_streams_url: Option<String>,
-
-    /// Optional path to write the bound listener address after binding.
-    #[arg(long)]
-    listen_addr_file: Option<PathBuf>,
-
-    /// Optional explicit path for the runtime registry file.
-    #[arg(long)]
-    runtime_registry_path: Option<PathBuf>,
 
     /// Optional explicit path for the peer directory file.
     #[arg(long)]
@@ -111,29 +100,17 @@ struct Cli {
     #[arg(long, hide = true)]
     fireline_bin: Option<PathBuf>,
 
-    /// Child runtime startup timeout in milliseconds.
+    /// Child host startup timeout in milliseconds.
     #[arg(long, default_value_t = 20_000)]
     startup_timeout_ms: u64,
 
-    /// Child runtime shutdown timeout in milliseconds.
+    /// Child host shutdown timeout in milliseconds.
     #[arg(long, default_value_t = 10_000)]
     stop_timeout_ms: u64,
 
     /// Runtime provider to enable for control-plane mode.
     #[arg(long = "provider", value_enum, default_value_t = ControlPlaneProvider::Local)]
     control_plane_provider: ControlPlaneProvider,
-
-    /// Prefer push registration over polling when managing child runtimes.
-    #[arg(long)]
-    prefer_push: bool,
-
-    /// Heartbeat stale scan interval in milliseconds.
-    #[arg(long, default_value_t = 5_000)]
-    heartbeat_scan_interval_ms: u64,
-
-    /// Runtime heartbeat stale timeout in milliseconds.
-    #[arg(long, default_value_t = 30_000)]
-    stale_timeout_ms: u64,
 
     /// Compatibility flag accepted for the old control-plane launcher path.
     #[arg(long, hide = true)]
@@ -151,17 +128,13 @@ struct Cli {
     #[arg(long, default_value = "fireline-runtime:dev")]
     docker_image: String,
 
-    /// Optional explicit runtime key for control-plane-managed subprocess mode.
+    /// Optional explicit host key for managed subprocess mode.
     #[arg(long, env = "FIRELINE_RUNTIME_KEY", hide = true)]
     host_key: Option<String>,
 
     /// Optional explicit node id for control-plane-managed subprocess mode.
     #[arg(long, env = "FIRELINE_NODE_ID", hide = true)]
     node_id: Option<String>,
-
-    /// Optional control-plane base URL used by managed runtimes in push mode.
-    #[arg(long, env = "FIRELINE_CONTROL_PLANE_URL", hide = true)]
-    control_plane_url: Option<String>,
 
     /// Optional provider kind override for control-plane-managed runtimes.
     #[arg(long, env = "FIRELINE_PROVIDER_KIND", hide = true)]
@@ -179,7 +152,7 @@ struct Cli {
     #[arg(long, env = "FIRELINE_ADVERTISED_STATE_STREAM_URL", hide = true)]
     advertised_state_stream_url: Option<String>,
 
-    /// Optional runtime topology JSON payload.
+    /// Optional host topology JSON payload.
     #[arg(long)]
     topology_json: Option<String>,
 
@@ -279,19 +252,14 @@ async fn run_control_plane_host(cli: Cli, host: IpAddr) -> Result<()> {
         .durable_streams_url
         .context("--durable-streams-url is required in control-plane mode")?;
 
-    control_plane::run_control_plane(ControlPlaneConfig {
+    control_plane::run_host(HostConfig {
         host,
         port: cli.port,
-        listen_addr_file: cli.listen_addr_file,
         fireline_bin,
-        runtime_registry_path: cli.runtime_registry_path,
         peer_directory_path: cli.peer_directory_path,
         startup_timeout: Duration::from_millis(cli.startup_timeout_ms),
         stop_timeout: Duration::from_millis(cli.stop_timeout_ms),
         provider,
-        prefer_push: cli.prefer_push,
-        heartbeat_scan_interval: Duration::from_millis(cli.heartbeat_scan_interval_ms),
-        stale_timeout: Duration::from_millis(cli.stale_timeout_ms),
         durable_streams_url,
         docker_build_context: cli.docker_build_context,
         dockerfile: cli.dockerfile,
@@ -429,13 +397,13 @@ async fn run_managed_runtime(
         state_stream: cli.state_stream,
         durable_streams_url,
         peer_directory_path,
-        control_plane_url: cli.control_plane_url.clone(),
+        control_plane_url: None,
         topology,
     })
     .await?;
     wait_for_runtime_listener_ready(&handle.health_url).await?;
 
-    let provider = parse_provider_kind(cli.provider_kind.as_deref())?;
+    let provider = parse_provider_name(cli.provider_kind.as_deref())?;
     let advertised_acp_url = cli
         .advertised_acp_url
         .clone()
@@ -444,72 +412,21 @@ async fn run_managed_runtime(
         .advertised_state_stream_url
         .clone()
         .unwrap_or_else(|| handle.state_stream_url.clone());
-    let descriptor = HostDescriptor {
-        host_key: host_key.clone(),
-        host_id: handle.host_id.clone(),
-        node_id,
+    let descriptor = SandboxDescriptor {
+        id: host_key.clone(),
         provider,
-        provider_instance_id: cli
-            .provider_instance_id
-            .clone()
-            .unwrap_or_else(|| handle.host_id.clone()),
-        status: HostStatus::Ready,
+        status: SandboxStatus::Ready,
         acp: Endpoint::new(advertised_acp_url),
         state: Endpoint::new(advertised_state_stream_url),
-        helper_api_base_url: None,
+        labels: std::collections::HashMap::new(),
         created_at_ms: started_at_ms,
         updated_at_ms: started_at_ms,
     };
 
-    let heartbeat_task = if let Some(control_plane_url) = cli.control_plane_url.clone() {
-        let token = std::env::var("FIRELINE_CONTROL_PLANE_TOKEN")
-            .context("FIRELINE_CONTROL_PLANE_TOKEN is required in push mode")?;
-        let control_plane_client = Arc::new(ControlPlaneClient::new(
-            control_plane_url,
-            token,
-            host_key,
-        )?);
-        control_plane_client
-            .register(HostRegistration {
-                host_id: descriptor.host_id.clone(),
-                node_id: descriptor.node_id.clone(),
-                provider: descriptor.provider,
-                provider_instance_id: descriptor.provider_instance_id.clone(),
-                advertised_acp_url: descriptor.acp.url.clone(),
-                advertised_state_stream_url: descriptor.state.url.clone(),
-                helper_api_base_url: descriptor.helper_api_base_url.clone(),
-            })
-            .await?;
-        Some(control_plane_client.spawn_heartbeat_loop(HeartbeatMetrics::default))
-    } else {
-        let registry = load_runtime_registry(cli.runtime_registry_path.clone())?;
-        registry.upsert(descriptor.clone())?;
-        None
-    };
-
-    log_runtime_started(&descriptor);
+    println!("FIRELINE_READY\t{}", serde_json::to_string(&descriptor)?);
+    log_managed_runtime_started(&host_key, &descriptor);
     tokio::signal::ctrl_c().await.ok();
-    if let Some(task) = heartbeat_task {
-        task.abort();
-        let _ = task.await;
-    }
-    handle.shutdown().await?;
-
-    if cli.control_plane_url.is_none() {
-        let registry = load_runtime_registry(cli.runtime_registry_path.clone())?;
-        let mut stopped = descriptor;
-        stopped.status = HostStatus::Stopped;
-        stopped.updated_at_ms = now_ms();
-        registry.upsert(stopped)?;
-    }
-    Ok(())
-}
-
-fn load_runtime_registry(path: Option<PathBuf>) -> Result<RuntimeRegistry> {
-    match path {
-        Some(path) => RuntimeRegistry::load(path),
-        None => RuntimeRegistry::load(RuntimeRegistry::default_path()?),
-    }
+    handle.shutdown().await
 }
 
 fn log_runtime_started(descriptor: &HostDescriptor) {
@@ -520,6 +437,16 @@ fn log_runtime_started(descriptor: &HostDescriptor) {
         acp_url = %descriptor.acp.url,
         state_stream_url = %descriptor.state.url,
         "fireline runtime started"
+    );
+}
+
+fn log_managed_runtime_started(host_key: &str, descriptor: &SandboxDescriptor) {
+    tracing::info!(
+        sandbox_id = host_key,
+        provider = %descriptor.provider,
+        acp_url = %descriptor.acp.url,
+        state_stream_url = %descriptor.state.url,
+        "fireline managed sandbox started"
     );
 }
 
@@ -559,10 +486,10 @@ fn default_node_id(host: IpAddr) -> String {
     }
 }
 
-fn parse_provider_kind(value: Option<&str>) -> Result<SandboxProviderKind> {
+fn parse_provider_name(value: Option<&str>) -> Result<String> {
     match value {
-        None | Some("local") => Ok(SandboxProviderKind::Local),
-        Some("docker") => Ok(SandboxProviderKind::Docker),
+        None | Some("local") => Ok("local".to_string()),
+        Some("docker") => Ok("docker".to_string()),
         Some(other) => Err(anyhow::anyhow!(
             "unsupported runtime provider kind '{other}'"
         )),

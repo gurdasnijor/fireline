@@ -12,54 +12,54 @@ use bollard::Docker;
 use bollard::body_full;
 use bollard::models::{ContainerCreateBody, HostConfig, PortBinding};
 use bollard::query_parameters::{
-    BuildImageOptionsBuilder, CreateContainerOptionsBuilder, RemoveContainerOptionsBuilder,
-    StartContainerOptions, StopContainerOptionsBuilder,
+    BuildImageOptionsBuilder, CreateContainerOptionsBuilder, LogsOptionsBuilder,
+    RemoveContainerOptionsBuilder, StartContainerOptions, StopContainerOptionsBuilder,
 };
 use futures::StreamExt;
 use tar::Builder;
 use tokio::sync::Mutex;
 use url::Url;
+use uuid::Uuid;
 use walkdir::WalkDir;
 
 use fireline_resources::{LocalPathMounter, ResourceMounter, prepare_resources};
 
-use crate::provider::{
-    ProvisionSpec, Endpoint, ManagedSandbox, SandboxLaunch, SandboxProvider,
-    SandboxProviderKind, SandboxTokenIssuer,
+use crate::provider::ManagedSandbox;
+use crate::provider_model::{
+    ExecutionResult, ProviderCapabilities, SandboxConfig, SandboxDescriptor, SandboxHandle,
+    SandboxProvider,
 };
 
 const CONTAINER_PORT: u16 = 4437;
-const TOKEN_TTL: Duration = Duration::from_secs(60 * 60 * 24);
-const LABEL_RUNTIME_KEY: &str = "fireline.host_key";
+const DOCKER_PROVIDER_NAME: &str = "docker";
+const LABEL_SANDBOX_ID: &str = "fireline.sandbox_id";
 const LABEL_PROVIDER: &str = "fireline.provider";
+const READY_LINE_PREFIX: &str = "FIRELINE_READY\t";
 
 #[derive(Debug, Clone)]
 pub struct DockerProviderConfig {
-    pub control_plane_url: String,
     pub image: String,
     pub build_context: PathBuf,
     pub dockerfile: PathBuf,
+    pub startup_timeout: Duration,
 }
 
 pub struct DockerProvider {
     docker: Docker,
     config: DockerProviderConfig,
-    token_issuer: Arc<dyn SandboxTokenIssuer>,
     mounters: Vec<Arc<dyn ResourceMounter>>,
     image_ready: Mutex<bool>,
+    sandboxes: Arc<Mutex<HashMap<String, DockerSandboxRecord>>>,
 }
 
 impl DockerProvider {
-    pub fn new(
-        config: DockerProviderConfig,
-        token_issuer: Arc<dyn SandboxTokenIssuer>,
-    ) -> Result<Self> {
+    pub fn new(config: DockerProviderConfig) -> Result<Self> {
         Ok(Self {
             docker: Docker::connect_with_local_defaults().context("connect to local docker")?,
             config,
-            token_issuer,
             mounters: vec![Arc::new(LocalPathMounter::new())],
             image_ready: Mutex::new(false),
+            sandboxes: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -101,42 +101,108 @@ impl DockerProvider {
         Ok(())
     }
 
-    fn state_stream_name(spec: &ProvisionSpec, host_key: &str) -> String {
-        spec.state_stream
+    fn state_stream_name(config: &SandboxConfig, sandbox_id: &str) -> String {
+        config
+            .state_stream
             .clone()
-            .unwrap_or_else(|| format!("fireline-state-{}", sanitize_name(host_key)))
+            .unwrap_or_else(|| format!("fireline-state-{}", sanitize_name(sandbox_id)))
+    }
+
+    async fn wait_for_ready_descriptor(
+        &self,
+        container_name: &str,
+        sandbox_id: &str,
+    ) -> Result<SandboxDescriptor> {
+        let mut logs = self.docker.logs(
+            container_name,
+            Some(
+                LogsOptionsBuilder::default()
+                    .follow(true)
+                    .stdout(true)
+                    .stderr(false)
+                    .build(),
+            ),
+        );
+        let deadline = tokio::time::Instant::now() + self.config.startup_timeout;
+        let mut buffer = String::new();
+
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(anyhow!(
+                    "timed out waiting for sandbox '{sandbox_id}' to report readiness"
+                ));
+            }
+
+            match tokio::time::timeout(remaining, logs.next()).await {
+                Ok(Some(Ok(output))) => {
+                    buffer.push_str(&String::from_utf8_lossy(output.as_ref()));
+                    while let Some(newline) = buffer.find('\n') {
+                        let line = buffer.drain(..=newline).collect::<String>();
+                        let line = line.trim_end();
+                        if let Some(payload) = line.strip_prefix(READY_LINE_PREFIX) {
+                            return serde_json::from_str(payload)
+                                .context("decode docker sandbox readiness descriptor");
+                        }
+                        if !line.is_empty() {
+                            tracing::info!(
+                                sandbox_id,
+                                line,
+                                "docker sandbox stdout before readiness"
+                            );
+                        }
+                    }
+                }
+                Ok(Some(Err(error))) => {
+                    return Err(anyhow::Error::from(error))
+                        .context("read docker sandbox startup logs");
+                }
+                Ok(None) => {
+                    return Err(anyhow!(
+                        "docker sandbox exited before reporting readiness for sandbox '{sandbox_id}'"
+                    ));
+                }
+                Err(_) => {
+                    return Err(anyhow!(
+                        "timed out waiting for sandbox '{sandbox_id}' to report readiness"
+                    ));
+                }
+            }
+        }
     }
 }
 
 #[async_trait]
 impl SandboxProvider for DockerProvider {
-    fn kind(&self) -> SandboxProviderKind {
-        SandboxProviderKind::Docker
+    fn name(&self) -> &str {
+        DOCKER_PROVIDER_NAME
     }
 
-    async fn provision(
-        &self,
-        spec: ProvisionSpec,
-        host_key: String,
-        node_id: String,
-    ) -> Result<SandboxLaunch> {
-        self.ensure_image_ready().await?;
-        let mounted_resources =
-            prepare_resources(&spec.resources, &self.mounters, &host_key).await?;
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            file_transfer: true,
+            stream_resources: true,
+            oci_images: true,
+            ..ProviderCapabilities::default()
+        }
+    }
 
-        let control_plane_url = rewrite_loopback_for_container(&self.config.control_plane_url)?;
-        let container_name = format!("fireline-{}", sanitize_name(&host_key));
-        let provider_instance_id = container_name.clone();
+    async fn create(&self, config: &SandboxConfig) -> Result<SandboxHandle> {
+        self.ensure_image_ready().await?;
+        let sandbox_id = format!("runtime:{}", Uuid::new_v4());
+        let mounted_resources =
+            prepare_resources(&config.resources, &self.mounters, &sandbox_id).await?;
+
+        let container_name = format!("fireline-{}", sanitize_name(&sandbox_id));
         let published_port = reserve_host_port()?;
-        let state_stream_name = Self::state_stream_name(&spec, &host_key);
+        let state_stream_name = Self::state_stream_name(config, &sandbox_id);
         let advertised_acp_url = format!("ws://127.0.0.1:{published_port}/acp");
         let advertised_state_stream_url =
-            join_stream_url(&spec.durable_streams_url, &state_stream_name);
+            join_stream_url(&config.durable_streams_url, &state_stream_name);
         let connect_durable_streams_url =
-            rewrite_loopback_for_container(&spec.durable_streams_url)?;
+            rewrite_loopback_for_container(&config.durable_streams_url)?;
 
-        let runtime_token = self.token_issuer.issue(&host_key, TOKEN_TTL);
-        let agent_command = rewrite_agent_command_for_image(&spec.agent_command)?;
+        let agent_command = rewrite_agent_command_for_image(&config.agent_command)?;
         let bind_mounts = mounted_resources
             .iter()
             .map(|resource| {
@@ -154,7 +220,7 @@ impl SandboxProvider for DockerProvider {
             "--port".to_string(),
             CONTAINER_PORT.to_string(),
             "--name".to_string(),
-            spec.name.clone(),
+            config.name.clone(),
             "--durable-streams-url".to_string(),
             connect_durable_streams_url,
             "--state-stream".to_string(),
@@ -163,9 +229,9 @@ impl SandboxProvider for DockerProvider {
         ];
         cmd.extend(agent_command);
 
-        if !spec.topology.components.is_empty() {
+        if !config.topology.components.is_empty() {
             let topology_json =
-                serde_json::to_string(&spec.topology).context("serialize runtime topology")?;
+                serde_json::to_string(&config.topology).context("serialize runtime topology")?;
             cmd.splice(
                 cmd.len() - 1..cmd.len() - 1,
                 ["--topology-json".to_string(), topology_json],
@@ -181,33 +247,34 @@ impl SandboxProvider for DockerProvider {
                     "--mounted-resources-json".to_string(),
                     mounted_resources_json,
                 ],
-            );
+                );
         }
+
+        let mut env_vars = vec![
+            format!("FIRELINE_RUNTIME_KEY={sandbox_id}"),
+            "FIRELINE_NODE_ID=node:docker".to_string(),
+            "FIRELINE_PROVIDER_KIND=docker".to_string(),
+            format!("FIRELINE_ADVERTISED_ACP_URL={advertised_acp_url}"),
+            format!("FIRELINE_ADVERTISED_STATE_STREAM_URL={advertised_state_stream_url}"),
+        ];
+        env_vars.extend(
+            config
+                .env_vars
+                .iter()
+                .map(|(key, value)| format!("{key}={value}")),
+        );
 
         let config = ContainerCreateBody {
             image: Some(self.config.image.clone()),
             cmd: Some(cmd),
-            env: Some(
-                [
-                    format!("FIRELINE_RUNTIME_KEY={host_key}"),
-                    format!("FIRELINE_NODE_ID={node_id}"),
-                    format!("FIRELINE_CONTROL_PLANE_URL={control_plane_url}"),
-                    format!("FIRELINE_CONTROL_PLANE_TOKEN={runtime_token}"),
-                    "FIRELINE_PROVIDER_KIND=docker".to_string(),
-                    format!("FIRELINE_PROVIDER_INSTANCE_ID={provider_instance_id}"),
-                    format!("FIRELINE_ADVERTISED_ACP_URL={advertised_acp_url}"),
-                    format!("FIRELINE_ADVERTISED_STATE_STREAM_URL={advertised_state_stream_url}"),
-                ]
-                .into_iter()
-                .collect(),
-            ),
+            env: Some(env_vars),
             exposed_ports: Some(HashMap::from([(
                 format!("{CONTAINER_PORT}/tcp"),
                 HashMap::new(),
             )])),
             labels: Some(HashMap::from([
-                (LABEL_RUNTIME_KEY.to_string(), host_key.clone()),
-                (LABEL_PROVIDER.to_string(), "docker".to_string()),
+                (LABEL_SANDBOX_ID.to_string(), sandbox_id.clone()),
+                (LABEL_PROVIDER.to_string(), DOCKER_PROVIDER_NAME.to_string()),
             ])),
             host_config: Some(HostConfig {
                 binds: (!bind_mounts.is_empty()).then_some(bind_mounts),
@@ -238,18 +305,93 @@ impl SandboxProvider for DockerProvider {
             .await
             .with_context(|| format!("start docker runtime container {container_name}"))?;
 
-        Ok(SandboxLaunch {
-            host_id: String::new(),
-            provider_instance_id,
-            acp: Endpoint::new(advertised_acp_url),
-            state: Endpoint::new(advertised_state_stream_url),
-            helper_api_base_url: None,
-            sandbox: Box::new(DockerManagedSandbox {
-                docker: self.docker.clone(),
-                container_name,
-            }),
-        })
+        let descriptor = match self
+            .wait_for_ready_descriptor(&container_name, &sandbox_id)
+            .await
+        {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                let sandbox = Box::new(DockerManagedSandbox {
+                    docker: self.docker.clone(),
+                    container_name,
+                });
+                if let Err(shutdown_error) = sandbox.shutdown().await {
+                    return Err(error.context(format!(
+                        "cleanup docker sandbox after startup failure also failed: {shutdown_error:#}"
+                    )));
+                }
+                return Err(error);
+            }
+        };
+
+        let managed_sandbox = Box::new(DockerManagedSandbox {
+            docker: self.docker.clone(),
+            container_name,
+        });
+        let handle = SandboxHandle::from_descriptor(descriptor.clone(), self.name());
+        self.sandboxes.lock().await.insert(
+            sandbox_id,
+            DockerSandboxRecord {
+                descriptor,
+                sandbox: managed_sandbox,
+            },
+        );
+        Ok(handle)
     }
+
+    async fn get(&self, id: &str) -> Result<Option<SandboxDescriptor>> {
+        Ok(self
+            .sandboxes
+            .lock()
+            .await
+            .get(id)
+            .map(|record| record.descriptor.clone()))
+    }
+
+    async fn list(
+        &self,
+        labels: Option<&HashMap<String, String>>,
+    ) -> Result<Vec<SandboxDescriptor>> {
+        let mut descriptors: Vec<_> = self
+            .sandboxes
+            .lock()
+            .await
+            .values()
+            .map(|record| record.descriptor.clone())
+            .filter(|descriptor| labels_match(&descriptor.labels, labels))
+            .collect();
+        descriptors.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(descriptors)
+    }
+
+    async fn execute(
+        &self,
+        id: &str,
+        _command: &str,
+        _timeout: Option<Duration>,
+        _env: Option<&HashMap<String, String>>,
+    ) -> Result<ExecutionResult> {
+        Err(anyhow!(
+            "docker sandbox '{id}' does not yet support provider-model execute()"
+        ))
+    }
+
+    async fn destroy(&self, id: &str) -> Result<bool> {
+        let Some(record) = self.sandboxes.lock().await.remove(id) else {
+            return Ok(false);
+        };
+        record.sandbox.shutdown().await?;
+        Ok(true)
+    }
+
+    async fn health_check(&self) -> Result<bool> {
+        Ok(self.docker.version().await.is_ok())
+    }
+}
+
+struct DockerSandboxRecord {
+    descriptor: SandboxDescriptor,
+    sandbox: Box<dyn ManagedSandbox>,
 }
 
 struct DockerManagedSandbox {
@@ -308,6 +450,19 @@ fn rewrite_loopback_for_container(url: &str) -> Result<String> {
 
 fn join_stream_url(base: &str, stream_name: &str) -> String {
     format!("{}/{}", base.trim_end_matches('/'), stream_name)
+}
+
+fn labels_match(
+    actual: &HashMap<String, String>,
+    expected: Option<&HashMap<String, String>>,
+) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+
+    expected
+        .iter()
+        .all(|(key, value)| actual.get(key).is_some_and(|actual_value| actual_value == value))
 }
 
 fn rewrite_agent_command_for_image(agent_command: &[String]) -> Result<Vec<String>> {

@@ -1,26 +1,21 @@
-use std::net::IpAddr;
-use std::path::PathBuf;
-
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use fireline_resources::ResourceRef;
-use fireline_sandbox::SandboxDispatcher;
-use fireline_session::{HostDescriptor, ProvisionSpec, SandboxProviderRequest, TopologySpec};
+use fireline_sandbox::{ProviderDispatcher, SandboxConfig, SandboxDescriptor, SandboxHandle};
+use fireline_session::TopologySpec;
 use serde::{Deserialize, Serialize};
 
 /// Host-side infrastructure config — never sent by clients.
 #[derive(Clone, Debug)]
 pub struct HostInfraConfig {
-    pub host: IpAddr,
     pub durable_streams_url: String,
-    pub peer_directory_path: Option<PathBuf>,
 }
 
 #[derive(Clone)]
 pub struct AppState {
-    pub dispatcher: SandboxDispatcher,
+    pub dispatcher: ProviderDispatcher,
     pub infra: HostInfraConfig,
 }
 
@@ -44,12 +39,12 @@ pub struct ProvisionRequest {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        .route("/v1/runtimes", get(list_runtimes).post(provision_runtime))
+        .route("/v1/sandboxes", get(list_sandboxes).post(provision_sandbox))
         .route(
-            "/v1/runtimes/{host_key}",
-            get(get_runtime).delete(delete_runtime),
+            "/v1/sandboxes/{sandbox_id}",
+            get(get_sandbox).delete(delete_sandbox),
         )
-        .route("/v1/runtimes/{host_key}/stop", post(stop_runtime))
+        .route("/v1/sandboxes/{sandbox_id}/stop", post(stop_sandbox))
         .with_state(state)
 }
 
@@ -57,59 +52,59 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
-async fn list_runtimes(
+async fn list_sandboxes(
     State(state): State<AppState>,
-) -> Result<Json<Vec<HostDescriptor>>, ControlPlaneError> {
-    Ok(Json(state.dispatcher.list().await))
+) -> Result<Json<Vec<SandboxDescriptor>>, ControlPlaneError> {
+    Ok(Json(state.dispatcher.list(None).await?))
 }
 
-async fn get_runtime(
-    Path(host_key): Path<String>,
+async fn get_sandbox(
+    Path(sandbox_id): Path<String>,
     State(state): State<AppState>,
-) -> Result<Json<HostDescriptor>, ControlPlaneError> {
-    let runtime = state.dispatcher.get(&host_key).await.ok_or_else(|| {
-        ControlPlaneError::not_found(format!("runtime '{host_key}' not found"))
+) -> Result<Json<SandboxDescriptor>, ControlPlaneError> {
+    let sandbox = state.dispatcher.get(&sandbox_id).await?.ok_or_else(|| {
+        ControlPlaneError::not_found(format!("sandbox '{sandbox_id}' not found"))
     })?;
-    Ok(Json(runtime))
+    Ok(Json(sandbox))
 }
 
-async fn provision_runtime(
+async fn provision_sandbox(
     State(state): State<AppState>,
     Json(request): Json<ProvisionRequest>,
-) -> Result<(StatusCode, Json<HostDescriptor>), ControlPlaneError> {
-    let spec = ProvisionSpec {
-        host_key: None,
-        node_id: None,
-        provider: SandboxProviderRequest::Local,
-        host: state.infra.host,
-        port: 0,
+) -> Result<(StatusCode, Json<SandboxHandle>), ControlPlaneError> {
+    let config = SandboxConfig {
         name: request.name,
         agent_command: request.agent_command,
-        durable_streams_url: state.infra.durable_streams_url.clone(),
-        resources: request.resources,
-        state_stream: request.state_stream,
-        stream_storage: None,
-        peer_directory_path: state.infra.peer_directory_path.clone(),
         topology: request.topology,
+        resources: request.resources,
+        durable_streams_url: state.infra.durable_streams_url.clone(),
+        state_stream: request.state_stream,
+        env_vars: std::collections::HashMap::new(),
+        labels: std::collections::HashMap::new(),
+        provider: None,
     };
-    let runtime = state.dispatcher.provision(spec).await?;
-    Ok((StatusCode::CREATED, Json(runtime)))
+    let sandbox = state.dispatcher.create(config).await?;
+    Ok((StatusCode::CREATED, Json(sandbox)))
 }
 
-async fn stop_runtime(
-    Path(host_key): Path<String>,
+async fn stop_sandbox(
+    Path(sandbox_id): Path<String>,
     State(state): State<AppState>,
-) -> Result<Json<HostDescriptor>, ControlPlaneError> {
-    let runtime = state.dispatcher.stop(&host_key).await?;
-    Ok(Json(runtime))
+) -> Result<Json<SandboxDescriptor>, ControlPlaneError> {
+    let sandbox = state.dispatcher.stop(&sandbox_id).await?.ok_or_else(|| {
+        ControlPlaneError::not_found(format!("sandbox '{sandbox_id}' not found"))
+    })?;
+    Ok(Json(sandbox))
 }
 
-async fn delete_runtime(
-    Path(host_key): Path<String>,
+async fn delete_sandbox(
+    Path(sandbox_id): Path<String>,
     State(state): State<AppState>,
-) -> Result<Json<HostDescriptor>, ControlPlaneError> {
-    let runtime = state.dispatcher.stop(&host_key).await?;
-    Ok(Json(runtime))
+) -> Result<Json<SandboxDescriptor>, ControlPlaneError> {
+    let sandbox = state.dispatcher.stop(&sandbox_id).await?.ok_or_else(|| {
+        ControlPlaneError::not_found(format!("sandbox '{sandbox_id}' not found"))
+    })?;
+    Ok(Json(sandbox))
 }
 
 #[derive(Debug)]
