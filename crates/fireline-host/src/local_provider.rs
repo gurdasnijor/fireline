@@ -113,6 +113,8 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
         let state_stream_name = spec.state_stream.clone().unwrap_or_else(|| {
             format!("fireline-state-{}", sanitize_state_stream_key(&runtime_key))
         });
+        let advertised_state_stream_url =
+            join_stream_url(&spec.durable_streams_url, &state_stream_name);
         let mut command = Command::new(&self.fireline_bin);
         command
             .arg("--host")
@@ -130,7 +132,11 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
             .arg("--durable-streams-url")
             .arg(&spec.durable_streams_url)
             .arg("--state-stream")
-            .arg(&state_stream_name);
+            .arg(&state_stream_name)
+            .env(
+                "FIRELINE_ADVERTISED_STATE_STREAM_URL",
+                &advertised_state_stream_url,
+            );
 
         if self.prefer_push {
             let runtime_token = self
@@ -261,4 +267,8 @@ fn sanitize_state_stream_key(value: &str) -> String {
             _ => '-',
         })
         .collect()
+}
+
+fn join_stream_url(base_url: &str, stream_name: &str) -> String {
+    format!("{}/{}", base_url.trim_end_matches('/'), stream_name)
 }
