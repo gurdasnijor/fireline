@@ -94,6 +94,10 @@ license.workspace = true
 repository.workspace = true
 description = "Fireline runtime substrate for ACP-compatible agents"
 
+[features]
+default = []
+anthropic-provider = ["fireline-host/anthropic-provider", "fireline-sandbox/anthropic-provider"]
+
 [dependencies]
 # Workspace crates
 fireline-orchestration.workspace = true

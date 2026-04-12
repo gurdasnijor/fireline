@@ -26,7 +26,9 @@ url.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
 microsandbox = { version = "0.3.12", optional = true }
+reqwest = { workspace = true, optional = true }
 
 [features]
 default = []
 microsandbox-provider = ["dep:microsandbox"]
+anthropic-provider = ["dep:reqwest"]

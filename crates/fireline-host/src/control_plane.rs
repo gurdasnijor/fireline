@@ -8,6 +8,8 @@ use fireline_sandbox::{
     DockerProvider, DockerProviderConfig, LocalSubprocessProvider, LocalSubprocessProviderConfig,
     ProviderDispatcher,
 };
+#[cfg(feature = "anthropic-provider")]
+use fireline_sandbox::{RemoteAnthropicProvider, RemoteAnthropicProviderConfig};
 use fireline_session::HostIndex;
 
 use crate::router::{AppState, HostInfraConfig, build_router};
@@ -64,6 +66,10 @@ pub async fn run_host(config: HostConfig) -> Result<()> {
             ProviderDispatcher::new(docker_provider, read_model).with_provider(local_provider)
         }
     };
+    #[cfg(feature = "anthropic-provider")]
+    let dispatcher = dispatcher.with_provider(Arc::new(RemoteAnthropicProvider::new(
+        RemoteAnthropicProviderConfig::default(),
+    )?));
 
     let app = build_router(AppState {
         dispatcher,

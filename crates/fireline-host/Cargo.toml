@@ -34,3 +34,4 @@ uuid.workspace = true
 default = ["transport-websocket", "transport-duplex"]
 transport-websocket = []
 transport-duplex = []
+anthropic-provider = ["fireline-sandbox/anthropic-provider"]

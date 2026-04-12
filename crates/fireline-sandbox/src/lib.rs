@@ -31,3 +31,5 @@ pub use provider::ManagedSandbox;
 pub use providers::{
     DockerProvider, DockerProviderConfig, LocalSubprocessProvider, LocalSubprocessProviderConfig,
 };
+#[cfg(feature = "anthropic-provider")]
+pub use providers::{RemoteAnthropicProvider, RemoteAnthropicProviderConfig};
