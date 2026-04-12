@@ -1,5 +1,20 @@
 import type { ResourceRef } from './resources.js'
-import type { ContextPlacement, ContextSourceSpec } from './topology.js'
+
+export interface TopologyComponentSpec {
+  readonly name: string
+  readonly config?: Record<string, unknown>
+}
+
+export interface TopologySpec {
+  readonly components: readonly TopologyComponentSpec[]
+}
+
+export type ContextPlacement = 'prepend' | 'append'
+
+export type ContextSourceSpec =
+  | { readonly kind: 'datetime' }
+  | { readonly kind: 'workspaceFile'; readonly path: string }
+  | { readonly kind: 'staticText'; readonly text: string }
 
 /**
  * Connection details for an ACP or durable-state endpoint exposed by a sandbox.

@@ -1,5 +1,4 @@
 import { requestControlPlane } from './control-plane.js'
-import type { TopologyComponentSpec, TopologySpec } from './topology.js'
 import type {
   AgentConfig,
   HarnessConfig,
@@ -7,6 +6,8 @@ import type {
   SandboxConfig,
   SandboxDefinition,
   SandboxHandle,
+  TopologyComponentSpec,
+  TopologySpec,
 } from './types.js'
 
 /**
