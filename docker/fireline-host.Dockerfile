@@ -11,6 +11,8 @@ RUN cargo build --release --features anthropic-provider --bin fireline
 
 FROM debian:bookworm-slim
 
+ARG SPEC=docker/specs/placeholder-spec.json
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends bash ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
@@ -20,9 +22,10 @@ RUN useradd --system --create-home --home-dir /var/lib/fireline --uid 10001 fire
 COPY --from=builder /app/target/release/fireline /usr/local/bin/fireline
 COPY docker/bin/fireline-host-entrypoint.sh /usr/local/bin/fireline-host-entrypoint
 COPY docker/bin/healthcheck-http.sh /usr/local/bin/healthcheck-http
+COPY ${SPEC} /etc/fireline/spec.json
 
 RUN chmod +x /usr/local/bin/fireline-host-entrypoint /usr/local/bin/healthcheck-http \
-    && mkdir -p /var/lib/fireline \
+    && mkdir -p /var/lib/fireline /etc/fireline \
     && chown -R fireline:fireline /var/lib/fireline
 
 ENV FIRELINE_PORT=4440 \
@@ -30,6 +33,7 @@ ENV FIRELINE_PORT=4440 \
     FIRELINE_NAME=hosted-fireline \
     FIRELINE_CONTROL_PLANE_PROVIDER=local \
     FIRELINE_DOCKERFILE=docker/fireline-runtime.Dockerfile \
+    FIRELINE_EMBEDDED_SPEC_PATH=/etc/fireline/spec.json \
     FIRELINE_DOCKER_IMAGE=fireline-runtime:dev
 
 WORKDIR /var/lib/fireline

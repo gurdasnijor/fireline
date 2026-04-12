@@ -1,0 +1,19 @@
+{
+  "kind": "harness",
+  "name": "placeholder",
+  "sandbox": {
+    "kind": "sandbox",
+    "provider": "local"
+  },
+  "middleware": {
+    "kind": "middleware",
+    "chain": []
+  },
+  "agent": {
+    "kind": "agent",
+    "command": [
+      "echo",
+      "replace docker/specs/placeholder-spec.json via --build-arg SPEC=./agent.spec.json"
+    ]
+  }
+}

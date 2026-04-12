@@ -11,6 +11,8 @@ RUN cargo build --release --features anthropic-provider --bin fireline --bin fir
 
 FROM debian:bookworm-slim
 
+ARG SPEC=docker/specs/placeholder-spec.json
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends bash ca-certificates curl socat \
     && rm -rf /var/lib/apt/lists/*
@@ -21,9 +23,10 @@ COPY --from=builder /app/target/release/fireline /usr/local/bin/fireline
 COPY --from=builder /app/target/release/fireline-streams /usr/local/bin/fireline-streams
 COPY docker/bin/fireline-host-quickstart-entrypoint.sh /usr/local/bin/fireline-host-quickstart-entrypoint
 COPY docker/bin/healthcheck-http.sh /usr/local/bin/healthcheck-http
+COPY ${SPEC} /etc/fireline/spec.json
 
 RUN chmod +x /usr/local/bin/fireline-host-quickstart-entrypoint /usr/local/bin/healthcheck-http \
-    && mkdir -p /var/lib/fireline/durable-streams \
+    && mkdir -p /var/lib/fireline/durable-streams /etc/fireline \
     && chown -R fireline:fireline /var/lib/fireline
 
 ENV FIRELINE_PORT=4440 \
@@ -32,6 +35,7 @@ ENV FIRELINE_PORT=4440 \
     FIRELINE_CONTROL_PLANE_PROVIDER=local \
     FIRELINE_DOCKERFILE=docker/fireline-runtime.Dockerfile \
     FIRELINE_DOCKER_IMAGE=fireline-runtime:dev \
+    FIRELINE_EMBEDDED_SPEC_PATH=/etc/fireline/spec.json \
     FIRELINE_STREAMS_PORT=7474 \
     FIRELINE_STREAMS_INTERNAL_PORT=17474 \
     DS_STORAGE__MODE=file-durable \
