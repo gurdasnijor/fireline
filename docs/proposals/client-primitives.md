@@ -1,10 +1,11 @@
 # Proposal: Fireline Client Primitives (v2)
 
-> **Status:** proposal, ready to execute
+> **SUPERSEDED** by [`./client-api-redesign.md`](./client-api-redesign.md) and [`./sandbox-provider-model.md`](./sandbox-provider-model.md). Retained for architectural history.
+> **Status:** historical design doc. The `Host` interface described here (`createSession` / `wake` / `status` / `stopSession`) was replaced by the `Sandbox` + middleware + agent composition model.
 > **Supersedes:** [`../explorations/typescript-typed-functional-core-api.md`](../explorations/typescript-typed-functional-core-api.md) (v1, retained as the reasoning record)
 > **Type:** design doc
 > **Audience:** whoever is shipping the public `@fireline/client` surface and building the browser-harness demo on top of it
-> **Source of truth:** [`../explorations/managed-agents-mapping.md`](../explorations/managed-agents-mapping.md) — primitive anchoring, the seven-combinator decomposition, and the acceptance bars
+> **Source of truth at the time:** [`../explorations/managed-agents-mapping.md`](../explorations/managed-agents-mapping.md) — primitive anchoring, the seven-combinator decomposition, and the acceptance bars
 > **Related:**
 > - [`../explorations/managed-agents-mapping.md`](../explorations/managed-agents-mapping.md) — the Anthropic-primitive table and the combinator algebra
 > - [`./runtime-host-split.md`](./runtime-host-split.md) — the parallel Rust-side runtime refactor (parts of it become redundant once this proposal's `Host` primitive lands)

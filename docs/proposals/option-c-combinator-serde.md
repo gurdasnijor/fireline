@@ -1,5 +1,6 @@
 # Proposal: Option C Rust Combinator Serde Format
 
+> **SUPERSEDED** by [`./client-api-redesign.md`](./client-api-redesign.md) and [`./sandbox-provider-model.md`](./sandbox-provider-model.md). Retained for architectural history.
 > **Status:** design only
 > **Type:** execution-driving proposal
 > **Audience:** maintainers landing the post-restructure Rust-side combinator path

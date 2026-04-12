@@ -1,5 +1,8 @@
 # fireline-host architecture audit
 
+> **SUPERSEDED** by [`./sandbox-provider-model.md`](./sandbox-provider-model.md) and [`./client-api-redesign.md`](./client-api-redesign.md). Retained for architectural history.
+> **Status:** historical audit against the pre-provider-model host layout. Many findings here landed directly; the rest were overtaken by the provider-model rewrite.
+
 ## TL;DR
 
 - Audit anchor: `origin/main` at `5461ea7` on 2026-04-11. The live worktree already has in-flight phase 9h edits in `crates/fireline-host/src/{bootstrap.rs,local_provider.rs,runtime_provider.rs}`, `src/main.rs`, and related tests; this report still flags them because most issues are outside that slice.

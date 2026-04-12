@@ -1,9 +1,10 @@
 # Fireline TypeScript API — Typed Functional Core
 
-> Status: proposal, not yet adopted
+> **SUPERSEDED** by [`../proposals/client-api-redesign.md`](../proposals/client-api-redesign.md) and [`../proposals/sandbox-provider-model.md`](../proposals/sandbox-provider-model.md). Retained for architectural history.
+> Status: historical exploration, superseded first by `client-primitives.md` and now by the client API redesign
 > Type: design doc
 > Audience: maintainers deciding the low-level TypeScript surface
-> Source of truth: [`./managed-agents-mapping.md`](./managed-agents-mapping.md)
+> Source of truth at the time: [`./managed-agents-mapping.md`](./managed-agents-mapping.md)
 > Related:
 > - [`./managed-agents-mapping.md`](./managed-agents-mapping.md) — primitive anchoring and acceptance bars
 > - [`./typescript-functional-api-proposal.md`](./typescript-functional-api-proposal.md) — earlier function-valued proposal

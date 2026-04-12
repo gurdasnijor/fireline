@@ -1,5 +1,6 @@
 # Claude Agent SDK v2 — API surface verification
 
+> **SUPERSEDED** by [`../proposals/client-api-redesign.md`](../proposals/client-api-redesign.md) and [`../proposals/sandbox-provider-model.md`](../proposals/sandbox-provider-model.md). Retained for architectural history.
 > **STATUS (2026-04-11):** thought experiment. The `host-claude` satisfier this doc was produced for was attempted, landed briefly, and was **deleted in commit `37db346`** along with its dedicated section in [`../proposals/client-primitives.md`](../proposals/client-primitives.md) and its tier slot in [`../proposals/runtime-host-split.md`](../proposals/runtime-host-split.md). The reasoning chain below is retained as design history because it's the chain that led to the Host/Sandbox primitive cleave and the `Host.provision` rename (landed in the same `37db346` commit — `createSession → provision`, `SessionHandle → HostHandle` carrying `acp` + `state` endpoints, `SessionSpec → ProvisionSpec`, `SessionStatus → HostStatus`, `stopSession → stop`, `sendInput / SessionInput / SessionOutput` deleted). The SDK-surface findings themselves are frozen at the 2026-04-11 fetch; anyone revisiting a ClaudeHost satisfier should re-fetch the preview docs and verify against the latest `unstable_v2_*` surface before trusting this document as current.
 >
 > **Produced for:** the (then-pending) `host-claude` satisfier lane.
@@ -9,7 +10,7 @@
 
 ## Summary
 
-**The existing sketch in `client-primitives.md` is written against the V1 SDK, not V2.** Three divergences are load-bearing; the other differences fall out of those three. The Host primitive interface itself (createSession / wake / status / stopSession) **does not need adjustment** — V2 maps cleanly onto it — but the illustrative code block needs a full rewrite, not field renames.
+**The existing sketch in `client-primitives.md` is written against the V1 SDK, not V2.** Three divergences are load-bearing; the other differences fall out of those three. The interface discussion below is specific to the now-deleted Host-era client surface and should not be treated as current API guidance after the redesign.
 
 Per `runtime-host-split.md` §7 workspace:4 escalation policy: this falls on the "report back, do not auto-edit the proposal doc" side of the line. A V2-correct rewrite is provided as [§6 Appendix](#6-appendix--proposed-v2-correct-sketch) of this findings doc so the work is done if the proposal authors want to land it verbatim, but the decision is theirs.
 

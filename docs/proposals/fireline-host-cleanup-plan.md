@@ -1,7 +1,9 @@
 # fireline-host cleanup execution plan
 
+> **SUPERSEDED** by [`./sandbox-provider-model.md`](./sandbox-provider-model.md) and [`./client-api-redesign.md`](./client-api-redesign.md). Retained for architectural history.
+> **Status (2026-04-12):** C1/C2/C3/CB landed. The remaining phases in this plan were overtaken by the provider-model rewrite plus the later cross-host/resource-discovery work.
 > **Input:** [`./fireline-host-audit.md`](./fireline-host-audit.md) (commit `8613304`) — the architecture audit that identified the cleanup surface.
-> **Purpose:** turn the audit's 6 recommended follow-up lanes and 3 open questions into an ordered, dispatchable execution plan. As soon as workspace:13 finishes the crate restructure (phases 9i–9k), this plan is the ready-to-fire sequence.
+> **Purpose at the time:** turn the audit's 6 recommended follow-up lanes and 3 open questions into an ordered, dispatchable execution plan.
 > **Doc type:** design-time execution plan. Markdown only. Does not touch code.
 > **Related:**
 > - [`./runtime-host-split.md`](./runtime-host-split.md) §7 — Host/Sandbox/Orchestrator taxonomy.
@@ -54,7 +56,22 @@ Rationale:
 
 ---
 
-## Phase overview
+## Status overview (updated 2026-04-12)
+
+| Phase | Title | 2026-04-12 status |
+|---|---|---|
+| **C1** | Delete dead surfaces | ✅ landed (`d2210cd`) |
+| **C2** | Collapse direct-host path | ✅ landed (`7f16e11`) |
+| **C3** | Delete `/v1/auth/runtime-token` + `auth.rs` prep | ✅ landed (`da38c60`) |
+| **C4** | Peer registry collapse + stream-backed `StreamDeploymentPeerRegistry` | **Superseded** by the provider-model rewrite and the later cross-host-discovery design work |
+| **C4b** | Resource discovery collapse + `StreamResourceMounter` | **Superseded** by the resource-discovery / stream-fs direction rather than this interim cleanup plan |
+| **CB** | Naming drift — `create_runtime` → `provision_runtime` etc. | ✅ landed (`8e794a4`) |
+| **C5** | Stream-as-truth flip + delete `heartbeat.rs` + `HeartbeatTracker` + stale scanner + `/register` + `/heartbeat` + `auth.rs` residue | **Superseded** by the provider-model rewrite; this doc is no longer the execution guide for that deletion path |
+| **C6** | Rewrite or inline `bootstrap.rs` | **Superseded** by provider-internal bootstrap work under the sandbox-provider model |
+
+The detailed phase writeups below are preserved as the historical cleanup plan that led into the provider-model rewrite; they are no longer the current implementation checklist.
+
+## Historical phase overview
 
 | Phase | Title | Audit lane | Risk | Commits | Depends on | Conflicts-with-w13-9i |
 |---|---|---|---|---|---|---|

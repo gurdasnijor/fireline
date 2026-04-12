@@ -1,5 +1,7 @@
 # Managed Agents Citations
 
+> **SUPERSEDED** by [`../proposals/client-api-redesign.md`](../proposals/client-api-redesign.md) and [`../proposals/sandbox-provider-model.md`](../proposals/sandbox-provider-model.md). Retained for architectural history.
+
 Source primitive set: Anthropic, ["Scaling Managed Agents: Decoupling the brain from the hands"](https://www.anthropic.com/engineering/managed-agents).  
 Code snapshot: local `main` at `a4dc19c`.
 

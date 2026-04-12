@@ -1,20 +1,19 @@
 # Fireline against Anthropic's Managed-Agent Primitives
 
-> Status: **operational source of truth** for Fireline's substrate roadmap
-> Type: reference + decision + execution-driving doc
+> **SUPERSEDED** by [`../proposals/client-api-redesign.md`](../proposals/client-api-redesign.md) and [`../proposals/sandbox-provider-model.md`](../proposals/sandbox-provider-model.md). Retained for architectural history.
+> Status: **historical reference** for the pre-redesign Host/Session/Topology framing
+> Type: historical reference + decision record
 > Audience: maintainers deciding what to build, in what order, against what acceptance bars
 > Source: Anthropic engineering blog, *"Managed agents: a small set of primitives for any agent harness"* (https://www.anthropic.com/engineering/managed-agents)
 > Related:
-> - [`../proposals/client-primitives.md`](../proposals/client-primitives.md) — the authoritative TypeScript substrate surface, built on the six primitives this doc names
-> - [`../proposals/runtime-host-split.md`](../proposals/runtime-host-split.md) §7 — Host / Sandbox / Orchestrator reframe grounding the Rust-side trait layout against the same primitives
-> - [`../proposals/crate-restructure-manifest.md`](../proposals/crate-restructure-manifest.md) — target Rust crate layout aligned 1:1 with the primitive taxonomy
-> - [`./managed-agents-citations.md`](./managed-agents-citations.md) — file:line inventory of where each primitive is implemented today
+> - [`../proposals/client-primitives.md`](../proposals/client-primitives.md) — the historical TypeScript substrate surface this doc informed
+> - [`../proposals/runtime-host-split.md`](../proposals/runtime-host-split.md) §7 — the historical Host / Sandbox / Orchestrator split proposal grounded in the same primitive framing
+> - [`../proposals/crate-restructure-manifest.md`](../proposals/crate-restructure-manifest.md) — the historical crate-layout plan aligned to this primitive taxonomy
+> - [`./managed-agents-citations.md`](./managed-agents-citations.md) — file:line inventory from the earlier crate/runtime vocabulary this doc was written against
 
 ## How to read this doc
 
-This is the **source of truth** for what Fireline should build, in what order, and against what acceptance bars. The substrate-shape proposals in [`../proposals/`](../proposals/) and the Rust-side trait layout all derive from the primitive framing here.
-
-If you're picking up new work, start here. If you're writing a new proposal or slice, cite this doc by section heading and pick a primitive to anchor against. If a feature doesn't fit any primitive, that's a signal the shape is wrong — it may belong in a downstream product, not in Fireline.
+This was the **source of truth** for an earlier substrate framing. Start with [`../proposals/client-api-redesign.md`](../proposals/client-api-redesign.md) and [`../proposals/sandbox-provider-model.md`](../proposals/sandbox-provider-model.md) for the live architecture; use this document only to understand the reasoning chain that led into those replacements.
 
 ## Purpose
 

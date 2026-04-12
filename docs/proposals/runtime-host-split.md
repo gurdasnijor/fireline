@@ -1,6 +1,7 @@
 # Proposal: Split `RuntimeHost`
 
-> Staging ground for item 2 of the architectural-debt report. **Proposal only — no code changes.** Informs a post-demo slice.
+> **SUPERSEDED** by [`./sandbox-provider-model.md`](./sandbox-provider-model.md). Retained for architectural history.
+> **Status:** historical split proposal. `RuntimeHost`, `RuntimeManager`, `RuntimeRegistry`, and the separate control-plane vocabulary in this document are no longer the live architecture.
 
 ## Background
 
