@@ -12,10 +12,10 @@ const tmpDir = join(packageDir, '.tmp')
 const runtimeRegistryPath = join(tmpDir, 'runtimes.toml')
 const peerDirectoryPath = join(tmpDir, 'peers.toml')
 const firelineBin = join(repoRoot, 'target', 'debug', 'fireline')
-const firelineControlPlaneBin = join(repoRoot, 'target', 'debug', 'fireline-control-plane')
 const firelineTestyLoadBin = join(repoRoot, 'target', 'debug', 'fireline-testy-load')
 const controlPlaneUrl = 'http://127.0.0.1:4440'
 const preferPush = process.env.PREFER_PUSH === 'true'
+const durableStreamsUrl = process.env.DURABLE_STREAMS_URL ?? null
 
 const client = createFirelineClient({
   host: {
@@ -112,20 +112,27 @@ const server = createServer(async (req, res) => {
         sendJson(res, 400, { error: 'missing_agent_id' })
         return
       }
+      if (!durableStreamsUrl) {
+        sendJson(res, 400, {
+          error: 'missing_durable_streams_url',
+          detail: 'set DURABLE_STREAMS_URL to an external durable-streams base URL',
+        })
+        return
+      }
 
       await stopCurrentRuntime()
 
-      currentRuntime = await client.host.create({
+      const resolved = await client.catalog.resolveAgent(agentId)
+      currentRuntime = await createRuntime({
         provider: 'local',
         host: '127.0.0.1',
         port: 4437,
         name: 'browser-harness',
+        durableStreamsUrl,
         stateStream: 'fireline-harness-state',
         peerDirectoryPath,
-        agent: {
-          source: 'catalog',
-          agentId,
-        },
+        topology: { components: [] },
+        agentCommand: resolved.command,
       })
 
       sendJson(res, 200, { runtime: currentRuntime })
@@ -204,12 +211,13 @@ function toErrorMessage(error) {
 
 async function startControlPlane() {
   console.log(
-    `starting fireline-control-plane with prefer_push=${preferPush ? 'true' : 'false'}`,
+    `starting fireline --control-plane with prefer_push=${preferPush ? 'true' : 'false'}`,
   )
 
   controlPlaneProcess = spawn(
-    firelineControlPlaneBin,
+    firelineBin,
     [
+      '--control-plane',
       '--host',
       '127.0.0.1',
       '--port',
@@ -227,10 +235,7 @@ async function startControlPlane() {
     ],
     {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        FIRELINE_CONTROL_PLANE_PREFER_PUSH: preferPush ? 'true' : 'false',
-      },
+      env: process.env,
     },
   )
 
@@ -241,6 +246,20 @@ async function startControlPlane() {
   }
 
   await waitForHttpReady(`${controlPlaneUrl}/healthz`, controlPlaneProcess)
+}
+
+async function createRuntime(spec) {
+  const response = await fetch(`${controlPlaneUrl}/v1/runtimes`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify(spec),
+  })
+  if (!response.ok) {
+    throw new Error(`runtime create failed (${response.status}): ${await response.text()}`)
+  }
+  return response.json()
 }
 
 async function stopControlPlane() {
