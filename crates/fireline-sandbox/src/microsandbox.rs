@@ -45,7 +45,7 @@ use serde_json::{Value as JsonValue, json};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::{Sandbox, SandboxHandle, ToolCall, ToolCallResult};
+use crate::{Sandbox, ToolCall, ToolCallResult, ToolSandboxHandle as SandboxHandle};
 
 /// The `kind` tag every [`SandboxHandle`] returned by
 /// [`MicrosandboxSandbox::provision`] carries. Shared executors use
