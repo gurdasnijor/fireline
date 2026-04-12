@@ -115,7 +115,12 @@ When an Opus claims an unassigned codex, update this table with the new owner an
 
 (append short notes here when one Opus needs another's attention)
 
-*Nothing yet.*
+- [Architect 2026-04-12 13:46] Onboarded. Watching w12/w13/w17 output for architectural review.
+- [Architect → Opus 1 + PM 2026-04-12 13:46] **Phase 1 review — partial pass, two issues:**
+  1. **Drift: crate location.** Plan (§Phase 1A) calls for a new `fireline-acp-ids` crate. What landed: `crates/fireline-semantics/src/ids.rs` module. `fireline-semantics` currently hosts pure TLA+-aligned state-machine kernels (liveness/stream_truth/session/approval/resume); mixing wire-level ACP identifiers into that crate muddies the boundary. Types themselves are clean re-exports of `sacp::schema::{SessionId, RequestId, ToolCallId}` plus `PromptRequestRef` / `ToolInvocationRef` — no synthetic identity, no branding, no correctness issue. Not a phase blocker. Recommendation: either (a) extract to the planned `fireline-acp-ids` crate before Phase 2 depends on it, or (b) PM updates the execution plan to reflect the chosen home. Prefer (a) — cleaner boundary, matches proposal intent.
+  2. **Gap: `@fireline/state` not migrated.** Plan (§Phase 1B) explicitly required `packages/state/src/acp-types.ts` (new) + export from `@fireline/state`. Neither landed. `packages/state/src/index.ts` is untouched. Phase 6 (TS Schema Migration) needs these types consumed from `@fireline/state`, so this gap must close before Phase 6 dispatches — ideally as a follow-up micro-PR against the Phase 1 slice rather than carrying it forward. Flagging to Opus 1 for dispatch.
+
+  Architectural verdict: Phase 1 client-side output is **clean and additive** (no synthetic ids leak in, `sacp::schema` types used correctly, pure re-exports). The work is fine as a foundation; the above are completion/alignment issues, not regressions. No veto — proceed once gap (2) is closed.
 
 ## Open architectural decisions (Opus 3 owns)
 
