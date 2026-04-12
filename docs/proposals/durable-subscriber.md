@@ -1,526 +1,593 @@
 # Durable Subscriber Primitive
 
-> **Status:** proposal
-> **Scope:** Rust harness + verification spec + TypeScript middleware surface
-> **Date:** 2026-04-12
+> Status: proposal
+> Date: 2026-04-12
+> Scope: Rust host driver, verification, TypeScript middleware surface
 
 ## TL;DR
 
-Extract the pattern already implemented in `crates/fireline-harness/src/approval.rs` into a generalized **DurableSubscriber** primitive. One abstraction collapses six concrete features that today either exist as one-offs or are ad-hoc:
+Generalize the durable workflow pattern already proven by the approval gate into a host-side `DurableSubscriber` primitive.
 
-| Feature | Today | After |
-|---|---|---|
-| Approval gate | One-off in `approval.rs` | `DurableSubscriber<PermissionRequest, ApprovalResolved>` |
-| Durable webhooks | Doesn't exist; examples inline HTTP servers | `DurableSubscriber<StreamEvent, WebhookDelivered>` |
-| Auto-approval policy | Doesn't exist | `DurableSubscriber<PermissionRequest, ApprovalResolved>` |
-| Cross-agent routing | Partial via `peer_mcp` | `DurableSubscriber<PeerCall, PeerCallAcked>` |
-| Scheduled wake / deferred work | Doesn't exist | `DurableSubscriber<WakeTimer, TimerFired>` |
-| External integration (Slack, email, GitHub) | Doesn't exist | `DurableSubscriber<StreamEvent, NotificationSent>` |
+This proposal assumes [acp-canonical-identifiers.md](./acp-canonical-identifiers.md) lands cleanly first.
 
-The substrate is already present — durable-streams SSE readers, `rebuild_from_log`, idempotent stream appends via `CommitTuple` dedupe. This proposal extracts the state machine, documents the contract, adds verifiable correctness properties to `verification/spec/managed_agents.tla`, and introduces a TypeScript middleware surface so subscribers can be declared in compose specs.
+Under that assumption:
 
----
+- every subscriber filters agent-layer events using canonical ACP schema fields
+- every completion key is composed only from `sacp::schema` identifier types
+- every outbound side effect propagates W3C Trace Context through `_meta.traceparent`, `_meta.tracestate`, and `_meta.baggage`
+- every subscriber runs in the infrastructure plane while reading and completing agent-plane work
+- no subscriber mints its own semantic identifier
 
-## 1. Motivation
-
-### 1.1 The pattern is already proven
-
-`crates/fireline-harness/src/approval.rs` demonstrates a concrete durable subscriber:
-
-1. **Emit intent** (`emit_permission_request` at `approval.rs:254`) — writes `permission_request` to the durable state stream
-2. **Observe live** (`wait_for_approval` at `approval.rs:294`) — opens a `LiveMode::Sse` reader, blocks until matching `approval_resolved` appears
-3. **Resume on restart** (`rebuild_from_log` at `approval.rs:176`) — on `session/load`, replays the stream from offset 0 to reconstruct in-memory state (pending reason, approved flag)
-4. **Act after match** — forwards the ACP prompt call to the agent
-
-This is a complete event-sourced state machine: pending → resolved → acted → completed. The stream is the source of truth. Every step can be interrupted and restarted without data loss.
-
-### 1.2 Every other "durable workflow" feature wants the same pattern
-
-The backend Node subscriber failure-mode analysis surfaced this clearly: any logic that reacts to stream events and performs side effects needs
-
-- at-least-once delivery (replay on restart)
-- idempotent side effects (or effects recorded on the stream so replay can skip already-completed work)
-- offset persistence / completion markers
-- bounded retry with dead-letter semantics
-
-Building each feature (webhooks, auto-approval, Slack notifiers) as a one-off reinvents this state machine every time. Today the approval gate is the one place that got it right — in Rust, tightly coupled to ACP's prompt proxy path. Everything else falls back to application-level polling or is missing entirely.
-
-### 1.3 What generalization buys us
-
-1. **Six features collapse into one primitive** — approvals, webhooks, auto-approvers, peer routing, scheduled wake, external integrations
-2. **Verifiable correctness once** — the TLA+ spec proves the pattern, not every instance
-3. **Composable surface** — subscribers are declared like other middleware, not coded ad-hoc
-4. **Host-side durability** — subscribers run inside the always-on fireline host, not in ephemeral user processes
-5. **No new substrate** — uses durable-streams SSE + idempotent appends, which already exist
+The approval gate correctness review in [approval-gate-correctness.md](../reviews/approval-gate-correctness.md) already proved the semantic substrate we need: suspend/resume durability, restart-safe completion behavior, timeout handling, concurrent isolation, and rebuild-race safety. The canonical-identifiers proposal supplies the missing external identity contract so the generalized abstraction does not freeze transitional seams into the API.
 
 ---
 
-## 2. The DurableSubscriber contract
+## 1. Alignment with Canonical Identifiers
 
-### 2.1 Abstract state machine
+This proposal is governed by [acp-canonical-identifiers.md](./acp-canonical-identifiers.md).
 
-```
-           ┌──────────────┐
-           │ stream event │
-           └──────┬───────┘
-                  │
-                  ▼
-           ┌──────────────┐
-           │   matches?   │──── no ─── (ignore)
-           └──────┬───────┘
-                  │ yes
-                  ▼
-           ┌──────────────┐
-           │  completed?  │──── yes ── (skip — replay safety)
-           └──────┬───────┘
-                  │ no
-                  ▼
-           ┌──────────────┐
-           │   handler    │ ── err ── retry (bounded)
-           └──────┬───────┘
-                  │ ok
-                  ▼
-           ┌──────────────┐
-           │   append     │  completion envelope
-           │  completion  │  (deterministic key prevents double-append)
-           └──────────────┘
-```
+That document sets the acceptance bar:
 
-Every transition is observable on the stream. `completed?` check and `append completion` are both deterministic over the stream — same input, same output. This makes replay trivially correct: the subscriber can start fresh with no local state and reconstruct "what's left to do" from the log alone.
+- no synthetic ids
+- no bespoke lineage stitching
+- only ACP-schema identifiers in the agent plane
+- W3C Trace Context propagated via ACP `_meta`
+- infrastructure ids kept in the infrastructure plane
 
-### 2.2 Key invariants
+DurableSubscriber adopts that bar without exception.
 
-Let `Matched(log)` = set of events in the log matching the subscriber's filter. Let `Completed(log)` = set of completion envelopes. Let `Pending(log) = Matched(log) \ Completed(log)` (by matched-event id).
+Concretely:
 
-The subscriber guarantees:
+1. `DurableSubscriber` does not introduce a new semantic identifier for events, completions, retries, dead letters, branches, or correlations.
+2. Completion identity is always derived from canonical ACP identifiers already present in the matched event.
+3. Storage row keys may serialize canonical key tuples for durable-stream convenience, but the semantic key remains typed until the final wire encoder.
+4. Subscriber lineage uses `_meta.traceparent`, `_meta.tracestate`, and `_meta.baggage`, not a Fireline-specific correlation field.
+5. The abstraction depends on the canonical-identifiers execution order. It is not safe to merge first and retrofit later.
 
-- **Progress:** `Pending(log)` decreases monotonically over time (modulo bounded retry state).
-- **Completeness:** eventually, `Pending(log) = {}` or every outstanding event has exhausted its retry budget and a dead-letter envelope is present.
-- **Idempotence:** replaying any prefix of the log produces the same set of completion envelopes.
-- **No lost events:** every matched event is either completed or dead-lettered; nothing is silently dropped.
-- **No duplicate completions:** for any matched event, at most one completion envelope exists (deduplication via deterministic stream keys).
+## 2. Motivation
 
-### 2.3 Contract obligations on handlers
+### 2.1 The substrate is already proven
 
-A handler's side effects must be one of:
-- **Idempotent by construction** (e.g. `PUT` requests with deterministic resource IDs, stream appends with deterministic keys)
-- **Gated by a completion check on the stream** (e.g. look for `notification_sent` envelope before sending Slack message)
-- **Acceptable to repeat** (e.g. audit log entries — dedup happens at the sink)
+`crates/fireline-harness/src/approval.rs` already demonstrates the durable workflow pattern:
 
-Handlers that violate this will duplicate side effects on crash-restart. The framework cannot hide this — it's an application-level concern. The subscriber primitive makes the hook point clear so this constraint is documented rather than discovered.
+1. emit an intent event to the agent stream
+2. observe the stream live through durable-streams SSE
+3. rebuild state from the log after restart
+4. resume when the matching completion arrives
+
+The review in [approval-gate-correctness.md](../reviews/approval-gate-correctness.md) confirmed that this substrate is semantically sound.
+
+### 2.2 Multiple features want the same primitive
+
+The same pattern appears in six categories:
+
+| Feature | Input event | Output/completion | Canonical key |
+|---|---|---|---|
+| Approval gate | `permission_request` | `approval_resolved` | `PromptKey(SessionId, RequestId)` |
+| Durable webhooks | prompt or tool event | `webhook_delivered` | `PromptKey` or `ToolKey` |
+| Auto-approval | `permission_request` | `approval_resolved` | `PromptKey(SessionId, RequestId)` |
+| Peer routing | prompt or tool event | `peer_call_delivered` or callee session start | `CrossSessionKey(SessionId, RequestId, SessionId)` |
+| Wake timers | prompt-bound reminder | `timer_fired` | `PromptKey(SessionId, RequestId)` |
+| External integrations | prompt/tool event | delivery/ack envelope | `PromptKey` or `ToolKey` |
+
+Without a shared primitive, each feature reimplements:
+
+- SSE live subscription
+- replay/rebuild behavior
+- completion dedupe
+- timeout and retry decisions
+- crash-safe side-effect sequencing
+
+### 2.3 What generalization buys us
+
+- one correctness story instead of six ad hoc ones
+- one middleware surface instead of feature-specific wiring
+- one verification target keyed by canonical ACP references
+- one host-side place to manage retries, dead letters, and observability
 
 ---
 
-## 3. Rust API design
+## 3. Canonical Contract
 
-### 3.1 The trait
+### 3.1 DurableSubscriber state machine
+
+The generic loop is:
+
+1. read agent-plane event from `state/session/{session_id}`
+2. filter by canonical ACP fields
+3. derive `CompletionKey` from canonical ACP identifiers in the event
+4. check whether that completion already exists
+5. run the handler or wait for an external completer
+6. append the domain completion back to the agent-plane stream
+7. keep retry/dead-letter bookkeeping in an infrastructure-plane subscriber stream
+
+### 3.2 Trait shape
 
 ```rust
-/// A durable subscriber over the state stream.
-///
-/// Filters matching events, invokes a handler, and records completion.
-/// Replay-safe because every decision is derived from the stream.
-pub trait DurableSubscriber: Send + Sync {
-    /// Event type the subscriber extracts from stream envelopes.
-    type Event: DeserializeOwned + Send;
+use sacp::schema::{RequestId, SessionId, ToolCallId};
 
-    /// Completion envelope written after successful handling.
+pub trait DurableSubscriber: Send + Sync {
+    type Event: DeserializeOwned + Send;
     type Completion: Serialize + Send;
 
-    /// Name used in tracing and for the completion stream key.
+    /// Infrastructure-facing name for metrics, config lookup, and admin UX.
+    /// This is not an agent-layer identifier.
     fn name(&self) -> &str;
 
-    /// Match filter. Return `Some(event)` if this stream envelope is relevant.
+    /// Match filter over a typed agent-plane envelope.
     fn matches(&self, envelope: &StreamEnvelope) -> Option<Self::Event>;
 
-    /// Deterministic completion key. Given the same event, returns the same key.
-    /// The key ensures idempotent completion — two subscribers seeing the
-    /// same event will write to the same slot.
-    fn completion_key(&self, event: &Self::Event) -> String;
+    /// Completion identity derived only from canonical ACP identifiers
+    /// already present in the event.
+    fn completion_key(&self, event: &Self::Event) -> CompletionKey;
 
-    /// Is this event already completed? Checked against the completion stream.
-    fn is_completed(&self, event: &Self::Event, completion_log: &[StreamEnvelope]) -> bool;
+    /// Has a completion with the same canonical key already been observed?
+    fn is_completed(&self, event: &Self::Event, log: &[StreamEnvelope]) -> bool;
 
-    /// The side-effecting handler. May return retry-on-error.
+    /// Execute or wait for the completion path.
     async fn handle(&self, event: Self::Event) -> HandlerOutcome<Self::Completion>;
 
-    /// Retry policy. Default: exponential backoff, max 5 attempts, then dead-letter.
-    fn retry_policy(&self) -> RetryPolicy { RetryPolicy::default() }
+    fn retry_policy(&self) -> RetryPolicy {
+        RetryPolicy::default()
+    }
 }
 
 pub enum HandlerOutcome<C> {
-    /// Handler succeeded. Append this completion envelope.
+    /// Subscriber actively produced the completion.
     Completed(C),
-    /// Transient failure. Retry per the retry policy.
+    /// Subscriber is passive and waits for another writer to append completion.
+    Passive,
+    /// Retryable failure; bookkeeping lives in the infrastructure plane.
     RetryTransient(anyhow::Error),
-    /// Permanent failure. Dead-letter this event; do not retry.
+    /// Permanent failure; dead-letter bookkeeping lives in the infrastructure plane.
     Failed(anyhow::Error),
 }
 ```
 
-### 3.2 The driver
+### 3.3 Type-Enforced Key Composition
 
-A single `DurableSubscriberDriver` component hosts any number of subscribers:
+`CompletionKey` is not an opaque string.
+
+```rust
+use sacp::schema::{RequestId, SessionId, ToolCallId};
+
+pub enum CompletionKey {
+    PromptKey(SessionId, RequestId),
+    ToolKey(SessionId, ToolCallId),
+    CrossSessionKey(SessionId, RequestId, SessionId),
+}
+```
+
+Rules:
+
+- every variant is composed only from canonical ACP types
+- no variant accepts `String`
+- no variant accepts a counter, random token, or derived payload fingerprint
+- serialization to a durable-stream row key happens only at the storage edge
+
+This is the main compile-time protection the proposal adds. A subscriber implementation cannot accidentally return an invented identifier because the trait has nowhere to put one.
+
+### 3.4 Event filtering
+
+Subscribers filter on typed ACP fields, not on Fireline-private seams:
+
+- `type`
+- `session_id: SessionId`
+- `request_id: RequestId`
+- `tool_call_id: ToolCallId`
+- `_meta.traceparent`
+- `_meta.tracestate`
+- `_meta.baggage`
+
+`StreamEnvelope` in this proposal therefore means "typed agent-plane envelope after canonical-id normalization", not an untyped JSON blob.
+
+### 3.5 Plane placement
+
+The `DurableSubscriberDriver` lives in the infrastructure plane.
+
+- it runs inside the always-on Fireline host process
+- it reads agent-plane streams such as `state/session/{session_id}` through durable-streams SSE
+- it writes domain completions back to the agent-plane stream when agent-layer semantics care about the result
+- it stores subscriber config, retry state, and dead-letter bookkeeping in an infrastructure stream such as `subscribers:tenant-{id}`
+
+This keeps the planes separate:
+
+- agent plane contains agent-facing state transitions
+- infrastructure plane contains subscriber driver mechanics
+
+The driver may observe both planes, but it does not project infrastructure rows onto agent-layer entities.
+
+---
+
+## 4. Rust Design
+
+### 4.1 Driver shape
 
 ```rust
 pub struct DurableSubscriberDriver {
     subscribers: Vec<Arc<dyn DurableSubscriber<Event = Value, Completion = Value>>>,
-    stream_url: String,
-    state_producer: Producer,
-    retry_store: Arc<dyn RetryStore>,
+    infra_stream: DurableStream,
+    agent_reader_factory: Arc<dyn AgentStreamReaderFactory>,
+    agent_completion_producer_factory: Arc<dyn AgentCompletionProducerFactory>,
 }
 ```
 
-The driver owns:
-- The single SSE reader on the state stream (shared across subscribers)
-- Dispatch to each subscriber's `matches` filter
-- Retry orchestration (`RetryStore` persists attempt state on the stream so retry schedule survives restart)
-- Completion append via `state_producer.append_json(completion_envelope)`
+Responsibilities:
 
-It registers as a topology component (`"durable_subscriber"`) so it participates in the normal conductor lifecycle.
+- subscribe to relevant agent streams with SSE
+- dispatch matched events to subscriber implementations
+- check for existing completions by `CompletionKey`
+- append domain completions to the correct agent stream
+- persist retry attempts and dead-letter state in the infrastructure stream
+- expose health and progress metrics keyed by subscriber `name()`
 
-### 3.3 Relationship to `approval.rs`
+### 4.2 Trace propagation
 
-The existing `ApprovalGateComponent` becomes an **implementation of** `DurableSubscriber`:
+Every subscriber side effect must propagate canonical trace context.
+
+Rules:
+
+1. Extract `_meta.traceparent`, `_meta.tracestate`, and `_meta.baggage` from the source event.
+2. When the side effect is ACP-shaped, write those fields back into outbound `_meta`.
+3. When the side effect is generic HTTP, also inject the corresponding W3C headers so the receiver joins the same trace.
+4. When the side effect produces a completion envelope, copy the same trace context into that envelope's `_meta`.
+
+This is mandatory for:
+
+- webhook POSTs
+- peer calls
+- Slack/email/GitHub outbound calls
+- any future subscriber that crosses process or host boundaries
+
+### 4.3 Relationship to `approval.rs`
+
+Once canonical identifiers land, the approval gate becomes the first passive subscriber.
 
 ```rust
+pub struct ApprovalGateSubscriber;
+
 impl DurableSubscriber for ApprovalGateSubscriber {
     type Event = PermissionRequest;
     type Completion = ApprovalResolved;
 
-    fn name(&self) -> &str { "approval_gate" }
-
-    fn matches(&self, env: &StreamEnvelope) -> Option<Self::Event> {
-        if env.kind == "permission_request" {
-            serde_json::from_value(env.value.clone()).ok()
-        } else { None }
+    fn name(&self) -> &str {
+        "approval_gate"
     }
 
-    fn completion_key(&self, e: &Self::Event) -> String {
-        format!("{}:{}:resolved", e.session_id, e.request_id)
+    fn matches(&self, envelope: &StreamEnvelope) -> Option<Self::Event> {
+        match_permission_request(envelope)
     }
 
-    fn is_completed(&self, e: &Self::Event, log: &[StreamEnvelope]) -> bool {
-        log.iter().any(|env|
-            env.kind == "approval_resolved" &&
-            env.key == self.completion_key(e)
-        )
+    fn completion_key(&self, event: &Self::Event) -> CompletionKey {
+        CompletionKey::PromptKey(event.session_id.clone(), event.request_id.clone())
     }
 
-    async fn handle(&self, e: Self::Event) -> HandlerOutcome<Self::Completion> {
-        // The approval gate's handle() blocks until an external party appends
-        // the resolution. It's a passive handler — completion comes from
-        // outside. This is a distinct mode from active handlers (webhooks).
+    fn is_completed(&self, event: &Self::Event, log: &[StreamEnvelope]) -> bool {
+        log.iter().any(|env| {
+            matches_approval_resolved(env, &event.session_id, &event.request_id)
+        })
+    }
+
+    async fn handle(&self, _event: Self::Event) -> HandlerOutcome<Self::Completion> {
         HandlerOutcome::Passive
     }
 }
 ```
 
-This introduces a distinction:
-
-- **Active subscribers** have `handle()` return a completion. Examples: webhook dispatcher, Slack notifier, auto-approval policy.
-- **Passive subscribers** wait for an external party to append the completion. The approval gate today is passive — the completion is appended by a dashboard, Slackbot, or human operator via `agent.resolvePermission()`.
-
-The driver handles both. A passive subscriber doesn't invoke `handle()` — it just tracks `Pending(log)` for observability. An active subscriber drives `handle() → append completion` on each pending event.
-
-### 3.4 Webhook subscriber — a concrete instance
-
-```rust
-pub struct WebhookSubscriber {
-    name: String,
-    filter: EventFilter,
-    url: String,
-    headers: Vec<(String, CredentialRef)>,
-    resolver: Arc<dyn CredentialResolver>,
-}
-
-impl DurableSubscriber for WebhookSubscriber {
-    type Event = StreamEnvelope;
-    type Completion = WebhookDelivered;
-
-    fn matches(&self, env: &StreamEnvelope) -> Option<Self::Event> {
-        self.filter.matches(env).then(|| env.clone())
-    }
-
-    fn completion_key(&self, e: &Self::Event) -> String {
-        format!("webhook:{}:delivered:{}", self.name, e.logical_id)
-    }
-
-    fn is_completed(&self, e: &Self::Event, log: &[StreamEnvelope]) -> bool {
-        log.iter().any(|env| env.key == self.completion_key(e))
-    }
-
-    async fn handle(&self, e: Self::Event) -> HandlerOutcome<Self::Completion> {
-        let headers = self.resolve_headers().await?;
-        match http_post(&self.url, &e.value, headers).await {
-            Ok(resp) if resp.status().is_success() => HandlerOutcome::Completed(
-                WebhookDelivered {
-                    logical_id: e.logical_id,
-                    delivered_at_ms: now_ms(),
-                    response_status: resp.status().as_u16(),
-                }
-            ),
-            Ok(resp) if resp.status().is_server_error() =>
-                HandlerOutcome::RetryTransient(anyhow!("5xx: {}", resp.status())),
-            Ok(resp) =>
-                HandlerOutcome::Failed(anyhow!("4xx: {}", resp.status())),
-            Err(e) => HandlerOutcome::RetryTransient(e.into()),
-        }
-    }
-}
-```
+Key point: the generalization uses the canonical permission request id carried by ACP. It does not preserve any transitional id-generation strategy.
 
 ---
 
-## 4. TypeScript middleware surface
+## 5. Use Cases
 
-### 4.1 Declaration
+### 5.1 ApprovalGateSubscriber
 
-Subscribers are declared in compose specs, matching the pattern used for `attachTools`, `secretsProxy`, etc.:
+- event: `permission_request`
+- completion: `approval_resolved`
+- key: `PromptKey(SessionId, RequestId)`
+- mode: passive
+- trace: completion envelope carries the same `_meta` trace context as the source request
+
+This is the reference case because the approval review already proved the behavior semantically.
+
+### 5.2 WebhookSubscriber
+
+- event: prompt-level or tool-level agent-plane event
+- completion: `webhook_delivered`
+- key:
+  - prompt-level: `PromptKey(SessionId, RequestId)`
+  - tool-level: `ToolKey(SessionId, ToolCallId)`
+- mode: active
+
+Webhook side effects must:
+
+- inject `traceparent`, `tracestate`, and `baggage` as HTTP headers
+- include the same values in payload `_meta` when the body is ACP-shaped JSON
+- write delivery completion back to the agent stream
+
+### 5.3 AutoApproveSubscriber
+
+- event: `permission_request`
+- completion: `approval_resolved`
+- key: `PromptKey(SessionId, RequestId)`
+- mode: active
+
+This is the active mirror of the approval gate. It watches the same event shape and can auto-resolve according to policy without inventing a second approval identity.
+
+### 5.4 PeerCallSubscriber
+
+- event: outbound prompt or tool event on the caller side
+- completion: peer delivery acknowledgment or callee session start
+- key: `CrossSessionKey(caller_session_id, caller_request_id, callee_session_id)`
+- mode: active
+
+Trace rule:
+
+- outbound peer ACP request must propagate `_meta.traceparent`, `_meta.tracestate`, and `_meta.baggage`
+- callee-side completion keeps the same trace lineage
+
+### 5.5 WakeTimerSubscriber
+
+Two cases exist:
+
+1. agent-bound timer
+   - event: prompt/request asking for a deferred wake
+   - completion: `timer_fired`
+   - key: `PromptKey(SessionId, RequestId)`
+2. infrastructure-only cluster timer
+   - out of first cut for this proposal
+   - stays entirely in the infrastructure plane until there is a canonical agent binding
+
+The first cut of DurableSubscriber should only model the agent-bound case, because the type-enforced `CompletionKey` enum intentionally covers ACP-bound identity shapes only.
+
+### 5.6 ExternalIntegrationSubscriber
+
+- event: prompt-level or tool-level agent event
+- completion: provider-specific delivery acknowledgment
+- key: `PromptKey` or `ToolKey`
+- mode: active
+
+Slack, email, GitHub, and similar integrations all follow the same rule as webhooks:
+
+- canonical ACP key on the input side
+- W3C Trace Context on the outbound side
+- completion written back to the agent stream
+- retry/dead-letter state stored in the infrastructure stream
+
+---
+
+## 6. TypeScript Middleware Surface
+
+### 6.1 Example
 
 ```typescript
 import { compose, agent, sandbox, middleware } from '@fireline/client'
-import { trace, webhook, autoApprove } from '@fireline/client/middleware'
+import { webhook } from '@fireline/client/middleware'
+import type { SessionId, RequestId, ToolCallId } from '@agentclientprotocol/sdk'
 
-export default compose(
-  sandbox({ ... }),
+compose(
+  sandbox({ provider: 'local' }),
   middleware([
-    trace(),
     webhook({
       name: 'audit-to-slack',
-      events: ['permission_request', 'approval_resolved'],
-      url: 'https://hooks.slack.com/services/...',
+      events: ['permission_request', 'tool_call_completed'],
+      url: 'https://hooks.slack.com/...',
+      keyBy: 'session_request',
       headers: { 'X-Signature': { ref: 'secret:slack-signing-key' } },
       retry: { maxAttempts: 5, initialBackoffMs: 1000 },
     }),
-    autoApprove({
-      name: 'read-only-approver',
-      policy: { match: { kind: 'prompt_contains', needle: 'read' }, action: 'allow' },
-    }),
   ]),
-  agent([...]),
+  agent(['claude-sonnet-4-6']),
 )
 ```
 
-Both `webhook()` and `autoApprove()` map to the same `durable_subscriber` topology component with different subscriber configs. The topology registry in `host_topology.rs` resolves them to concrete `DurableSubscriber` impls.
+### 6.2 Key strategy surface
 
-### 4.2 Observation
-
-Because subscribers append completion envelopes to the stream, they are observable via `fireline.db()` exactly like any other stream event. A webhook delivery log falls out for free:
+The middleware API exposes declarative keying only:
 
 ```typescript
-const delivered = useLiveQuery(q =>
-  q.from({ d: db.webhookDeliveries }).where(({ d }) => d.subscriberName === 'audit-to-slack')
-)
-// UI shows delivery history, response codes, retry attempts — all from the stream.
+type SubscriberKeyStrategy =
+  | 'session'
+  | 'session_request'
+  | 'session_tool_call'
+  | 'cross_session'
 ```
 
-New collections added to `@fireline/state` schema: `webhookDeliveries`, `deadLetters`, `subscriberProgress`. These are materialized views over the existing state stream — no new substrate.
+Mapping:
+
+- `'session'` means the subscriber expects only a `SessionId`
+- `'session_request'` maps to `CompletionKey::PromptKey`
+- `'session_tool_call'` maps to `CompletionKey::ToolKey`
+- `'cross_session'` maps to `CompletionKey::CrossSessionKey`
+
+No custom string key is allowed in userland middleware.
+
+### 6.3 Type discipline
+
+The TS surface must type ACP identifiers through `@agentclientprotocol/sdk`, not plain `string`.
+
+That means:
+
+- subscriber event payload types use branded ACP identifiers
+- helper functions such as `appendApprovalResolved(...)` type `SessionId` and `RequestId`
+- middleware specs cannot accept custom correlation ids
+
+### 6.4 Trace propagation in middleware
+
+The middleware surface does not ask the user for trace fields.
+
+Instead:
+
+- source `_meta.traceparent`, `_meta.tracestate`, and `_meta.baggage` are automatically propagated
+- outbound webhook HTTP requests receive W3C trace headers
+- ACP-shaped outbound payloads mirror the same values in `_meta`
 
 ---
 
-## 5. Verification
+## 7. Verification
 
-### 5.1 Current TLA+ coverage
+### 7.1 Preconditions from the canonical-id work
 
-`verification/spec/managed_agents.tla` already models:
+DurableSubscriber verification depends on the canonical-identifiers invariants.
 
-- **Session append-only semantics** (`SessionAppendOnly`, line 755)
-- **Idempotent append via CommitTuple** (`SessionScopedIdempotentAppend`, line 769)
-- **Approval request/resolve with history** (`RequestApproval`, `ResolveApproval`, lines 361 and 400)
-- **Release gated by resolution** (`HarnessSuspendReleasedOnlyByMatchingApproval`, line 785)
-- **Durability across runtime death** (`SessionDurableAcrossRuntimeDeath`, line 763)
-- **Replay semantics** (`SessionReplayFromOffsetIsSuffix`, line 759)
+At minimum, the TLA and test plan should assume:
 
-This is most of the machinery we need. The approval gate is already specified in terms of events on the session log. Generalizing to `DurableSubscriber` means lifting the specific `permission_requested` / `approval_resolved` kinds to an abstract `MatchedEvent` / `CompletionEnvelope` pair.
+- `AgentLayerIdentifiersAreCanonical`
+- `AgentLayerRowsExcludeInfrastructureIds`
+- `TraceContextFlowsThroughMeta`
 
-### 5.2 Proposed TLA+ extensions
+If those invariants are not already established, subscriber verification is proving the wrong surface.
 
-Add the following to `managed_agents.tla`:
+### 7.2 Subscriber invariants
 
-```tla
-CONSTANTS
-  SubscriberNames,           \* symbolic subscriber identifiers
-  CompletionKeys             \* deterministic completion key space
+Once canonical ids are in place, subscriber invariants key directly by canonical tuples:
 
-EventKinds ==
-  \* existing kinds plus:
-  {
-    ...,
-    "subscriber_completion",
-    "subscriber_dead_letter"
-  }
+- `PromptKey == <<session_id, request_id>>`
+- `ToolKey == <<session_id, tool_call_id>>`
+- `CrossSessionKey == <<caller_session_id, caller_request_id, callee_session_id>>`
 
-VARIABLES
-  subscriberCompletions,     \* [subscriber |-> set of completion keys observed]
-  subscriberAttempts,        \* [subscriber |-> [event -> attempt count]]
-  subscriberDeadLetters      \* [subscriber |-> set of event ids]
+No separate matched-event id or completion id is introduced.
 
-Matched(s, subscriber, log) ==
-  { i \in 1..Len(log) :
-      /\ log[i].kind \in { "permission_requested", "prompt_turn_started", ... }  \* subscriber-specific filter
-      /\ ... subscriber-filter-predicate(log[i], subscriber) }
+Core invariants:
 
-CompletedEventIds(s, subscriber, log) ==
-  { log[i].logicalId : i \in 1..Len(log) :
-      /\ log[i].kind = "subscriber_completion"
-      /\ log[i].subscriberName = subscriber }
+1. every matched canonical key is eventually completed or dead-lettered
+2. at most one completion exists per `(subscriber_name, CompletionKey)`
+3. replay from any offset preserves the same completed key set
+4. retry and dead-letter bookkeeping never leaks into agent-layer rows
+5. completion envelopes preserve source trace context
 
-PendingForSubscriber(s, subscriber, log) ==
-  { log[i].logicalId : i \in Matched(s, subscriber, log) }
-    \ CompletedEventIds(s, subscriber, log)
+### 7.3 TLA+ extension shape
 
-HandleMatchedEvent(s, subscriber, i, completionKey) ==
-  \* Successful handle → append completion envelope.
-  /\ i \in Matched(s, subscriber, sessionLog[s])
-  /\ log[i].logicalId \notin CompletedEventIds(s, subscriber, sessionLog[s])
-  /\ sessionLog' = [sessionLog EXCEPT ![s] = Append(@, CompletionEnvelope(subscriber, completionKey))]
-  /\ subscriberCompletions' = [subscriberCompletions EXCEPT ![subscriber] = @ \cup {completionKey}]
-  /\ ... invariants preserved
+The TLA model should add:
 
-RetryMatchedEvent(s, subscriber, i) ==
-  \* Transient failure → increment attempt count, don't append completion.
-  /\ subscriberAttempts' = [subscriberAttempts EXCEPT ![subscriber][i] = @ + 1]
-  /\ subscriberAttempts'[subscriber][i] <= MaxAttempts
+- subscriber config and retry state in the infrastructure plane
+- agent-plane completion events keyed by canonical tuples
+- subscriber actions that match, complete, retry, or dead-letter by canonical `CompletionKey`
 
-DeadLetterMatchedEvent(s, subscriber, i) ==
-  \* Attempts exhausted → write dead-letter envelope.
-  /\ subscriberAttempts[subscriber][i] >= MaxAttempts
-  /\ sessionLog' = [sessionLog EXCEPT ![s] = Append(@, DeadLetterEnvelope(subscriber, i))]
-  /\ subscriberDeadLetters' = [subscriberDeadLetters EXCEPT ![subscriber] = @ \cup {log[i].logicalId}]
-```
+The model should not add:
 
-### 5.3 Proposed invariants
+- a new synthetic event id
+- a new synthetic completion id
+- a parallel lineage table
 
-```tla
-\* Every matched event eventually gets a completion or dead-letter.
-SubscriberEventualCompletion ==
-  \A s \in Sessions :
-    \A subscriber \in SubscriberNames :
-      \A id \in { log[i].logicalId : i \in Matched(s, subscriber, sessionLog[s]) } :
-        \/ id \in CompletedEventIds(s, subscriber, sessionLog[s])
-        \/ id \in subscriberDeadLetters[subscriber]
-        \/ subscriberAttempts[subscriber][id] < MaxAttempts  \* still in retry
+### 7.4 Validation against the approval proof
 
-\* Completion envelopes are unique per (subscriber, event).
-SubscriberCompletionUnique ==
-  \A s \in Sessions :
-    \A subscriber \in SubscriberNames :
-      \A key \in CompletionKeys :
-        Cardinality({ i \in 1..Len(sessionLog[s]) :
-          /\ sessionLog[s][i].kind = "subscriber_completion"
-          /\ sessionLog[s][i].subscriberName = subscriber
-          /\ sessionLog[s][i].completionKey = key }) <= 1
+The approval correctness review already gives us the semantic regression bar:
 
-\* Replay from any offset produces the same completion set.
-SubscriberReplayIdempotent ==
-  \A s \in Sessions :
-    \A offset \in 0..Len(sessionLog[s]) :
-      CompletedEventIds(s, subscriber, sessionLog[s]) =
-        CompletedEventIds(s, subscriber, SubSeq(sessionLog[s], 1, offset))
-          \cup { log[i].logicalId : i \in (offset+1)..Len(sessionLog[s])
-                                   /\ sessionLog[s][i].kind = "subscriber_completion" }
-  \* In plain English: the set of completions after replay equals the
-  \* set of completions already in the prefix plus any new ones since.
+- suspend and resume across crash
+- timeout behavior
+- concurrent isolation
+- rebuild race with live resolution
 
-\* Dead-letter implies MaxAttempts reached.
-SubscriberDeadLetterGated ==
-  \A subscriber \in SubscriberNames :
-    \A id \in subscriberDeadLetters[subscriber] :
-      subscriberAttempts[subscriber][id] >= MaxAttempts
-
-\* Progress: Pending set is monotone non-increasing when no new matches arrive.
-SubscriberProgressMonotone ==
-  lastAction \in { "handle_matched_event", "dead_letter_matched_event" } =>
-    \A s \in Sessions, subscriber \in SubscriberNames :
-      PendingForSubscriber(s, subscriber, sessionLog[s]) \subseteq
-        PendingForSubscriber(s, subscriber, previousSessionLog[s])
-```
-
-### 5.4 What this buys us
-
-Stateright + TLC can exhaustively check these invariants over small configurations. The existing `verification/stateright/` harness already runs `managed_agents.tla` properties — adding these invariants extends the same infrastructure.
-
-Model checking validates:
-- No event is silently dropped
-- Retries are bounded
-- Replay is deterministic
-- Dead-letter is reachable only through exhaustion
-
-These are the correctness properties any real subscriber implementation must satisfy. Once the spec passes, any concrete `DurableSubscriber` impl that preserves the state transitions inherits the invariants.
+The generalized subscriber implementation should preserve those behaviors when the approval gate is re-expressed against canonical ACP `RequestId`.
 
 ---
 
-## 6. Implementation plan
+## 8. Implementation Plan
 
-### Phase 1 — Extract the trait, re-express `ApprovalGateComponent` (no behavior change)
+### 8.1 Prerequisite gates
 
-1. Define `DurableSubscriber` trait + `HandlerOutcome` + `RetryPolicy` in a new crate module `fireline-harness/src/subscriber/mod.rs`.
-2. Implement `ApprovalGateSubscriber` that wraps the existing approval-gate logic.
-3. Keep `ApprovalGateComponent` as the existing topology component, but refactor its internals to delegate to `DurableSubscriber`.
-4. All existing tests pass unchanged — this is a pure refactor.
+Subscriber generalization cannot start before these canonical-id milestones:
 
-**Acceptance:** `cargo test --workspace` passes, approval-gate behavior is byte-identical on the stream.
+1. canonical-identifiers Phase 2 is landed
+   - the approval flow is operating on canonical request references rather than transitional identity seams
+2. canonical-identifiers Phase 5 is landed
+   - `_meta.traceparent`, `_meta.tracestate`, and `_meta.baggage` propagate end to end
 
-### Phase 2 — Add the driver + webhook subscriber
+If either prerequisite is missing, DurableSubscriber risks freezing pre-canonical assumptions into the abstraction.
 
-1. Implement `DurableSubscriberDriver` as a new topology component (`"durable_subscriber"` registration).
-2. Implement `WebhookSubscriber` as the first active subscriber.
-3. Add TypeScript `webhook()` middleware helper, wire through `middlewareToComponents`.
-4. Integration test: compose spec with `webhook()` middleware, provision, trigger matching events, assert webhook fires + `webhook_delivered` envelope appears on stream.
+### 8.2 Phase 1: typed subscriber core
 
-**Acceptance:** examples/webhook-integration/ demo runs end-to-end.
+1. add `CompletionKey`
+2. add `DurableSubscriber`
+3. add a typed agent-plane envelope decoder using `sacp::schema` types
+4. add infrastructure-plane retry/dead-letter store
 
-### Phase 3 — Additional subscribers
+Acceptance:
 
-1. `AutoApproveSubscriber` (replaces inline auto-approval in application code).
-2. `PeerCallSubscriber` (durable cross-agent dispatch — currently partial in `peer_mcp`).
-3. `WakeTimerSubscriber` (scheduled wake — enables deferred work).
-4. Update docs + examples for each.
+- no trait surface accepts opaque string ids
+- no completion key is representable without canonical ACP types
 
-### Phase 4 — TLA+ verification
+### 8.3 Phase 2: approval gate extraction
 
-1. Extend `verification/spec/managed_agents.tla` with subscriber state variables and actions.
-2. Add the four invariants (`SubscriberEventualCompletion`, `SubscriberCompletionUnique`, `SubscriberReplayIdempotent`, `SubscriberProgressMonotone`).
-3. Run TLC to exhaustively check small configurations.
-4. Port to `verification/stateright/` for concurrent-correctness checks.
+1. keep `ApprovalGateComponent` as the topology component
+2. move its internals behind `ApprovalGateSubscriber`
+3. preserve the proven behavior from the review
 
-**Acceptance:** TLC finds no counterexamples for configurations covering at least 3 subscribers × 5 events × 3 replay offsets × retry-up-to-3-attempts.
+Acceptance:
 
-### Phase 5 — Migration docs + example sweep
+- approval path uses canonical `RequestId`
+- replay, timeout, and rebuild-race tests remain green
 
-1. Update `docs/guide/approvals.md` to frame the approval gate as one instance of `DurableSubscriber`.
-2. Update `examples/approval-workflow/` to use `webhook()` + `autoApprove()` instead of the inline subscriber pattern that can duplicate side effects on crash.
-3. Deprecate any ad-hoc subscriber patterns in examples.
+### 8.4 Phase 3: active subscribers
 
----
+1. implement `WebhookSubscriber`
+2. implement `AutoApproveSubscriber`
+3. implement external-integration subscribers on the same abstraction
 
-## 7. What this does NOT solve
+Acceptance:
 
-Worth being explicit about the limits:
+- outbound HTTP requests inject W3C trace headers
+- completion envelopes write back to the agent stream
+- retry/dead-letter state stays in the infrastructure stream
 
-- **External system deduplication.** If your webhook receiver isn't idempotent and the subscriber fires twice due to a clean retry (not a crash), the receiver sees duplicates. Subscribers should include idempotency keys in outbound requests; receivers must dedupe. Fireline cannot enforce this.
-- **Arbitrary handler logic.** A `handle()` that spawns threads, mutates global state, or writes to non-stream sinks breaks the replay model. The primitive is disciplined — handlers must follow the contract. Bad handlers make bad subscribers.
-- **Cross-subscriber coordination.** Two subscribers both reacting to the same event independently is fine. Two subscribers that need to coordinate ("do X only if Y subscriber finished") is not a native pattern — compose through additional completion events on the stream.
-- **Hot reload of subscriber config.** Changing a subscriber's filter or URL requires restarting the driver. Live-editing subscribers is future work (likely via a `subscriber_config_updated` envelope that the driver watches for).
+### 8.5 Phase 4: peer and timer subscribers
 
----
+1. implement `PeerCallSubscriber`
+2. implement prompt-bound `WakeTimerSubscriber`
+3. defer infrastructure-only timers until a clean infra-only contract is written
 
-## 8. Open questions
+### 8.6 Phase 5: verification and docs
 
-1. **Retry state storage.** Attempts and backoff schedules can live in-memory (lost on restart, which means the schedule restarts) or on the stream (persistent, but pollutes the log). Recommend on-stream for first cut with periodic compaction.
-2. **Subscriber epoch semantics.** If a subscriber's config changes (new filter, new handler), do pending events from the old config still get handled? Proposal: yes, old completions are honored, new events use the new config. Key by `(subscriber_name, epoch)` if conflicts arise.
-3. **Cross-stream subscribers.** Today every subscriber reads one state stream. For cross-agent operations, a subscriber might want to observe multiple streams. Start with single-stream; cross-stream can compose through a "forwarder" subscriber that copies events between streams.
-4. **Dead-letter handling UX.** Who sees dead-lettered events? A subscriber watching `subscriber_dead_letter` kinds on the same stream (meta-subscriber). Or export to an external DLQ system. Recommend meta-subscriber for simplicity.
-5. **Passive vs active detection.** Is the trait distinction explicit (`trait PassiveSubscriber` vs `trait ActiveSubscriber`) or an enum at construction time? Recommend enum (`SubscriberMode::{Active, Passive}`) to keep one trait.
+1. extend TLA with canonical `CompletionKey` tuples
+2. add end-to-end tests after the canonical-id execution is complete
+3. document `webhook()`, `autoApprove()`, and approval-gate-as-subscriber
 
 ---
 
-## 9. References
+## 9. What This Does Not Solve
 
-- **Pattern origin:** `crates/fireline-harness/src/approval.rs` — the working prototype
-- **Durable streams primitive:** [durablestreams.com/stream-db](https://durablestreams.com/stream-db) — `LiveMode::Sse` + offset replay
-- **TLA+ spec:** `verification/spec/managed_agents.tla` — invariants to extend
-- **Stateright harness:** `verification/stateright/src/lib.rs` — concurrent-correctness checks
-- **Flamecast webhook RFC:** referenced as a concrete target shape for webhook delivery semantics
-- **Related proposal:** `docs/proposals/webhook-support.md` — earlier sketch that this subsumes
+- subscriber business logic is still application policy; the primitive only makes the durability contract explicit
+- infrastructure-only timers without an agent binding are deferred
+- receiver-side dedupe for external systems is still the receiver's responsibility
+- cross-subscriber coordination beyond stream-visible completions is not a first-cut feature
+- this proposal does not relax plane separation by letting subscriber bookkeeping leak into agent-layer entities
+
+---
+
+## 10. Open Questions
+
+1. Resolution sources for passive approval flows.
+
+   When the approval gate becomes a passive DurableSubscriber, who writes `approval_resolved`?
+
+   - `agent.resolvePermission()` when the app owns the agent process
+   - `appendApprovalResolved(streamUrl, ...)` for external dashboards, webhooks, or automation
+   - another `DurableSubscriber`, such as `AutoApproveSubscriber`
+
+   All three should remain valid. The primitive must stay compatible with in-process and out-of-process resolution.
+
+2. Whether `webhook_delivered` belongs in every agent stream or only when the application explicitly opts into observing delivery outcomes.
+
+3. Whether subscriber configuration should live only in static topology or also support infrastructure-plane live reload later.
+
+---
+
+## 11. Validation against Canonical Identifiers
+
+- [ ] Every `CompletionKey` variant is composed only of `sacp::schema` types
+- [ ] Every subscriber implementation in the proposal uses canonical ACP types for event fields
+- [ ] No subscriber hashes payloads, mints UUIDs, or derives keys from anything other than ACP identifiers
+- [ ] Webhook and notification outbound calls inject `_meta.traceparent`, `_meta.tracestate`, and `_meta.baggage`
+- [ ] Subscriber infrastructure state for retry and dead-letter lives in the infrastructure plane, not on agent-layer rows
+- [ ] The TypeScript middleware surface types identifiers via `@agentclientprotocol/sdk`
+
+---
+
+## 12. References
+
+- [acp-canonical-identifiers.md](./acp-canonical-identifiers.md)
+- [approval-gate-correctness.md](../reviews/approval-gate-correctness.md)
+- `crates/fireline-harness/src/approval.rs`
+- `docs/proposals/webhook-support.md`
+- `verification/spec/managed_agents.tla`
