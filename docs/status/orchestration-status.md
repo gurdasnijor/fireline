@@ -240,7 +240,41 @@ Deferred (background / blocked):
 - `docs/guide/` + `README.md` canonical-ids vocabulary refresh — blocked on Phase 1.5 landing (vocabulary not stable yet).
 - `docs/demos/pi-acp-to-openclaw.md` canonical-ids + durable-promises rewrite — blocked on Phases 2 + 5 + DurableSubscriber primitive.
 
-## Open architectural decisions (Opus 3 owns)
+## Jessica (PM-B) dispatch queue
+
+> **Onboarded 2026-04-12.** PM-B owns demo-readiness delivery lanes that do not
+> touch canonical-identifiers code (PM-A / Opus 1 owns those). Workers: w24, w25.
+> Reports into Opus 1 at workspace:4 every ~30 min.
+>
+> **Scope guard:** no edits to `crates/fireline-acp-ids/`, `crates/fireline-semantics/src/ids.rs`,
+> `packages/state/src/acp-types.ts`, `packages/state/src/index.ts`, or the approval-gate
+> canonical-`RequestId` call sites until canonical-ids Phase 3.5 + Phase 3 land.
+
+### Landed context feeding the demo (PM-B inherits)
+
+- `b9264f3` DeploymentSpecSubscriber catalog entry (Tier C) — enables always-on deploy wake
+- `739cbcb` ACP registry compose fallback (Phase 3) — `agent(['pi-acp'])` lookup path live
+- `ff9b712` OTel bootstrap + null exporter (observability Phase 1)
+- `2c68794` + `38559b4` Portable OCI image + embedded-spec layer (hosted Phase 1 MVP)
+- Anthropic provider (962 LOC, feature-gated) — already in tree
+- Stream-backed peer discovery (`StreamDeploymentPeerRegistry`) — already in tree
+- Durable approval crash/resume — proven (`8afcfff` verification doc)
+
+### Tracks (demo-readiness lanes)
+
+| Track | Lane | Scope | Dispatch status |
+|---|---|---|---|
+| **J1** | Hosted deployment Phase 2 — Tier C spec-stream boot path | Implement Tier C boot per `hosted-fireline-deployment.md §Phase 2` on top of `DeploymentSpecSubscriber` catalog entry. Spec resource read path + sandbox provisioning wiring in `crates/fireline-host` / `fireline-conductor`. Feature-flag gated. CI-first per contention rules. | **Queued for w24.** Dispatching first. |
+| **J2** | ACP Registry Phase 3 E2E smoke | Add E2E verification that `agent(['pi-acp'])` resolves via `AgentCatalog` client, compose fallback kicks in when registry unreachable, and `fireline-agents add pi-acp` produces an idempotent resolved entry. Lives under `tests/acp_registry_e2e.rs` + matching CI lane. | **Queued for w25.** Dispatching first. |
+| **J3** | CLI Phase 2 design refinement (`fireline deploy --to <platform>`) | Doc-only refinement of `fireline-cli-execution.md §Phase 2` against tiered deploy model. Align language with Tier A OCI (landed) and Tier C spec-stream (Track J1). No code. Followup to Architect for direction review before implementation dispatch. | **Queued.** Dispatches after J1/J2 in flight. |
+| **J4** | Observability Phase 2 — span emission + peer `_meta` injection | Instrument `fireline.session.created`, `fireline.prompt.request`, `fireline.tool.call`, `fireline.approval.requested`, `fireline.approval.resolved`, plus `peer.call.out/in` with `_meta.traceparent` injection per `observability-integration.md §Phase 2`. Defer peer injection to post-canonical-ids-Phase-4 if that gate is not yet green; span emission for session/prompt/tool/approval can land first. | **Queued.** Dispatches in parallel once J1/J2 are in flight. |
+| **J5** | Demo orchestrator polish — `pi-acp-to-openclaw.md` + stage-safe script | Update demo doc to reflect landed substrate (canonical-ids Phase 2, DeploymentSpecSubscriber, ACP registry, OTel Phase 1). Add stage-safe operator script for Demo 1 (Unkillable Agent) + Demo 2 (Approval Gate) per `DEMO-PLAN.md`. Doc-only. | **Queued.** Fills the third slot after Tracks J1/J2/J4 are in flight. |
+
+### Dispatch log
+
+- `[Jessica 2026-04-12 ~arrival] Onboarded. Workers w24 + w25 confirmed idle. Acknowledged to Opus 1 at workspace:4.`
+
+
 
 - ~~Does `webhook-support.md` merge into `durable-subscriber.md` or stay standalone?~~ **DECIDED 2026-04-12 (Architect): MERGE.** `durable-subscriber.md §5.2` already specifies `WebhookSubscriber` as a primary use-case of the generalized primitive; `webhook-support.md`'s mechanism (host-side always-on stream subscriber, at-least-once delivery, cursor-stream persistence, topology component lowering) is a strict subset of DurableSubscriber's contract. DurableSubscriber additionally mandates W3C Trace Context propagation on outbound side effects — webhook-support.md lacks this, so merging is a strict architectural improvement, not just dedup. Merge plan: absorb webhook-support.md's concrete API surface (§6 `webhook()` middleware helper + topology lowering + host target config) into durable-subscriber.md as a dedicated subsection under §5.2, and mark `webhook-support.md` as SUPERSEDED in `proposal-index.md`.
 - Does `fireline.db()` session-flattened DB restructure in canonical-ids Phase 6 or post-refactor?
