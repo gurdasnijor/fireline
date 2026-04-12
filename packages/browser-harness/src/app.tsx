@@ -17,9 +17,11 @@ import {
   type Stream,
 } from '@agentclientprotocol/sdk'
 import { useLiveQuery } from '@tanstack/react-db'
+import { Sandbox, agent, compose, sandbox } from '@fireline/client'
+import type { SandboxHandle, SandboxStatus } from '@fireline/client'
+import { SandboxAdmin } from '@fireline/client/admin'
+import { trace } from '@fireline/client/middleware'
 import { createFirelineDB, type FirelineDB } from '@fireline/state'
-import { createFirelineHost } from '@fireline/client/host-fireline'
-import type { Host, HostHandle, HostStatus } from '@fireline/client/host'
 
 const STATE_STREAM_NAME =
   import.meta.env.VITE_FIRELINE_STATE_STREAM ?? 'fireline-harness-state'
@@ -123,7 +125,9 @@ export function App() {
             dbReady={dbReady}
             dbError={dbError}
             onHandleChanged={(_, status) => {
-              setDbEnabled(status?.kind === 'running' || status?.kind === 'idle')
+              setDbEnabled(
+                status === 'ready' || status === 'busy' || status === 'idle',
+              )
               setDbEpoch((current) => current + 1)
             }}
           />
@@ -173,13 +177,19 @@ function SessionHarness({
   dbActive: boolean
   dbReady: boolean
   dbError: string | null
-  onHandleChanged(handle: HostHandle | null, status: HostStatus | null): void
+  onHandleChanged(handle: SandboxHandle | null, status: SandboxStatus | null): void
 }) {
-  const host = useMemo<Host>(
+  const sandboxClient = useMemo(
     () =>
-      createFirelineHost({
-        controlPlaneUrl: CONTROL_PLANE_URL,
-        sharedStateUrl: STATE_PROXY_URL,
+      new Sandbox({
+        serverUrl: CONTROL_PLANE_URL,
+      }),
+    [],
+  )
+  const sandboxAdmin = useMemo(
+    () =>
+      new SandboxAdmin({
+        serverUrl: CONTROL_PLANE_URL,
       }),
     [],
   )
@@ -191,8 +201,8 @@ function SessionHarness({
   const [pendingPermission, setPendingPermission] = useState<RequestPermissionRequest | null>(null)
   const [agents, setAgents] = useState<CatalogAgent[]>([])
   const [selectedAgentId, setSelectedAgentId] = useState<string>('')
-  const [handle, setHandle] = useState<HostHandle | null>(null)
-  const [hostStatus, setHostStatus] = useState<HostStatus | null>(null)
+  const [handle, setHandle] = useState<SandboxHandle | null>(null)
+  const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null)
   const [runtimePending, setRuntimePending] = useState(false)
   const connectionRef = useRef<ClientSideConnection | null>(null)
   const websocketRef = useRef<WebSocket | null>(null)
@@ -200,7 +210,9 @@ function SessionHarness({
   const permissionResolverRef = useRef<PermissionResolver | null>(null)
   const bottomRef = useRef<HTMLDivElement | null>(null)
   const runtimeReady =
-    hostStatus?.kind === 'running' || hostStatus?.kind === 'idle'
+    sandboxStatus === 'ready' ||
+    sandboxStatus === 'busy' ||
+    sandboxStatus === 'idle'
 
   useEffect(() => {
     void refreshAgents()
@@ -218,7 +230,7 @@ function SessionHarness({
     if (!runtimeReady) {
       if (handle) {
         setLastError(
-          `Runtime is not ready yet (${hostStatus?.kind ?? 'unknown'})`,
+          `Runtime is not ready yet (${sandboxStatus ?? 'unknown'})`,
         )
         setStatus('error')
         return
@@ -403,10 +415,12 @@ function SessionHarness({
     }
   }
 
-  async function refreshStatus(currentHandle: HostHandle): Promise<HostStatus | null> {
+  async function refreshStatus(
+    currentHandle: SandboxHandle,
+  ): Promise<SandboxStatus | null> {
     try {
-      const next = await host.status(currentHandle)
-      setHostStatus(next)
+      const next = await sandboxAdmin.status(currentHandle.id)
+      setSandboxStatus(next)
       onHandleChanged(currentHandle, next)
       return next
     } catch (error) {
@@ -431,12 +445,10 @@ function SessionHarness({
         `${HARNESS_API_BASE}/resolve?agentId=${encodeURIComponent(selectedAgentId)}`,
       )
 
-      const next = await host.provision({
-        agentCommand: resolved.agentCommand,
-        metadata: {
-          name: 'browser-harness',
-          stateStream: STATE_STREAM_NAME,
-        },
+      const next = await sandboxClient.provision({
+        ...compose(sandbox(), [trace()], agent(resolved.agentCommand)),
+        name: 'browser-harness',
+        stateStream: STATE_STREAM_NAME,
       })
 
       setHandle(next)
@@ -464,10 +476,10 @@ function SessionHarness({
       setEvents([])
       const current = handle
       if (current) {
-        await host.stop(current)
+        await sandboxAdmin.destroy(current.id)
       }
       setHandle(null)
-      setHostStatus(null)
+      setSandboxStatus(null)
       onHandleChanged(null, null)
       pushEvent('runtime_stop', {})
     } catch (error) {
@@ -476,21 +488,6 @@ function SessionHarness({
       pushEvent('error', { message })
     } finally {
       setRuntimePending(false)
-    }
-  }
-
-  async function wakeSession() {
-    if (!handle) {
-      return
-    }
-    try {
-      const outcome = await host.wake(handle)
-      pushEvent('wake', outcome)
-      await refreshStatus(handle)
-    } catch (error) {
-      const message = toErrorMessage(error)
-      setLastError(message)
-      pushEvent('error', { message })
     }
   }
 
@@ -562,13 +559,6 @@ function SessionHarness({
           onClick={() => void disconnect({ preserveSessionId: true })}
         >
           Disconnect
-        </button>
-        <button
-          style={buttonStyle('#0e7490')}
-          disabled={!handle || runtimePending}
-          onClick={() => void wakeSession()}
-        >
-          Wake
         </button>
         <button
           style={buttonStyle('#6b7280')}
@@ -687,8 +677,8 @@ function SessionHarness({
             <KeyValueRow label="status" value={status} />
             <KeyValueRow label="sessionId" value={sessionId ?? 'none'} mono />
             <KeyValueRow
-              label="hostStatus"
-              value={hostStatus?.kind ?? 'not running'}
+              label="sandboxStatus"
+              value={sandboxStatus ?? 'not running'}
             />
             <KeyValueRow
               label="lastError"
