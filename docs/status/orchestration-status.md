@@ -87,8 +87,11 @@ detailed phase plans still live in the sibling proposal and execution docs.
 | ACP Canonical Identifiers | Phases 0-8 | Active. Phase 1 landed; Phase 1.5 dispatched; Phases 2-8 remain. | Internal phase gates only. | ~8 phases total; roughly 2-5 days per phase |
 | DurableSubscriber implementation | Design only; execution plan pending | Not started. Proposal stable, implementation not yet sequenced. | ACP Canonical Identifiers through Phase 5 | TBD; expected multi-phase implementation, to be formalized by w17 |
 | Durable Promises | Design only; execution plan pending | Not started. Proposal stable, imperative sugar only. | DurableSubscriber implementation | TBD; expected smaller follow-on after subscriber core, to be formalized by w18 |
-| CLI maturity (`npx fireline run` / `deploy`) | Roughly 3-4 phases | Independent track, not yet split into an execution plan. | Compose/start surface stabilization after canonical-identifiers | ~3-4 phases: stdio conductor path, deploy subcommand, binary packaging, polish |
-| Demo polish (`pi-acp-to-openclaw`) | Narrative + polish passes | Roadmap target only. | ACP Canonical Identifiers, DurableSubscriber, Durable Promises, CLI maturity | ~1-2 focused polish phases once blockers land |
+| CLI production-readiness (`npx fireline deploy`) | Gap analysis + `fireline deploy` + always-on wiring | Execution plan pending. Base `npx fireline run` already in `packages/fireline/`. | Compose/start stabilization + DurableSubscriber always-on profile | Small per Opus 1 rescope (2026-04-12) — ~200-line gap doc |
+| Hosted Fireline deployment | ~5-6 phases | Execution plan dispatched to w15 (2026-04-12 14:50). Architect direction: Fly-class Firecracker + co-located durable-streams + Anthropic primary. Always-on subsumed by DurableSubscriber profile. | CLI production-readiness, DurableSubscriber catalog | ~5-6 phases: MVP → deploy pipeline → multi-region → multi-provider → managed upgrades → ops |
+| Fleet UI positioning | Decision doc + minor wiring | Pending. `examples/flamecast-client/` is a working UI today. | canonical-ids Phase 4 (trace-context) for OTel visualization | Small per Opus 1 rescope (2026-04-12) — positioning + OTel wiring |
+| ACP registry client | `crates/fireline-tools/src/agent_catalog.rs` (currently TODO stub) + `fireline-agents add <id>` CLI | Execution plan pending. Unlocks `agent(['pi-acp'])` against public ACP registry. | Independent track | Small — ~3 phases |
+| Demo delivery synthesis (`pi-acp-to-openclaw`) | Narrative + E2E verification + anthropic-provider wiring validation | Orchestrator doc pending. | All above | ~1-2 focused polish phases; absorbs former item (6) anthropic-provider validation |
 
 ```text
 ACP Canonical Identifiers
