@@ -120,6 +120,9 @@ interface ProvisionRequest {
   readonly agentCommand: readonly string[]
   readonly topology: TopologySpec
   readonly resources: NonNullable<SandboxDefinition['resources']>
+  readonly envVars?: Readonly<Record<string, string>>
+  readonly labels?: Readonly<Record<string, string>>
+  readonly provider?: string
   readonly stateStream?: string
 }
 
@@ -130,6 +133,9 @@ function buildProvisionRequest(config: SandboxConfig): ProvisionRequest {
     agentCommand: [...config.agent.command],
     topology: buildTopology(config.middleware, name),
     resources: [...(config.sandbox.resources ?? [])],
+    envVars: config.sandbox.envVars,
+    labels: config.sandbox.labels,
+    provider: config.sandbox.provider,
     stateStream: config.stateStream,
   }
 }

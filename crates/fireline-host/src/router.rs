@@ -31,6 +31,12 @@ pub struct ProvisionRequest {
     pub agent_command: Vec<String>,
     #[serde(default)]
     pub resources: Vec<ResourceRef>,
+    #[serde(default)]
+    pub env_vars: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub labels: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub provider: Option<String>,
     pub state_stream: Option<String>,
     #[serde(default)]
     pub topology: TopologySpec,
@@ -79,9 +85,9 @@ async fn provision_sandbox(
         resources: request.resources,
         durable_streams_url: state.infra.durable_streams_url.clone(),
         state_stream: request.state_stream,
-        env_vars: std::collections::HashMap::new(),
-        labels: std::collections::HashMap::new(),
-        provider: None,
+        env_vars: request.env_vars,
+        labels: request.labels,
+        provider: request.provider,
     };
     let sandbox = state.dispatcher.create(config).await?;
     Ok((StatusCode::CREATED, Json(sandbox)))
