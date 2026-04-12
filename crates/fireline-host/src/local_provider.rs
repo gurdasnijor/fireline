@@ -5,8 +5,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use fireline_sandbox::{
-    ProvisionSpec, LocalRuntimeLauncher, ManagedRuntime, MountedResource, HostDescriptor,
-    RuntimeLaunch, RuntimeRegistry, HostStatus,
+    HostDescriptor, HostStatus, LocalRuntimeLauncher, ManagedRuntime, MountedResource,
+    ProvisionSpec, RuntimeLaunch, RuntimeRegistry,
 };
 use tokio::process::{Child, Command};
 use tracing::{info, instrument};
@@ -110,9 +110,10 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
         node_id: String,
         mounted_resources: Vec<MountedResource>,
     ) -> Result<RuntimeLaunch> {
-        let state_stream_name = spec.state_stream.clone().unwrap_or_else(|| {
-            format!("fireline-state-{}", sanitize_state_stream_key(&host_key))
-        });
+        let state_stream_name = spec
+            .state_stream
+            .clone()
+            .unwrap_or_else(|| format!("fireline-state-{}", sanitize_state_stream_key(&host_key)));
         let advertised_state_stream_url =
             join_stream_url(&spec.durable_streams_url, &state_stream_name);
         let mut command = Command::new(&self.fireline_bin);
@@ -188,7 +189,16 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
                     child,
                     stop_timeout: self.stop_timeout,
                 };
-                let _ = runtime.try_shutdown().await;
+                if let Err(shutdown_error) = runtime.try_shutdown().await {
+                    tracing::warn!(
+                        host_key,
+                        error = %shutdown_error,
+                        "cleanup child runtime after startup failure failed"
+                    );
+                    return Err(error.context(format!(
+                        "cleanup child runtime after startup failure also failed: {shutdown_error:#}"
+                    )));
+                }
                 return Err(error);
             }
         };
