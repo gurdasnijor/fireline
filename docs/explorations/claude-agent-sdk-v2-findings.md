@@ -1,8 +1,9 @@
 # Claude Agent SDK v2 — API surface verification
 
-> **Status:** findings report, no code / interface changes recommended from this alone.
-> **Produced for:** the `host-claude` satisfier lane (Step 3 / Tier E in [`../proposals/runtime-host-split.md#7-host--sandbox--orchestrator-reframe-post-stress-test`](../proposals/runtime-host-split.md)).
-> **Reviews:** [`../proposals/client-primitives.md`](../proposals/client-primitives.md) §"Stress-test example — Claude Agent SDK v2 host" (lines ~653–774).
+> **STATUS (2026-04-11):** thought experiment. The `host-claude` satisfier this doc was produced for was attempted, landed briefly, and was **deleted in commit `37db346`** along with its dedicated section in [`../proposals/client-primitives.md`](../proposals/client-primitives.md) and its tier slot in [`../proposals/runtime-host-split.md`](../proposals/runtime-host-split.md). The reasoning chain below is retained as design history because it's the chain that led to the Host/Sandbox primitive cleave and the `Host.provision` rename (landed in the same `37db346` commit — `createSession → provision`, `SessionHandle → HostHandle` carrying `acp` + `state` endpoints, `SessionSpec → ProvisionSpec`, `SessionStatus → HostStatus`, `stopSession → stop`, `sendInput / SessionInput / SessionOutput` deleted). The SDK-surface findings themselves are frozen at the 2026-04-11 fetch; anyone revisiting a ClaudeHost satisfier should re-fetch the preview docs and verify against the latest `unstable_v2_*` surface before trusting this document as current.
+>
+> **Produced for:** the (then-pending) `host-claude` satisfier lane.
+> **Reviews:** [`../proposals/client-primitives.md`](../proposals/client-primitives.md) §"Stress test, in retrospect — the Claude Agent SDK v2 thought experiment" (this section was formerly a full ~200-line code walk; the post-`37db346` version is a short historical pointer back to this doc).
 > **Fetched from:** https://code.claude.com/docs/en/agent-sdk/typescript-v2-preview on 2026-04-11.
 > **Version anchor:** page header is *"TypeScript SDK V2 interface (preview)"* with the explicit warning *"The V2 interface is an **unstable preview**. APIs may change based on feedback before becoming stable."* All public entrypoints are prefixed `unstable_v2_*`. **There is no semver version number on the page** — the version is implicitly tied to the current `@anthropic-ai/claude-agent-sdk` npm package, with `unstable_v2_*` exports.
 

@@ -11,7 +11,8 @@ This is the third handoff in the day's sequence. Read those two first for the fu
 
 - **Crate restructure** — dispatched (codex workspace:13); manifest at `c9a3e8e`
 - **TLA Level 2** — dispatched (codex workspace:12)
-- **Tier 4 host-claude** — landed `2348428`
+- **Tier 4 host-claude** — landed `2348428`, then **deleted in `37db346`** along with the rest of the Claude-host satisfier code; design lessons preserved in `docs/explorations/claude-agent-sdk-v2-findings.md` (retained as thought-experiment history)
+- **Host primitive rename** — landed `37db346`: `createSession → provision`, `SessionHandle → HostHandle` (now carries `acp` + `state` endpoints), `SessionSpec → ProvisionSpec`, `SessionStatus → HostStatus`, `stopSession → stop`, `sendInput` / `SessionInput` / `SessionOutput` deleted; `packages/client/src/host-claude/` removed. Doc sync across `client-primitives.md`, `deployment-and-remote-handoff.md`, `demo-walkthrough.md`, `demo-runbook.md`, `runtime-host-split.md`, and the findings doc above
 - **Tier 5 browser-harness** — in progress on workspace:4
 
 ## TL;DR — where you're picking up
