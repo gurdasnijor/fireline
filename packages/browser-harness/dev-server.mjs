@@ -7,8 +7,6 @@ import { fileURLToPath } from 'node:url'
 const packageDir = dirname(fileURLToPath(import.meta.url))
 const repoRoot = dirname(dirname(packageDir))
 const tmpDir = join(packageDir, '.tmp')
-const runtimeRegistryPath = join(tmpDir, 'runtimes.toml')
-const peerDirectoryPath = join(tmpDir, 'peers.toml')
 const firelineBin = join(repoRoot, 'target', 'debug', 'fireline')
 const firelineStreamsBin = join(repoRoot, 'target', 'debug', 'fireline-streams')
 const firelineTestyLoadBin = join(repoRoot, 'target', 'debug', 'fireline-testy-load')
@@ -175,10 +173,6 @@ async function startControlPlane() {
       durableStreamsUrl,
       '--fireline-bin',
       firelineBin,
-      '--runtime-registry-path',
-      runtimeRegistryPath,
-      '--peer-directory-path',
-      peerDirectoryPath,
       '--startup-timeout-ms',
       '20000',
       '--stop-timeout-ms',
