@@ -10,6 +10,7 @@ description = "Tool registry and peer transport primitives for Fireline"
 anyhow.workspace = true
 async-trait.workspace = true
 durable-streams.workspace = true
+dirs.workspace = true
 fireline-acp-ids.workspace = true
 futures.workspace = true
 reqwest.workspace = true
