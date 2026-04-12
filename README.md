@@ -87,6 +87,83 @@ Middleware composes. Add `peer(['agent:reviewer'])` to route cross-agent calls. 
 
 ---
 
+## Observe everything — reactively, from the stream
+
+Every agent effect lands on a durable stream. `@fireline/state` materializes it into reactive collections you query like a database — no polling, no custom APIs.
+
+```typescript
+import { createFirelineDB } from '@fireline/state'
+import { useLiveQuery } from '@tanstack/react-db'
+import { eq } from '@tanstack/db'
+
+const db = createFirelineDB({ stateStreamUrl: handle.state.url })
+
+// React component — re-renders automatically as the agent works
+function AgentActivity({ sessionId }: { sessionId: string }) {
+  const turns = useLiveQuery(q =>
+    q.from({ t: db.collections.promptTurns })
+      .where(({ t }) => eq(t.sessionId, sessionId))
+  )
+  const pending = useLiveQuery(q =>
+    q.from({ p: db.collections.permissions })
+      .where(({ p }) => eq(p.state, 'pending'))
+  )
+  return <>{turns.map(t => <Turn key={t.promptTurnId} turn={t} />)}</>
+}
+```
+
+The stream contains sessions, turns, chunks, tool calls, permissions, cross-agent lineage — all queryable in real-time. Build a dashboard, wire up a Slack notification, trigger a webhook — the stream is the API.
+
+---
+
+## Durable orchestration — subscribe, don't poll
+
+Need to know when an agent finishes? When it needs approval? When a multi-step pipeline advances? Subscribe to the stream. The durable log IS the orchestration mechanism.
+
+```typescript
+// Wait for agent completion — durably, without holding a connection open
+db.collections.promptTurns.subscribe(turns => {
+  const done = turns.find(t => t.sessionId === id && t.state === 'completed')
+  if (done) notifyUser(done)
+})
+
+// Auto-approve tool calls matching a policy — the approval gate is a stream event
+db.collections.permissions.subscribe(perms => {
+  for (const p of perms.filter(p => p.state === 'pending')) {
+    if (matchesPolicy(p)) approveViaStream(p.requestId)
+  }
+})
+
+// React to cross-agent handoffs
+db.collections.childSessionEdges.subscribe(edges => {
+  // Agent A called Agent B — the lineage graph is in the stream
+})
+```
+
+No `whileLoop()` orchestrator. No `wake()` verb. No polling. The durable stream pushes events to you. If your process crashes and restarts, replay from the last offset — nothing is lost.
+
+---
+
+## Sessions survive everything
+
+Kill a sandbox. Restart it on a different host. The session continues.
+
+```typescript
+// Host A — local dev
+const handle1 = await compose(sandbox(), middleware([trace()]), agent([...]))
+  .start({ serverUrl: 'http://localhost:4440', stateStream: 'my-session' })
+// ... prompt a few turns, then stop
+
+// Host B — cloud, different machine, different continent
+const handle2 = await compose(sandbox(), middleware([trace()]), agent([...]))
+  .start({ serverUrl: 'https://prod.internal:4440', stateStream: 'my-session' })
+// session/load picks up from exactly where Host A left off
+```
+
+The session is the stream, not the sandbox. Both hosts read and write the same durable log. The agent on Host B replays the full conversation history and continues. Zero state is lost.
+
+---
+
 ## Multi-agent topologies
 
 ```typescript
