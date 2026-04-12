@@ -1945,7 +1945,7 @@ pub(crate) async fn wait_for_session_record(
     }
 }
 
-/// Append a synthetic `approval_resolved` permission event to a state
+/// Append an external `approval_resolved` permission event to a state
 /// stream as an "external producer". Used by approval-gate contract
 /// tests that need to unblock a suspended prompt by simulating an
 /// approval service write.
@@ -1992,9 +1992,9 @@ pub(crate) async fn append_approval_resolved(
 
 /// Wait for the approval gate to publish its `permission_request`
 /// envelope for a given session and return `(session_id, request_id)`
-/// parsed from the envelope. The request_id is reconstructed from the
-/// envelope key, which has the shape `"<session>:<request_id>"` as
-/// emitted by `ApprovalGateComponent::emit_permission_request`.
+/// parsed from the envelope. The returned `request_id` is the canonical
+/// JSON-RPC id the approval gate copied from the intercepted ACP prompt
+/// request and emitted in the `permission_request` payload.
 pub(crate) async fn wait_for_permission_request(
     state_stream_url: &str,
     session_id: &str,

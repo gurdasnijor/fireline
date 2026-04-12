@@ -258,9 +258,12 @@ impl StateProjector {
                 if !is_canonical_client_request(req) {
                     return Vec::new();
                 }
+                let Some(request_id) = request_id_from_json_value(&req.id) else {
+                    return Vec::new();
+                };
                 self.correlation
                     .pending_initialize
-                    .insert(request_id_key(&request_id_from_json_value(&req.id)));
+                    .insert(request_id_key(&request_id));
                 self.inherited_lineage = parse_fireline_lineage(&req.params);
                 Vec::new()
             }
@@ -268,7 +271,9 @@ impl StateProjector {
                 if !is_canonical_client_request(req) {
                     return Vec::new();
                 }
-                let request_id = request_id_from_json_value(&req.id);
+                let Some(request_id) = request_id_from_json_value(&req.id) else {
+                    return Vec::new();
+                };
                 let request_key = request_id_key(&request_id);
                 let pending = PendingRequestRow {
                     request_id: request_id.clone(),
@@ -303,7 +308,9 @@ impl StateProjector {
                     .unwrap_or("unknown")
                     .to_string();
                 let session_id = SessionId::from(session_id);
-                let request_id = request_id_from_json_value(&req.id);
+                let Some(request_id) = request_id_from_json_value(&req.id) else {
+                    return Vec::new();
+                };
                 let request_key = request_id_key(&request_id);
                 let prompt_turn_id = self.next_prompt_turn_id();
                 let trace_id = self
@@ -368,7 +375,10 @@ impl StateProjector {
     }
 
     fn handle_response(&mut self, resp: &ResponseEvent) -> Vec<StateChange> {
-        let request_key = request_id_key(&request_id_from_json_value(&resp.id));
+        let Some(request_id) = request_id_from_json_value(&resp.id) else {
+            return Vec::new();
+        };
+        let request_key = request_id_key(&request_id);
         let mut changes = Vec::new();
 
         if self.correlation.pending_initialize.remove(&request_key) {
@@ -642,8 +652,18 @@ fn first_text_block(blocks: &[Value]) -> Option<String> {
     })
 }
 
-fn request_id_from_json_value(value: &Value) -> RequestId {
-    serde_json::from_value(value.clone()).unwrap_or_else(|_| RequestId::from(value.to_string()))
+fn request_id_from_json_value(value: &Value) -> Option<RequestId> {
+    match serde_json::from_value(value.clone()) {
+        Ok(request_id) => Some(request_id),
+        Err(error) => {
+            tracing::error!(
+                ?value,
+                ?error,
+                "state projector dropped event with malformed canonical JSON-RPC request id"
+            );
+            None
+        }
+    }
 }
 
 fn request_id_key(request_id: &RequestId) -> String {

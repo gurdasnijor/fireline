@@ -7,11 +7,12 @@
 //! - **Deny** the request outright, returning a tool-level error
 //!   so the agent sees a failure instead of the requested action
 //! - **RequireApproval** — emit a `permission_request` event to the
-//!   durable state stream with a unique request id, then block the
-//!   request until a matching `approval_resolved` event appears on
-//!   the stream. The request is forwarded to the agent only if the
-//!   resolution event carries `allow: true`. A `Deny` resolution
-//!   surfaces as a gate error the agent never sees.
+//!   durable state stream keyed by the intercepted ACP JSON-RPC
+//!   `request_id`, then block the request until a matching
+//!   `approval_resolved` event appears on the stream. The request is
+//!   forwarded to the agent only if the resolution event carries
+//!   `allow: true`. A `Deny` resolution surfaces as a gate error the
+//!   agent never sees.
 //!
 //! # Why prompt-level, not tool-call-level
 //!
@@ -42,7 +43,6 @@ use sacp::schema::{ContentBlock, PromptRequest};
 use sacp::{Agent, Client, ConnectTo, Proxy};
 use serde::Serialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 #[derive(Clone, Default)]
 pub struct ApprovalConfig {
@@ -179,30 +179,6 @@ impl ApprovalGateComponent {
             })
             .collect::<Vec<_>>()
             .join(" ")
-    }
-
-    // The approval gate runs before the state projector materializes a
-    // prompt_turn row, so the final prompt_turn_id is not directly available
-    // here. Prefer a caller-supplied Fireline trace id when present because
-    // it becomes the downstream prompt_turn_id; otherwise fall back to a
-    // stable serialization of the prompt payload so replay of the same prompt
-    // in the same session resolves to the same approval request id.
-    fn prompt_identity(request: &PromptRequest) -> String {
-        request
-            .meta
-            .as_ref()
-            .and_then(fireline_trace_id)
-            .unwrap_or_else(|| {
-                serde_json::to_string(&request.prompt)
-                    .unwrap_or_else(|_| ApprovalGateComponent::join_prompt_text(request))
-            })
-    }
-
-    fn approval_request_id(request: &PromptRequest, policy_id: usize) -> RequestId {
-        let prompt_identity = Self::prompt_identity(request);
-        let material = format!("{}:{policy_id}:{prompt_identity}", request.session_id);
-        let digest = Sha256::digest(material.as_bytes());
-        RequestId::from(format!("{digest:x}"))
     }
 
     async fn rebuild_from_log(&self, session_id: &SessionId) -> Result<(), sacp::Error> {
@@ -448,19 +424,6 @@ fn approval_timeout_error(session_id: &SessionId) -> sacp::Error {
     ))
 }
 
-fn fireline_trace_id(meta: &serde_json::Map<String, Value>) -> Option<String> {
-    meta.get("fireline")
-        .and_then(Value::as_object)
-        .and_then(|fireline| fireline.get("traceId"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| {
-            meta.get("fireline/trace-id")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PermissionEvent {
@@ -512,15 +475,14 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                                 .forward_response_to(responder);
                         }
 
-                        let policy_match =
-                            this.config.policies.iter().enumerate().find_map(|(policy_id, policy)| {
-                                policy
-                                    .match_rule
-                                    .matches_prompt(&prompt_text)
-                                    .then(|| (policy_id, policy.action, policy.reason.clone()))
-                            });
+                        let policy_match = this.config.policies.iter().find_map(|policy| {
+                            policy
+                                .match_rule
+                                .matches_prompt(&prompt_text)
+                                .then(|| (policy.action, policy.reason.clone()))
+                        });
 
-                        let Some((policy_id, action, reason)) = policy_match else {
+                        let Some((action, reason)) = policy_match else {
                             return cx
                                 .send_request_to(Agent, request)
                                 .forward_response_to(responder);
@@ -533,8 +495,14 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                                 )),
                             ),
                             ApprovalAction::RequireApproval => {
-                                let request_id =
-                                    ApprovalGateComponent::approval_request_id(&request, policy_id);
+                                let request_id_value = responder.id();
+                                let Some(request_id) = request_id_from_value(&request_id_value) else {
+                                    return responder.respond_with_error(sacp::util::internal_error(
+                                        format!(
+                                            "approval_gate requires canonical JSON-RPC request id; got {request_id_value}"
+                                        ),
+                                    ));
+                                };
                                 let should_emit = {
                                     let mut pending_sessions = this
                                         .pending_sessions
@@ -852,33 +820,20 @@ mod tests {
     }
 
     #[test]
-    fn approval_request_id_uses_fireline_trace_id_when_present() {
-        let mut fireline = serde_json::Map::new();
-        fireline.insert("traceId".to_string(), Value::String("trace-123".to_string()));
-        let mut meta = serde_json::Map::new();
-        meta.insert("fireline".to_string(), Value::Object(fireline));
-
-        let request = PromptRequest::new(
-            sacp::schema::SessionId::from("sess-1"),
-            vec![ContentBlock::from("same prompt".to_string())],
-        )
-        .meta(meta);
-
-        let first = ApprovalGateComponent::approval_request_id(&request, 0);
-        let second = ApprovalGateComponent::approval_request_id(&request, 0);
-        assert_eq!(first, second);
+    fn request_id_from_value_accepts_canonical_string_and_number_ids() {
+        assert_eq!(
+            request_id_from_value(&Value::String("req-123".to_string())),
+            Some(RequestId::from("req-123".to_string()))
+        );
+        assert_eq!(
+            request_id_from_value(&Value::Number(serde_json::Number::from(42))),
+            Some(serde_json::from_value(serde_json::json!(42)).expect("numeric request id"))
+        );
     }
 
     #[test]
-    fn approval_request_id_changes_with_policy_id() {
-        let request = PromptRequest::new(
-            sacp::schema::SessionId::from("sess-1"),
-            vec![ContentBlock::from("same prompt".to_string())],
-        );
-
-        let first = ApprovalGateComponent::approval_request_id(&request, 0);
-        let second = ApprovalGateComponent::approval_request_id(&request, 1);
-        assert_ne!(first, second);
+    fn request_id_from_value_rejects_non_json_rpc_ids() {
+        assert_eq!(request_id_from_value(&serde_json::json!({"bad": "id"})), None);
     }
 
     #[tokio::test]

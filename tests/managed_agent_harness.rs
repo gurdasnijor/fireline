@@ -285,8 +285,8 @@ async fn harness_append_order_is_stable_under_continued_writes() -> Result<()> {
 ///
 /// Action: fire a prompt containing the needle in a background task so it
 /// reaches the gate and blocks. Poll the state stream for the
-/// `permission_request` envelope emitted by the gate, extract the generated
-/// `requestId` from it, then append a synthetic `approval_resolved` event
+/// `permission_request` envelope emitted by the gate, extract the canonical
+/// ACP `requestId` from it, then append an external `approval_resolved` event
 /// with that same `requestId` and `allow: true` through a fresh external
 /// producer (simulating an approval service).
 ///
