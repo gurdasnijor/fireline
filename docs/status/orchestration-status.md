@@ -260,19 +260,22 @@ Deferred (background / blocked):
 - Stream-backed peer discovery (`StreamDeploymentPeerRegistry`) — already in tree
 - Durable approval crash/resume — proven (`8afcfff` verification doc)
 
-### Tracks (demo-readiness lanes)
+### Tracks (demo-readiness lanes — CORRECTED per Opus 1 directive)
+
+Original J1/J2 drifted from charter (J1 was Tier C not Tier A; J2 collided with PM-A's QA-2 on w13). Tracks below are the **demo-blocking** 5 from the onboarding.
 
 | Track | Lane | Scope | Dispatch status |
 |---|---|---|---|
-| **J1** | Hosted deployment Phase 2 — Tier C spec-stream boot path | Implement Tier C boot per `hosted-fireline-deployment.md §Phase 2` on top of `DeploymentSpecSubscriber` catalog entry. Spec resource read path + sandbox provisioning wiring in `crates/fireline-host` / `fireline-conductor`. Feature-flag gated. CI-first per contention rules. | **Queued for w24.** Dispatching first. |
-| **J2** | ACP Registry Phase 3 E2E smoke | Add E2E verification that `agent(['pi-acp'])` resolves via `AgentCatalog` client, compose fallback kicks in when registry unreachable, and `fireline-agents add pi-acp` produces an idempotent resolved entry. Lives under `tests/acp_registry_e2e.rs` + matching CI lane. | **Queued for w25.** Dispatching first. |
-| **J3** | CLI Phase 2 design refinement (`fireline deploy --to <platform>`) | Doc-only refinement of `fireline-cli-execution.md §Phase 2` against tiered deploy model. Align language with Tier A OCI (landed) and Tier C spec-stream (Track J1). No code. Followup to Architect for direction review before implementation dispatch. | **Queued.** Dispatches after J1/J2 in flight. |
-| **J4** | Observability Phase 2 — span emission + peer `_meta` injection | Instrument `fireline.session.created`, `fireline.prompt.request`, `fireline.tool.call`, `fireline.approval.requested`, `fireline.approval.resolved`, plus `peer.call.out/in` with `_meta.traceparent` injection per `observability-integration.md §Phase 2`. Defer peer injection to post-canonical-ids-Phase-4 if that gate is not yet green; span emission for session/prompt/tool/approval can land first. | **Queued.** Dispatches in parallel once J1/J2 are in flight. |
-| **J5** | Demo orchestrator polish — `pi-acp-to-openclaw.md` + stage-safe script | Update demo doc to reflect landed substrate (canonical-ids Phase 2, DeploymentSpecSubscriber, ACP registry, OTel Phase 1). Add stage-safe operator script for Demo 1 (Unkillable Agent) + Demo 2 (Approval Gate) per `DEMO-PLAN.md`. Doc-only. | **Queued.** Fills the third slot after Tracks J1/J2/J4 are in flight. |
+| **T1** | `fireline deploy` thin wrapper | CLI command in `packages/fireline/src/cli.ts` that chains `fireline build` + target-native deploy (`flyctl deploy` / `wrangler deploy` / `docker compose up -d` / `kubectl apply`). No new HTTP surface. Per `hosted-deploy-surface-decision.md §CLI surface`. | **Dispatched to w25** (redirected from J2). |
+| **T2** | Tier A OCI end-to-end smoke on ONE target | Pick CF Containers OR Fly.io. Prove the w17/landed OCI image: deploys, ACP up, prompt round-trips, host restart survives, durable-streams attached storage persists. Review doc under `docs/reviews/smoke-tier-a-{target}-2026-04-12.md`. | **Dispatched to w24** (redirected from J1). |
+| **T3** | Peer-to-peer E2E recording | Monitor FQA-5 (PM-A's w18). When FQA-5 lands green, capture peer-to-peer demo recording + write operator driver script for demo replay. Shared track with PM-A. | **Queued.** Wait for FQA-5 signal from PM-A. |
+| **T4** | OTel Phase 2 minimal (5 spans + `_meta` injection) | Instrument `fireline.session.created`, `fireline.prompt.request`, `fireline.tool.call`, `fireline.approval.requested`, `fireline.approval.resolved` + peer `_meta.traceparent` inject/extract per `observability-integration.md §Phase 2`. Peer injection may defer post-canonical-ids-Phase-4; the 5 span emitters land first. | **Queued.** Dispatches in parallel once T1 or T2 is in flight. |
+| **T5** | Betterstack wiring + demo script polish | Set up Betterstack source + saved dashboard view over the OTel traces from T4. Extend `pi-acp-to-openclaw.md` demo script with stage-safe choreography for Demo 1 (Unkillable Agent), Demo 2 (Approval Gate), pre-staged artifacts, narration, failure recovery plan. | **Queued.** Dispatches after T1/T2 land + T4 is emitting spans. |
 
 ### Dispatch log
 
 - `[Jessica 2026-04-12 ~arrival] Onboarded. Workers w24 + w25 confirmed idle. Acknowledged to Opus 1 at workspace:4.`
+- `[Jessica 2026-04-12 ~arrival+15m] Initial J1/J2 dispatches were wrong scope (J1=Tier C vs required Tier A; J2 collided with PM-A QA-2). Opus 1 caught before deep work. Sent scope redirects to w24 (→ T2 Tier A smoke) and w25 (→ T1 fireline deploy wrapper). 5-track queue above reflects corrected demo-blocking list. Acknowledged correction back to Opus 1.`
 
 
 
