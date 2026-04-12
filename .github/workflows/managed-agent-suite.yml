@@ -59,6 +59,9 @@ jobs:
             --test runtime_index_agreement \
             -- --nocapture --test-threads=1
 
+      - name: Run fireline-harness unit tests
+        run: cargo test -p fireline-harness --lib
+
       # `tests/control_plane_docker.rs` is NOT in the workflow yet:
       # the test triggers a fresh `docker build` of
       # `docker/fireline-runtime.Dockerfile` on every run, and a full
