@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::{Request, State};
-use axum::http::{header, HeaderMap};
+use axum::http::{HeaderMap, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
@@ -103,7 +103,7 @@ mod tests {
     use axum::routing::get;
     use axum::{Extension, Router};
 
-    use super::{require_runtime_bearer, RuntimeTokenClaims, RuntimeTokenStore};
+    use super::{RuntimeTokenClaims, RuntimeTokenStore, require_runtime_bearer};
 
     #[test]
     fn issued_tokens_validate_until_expiry() {

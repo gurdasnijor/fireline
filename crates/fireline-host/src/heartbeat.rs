@@ -1,5 +1,5 @@
 use anyhow::Result;
-use fireline_runtime::RuntimeRegistry;
+use fireline_sandbox::RuntimeRegistry;
 
 #[derive(Clone)]
 pub struct HeartbeatTracker {
@@ -29,7 +29,7 @@ impl HeartbeatTracker {
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use fireline_runtime::RuntimeRegistry;
+    use fireline_sandbox::RuntimeRegistry;
 
     use super::HeartbeatTracker;
 

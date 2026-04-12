@@ -4,12 +4,13 @@ use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use fireline_runtime::{
-    CreateRuntimeSpec, HeartbeatReport, RuntimeDescriptor, RuntimeHost, RuntimeRegistration,
+use fireline_sandbox::RuntimeHost;
+use fireline_session::{
+    CreateRuntimeSpec, HeartbeatReport, RuntimeDescriptor, RuntimeRegistration, RuntimeStatus,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{require_runtime_bearer, RuntimeTokenClaims, RuntimeTokenStore};
+use crate::auth::{RuntimeTokenClaims, RuntimeTokenStore, require_runtime_bearer};
 use crate::heartbeat::HeartbeatTracker;
 
 #[derive(Clone)]
@@ -129,7 +130,7 @@ async fn register_runtime(
             .runtime_host
             .get(&runtime_key)?
             .map(|runtime| runtime.status),
-        Some(fireline_runtime::RuntimeStatus::Stopped)
+        Some(RuntimeStatus::Stopped)
     ) {
         return Err(ControlPlaneError::conflict(format!(
             "runtime '{runtime_key}' is stopped and cannot re-register"
@@ -158,8 +159,7 @@ async fn heartbeat_runtime(
     })?;
     if matches!(
         current.status,
-        fireline_runtime::RuntimeStatus::Stopped
-            | fireline_runtime::RuntimeStatus::Broken
+        RuntimeStatus::Stopped | RuntimeStatus::Broken
     ) {
         return Err(ControlPlaneError::gone(format!(
             "runtime '{runtime_key}' cannot heartbeat from status '{:?}'",

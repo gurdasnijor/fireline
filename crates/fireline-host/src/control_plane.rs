@@ -1,117 +1,47 @@
-mod auth;
-mod heartbeat;
-mod local_provider;
-mod router;
-
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::{Parser, ValueEnum};
-use fireline_runtime::{
+use fireline_sandbox::{
     DockerProvider, DockerProviderConfig, LocalProvider, RuntimeHost, RuntimeManager,
-    RuntimeRegistry, RuntimeTokenIssuer,
+    RuntimeRegistry, RuntimeStatus, RuntimeTokenIssuer,
 };
-use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::EnvFilter;
 
-use self::auth::RuntimeTokenStore;
-use self::heartbeat::HeartbeatTracker;
-use self::local_provider::ChildProcessRuntimeLauncher;
-use self::router::{build_router, AppState};
+use crate::auth::RuntimeTokenStore;
+use crate::heartbeat::HeartbeatTracker;
+use crate::local_provider::ChildProcessRuntimeLauncher;
+use crate::router::{AppState, build_router};
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum ProviderMode {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderMode {
     Local,
     Docker,
 }
 
-#[derive(Debug, Parser)]
-#[command(
-    name = "fireline-control-plane",
-    about = "Fireline control plane for runtime lifecycle"
-)]
-struct Cli {
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
-
-    #[arg(long, default_value_t = 4440)]
-    port: u16,
-
-    /// Optional path to write the actual bound `host:port` to after the
-    /// listener is up. Used by tests that pass `--port 0` and need to learn
-    /// the OS-assigned port without a TOCTOU reservation race.
-    #[arg(long)]
-    listen_addr_file: Option<PathBuf>,
-
-    #[arg(long)]
-    fireline_bin: PathBuf,
-
-    #[arg(long)]
-    runtime_registry_path: Option<PathBuf>,
-
-    #[arg(long)]
-    peer_directory_path: Option<PathBuf>,
-
-    #[arg(long, default_value_t = 20_000)]
-    startup_timeout_ms: u64,
-
-    #[arg(long, default_value_t = 10_000)]
-    stop_timeout_ms: u64,
-
-    #[arg(long, value_enum, default_value_t = ProviderMode::Local)]
-    provider: ProviderMode,
-
-    #[arg(
-        long,
-        env = "FIRELINE_CONTROL_PLANE_PREFER_PUSH",
-        default_value_t = false
-    )]
-    prefer_push: bool,
-
-    #[arg(long, default_value_t = 5_000)]
-    heartbeat_scan_interval_ms: u64,
-
-    #[arg(long, default_value_t = 30_000)]
-    stale_timeout_ms: u64,
-
-    #[arg(long)]
-    shared_stream_base_url: Option<String>,
-
-    #[arg(long)]
-    docker_build_context: Option<PathBuf>,
-
-    #[arg(long, default_value = "docker/fireline-runtime.Dockerfile")]
-    dockerfile: PathBuf,
-
-    #[arg(long, default_value = "fireline-runtime:dev")]
-    docker_image: String,
+#[derive(Clone, Debug)]
+pub struct ControlPlaneConfig {
+    pub host: std::net::IpAddr,
+    pub port: u16,
+    pub listen_addr_file: Option<PathBuf>,
+    pub fireline_bin: PathBuf,
+    pub runtime_registry_path: Option<PathBuf>,
+    pub peer_directory_path: Option<PathBuf>,
+    pub startup_timeout: Duration,
+    pub stop_timeout: Duration,
+    pub provider: ProviderMode,
+    pub prefer_push: bool,
+    pub heartbeat_scan_interval: Duration,
+    pub stale_timeout: Duration,
+    pub shared_stream_base_url: Option<String>,
+    pub docker_build_context: Option<PathBuf>,
+    pub dockerfile: PathBuf,
+    pub docker_image: String,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let span_events = if std::env::var_os("FIRELINE_TRACE_SPANS").is_some() {
-        FmtSpan::CLOSE
-    } else {
-        FmtSpan::NONE
-    };
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .with_span_events(span_events)
-        .without_time()
-        .init();
-
-    let cli = Cli::parse();
-    let host: std::net::IpAddr = cli.host.parse().context("parse control-plane host")?;
-
-    // Bind the listener first so we know the actual port before constructing
-    // anything that needs the base URL. This closes the TOCTOU race the test
-    // harness used to hit when it would reserve-and-drop a port and then pass
-    // the integer to this subprocess, which might lose the race to another
-    // test binary starting in parallel.
-    let bind_addr = SocketAddr::new(host, cli.port);
+pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
+    let bind_addr = SocketAddr::new(config.host, config.port);
     let listener = tokio::net::TcpListener::bind(bind_addr)
         .await
         .with_context(|| format!("bind control plane listener on {bind_addr}"))?;
@@ -119,9 +49,9 @@ async fn main() -> Result<()> {
         .local_addr()
         .context("resolve control plane bound address")?;
     let bound_port = bound_addr.port();
-    let base_url = control_plane_base_url(host, bound_port);
+    let base_url = control_plane_base_url(config.host, bound_port);
 
-    if let Some(listen_addr_file) = cli.listen_addr_file.as_ref() {
+    if let Some(listen_addr_file) = config.listen_addr_file.as_ref() {
         if let Some(parent) = listen_addr_file.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create listen-addr-file parent {}", parent.display()))?;
@@ -134,7 +64,7 @@ async fn main() -> Result<()> {
         })?;
     }
 
-    let runtime_registry_path = match cli.runtime_registry_path {
+    let runtime_registry_path = match config.runtime_registry_path {
         Some(path) => path,
         None => RuntimeRegistry::default_path()?,
     };
@@ -142,30 +72,30 @@ async fn main() -> Result<()> {
     let token_store = RuntimeTokenStore::default();
     let heartbeat_tracker = HeartbeatTracker::new(runtime_registry.clone());
     let launcher = Arc::new(ChildProcessRuntimeLauncher::new(
-        cli.fireline_bin,
+        config.fireline_bin,
         runtime_registry.clone(),
         runtime_registry_path,
-        cli.peer_directory_path,
-        cli.prefer_push,
+        config.peer_directory_path,
+        config.prefer_push,
         base_url.clone(),
-        cli.shared_stream_base_url.clone(),
+        config.shared_stream_base_url.clone(),
         token_store.clone(),
-        Duration::from_millis(cli.startup_timeout_ms),
-        Duration::from_millis(cli.stop_timeout_ms),
+        config.startup_timeout,
+        config.stop_timeout,
     ));
     let mut runtime_manager = RuntimeManager::new(Arc::new(LocalProvider::new(launcher)));
-    if matches!(cli.provider, ProviderMode::Docker) {
-        let build_context = cli
+    if matches!(config.provider, ProviderMode::Docker) {
+        let build_context = config
             .docker_build_context
             .clone()
             .unwrap_or(default_repo_root()?);
         let docker_provider = Arc::new(DockerProvider::new(
             DockerProviderConfig {
                 control_plane_url: base_url.clone(),
-                shared_stream_base_url: cli.shared_stream_base_url.clone(),
-                image: cli.docker_image.clone(),
+                shared_stream_base_url: config.shared_stream_base_url.clone(),
+                image: config.docker_image.clone(),
                 build_context,
-                dockerfile: cli.dockerfile.clone(),
+                dockerfile: config.dockerfile.clone(),
             },
             Arc::new(ControlPlaneTokenIssuer {
                 token_store: token_store.clone(),
@@ -177,8 +107,8 @@ async fn main() -> Result<()> {
     spawn_stale_runtime_task(
         runtime_registry.clone(),
         heartbeat_tracker.clone(),
-        Duration::from_millis(cli.heartbeat_scan_interval_ms),
-        Duration::from_millis(cli.stale_timeout_ms),
+        config.heartbeat_scan_interval,
+        config.stale_timeout,
     );
 
     let app = build_router(AppState {
@@ -231,11 +161,10 @@ fn spawn_stale_runtime_task(
                     continue;
                 };
 
-                if descriptor.status != fireline_runtime::RuntimeStatus::Ready {
+                if descriptor.status != RuntimeStatus::Ready {
                     if matches!(
                         descriptor.status,
-                        fireline_runtime::RuntimeStatus::Stopped
-                            | fireline_runtime::RuntimeStatus::Broken
+                        RuntimeStatus::Stopped | RuntimeStatus::Broken
                     ) {
                         if let Err(error) = heartbeat_tracker.forget(&runtime_key).await {
                             tracing::warn!(
@@ -248,7 +177,7 @@ fn spawn_stale_runtime_task(
                     continue;
                 }
 
-                descriptor.status = fireline_runtime::RuntimeStatus::Stale;
+                descriptor.status = RuntimeStatus::Stale;
                 descriptor.updated_at_ms = now_ms();
                 if let Err(error) = runtime_registry.upsert(descriptor) {
                     tracing::warn!(?error, runtime_key, "mark runtime stale");
@@ -273,7 +202,7 @@ fn control_plane_base_url(host: std::net::IpAddr, port: u16) -> String {
 fn default_repo_root() -> Result<PathBuf> {
     Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .context("resolve control-plane crate parent")?
+        .context("resolve host crate parent")?
         .parent()
         .context("resolve workspace root")?
         .to_path_buf())

@@ -4,32 +4,22 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, to_bytes};
 use axum::http::{Method, StatusCode};
+use fireline_harness::TopologySpec;
+use fireline_host::auth::RuntimeTokenStore;
+use fireline_host::heartbeat::HeartbeatTracker;
+use fireline_host::router::{AppState, build_router};
 use fireline_runtime::{
     CreateRuntimeSpec, Endpoint, HeartbeatReport, LocalProvider, LocalRuntimeLauncher,
     ManagedRuntime, RuntimeDescriptor, RuntimeHost, RuntimeLaunch, RuntimeManager,
     RuntimeProviderKind, RuntimeRegistration, RuntimeRegistry, RuntimeStatus,
 };
-use fireline_harness::TopologySpec;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde::de::DeserializeOwned;
+use serde_json::{Value, json};
 use tower::util::ServiceExt;
 use uuid::Uuid;
-
-#[path = "../crates/fireline-control-plane/src/auth.rs"]
-mod auth;
-
-#[path = "../crates/fireline-control-plane/src/heartbeat.rs"]
-mod heartbeat;
-
-#[path = "../crates/fireline-control-plane/src/router.rs"]
-mod router;
-
-use auth::RuntimeTokenStore;
-use heartbeat::HeartbeatTracker;
-use router::{build_router, AppState};
 
 const PRELAUNCH_PROVIDER_INSTANCE_ID: &str = "launcher-provider-instance";
 const PRELAUNCH_ACP_URL: &str = "ws://127.0.0.1:4444/acp-prelaunch";
