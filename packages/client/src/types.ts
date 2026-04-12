@@ -1,4 +1,4 @@
-import type { ResourceRef } from './core/index.js'
+import type { ResourceRef } from './core/resource.js'
 import type { ContextPlacement, ContextSourceSpec } from './topology.js'
 
 /**

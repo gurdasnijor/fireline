@@ -15,18 +15,6 @@
       "types": "./dist/admin.d.ts",
       "default": "./dist/admin.js"
     },
-    "./core": {
-      "types": "./dist/core/index.d.ts",
-      "default": "./dist/core/index.js"
-    },
-    "./orchestration": {
-      "types": "./dist/orchestration/index.d.ts",
-      "default": "./dist/orchestration/index.js"
-    },
-    "./sandbox-local": {
-      "types": "./dist/sandbox-local/index.d.ts",
-      "default": "./dist/sandbox-local/index.js"
-    },
     "./middleware": {
       "types": "./dist/middleware.d.ts",
       "default": "./dist/middleware.js"
