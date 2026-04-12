@@ -1,4 +1,5 @@
 import { DurableStream } from '@durable-streams/client'
+import type { RequestId, SessionId } from './acp-ids.js'
 
 /**
  * Appends an external `approval_resolved` permission event to a Fireline state stream.
@@ -9,8 +10,8 @@ import { DurableStream } from '@durable-streams/client'
  */
 export async function appendApprovalResolved(options: {
   readonly streamUrl: string
-  readonly sessionId: string
-  readonly requestId: string
+  readonly sessionId: SessionId
+  readonly requestId: RequestId
   readonly allow: boolean
   readonly resolvedBy?: string
 }): Promise<void> {

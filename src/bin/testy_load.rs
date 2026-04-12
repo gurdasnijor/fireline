@@ -86,7 +86,7 @@ impl ResumableTesty {
                         continue;
                     };
                     if let Ok(record) = serde_json::from_value::<SessionRecord>(value.clone())
-                        && record.session_id == target
+                        && record.session_id.to_string() == target
                     {
                         self.create_session(session_id, Vec::new());
                         return Ok(true);

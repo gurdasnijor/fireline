@@ -1,10 +1,26 @@
 import { createStateSchema } from '@durable-streams/state'
 import { z } from 'zod'
+import type { RequestId, SessionId, ToolCallId } from './acp-types.js'
+
+const sessionIdSchema = z.custom<SessionId>(
+  (value): value is SessionId => typeof value === 'string',
+)
+
+const requestIdSchema = z.custom<RequestId>(
+  (value): value is RequestId =>
+    value === null ||
+    typeof value === 'string' ||
+    (typeof value === 'number' && Number.isInteger(value)),
+)
+
+const toolCallIdSchema = z.custom<ToolCallId>(
+  (value): value is ToolCallId => typeof value === 'string',
+)
 
 export const connectionSchema = z.object({
   logicalConnectionId: z.string(),
   state: z.enum(['created', 'attached', 'broken', 'closed']),
-  latestSessionId: z.string().optional(),
+  latestSessionId: sessionIdSchema.optional(),
   lastError: z.string().optional(),
   queuePaused: z.boolean().optional(),
   createdAt: z.number(),
@@ -14,8 +30,8 @@ export const connectionSchema = z.object({
 export const promptTurnSchema = z.object({
   promptTurnId: z.string(),
   logicalConnectionId: z.string(),
-  sessionId: z.string(),
-  requestId: z.string(),
+  sessionId: sessionIdSchema,
+  requestId: requestIdSchema,
   traceId: z.string().optional(),
   parentPromptTurnId: z.string().optional(),
   text: z.string().optional(),
@@ -35,9 +51,9 @@ export const promptTurnSchema = z.object({
 })
 
 export const pendingRequestSchema = z.object({
-  requestId: z.string(),
+  requestId: requestIdSchema,
   logicalConnectionId: z.string(),
-  sessionId: z.string().optional(),
+  sessionId: sessionIdSchema.optional(),
   promptTurnId: z.string().optional(),
   method: z.string(),
   direction: z.enum(['client_to_agent', 'agent_to_client']),
@@ -53,13 +69,13 @@ export const permissionOptionSchema = z.object({
 })
 
 export const permissionSchema = z.object({
-  requestId: z.string(),
-  jsonrpcId: z.union([z.string(), z.number()]),
+  requestId: requestIdSchema,
+  jsonrpcId: requestIdSchema,
   logicalConnectionId: z.string(),
-  sessionId: z.string(),
+  sessionId: sessionIdSchema,
   promptTurnId: z.string(),
   title: z.string().optional(),
-  toolCallId: z.string().optional(),
+  toolCallId: toolCallIdSchema.optional(),
   options: z.array(permissionOptionSchema).optional(),
   state: z.enum(['pending', 'resolved', 'orphaned']),
   outcome: z.string().optional(),
@@ -70,7 +86,7 @@ export const permissionSchema = z.object({
 export const terminalSchema = z.object({
   terminalId: z.string(),
   logicalConnectionId: z.string(),
-  sessionId: z.string(),
+  sessionId: sessionIdSchema,
   promptTurnId: z.string().optional(),
   state: z.enum(['open', 'exited', 'released', 'broken']),
   command: z.string().optional(),
@@ -89,7 +105,7 @@ export const runtimeInstanceSchema = z.object({
 })
 
 export const sessionSchema = z.object({
-  sessionId: z.string(),
+  sessionId: sessionIdSchema,
   runtimeKey: z.string(),
   runtimeId: z.string(),
   nodeId: z.string(),
@@ -107,15 +123,16 @@ export const childSessionEdgeSchema = z.object({
   edgeId: z.string(),
   traceId: z.string().optional(),
   parentRuntimeId: z.string(),
-  parentSessionId: z.string(),
+  parentSessionId: sessionIdSchema,
   parentPromptTurnId: z.string(),
   childRuntimeId: z.string(),
-  childSessionId: z.string(),
+  childSessionId: sessionIdSchema,
   createdAt: z.number(),
 })
 
 export const chunkSchema = z.object({
   chunkId: z.string(),
+  sessionId: sessionIdSchema,
   promptTurnId: z.string(),
   logicalConnectionId: z.string(),
   type: z.enum(['text', 'tool_call', 'thinking', 'tool_result', 'error', 'stop']),

@@ -6,6 +6,7 @@
 //! path rather than introducing a second Fireline-specific peer protocol.
 
 use anyhow::{Context, Result};
+use fireline_acp_ids::SessionId;
 use futures::{SinkExt, StreamExt};
 use serde_json::{Map, Value};
 
@@ -13,7 +14,7 @@ use super::Peer;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PeerCallResult {
-    pub child_session_id: String,
+    pub child_session_id: SessionId,
     pub response_text: String,
     pub stop_reason: String,
 }
@@ -111,7 +112,7 @@ pub(crate) async fn dispatch_peer_call(
             cx.build_session(std::path::Path::new("."))
                 .block_task()
                 .run_until(async |mut session| {
-                    let child_session_id = session.session_id().to_string();
+                    let child_session_id = session.session_id().clone();
                     session.send_prompt(&prompt_text)?;
 
                     let mut response_text = String::new();

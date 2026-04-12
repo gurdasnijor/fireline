@@ -166,7 +166,7 @@ async fn session_durable_stream_survives_runtime_death() -> Result<()> {
         assert!(
             records_after_death
                 .iter()
-                .any(|r| r.session_id == session_id),
+                .any(|r| r.session_id.to_string() == session_id),
             "INVARIANT (Session): shared stream must retain session record after \
              runtime process exit; found {} records total",
             records_after_death.len()

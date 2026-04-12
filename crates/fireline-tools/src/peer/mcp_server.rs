@@ -182,7 +182,7 @@ pub(crate) fn build_peer_mcp_server(
                             parent_session_id: session_id,
                             parent_prompt_turn_id,
                             child_host_id: peer.host_id.clone(),
-                            child_session_id: result.child_session_id.clone(),
+                            child_session_id: result.child_session_id.to_string(),
                         })
                         .await
                         .map_err(|e| {

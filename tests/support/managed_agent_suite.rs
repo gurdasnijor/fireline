@@ -1930,7 +1930,10 @@ pub(crate) async fn wait_for_session_record(
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let records = read_session_records(state_stream_url).await?;
-        if let Some(found) = records.into_iter().find(|r| r.session_id == session_id) {
+        if let Some(found) = records
+            .into_iter()
+            .find(|r| r.session_id.to_string() == session_id)
+        {
             return Ok(found);
         }
         if tokio::time::Instant::now() >= deadline {

@@ -76,7 +76,7 @@ impl SessionIndex {
                     self.sessions
                         .write()
                         .unwrap()
-                        .insert(record.session_id.clone(), record);
+                        .insert(record.session_id.to_string(), record);
                 }
                 ChangeOperation::Delete => {
                     let Some(key) = envelope.key() else {

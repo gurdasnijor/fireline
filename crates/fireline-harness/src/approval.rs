@@ -37,6 +37,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use durable_streams::{Client as DurableStreamsClient, LiveMode, Offset, Producer};
+use fireline_acp_ids::{RequestId, SessionId, ToolCallId};
 use sacp::schema::{ContentBlock, PromptRequest};
 use sacp::{Agent, Client, ConnectTo, Proxy};
 use serde::Serialize;
@@ -122,13 +123,13 @@ pub struct ApprovalGateComponent {
     state_stream_url: Option<String>,
     state_producer: Option<Producer>,
     approval_timeout: Option<Duration>,
-    approved_sessions: Arc<Mutex<HashSet<String>>>,
-    pending_sessions: Arc<Mutex<HashMap<String, PendingApproval>>>,
+    approved_sessions: Arc<Mutex<HashSet<SessionId>>>,
+    pending_sessions: Arc<Mutex<HashMap<SessionId, PendingApproval>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingApproval {
-    request_id: String,
+    request_id: RequestId,
     reason: String,
 }
 
@@ -197,14 +198,14 @@ impl ApprovalGateComponent {
             })
     }
 
-    fn approval_request_id(request: &PromptRequest, policy_id: usize) -> String {
+    fn approval_request_id(request: &PromptRequest, policy_id: usize) -> RequestId {
         let prompt_identity = Self::prompt_identity(request);
         let material = format!("{}:{policy_id}:{prompt_identity}", request.session_id);
         let digest = Sha256::digest(material.as_bytes());
-        format!("{digest:x}")
+        RequestId::from(format!("{digest:x}"))
     }
 
-    async fn rebuild_from_log(&self, session_id: &str) -> Result<(), sacp::Error> {
+    async fn rebuild_from_log(&self, session_id: &SessionId) -> Result<(), sacp::Error> {
         let Some(state_stream_url) = &self.state_stream_url else {
             return Ok(());
         };
@@ -240,7 +241,11 @@ impl ApprovalGateComponent {
                 let Some(value) = event.get("value") else {
                     continue;
                 };
-                if value.get("sessionId").and_then(Value::as_str) != Some(session_id) {
+                let Some(event_session_id) = value.get("sessionId").and_then(session_id_from_value)
+                else {
+                    continue;
+                };
+                if event_session_id != *session_id {
                     continue;
                 }
 
@@ -248,8 +253,7 @@ impl ApprovalGateComponent {
                     Some("permission_request") => {
                         let Some(request_id) = value
                             .get("requestId")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
+                            .and_then(request_id_from_value)
                         else {
                             continue;
                         };
@@ -280,7 +284,7 @@ impl ApprovalGateComponent {
             self.approved_sessions
                 .lock()
                 .expect("approval state poisoned")
-                .insert(session_id.to_string());
+                .insert(session_id.clone());
             self.pending_sessions
                 .lock()
                 .expect("approval state poisoned")
@@ -289,7 +293,7 @@ impl ApprovalGateComponent {
             self.pending_sessions
                 .lock()
                 .expect("approval state poisoned")
-                .insert(session_id.to_string(), pending);
+                .insert(session_id.clone(), pending);
         } else {
             self.pending_sessions
                 .lock()
@@ -302,8 +306,8 @@ impl ApprovalGateComponent {
 
     async fn emit_permission_request(
         &self,
-        session_id: &str,
-        request_id: &str,
+        session_id: &SessionId,
+        request_id: &RequestId,
         reason: &str,
     ) -> Result<(), sacp::Error> {
         let Some(producer) = self.state_producer.as_ref() else {
@@ -314,14 +318,15 @@ impl ApprovalGateComponent {
 
         producer.append_json(&StateEnvelope {
             entity_type: "permission",
-            key: format!("{session_id}:{request_id}"),
+            key: format!("{session_id}:{}", request_id_key(request_id)),
             headers: StateHeaders {
                 operation: "insert",
             },
             value: PermissionEvent {
                 kind: "permission_request",
-                session_id: session_id.to_string(),
-                request_id: Some(request_id.to_string()),
+                session_id: session_id.clone(),
+                request_id: Some(request_id.clone()),
+                tool_call_id: None,
                 allow: None,
                 resolved_by: None,
                 reason: Some(reason.to_string()),
@@ -342,8 +347,8 @@ impl ApprovalGateComponent {
     /// stream terminates.
     async fn wait_for_approval(
         &self,
-        session_id: &str,
-        request_id: &str,
+        session_id: &SessionId,
+        request_id: &RequestId,
     ) -> Result<bool, sacp::Error> {
         let state_stream_url = self
             .state_stream_url
@@ -395,10 +400,20 @@ impl ApprovalGateComponent {
                         if value.get("kind").and_then(Value::as_str) != Some("approval_resolved") {
                             continue;
                         }
-                        if value.get("sessionId").and_then(Value::as_str) != Some(session_id) {
+                        let Some(event_session_id) =
+                            value.get("sessionId").and_then(session_id_from_value)
+                        else {
+                            continue;
+                        };
+                        if event_session_id != *session_id {
                             continue;
                         }
-                        if value.get("requestId").and_then(Value::as_str) != Some(request_id) {
+                        let Some(event_request_id) =
+                            value.get("requestId").and_then(request_id_from_value)
+                        else {
+                            continue;
+                        };
+                        if event_request_id != *request_id {
                             continue;
                         }
                         let allow = value.get("allow").and_then(Value::as_bool).unwrap_or(false);
@@ -419,7 +434,7 @@ impl ApprovalGateComponent {
         }
     }
 
-    fn is_session_approved(&self, session_id: &str) -> bool {
+    fn is_session_approved(&self, session_id: &SessionId) -> bool {
         self.approved_sessions
             .lock()
             .expect("approval state poisoned")
@@ -427,7 +442,7 @@ impl ApprovalGateComponent {
     }
 }
 
-fn approval_timeout_error(session_id: &str) -> sacp::Error {
+fn approval_timeout_error(session_id: &SessionId) -> sacp::Error {
     sacp::util::internal_error(format!(
         "approval_gate timed out waiting for approval on session {session_id}"
     ))
@@ -450,9 +465,11 @@ fn fireline_trace_id(meta: &serde_json::Map<String, Value>) -> Option<String> {
 #[serde(rename_all = "camelCase")]
 struct PermissionEvent {
     kind: &'static str,
-    session_id: String,
+    session_id: SessionId,
     #[serde(skip_serializing_if = "Option::is_none")]
-    request_id: Option<String>,
+    request_id: Option<RequestId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<ToolCallId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     allow: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -487,7 +504,7 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                 {
                     let this = this.clone();
                     async move |request: PromptRequest, responder, cx| {
-                        let session_id = request.session_id.to_string();
+                        let session_id = request.session_id.clone();
                         let prompt_text = ApprovalGateComponent::join_prompt_text(&request);
                         if this.is_session_approved(&session_id) {
                             return cx
@@ -585,8 +602,7 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                 {
                     let this = this.clone();
                     async move |request: sacp::schema::LoadSessionRequest, responder, cx| {
-                        this.rebuild_from_log(&request.session_id.to_string())
-                            .await?;
+                        this.rebuild_from_log(&request.session_id).await?;
                         cx.send_request_to(Agent, request)
                             .forward_response_to(responder)
                     }
@@ -603,6 +619,22 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn session_id_from_value(value: &Value) -> Option<SessionId> {
+    value.as_str().map(|text| SessionId::from(text.to_string()))
+}
+
+fn request_id_from_value(value: &Value) -> Option<RequestId> {
+    serde_json::from_value(value.clone()).ok()
+}
+
+fn request_id_key(request_id: &RequestId) -> String {
+    match request_id {
+        RequestId::Null => "null".to_string(),
+        RequestId::Number(number) => number.to_string(),
+        RequestId::Str(text) => text.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -693,16 +725,19 @@ mod tests {
         request_id: &str,
         allow: bool,
     ) -> Result<()> {
+        let session_id = SessionId::from(session_id.to_string());
+        let request_id = RequestId::from(request_id.to_string());
         producer.append_json(&StateEnvelope {
             entity_type: "permission",
-            key: format!("{session_id}:{request_id}:resolved"),
+            key: format!("{session_id}:{}:resolved", request_id_key(&request_id)),
             headers: StateHeaders {
                 operation: "insert",
             },
             value: PermissionEvent {
                 kind: "approval_resolved",
-                session_id: session_id.to_string(),
-                request_id: Some(request_id.to_string()),
+                session_id,
+                request_id: Some(request_id),
+                tool_call_id: None,
                 allow: Some(allow),
                 resolved_by: Some("approval-test".to_string()),
                 reason: None,
@@ -725,8 +760,9 @@ mod tests {
             },
             value: PermissionEvent {
                 kind: "permission_request",
-                session_id: "bootstrap-session".to_string(),
-                request_id: Some("bootstrap-request".to_string()),
+                session_id: SessionId::from("bootstrap-session"),
+                request_id: Some(RequestId::from("bootstrap-request".to_string())),
+                tool_call_id: None,
                 allow: None,
                 resolved_by: None,
                 reason: Some("bootstrap".to_string()),
@@ -861,11 +897,27 @@ mod tests {
 
         let waiter_a = tokio::spawn({
             let gate = gate.clone();
-            async move { gate.wait_for_approval("session-a", "request-a").await }
+            async move {
+                let session_id = SessionId::from("session-a");
+                let request_id = RequestId::from("request-a".to_string());
+                gate.wait_for_approval(
+                    &session_id,
+                    &request_id,
+                )
+                .await
+            }
         });
         let mut waiter_b = tokio::spawn({
             let gate = gate.clone();
-            async move { gate.wait_for_approval("session-b", "request-b").await }
+            async move {
+                let session_id = SessionId::from("session-b");
+                let request_id = RequestId::from("request-b".to_string());
+                gate.wait_for_approval(
+                    &session_id,
+                    &request_id,
+                )
+                .await
+            }
         });
 
         tokio::time::sleep(Duration::from_millis(100)).await;

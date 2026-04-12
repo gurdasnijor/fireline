@@ -12,6 +12,7 @@ async-trait.workspace = true
 axum.workspace = true
 durable-streams.workspace = true
 durable-streams-server.workspace = true
+fireline-acp-ids.workspace = true
 fireline-resources.workspace = true
 fireline-tools.workspace = true
 serde.workspace = true

@@ -4,6 +4,7 @@ use sacp_conductor::trace::{NotificationEvent, RequestEvent, ResponseEvent, Trac
 use serde::Serialize;
 use serde_json::Value;
 
+use fireline_acp_ids::{RequestId, SessionId};
 use fireline_session::{SessionRecord, SessionStatus};
 
 pub type StateChange = Value;
@@ -80,8 +81,8 @@ struct ConnectionRow {
 struct PromptTurnRow {
     prompt_turn_id: String,
     logical_connection_id: String,
-    session_id: String,
-    request_id: String,
+    session_id: SessionId,
+    request_id: RequestId,
     #[serde(skip_serializing_if = "Option::is_none")]
     trace_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,10 +102,10 @@ struct PromptTurnRow {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PendingRequestRow {
-    request_id: String,
+    request_id: RequestId,
     logical_connection_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    session_id: Option<String>,
+    session_id: Option<SessionId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_turn_id: Option<String>,
     method: String,
@@ -138,6 +139,7 @@ struct HostInstanceRow {
 #[serde(rename_all = "camelCase")]
 struct ChunkRow {
     chunk_id: String,
+    session_id: SessionId,
     prompt_turn_id: String,
     logical_connection_id: String,
     #[serde(rename = "type")]
@@ -258,7 +260,7 @@ impl StateProjector {
                 }
                 self.correlation
                     .pending_initialize
-                    .insert(req.id.to_string());
+                    .insert(request_id_key(&request_id_from_json_value(&req.id)));
                 self.inherited_lineage = parse_fireline_lineage(&req.params);
                 Vec::new()
             }
@@ -266,7 +268,8 @@ impl StateProjector {
                 if !is_canonical_client_request(req) {
                     return Vec::new();
                 }
-                let request_id = req.id.to_string();
+                let request_id = request_id_from_json_value(&req.id);
+                let request_key = request_id_key(&request_id);
                 let pending = PendingRequestRow {
                     request_id: request_id.clone(),
                     logical_connection_id: self.logical_connection_id.clone(),
@@ -280,10 +283,10 @@ impl StateProjector {
                 };
                 self.correlation
                     .pending_requests
-                    .insert(request_id.clone(), pending.clone());
+                    .insert(request_key.clone(), pending.clone());
                 vec![state_change(
                     "pending_request",
-                    &request_id,
+                    &request_key,
                     "insert",
                     Some(&pending),
                 )]
@@ -299,7 +302,9 @@ impl StateProjector {
                     .and_then(Value::as_str)
                     .unwrap_or("unknown")
                     .to_string();
-                let request_id = req.id.to_string();
+                let session_id = SessionId::from(session_id);
+                let request_id = request_id_from_json_value(&req.id);
+                let request_key = request_id_key(&request_id);
                 let prompt_turn_id = self.next_prompt_turn_id();
                 let trace_id = self
                     .inherited_lineage
@@ -315,10 +320,10 @@ impl StateProjector {
 
                 self.correlation
                     .prompt_request_to_turn
-                    .insert(request_id.clone(), prompt_turn_id.clone());
+                    .insert(request_key.clone(), prompt_turn_id.clone());
                 self.correlation
                     .session_active_turn
-                    .insert(session_id.clone(), prompt_turn_id.clone());
+                    .insert(session_id.to_string(), prompt_turn_id.clone());
 
                 let turn = PromptTurnRow {
                     prompt_turn_id: prompt_turn_id.clone(),
@@ -351,11 +356,11 @@ impl StateProjector {
                 };
                 self.correlation
                     .pending_requests
-                    .insert(request_id.clone(), pending.clone());
+                    .insert(request_key.clone(), pending.clone());
 
                 vec![
                     state_change("prompt_turn", &prompt_turn_id, "insert", Some(&turn)),
-                    state_change("pending_request", &request_id, "insert", Some(&pending)),
+                    state_change("pending_request", &request_key, "insert", Some(&pending)),
                 ]
             }
             _ => Vec::new(),
@@ -363,10 +368,10 @@ impl StateProjector {
     }
 
     fn handle_response(&mut self, resp: &ResponseEvent) -> Vec<StateChange> {
-        let request_id = resp.id.to_string();
+        let request_key = request_id_key(&request_id_from_json_value(&resp.id));
         let mut changes = Vec::new();
 
-        if self.correlation.pending_initialize.remove(&request_id) {
+        if self.correlation.pending_initialize.remove(&request_key) {
             self.supports_load_session = resp
                 .payload
                 .get("agentCapabilities")
@@ -376,13 +381,13 @@ impl StateProjector {
                 .unwrap_or(false);
         }
 
-        if let Some(mut pending) = self.correlation.pending_requests.remove(&request_id) {
+        if let Some(mut pending) = self.correlation.pending_requests.remove(&request_key) {
             let was_session_new = pending.method == "session/new";
             pending.state = PendingRequestState::Resolved;
             pending.resolved_at = Some(now_ms());
             changes.push(state_change(
                 "pending_request",
-                &request_id,
+                &request_key,
                 "update",
                 Some(&pending),
             ));
@@ -397,9 +402,10 @@ impl StateProjector {
                     .or_else(|| resp.payload.get("session_id"))
                     .and_then(Value::as_str)
                 {
+                    let session_id = SessionId::from(session_id.to_string());
                     let now = now_ms();
                     let session = SessionRecord {
-                        session_id: session_id.to_string(),
+                        session_id: session_id.clone(),
                         host_key: self.host_key.clone(),
                         host_id: self.host_id.clone(),
                         node_id: self.node_id.clone(),
@@ -414,7 +420,7 @@ impl StateProjector {
                     };
                     changes.push(state_change(
                         "session",
-                        session_id,
+                        &session_id.to_string(),
                         "insert",
                         Some(&session),
                     ));
@@ -435,7 +441,7 @@ impl StateProjector {
             }
         }
 
-        if let Some(prompt_turn_id) = self.correlation.prompt_request_to_turn.remove(&request_id) {
+        if let Some(prompt_turn_id) = self.correlation.prompt_request_to_turn.remove(&request_key) {
             let stop_reason = if resp.is_error {
                 Some("error".to_string())
             } else {
@@ -497,6 +503,9 @@ impl StateProjector {
         else {
             return Vec::new();
         };
+        let Some(turn) = self.correlation.prompt_turns.get(&prompt_turn_id).cloned() else {
+            return Vec::new();
+        };
 
         let update = notif.params.get("update");
         let update_type = update
@@ -549,6 +558,7 @@ impl StateProjector {
 
         let chunk = ChunkRow {
             chunk_id: uuid::Uuid::new_v4().to_string(),
+            session_id: turn.session_id,
             prompt_turn_id,
             logical_connection_id: self.logical_connection_id.clone(),
             chunk_type,
@@ -630,6 +640,18 @@ fn first_text_block(blocks: &[Value]) -> Option<String> {
             None
         }
     })
+}
+
+fn request_id_from_json_value(value: &Value) -> RequestId {
+    serde_json::from_value(value.clone()).unwrap_or_else(|_| RequestId::from(value.to_string()))
+}
+
+fn request_id_key(request_id: &RequestId) -> String {
+    match request_id {
+        RequestId::Null => "null".to_string(),
+        RequestId::Number(number) => number.to_string(),
+        RequestId::Str(text) => text.clone(),
+    }
 }
 
 fn parse_fireline_lineage(params: &Value) -> InheritedLineage {

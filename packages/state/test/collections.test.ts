@@ -53,6 +53,7 @@ function promptTurn(overrides: Partial<PromptTurnRow> & Pick<PromptTurnRow, 'pro
 function chunk(overrides: Partial<ChunkRow> & Pick<ChunkRow, 'chunkId'>): ChunkRow {
   return {
     chunkId: overrides.chunkId,
+    sessionId: overrides.sessionId ?? 'session-1',
     promptTurnId: overrides.promptTurnId ?? 'turn-1',
     logicalConnectionId: overrides.logicalConnectionId ?? 'conn-1',
     type: overrides.type ?? 'text',

@@ -23,6 +23,7 @@ pub use session_index::SessionIndex;
 pub use stream_host::*;
 
 use serde::{Deserialize, Serialize};
+use fireline_acp_ids::SessionId;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -35,7 +36,7 @@ pub enum SessionStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionRecord {
-    pub session_id: String,
+    pub session_id: SessionId,
     #[serde(rename = "runtimeKey")]
     pub host_key: String,
     #[serde(rename = "runtimeId")]
