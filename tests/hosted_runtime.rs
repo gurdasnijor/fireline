@@ -5,9 +5,12 @@ use std::time::Duration;
 use agent_client_protocol::{InitializeRequest, ProtocolVersion};
 use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
-use fireline_runtime::bootstrap::{start, BootstrapConfig};
 use fireline_harness::TopologySpec;
+use fireline_runtime::bootstrap::{BootstrapConfig, start};
 use uuid::Uuid;
+
+#[path = "support/stream_server.rs"]
+mod stream_server;
 
 struct WebSocketTransport {
     url: String,
@@ -73,6 +76,7 @@ fn temp_peer_directory() -> PathBuf {
 
 #[tokio::test]
 async fn hosted_runtime_serves_acp_and_emits_state_events() -> Result<()> {
+    let stream_server = stream_server::TestStreamServer::spawn().await?;
     let handle = start(BootstrapConfig {
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
@@ -82,10 +86,9 @@ async fn hosted_runtime_serves_acp_and_emits_state_events() -> Result<()> {
         agent_command: vec![testy_bin()],
         mounted_resources: Vec::new(),
         state_stream: None,
-        stream_storage: None,
+        durable_streams_url: stream_server.base_url.clone(),
         peer_directory_path: temp_peer_directory(),
         control_plane_url: None,
-        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -144,12 +147,14 @@ async fn hosted_runtime_serves_acp_and_emits_state_events() -> Result<()> {
     );
 
     handle.shutdown().await?;
+    stream_server.shutdown().await;
     Ok(())
 }
 
 #[tokio::test]
 async fn hosted_runtime_rejects_concurrent_attachment_and_recovers_after_disconnect() -> Result<()>
 {
+    let stream_server = stream_server::TestStreamServer::spawn().await?;
     let handle = start(BootstrapConfig {
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
@@ -159,10 +164,9 @@ async fn hosted_runtime_rejects_concurrent_attachment_and_recovers_after_disconn
         agent_command: vec![testy_bin()],
         mounted_resources: Vec::new(),
         state_stream: None,
-        stream_storage: None,
+        durable_streams_url: stream_server.base_url.clone(),
         peer_directory_path: temp_peer_directory(),
         control_plane_url: None,
-        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -209,11 +213,13 @@ async fn hosted_runtime_rejects_concurrent_attachment_and_recovers_after_disconn
     assert_eq!(response, "Hello, world!");
 
     handle.shutdown().await?;
+    stream_server.shutdown().await;
     Ok(())
 }
 
 #[tokio::test]
 async fn hosted_runtime_allows_immediate_sequential_reattach_after_disconnect() -> Result<()> {
+    let stream_server = stream_server::TestStreamServer::spawn().await?;
     let handle = start(BootstrapConfig {
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
@@ -223,10 +229,9 @@ async fn hosted_runtime_allows_immediate_sequential_reattach_after_disconnect() 
         agent_command: vec![testy_bin()],
         mounted_resources: Vec::new(),
         state_stream: None,
-        stream_storage: None,
+        durable_streams_url: stream_server.base_url.clone(),
         peer_directory_path: temp_peer_directory(),
         control_plane_url: None,
-        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -260,5 +265,6 @@ async fn hosted_runtime_allows_immediate_sequential_reattach_after_disconnect() 
     }
 
     handle.shutdown().await?;
+    stream_server.shutdown().await;
     Ok(())
 }

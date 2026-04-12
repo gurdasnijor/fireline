@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 
+#[path = "stream_server.rs"]
+mod stream_server;
+
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -8,20 +11,16 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use axum::Router;
 use durable_streams::{Client as DsClient, Offset};
+use fireline_harness::TopologySpec;
+use fireline_resources::{FsOpRecord, RuntimeStreamFileRecord};
 use fireline_runtime::bootstrap::{BootstrapConfig, BootstrapHandle, start};
 use fireline_runtime::runtime_host::{RuntimeDescriptor, RuntimeStatus};
-use fireline_resources::{FsOpRecord, RuntimeStreamFileRecord};
-use fireline_runtime::{
-    LocalPathMounter, PersistedRuntimeSpec, ResourceMounter, ResourceRef,
-};
+use fireline_runtime::{LocalPathMounter, PersistedRuntimeSpec, ResourceMounter, ResourceRef};
 use fireline_session::SessionRecord;
-use fireline_harness::TopologySpec;
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value as JsonValue, json};
 use tokio::process::{Child, Command as TokioCommand};
-use tokio::sync::oneshot;
 use tracing::instrument;
 use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 use uuid::Uuid;
@@ -226,11 +225,13 @@ pub(crate) fn ensure_control_plane_binaries_built() -> Result<()> {
 
 pub(crate) struct LocalRuntimeHarness {
     handle: BootstrapHandle,
+    shared_stream_server: Option<stream_server::TestStreamServer>,
 }
 
 impl LocalRuntimeHarness {
     pub(crate) async fn spawn(name: &str) -> Result<Self> {
         init_test_tracing();
+        let shared_stream_server = stream_server::TestStreamServer::spawn().await?;
         let handle = start(BootstrapConfig {
             host: "127.0.0.1".parse::<IpAddr>()?,
             port: 0,
@@ -240,15 +241,17 @@ impl LocalRuntimeHarness {
             agent_command: vec![testy_bin().display().to_string()],
             mounted_resources: Vec::new(),
             state_stream: None,
-            stream_storage: None,
+            durable_streams_url: shared_stream_server.base_url.clone(),
             peer_directory_path: temp_path("fireline-managed-agent-peers"),
             control_plane_url: None,
-            external_state_stream_url: None,
             topology: TopologySpec::default(),
         })
         .await?;
 
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            shared_stream_server: Some(shared_stream_server),
+        })
     }
 
     pub(crate) fn acp_url(&self) -> &str {
@@ -279,7 +282,11 @@ impl LocalRuntimeHarness {
     }
 
     pub(crate) async fn shutdown(self) -> Result<()> {
-        self.handle.shutdown().await
+        self.handle.shutdown().await?;
+        if let Some(shared_stream_server) = self.shared_stream_server {
+            shared_stream_server.shutdown().await;
+        }
+        Ok(())
     }
 }
 
@@ -289,7 +296,7 @@ pub(crate) struct ControlPlaneHarness {
     pub runtime_registry_path: PathBuf,
     pub peer_directory_path: PathBuf,
     pub shared_state_stream_name: String,
-    shared_stream_server: SharedStreamServer,
+    shared_stream_server: stream_server::TestStreamServer,
     child: Child,
 }
 
@@ -301,7 +308,7 @@ impl ControlPlaneHarness {
         let runtime_registry_path = temp_path("fireline-managed-agent-runtimes");
         let peer_directory_path = temp_path("fireline-managed-agent-peers");
         let shared_state_stream_name = format!("fireline-managed-agent-suite-{}", Uuid::new_v4());
-        let shared_stream_server = SharedStreamServer::spawn().await?;
+        let shared_stream_server = stream_server::TestStreamServer::spawn().await?;
         let (child, base_url) = spawn_control_plane(
             &runtime_registry_path,
             &peer_directory_path,
@@ -343,6 +350,7 @@ impl ControlPlaneHarness {
                 "port": 0,
                 "name": name,
                 "agentCommand": agent_command,
+                "durableStreamsUrl": self.shared_stream_server.base_url,
                 "stateStream": self.shared_state_stream_name,
                 "topology": { "components": [] }
             }))
@@ -459,44 +467,6 @@ impl ControlPlaneHarness {
         self.stop_all_live_runtimes().await;
         shutdown_process(&mut self.child).await;
         self.shared_stream_server.shutdown().await;
-    }
-}
-
-struct SharedStreamServer {
-    base_url: String,
-    shutdown_tx: Option<oneshot::Sender<()>>,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl SharedStreamServer {
-    async fn spawn() -> Result<Self> {
-        let router: Router = fireline_session::build_stream_router(None)?;
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .context("bind shared durable-streams test listener")?;
-        let addr = listener
-            .local_addr()
-            .context("resolve shared streams address")?;
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let task = tokio::spawn(async move {
-            let _ = axum::serve(listener, router)
-                .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
-                })
-                .await;
-        });
-        Ok(Self {
-            base_url: format!("http://127.0.0.1:{}/v1/stream", addr.port()),
-            shutdown_tx: Some(shutdown_tx),
-            task,
-        })
-    }
-
-    async fn shutdown(mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
-        let _ = self.task.await;
     }
 }
 
@@ -982,19 +952,19 @@ impl LocalRuntimeHarness {
     #[instrument(skip(spec), fields(name = %spec.name))]
     pub(crate) async fn spawn_with(spec: ManagedAgentHarnessSpec) -> Result<Self> {
         init_test_tracing();
-        let (state_stream, external_state_stream_url) = match &spec.stream_mode {
-            StreamMode::Embedded => (None, None),
+        let (state_stream, durable_streams_url, shared_stream_server) = match &spec.stream_mode {
+            StreamMode::Embedded => {
+                let shared_stream_server = stream_server::TestStreamServer::spawn().await?;
+                (
+                    None,
+                    shared_stream_server.base_url.clone(),
+                    Some(shared_stream_server),
+                )
+            }
             StreamMode::SharedExternal {
                 base_url,
                 stream_name,
-            } => (
-                Some(stream_name.clone()),
-                Some(format!(
-                    "{}/{}",
-                    base_url.trim_end_matches('/'),
-                    stream_name
-                )),
-            ),
+            } => (Some(stream_name.clone()), base_url.clone(), None),
         };
 
         // Pre-mount LocalPath resources so the runtime sees them as real
@@ -1023,15 +993,17 @@ impl LocalRuntimeHarness {
             agent_command: spec.agent_command,
             mounted_resources,
             state_stream,
-            stream_storage: None,
+            durable_streams_url,
             peer_directory_path: temp_path("fireline-managed-agent-peers"),
             control_plane_url: None,
-            external_state_stream_url,
             topology: spec.topology,
         })
         .await?;
 
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            shared_stream_server,
+        })
     }
 }
 
@@ -1060,6 +1032,10 @@ impl ControlPlaneHarness {
             "port": 0,
             "name": spec.name,
             "agentCommand": spec.agent_command,
+            "durableStreamsUrl": match &spec.stream_mode {
+                StreamMode::SharedExternal { base_url, .. } => base_url.clone(),
+                StreamMode::Embedded => self.shared_stream_server.base_url.clone(),
+            },
             "stateStream": stream_name,
             "topology": spec.topology,
             "resources": spec.resources,

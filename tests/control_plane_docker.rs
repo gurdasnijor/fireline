@@ -96,6 +96,7 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
         let local = create_runtime(
             &client,
             &base_url,
+            &shared_ds.base_url,
             RuntimeProviderKind::Local,
             "agent-local",
             vec![testy_bin()],
@@ -108,6 +109,7 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
             let runtime = create_runtime(
                 &client,
                 &base_url,
+                &shared_ds.base_url,
                 RuntimeProviderKind::Docker,
                 &format!("agent-docker-{}", index + 1),
                 vec!["/usr/local/bin/fireline-testy".to_string()],
@@ -291,6 +293,7 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
 async fn create_runtime(
     client: &reqwest::Client,
     base_url: &str,
+    durable_streams_url: &str,
     provider: RuntimeProviderKind,
     name: &str,
     agent_command: Vec<String>,
@@ -306,6 +309,7 @@ async fn create_runtime(
             "port": 0,
             "name": name,
             "agentCommand": agent_command,
+            "durableStreamsUrl": durable_streams_url,
             "topology": { "components": [] }
         }))
         .send()

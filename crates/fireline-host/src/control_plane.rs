@@ -78,7 +78,6 @@ pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
         config.peer_directory_path,
         config.prefer_push,
         base_url.clone(),
-        config.shared_stream_base_url.clone(),
         token_store.clone(),
         config.startup_timeout,
         config.stop_timeout,
@@ -92,7 +91,6 @@ pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
         let docker_provider = Arc::new(DockerProvider::new(
             DockerProviderConfig {
                 control_plane_url: base_url.clone(),
-                shared_stream_base_url: config.shared_stream_base_url.clone(),
                 image: config.docker_image.clone(),
                 build_context,
                 dockerfile: config.dockerfile.clone(),

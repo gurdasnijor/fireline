@@ -3,14 +3,13 @@
 //! `bootstrap::start(config)` brings up everything the Fireline
 //! binary needs in one process:
 //!
-//! 1. Build the embedded durable-streams Router via
-//!    [`crate::stream_host::build_stream_router`]
+//! 1. Connect to the external durable-streams service supplied under
+//!    `config.durable_streams_url`
 //! 2. Build the `durable-streams::Producer` that the state writer
 //!    will append to (HTTP client pointed at our own listener)
 //! 3. Compose the component list (`PeerComponent`, future components)
-//! 4. Build the axum Router and `.merge()` in the stream Router so
-//!    `/healthz`, `/v1/stream/{name}`, `/acp`, and `/api/v1/files/*`
-//!    all live on a single listener (Option A embedding)
+//! 4. Build the axum Router so `/healthz` and `/acp` live on a single
+//!    listener while state rows flow to the external stream service
 //! 5. Bind the listener on `config.host:config.port` and serve
 //! 6. Return a handle that can be `.shutdown()`'d gracefully
 
@@ -19,6 +18,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use axum::Router;
+use axum::routing::get;
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, DurableStream, Producer};
 use fireline_harness::{
     AcpRouteState, ComponentContext, SharedTerminal, TopologySpec, audit_stream_names,
@@ -31,8 +31,7 @@ use fireline_orchestration::{
 use fireline_resources::MountedResource;
 use fireline_session::{
     ActiveTurnIndex, CreateRuntimeSpec, PersistedRuntimeSpec, RuntimeMaterializer,
-    RuntimeMaterializerTask, RuntimeProviderRequest, SessionIndex, StreamStorageConfig,
-    build_stream_router,
+    RuntimeMaterializerTask, RuntimeProviderRequest, SessionIndex,
 };
 use fireline_tools::LocalPeerDirectory;
 use fireline_tools::directory::{Peer, PeerRegistry};
@@ -51,10 +50,9 @@ pub struct BootstrapConfig {
     pub agent_command: Vec<String>,
     pub mounted_resources: Vec<MountedResource>,
     pub state_stream: Option<String>,
-    pub stream_storage: Option<StreamStorageConfig>,
+    pub durable_streams_url: String,
     pub peer_directory_path: PathBuf,
     pub control_plane_url: Option<String>,
-    pub external_state_stream_url: Option<String>,
     pub topology: TopologySpec,
 }
 
@@ -122,15 +120,8 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     let connect_host_name = connect_host(local_addr.ip());
     let health_url = format!("http://{connect_host_name}:{}/healthz", local_addr.port());
     let acp_url = format!("ws://{connect_host_name}:{}/acp", local_addr.port());
-    let local_state_stream_url = format!(
-        "http://{connect_host_name}:{}/v1/stream/{state_stream}",
-        local_addr.port()
-    );
-    let state_stream_url = config
-        .external_state_stream_url
-        .clone()
-        .unwrap_or(local_state_stream_url);
-    let stream_base_url = state_stream_base_url(&state_stream_url)?;
+    let stream_base_url = config.durable_streams_url.trim_end_matches('/').to_string();
+    let state_stream_url = format!("{stream_base_url}/{state_stream}");
     let runtime_name = config.name.clone();
 
     let stream_client = DurableStreamsClient::new();
@@ -206,8 +197,8 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     };
 
     let app = Router::new()
-        .merge(fireline_harness::routes_acp::router(app_state))
-        .merge(build_stream_router(config.stream_storage.as_ref())?);
+        .route("/healthz", get(healthz))
+        .merge(fireline_harness::routes_acp::router(app_state));
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let server_task = tokio::spawn(async move {
@@ -250,9 +241,10 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
             port: local_addr.port(),
             name: runtime_name.clone(),
             agent_command: agent_command_for_spec,
+            durable_streams_url: stream_base_url.clone(),
             resources: Vec::new(),
             state_stream: Some(state_stream.clone()),
-            stream_storage: config.stream_storage.clone(),
+            stream_storage: None,
             peer_directory_path: Some(peer_directory_path.clone()),
             topology: config.topology.clone(),
         },
@@ -294,6 +286,10 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     })
 }
 
+async fn healthz() -> &'static str {
+    "ok"
+}
+
 fn connect_host(ip: IpAddr) -> String {
     if ip.is_unspecified() {
         match ip {
@@ -303,13 +299,6 @@ fn connect_host(ip: IpAddr) -> String {
     } else {
         ip.to_string()
     }
-}
-
-fn state_stream_base_url(state_stream_url: &str) -> Result<String> {
-    let (base, _) = state_stream_url
-        .rsplit_once('/')
-        .ok_or_else(|| anyhow::anyhow!("state stream url must include a stream name"))?;
-    Ok(base.to_string())
 }
 
 async fn ensure_stream_exists(stream: &DurableStream) -> Result<()> {

@@ -36,7 +36,6 @@ const LABEL_PROVIDER: &str = "fireline.provider";
 #[derive(Debug, Clone)]
 pub struct DockerProviderConfig {
     pub control_plane_url: String,
-    pub shared_stream_base_url: Option<String>,
     pub image: String,
     pub build_context: PathBuf,
     pub dockerfile: PathBuf,
@@ -131,20 +130,10 @@ impl RuntimeProvider for DockerProvider {
         let published_port = reserve_host_port()?;
         let state_stream_name = Self::state_stream_name(&spec, &runtime_key);
         let advertised_acp_url = format!("ws://127.0.0.1:{published_port}/acp");
-        let advertised_state_stream_url = self
-            .config
-            .shared_stream_base_url
-            .as_ref()
-            .map(|base| join_stream_url(base, &state_stream_name))
-            .unwrap_or_else(|| {
-                format!("http://127.0.0.1:{published_port}/v1/stream/{state_stream_name}")
-            });
-        let connect_state_stream_url = self
-            .config
-            .shared_stream_base_url
-            .as_ref()
-            .map(|base| rewrite_loopback_for_container(&join_stream_url(base, &state_stream_name)))
-            .transpose()?;
+        let advertised_state_stream_url =
+            join_stream_url(&spec.durable_streams_url, &state_stream_name);
+        let connect_durable_streams_url =
+            rewrite_loopback_for_container(&spec.durable_streams_url)?;
 
         let runtime_token = self.token_issuer.issue(&runtime_key, TOKEN_TTL);
         let agent_command = rewrite_agent_command_for_image(&spec.agent_command)?;
@@ -166,6 +155,8 @@ impl RuntimeProvider for DockerProvider {
             CONTAINER_PORT.to_string(),
             "--name".to_string(),
             spec.name.clone(),
+            "--durable-streams-url".to_string(),
+            connect_durable_streams_url,
             "--state-stream".to_string(),
             state_stream_name,
             "--".to_string(),
@@ -208,11 +199,6 @@ impl RuntimeProvider for DockerProvider {
                     format!("FIRELINE_ADVERTISED_STATE_STREAM_URL={advertised_state_stream_url}"),
                 ]
                 .into_iter()
-                .chain(
-                    connect_state_stream_url
-                        .into_iter()
-                        .map(|url| format!("FIRELINE_EXTERNAL_STATE_STREAM_URL={url}")),
-                )
                 .collect(),
             ),
             exposed_ports: Some(HashMap::from([(

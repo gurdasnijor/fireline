@@ -5,11 +5,14 @@ use std::time::Duration;
 use agent_client_protocol_test::testy::TestyCommand;
 use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
-use fireline_runtime::bootstrap::{BootstrapConfig, start};
 use fireline_harness::TopologySpec;
+use fireline_runtime::bootstrap::{BootstrapConfig, start};
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use uuid::Uuid;
+
+#[path = "support/stream_server.rs"]
+mod stream_server;
 
 struct WebSocketTransport {
     url: String,
@@ -76,6 +79,7 @@ fn temp_peer_directory() -> PathBuf {
 #[tokio::test]
 async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> Result<()> {
     let peer_directory_path = temp_peer_directory();
+    let stream_server = stream_server::TestStreamServer::spawn().await?;
 
     let handle_b = start(BootstrapConfig {
         host: "127.0.0.1".parse::<IpAddr>()?,
@@ -86,10 +90,9 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
         agent_command: vec![testy_bin()],
         mounted_resources: Vec::new(),
         state_stream: None,
-        stream_storage: None,
+        durable_streams_url: stream_server.base_url.clone(),
         peer_directory_path: peer_directory_path.clone(),
         control_plane_url: None,
-        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -103,10 +106,9 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
         agent_command: vec![testy_bin()],
         mounted_resources: Vec::new(),
         state_stream: None,
-        stream_storage: None,
+        durable_streams_url: stream_server.base_url.clone(),
         peer_directory_path: peer_directory_path.clone(),
         control_plane_url: None,
-        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -265,6 +267,7 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
 
     handle_a.shutdown().await?;
     handle_b.shutdown().await?;
+    stream_server.shutdown().await;
     Ok(())
 }
 

@@ -200,6 +200,7 @@ impl TestHarness {
                 port: 0,
                 name: name.to_string(),
                 agent_command: vec!["/bin/echo".to_string(), "ok".to_string()],
+                durable_streams_url: "http://127.0.0.1:4444/v1/stream".to_string(),
                 resources: Vec::new(),
                 state_stream: Some(format!("state-{name}")),
                 stream_storage: None,

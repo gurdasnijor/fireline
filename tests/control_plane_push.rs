@@ -4,12 +4,17 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use fireline_runtime::runtime_host::{Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
 use fireline_runtime::RuntimeRegistry;
+use fireline_runtime::runtime_host::{
+    Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus,
+};
 use reqwest::StatusCode;
 use serde_json::json;
 use tokio::process::{Child, Command};
 use uuid::Uuid;
+
+#[path = "support/stream_server.rs"]
+mod stream_server;
 
 fn fireline_bin() -> PathBuf {
     target_bin("fireline")
@@ -42,6 +47,7 @@ async fn polling_runtime_publishes_final_descriptor_through_control_plane() -> R
 async fn assert_runtime_lifecycle_round_trip(prefer_push: bool) -> Result<()> {
     let runtime_registry_path = temp_path("fireline-control-plane-runtimes");
     let peer_directory_path = temp_path("fireline-control-plane-peers");
+    let shared_stream_server = stream_server::TestStreamServer::spawn().await?;
     let base_url = format!("http://127.0.0.1:{}", reserve_port()?);
     let mut control_plane = spawn_control_plane(
         &base_url,
@@ -63,6 +69,7 @@ async fn assert_runtime_lifecycle_round_trip(prefer_push: bool) -> Result<()> {
                 "port": 0,
                 "name": "push-test",
                 "agentCommand": [testy_bin()],
+                "durableStreamsUrl": shared_stream_server.base_url.clone(),
                 "topology": { "components": [] }
             }))
             .send()
@@ -104,6 +111,7 @@ async fn assert_runtime_lifecycle_round_trip(prefer_push: bool) -> Result<()> {
     .await;
 
     shutdown_process(&mut control_plane).await;
+    shared_stream_server.shutdown().await;
     result
 }
 

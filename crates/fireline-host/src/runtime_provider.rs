@@ -33,10 +33,9 @@ impl LocalRuntimeLauncher for BootstrapRuntimeLauncher {
             agent_command: spec.agent_command,
             mounted_resources,
             state_stream: spec.state_stream,
-            stream_storage: spec.stream_storage,
+            durable_streams_url: spec.durable_streams_url,
             peer_directory_path,
             control_plane_url: None,
-            external_state_stream_url: None,
             topology: spec.topology,
         })
         .await

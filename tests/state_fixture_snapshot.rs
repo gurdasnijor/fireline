@@ -4,10 +4,13 @@ use std::time::Duration;
 
 use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
-use fireline_runtime::bootstrap::{BootstrapConfig, start};
 use fireline_harness::TopologySpec;
+use fireline_runtime::bootstrap::{BootstrapConfig, start};
 use serde_json::Value;
 use uuid::Uuid;
+
+#[path = "support/stream_server.rs"]
+mod stream_server;
 
 struct WebSocketTransport {
     url: String,
@@ -75,6 +78,7 @@ fn temp_peer_directory() -> PathBuf {
 #[ignore = "updates the committed NDJSON conformance fixture for @fireline/state"]
 async fn update_rust_state_fixture_snapshot() -> Result<()> {
     let peer_directory_path = temp_peer_directory();
+    let stream_server = stream_server::TestStreamServer::spawn().await?;
 
     let handle_b = start(BootstrapConfig {
         host: "127.0.0.1".parse::<IpAddr>()?,
@@ -85,10 +89,9 @@ async fn update_rust_state_fixture_snapshot() -> Result<()> {
         agent_command: vec![testy_bin()],
         mounted_resources: Vec::new(),
         state_stream: Some(format!("fireline-fixture-child-{}", Uuid::new_v4())),
-        stream_storage: None,
+        durable_streams_url: stream_server.base_url.clone(),
         peer_directory_path: peer_directory_path.clone(),
         control_plane_url: None,
-        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -102,10 +105,9 @@ async fn update_rust_state_fixture_snapshot() -> Result<()> {
         agent_command: vec![testy_bin()],
         mounted_resources: Vec::new(),
         state_stream: Some(format!("fireline-fixture-{}", Uuid::new_v4())),
-        stream_storage: None,
+        durable_streams_url: stream_server.base_url.clone(),
         peer_directory_path,
         control_plane_url: None,
-        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -189,5 +191,6 @@ async fn update_rust_state_fixture_snapshot() -> Result<()> {
 
     handle_a.shutdown().await?;
     handle_b.shutdown().await?;
+    stream_server.shutdown().await;
     Ok(())
 }

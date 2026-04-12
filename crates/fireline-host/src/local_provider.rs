@@ -20,7 +20,6 @@ pub struct ChildProcessRuntimeLauncher {
     default_peer_directory_path: Option<PathBuf>,
     prefer_push: bool,
     control_plane_url: String,
-    shared_stream_base_url: Option<String>,
     token_store: RuntimeTokenStore,
     startup_timeout: Duration,
     stop_timeout: Duration,
@@ -37,7 +36,6 @@ impl ChildProcessRuntimeLauncher {
         default_peer_directory_path: Option<PathBuf>,
         prefer_push: bool,
         control_plane_url: String,
-        shared_stream_base_url: Option<String>,
         token_store: RuntimeTokenStore,
         startup_timeout: Duration,
         stop_timeout: Duration,
@@ -49,7 +47,6 @@ impl ChildProcessRuntimeLauncher {
             default_peer_directory_path,
             prefer_push,
             control_plane_url,
-            shared_stream_base_url,
             token_store,
             startup_timeout,
             stop_timeout,
@@ -130,6 +127,8 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
             .arg(&node_id)
             .arg("--runtime-registry-path")
             .arg(&self.runtime_registry_path)
+            .arg("--durable-streams-url")
+            .arg(&spec.durable_streams_url)
             .arg("--state-stream")
             .arg(&state_stream_name);
 
@@ -141,13 +140,6 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
                 .arg("--control-plane-url")
                 .arg(&self.control_plane_url)
                 .env("FIRELINE_CONTROL_PLANE_TOKEN", runtime_token.token);
-        }
-
-        if let Some(shared_stream_base_url) = &self.shared_stream_base_url {
-            let state_stream_url = join_stream_url(shared_stream_base_url, &state_stream_name);
-            command
-                .env("FIRELINE_EXTERNAL_STATE_STREAM_URL", &state_stream_url)
-                .env("FIRELINE_ADVERTISED_STATE_STREAM_URL", state_stream_url);
         }
 
         if let Some(peer_directory_path) = spec
@@ -269,8 +261,4 @@ fn sanitize_state_stream_key(value: &str) -> String {
             _ => '-',
         })
         .collect()
-}
-
-fn join_stream_url(base: &str, stream_name: &str) -> String {
-    format!("{}/{}", base.trim_end_matches('/'), stream_name)
 }

@@ -262,6 +262,7 @@ mod tests {
                 port: 0,
                 name: format!("runtime-index-test-{runtime_key}"),
                 agent_command: vec!["/bin/echo".to_string()],
+                durable_streams_url: "http://127.0.0.1:8787/v1/stream".to_string(),
                 resources: Vec::new(),
                 state_stream: Some("state-test".to_string()),
                 stream_storage: None,

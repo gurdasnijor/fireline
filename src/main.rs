@@ -1,6 +1,6 @@
 //! Fireline CLI entry point.
 //!
-//! Parses CLI args, calls [`fireline_runtime::bootstrap::start`], waits for
+//! Parses CLI args, calls [`fireline_host::bootstrap::start`], waits for
 //! the shutdown signal, and exits. Should stay under ~50 lines.
 //!
 //! All runtime assembly lives in the primitive crates, not in a root
@@ -8,17 +8,20 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use fireline_runtime::bootstrap::{self, BootstrapConfig};
-use fireline_runtime::control_plane_client::ControlPlaneClient;
-use fireline_runtime::runtime_host::{Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
-use fireline_runtime::RuntimeRegistry;
-use fireline_runtime::{HeartbeatMetrics, MountedResource, RuntimeRegistration};
 use fireline_harness::TopologySpec;
+use fireline_host::bootstrap::{self, BootstrapConfig};
+use fireline_runtime::RuntimeRegistry;
+use fireline_runtime::control_plane_client::ControlPlaneClient;
+use fireline_runtime::runtime_host::{
+    Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus,
+};
+use fireline_runtime::{HeartbeatMetrics, MountedResource, RuntimeRegistration};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::format::FmtSpan;
+use uuid::Uuid;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -26,7 +29,7 @@ use tracing_subscriber::EnvFilter;
     about = "Fireline runtime substrate for ACP-compatible agents"
 )]
 struct Cli {
-    /// Bind port for the embedded durable-streams server (helper API uses port + 1).
+    /// Bind port for the Fireline host listener.
     #[arg(long, default_value_t = 4437)]
     port: u16,
 
@@ -41,6 +44,10 @@ struct Cli {
     /// Optional explicit name for the durable state stream.
     #[arg(long)]
     state_stream: Option<String>,
+
+    /// Base URL for the external durable-streams service, e.g. `http://127.0.0.1:8787/v1/stream`.
+    #[arg(long)]
+    durable_streams_url: String,
 
     /// Optional explicit path for the runtime registry file.
     #[arg(long)]
@@ -77,10 +84,6 @@ struct Cli {
     /// Optional externally reachable state stream URL to register instead of the bind URL.
     #[arg(long, env = "FIRELINE_ADVERTISED_STATE_STREAM_URL", hide = true)]
     advertised_state_stream_url: Option<String>,
-
-    /// Optional external durable-streams URL for this runtime's state stream.
-    #[arg(long, env = "FIRELINE_EXTERNAL_STATE_STREAM_URL", hide = true)]
-    external_state_stream_url: Option<String>,
 
     /// Optional runtime topology JSON payload.
     #[arg(long)]
@@ -125,10 +128,7 @@ async fn main() -> Result<()> {
         (Some(runtime_key), Some(node_id)) => {
             run_managed_runtime(cli, host, topology, mounted_resources, runtime_key, node_id).await
         }
-        (None, None) => {
-            let registry = load_runtime_registry(cli.runtime_registry_path.clone())?;
-            run_direct_host(cli, host, topology, mounted_resources, registry).await
-        }
+        (None, None) => run_direct_host(cli, host, topology, mounted_resources).await,
         _ => Err(anyhow::anyhow!(
             "--runtime-key and --node-id must be provided together"
         )),
@@ -139,30 +139,49 @@ async fn run_direct_host(
     cli: Cli,
     host: IpAddr,
     topology: TopologySpec,
-    _mounted_resources: Vec<MountedResource>,
-    registry: RuntimeRegistry,
+    mounted_resources: Vec<MountedResource>,
 ) -> Result<()> {
-    let runtime_host = fireline_runtime::runtime_host::RuntimeHost::new(registry);
-    let descriptor = runtime_host
-        .create(fireline_runtime::runtime_host::CreateRuntimeSpec {
-            runtime_key: None,
-            node_id: None,
-            provider: fireline_runtime::runtime_host::RuntimeProviderRequest::Local,
-            host,
-            port: cli.port,
-            name: cli.name,
-            agent_command: cli.agent_command,
-            resources: Vec::new(),
-            state_stream: cli.state_stream,
-            stream_storage: None,
-            peer_directory_path: cli.peer_directory_path,
-            topology,
-        })
-        .await?;
+    let runtime_key = format!("runtime:{}", Uuid::new_v4());
+    let node_id = default_node_id(host);
+    let started_at_ms = now_ms();
+    let peer_directory_path = match cli.peer_directory_path {
+        Some(path) => path,
+        None => fireline_tools::LocalPeerDirectory::default_path()?,
+    };
+    let handle = bootstrap::start(BootstrapConfig {
+        host,
+        port: cli.port,
+        name: cli.name,
+        runtime_key: runtime_key.clone(),
+        node_id: node_id.clone(),
+        agent_command: cli.agent_command,
+        mounted_resources,
+        state_stream: cli.state_stream,
+        durable_streams_url: cli.durable_streams_url,
+        peer_directory_path,
+        control_plane_url: None,
+        topology,
+    })
+    .await?;
+    wait_for_runtime_listener_ready(&handle.health_url).await?;
+
+    let descriptor = RuntimeDescriptor {
+        runtime_key,
+        runtime_id: handle.runtime_id.clone(),
+        node_id,
+        provider: RuntimeProviderKind::Local,
+        provider_instance_id: handle.runtime_id.clone(),
+        status: RuntimeStatus::Ready,
+        acp: Endpoint::new(handle.acp_url.clone()),
+        state: Endpoint::new(handle.state_stream_url.clone()),
+        helper_api_base_url: None,
+        created_at_ms: started_at_ms,
+        updated_at_ms: started_at_ms,
+    };
 
     log_runtime_started(&descriptor);
     tokio::signal::ctrl_c().await.ok();
-    runtime_host.stop(&descriptor.runtime_key).await.map(|_| ())
+    handle.shutdown().await
 }
 
 async fn run_managed_runtime(
@@ -187,10 +206,9 @@ async fn run_managed_runtime(
         agent_command: cli.agent_command,
         mounted_resources,
         state_stream: cli.state_stream,
-        stream_storage: None,
+        durable_streams_url: cli.durable_streams_url.clone(),
         peer_directory_path,
         control_plane_url: cli.control_plane_url.clone(),
-        external_state_stream_url: cli.external_state_stream_url.clone(),
         topology,
     })
     .await?;
@@ -204,7 +222,6 @@ async fn run_managed_runtime(
     let advertised_state_stream_url = cli
         .advertised_state_stream_url
         .clone()
-        .or(cli.external_state_stream_url.clone())
         .unwrap_or_else(|| handle.state_stream_url.clone());
     let descriptor = RuntimeDescriptor {
         runtime_key: runtime_key.clone(),
@@ -311,6 +328,14 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("time went backwards")
         .as_millis() as i64
+}
+
+fn default_node_id(host: IpAddr) -> String {
+    if host.is_unspecified() {
+        "node:local".to_string()
+    } else {
+        format!("node:{host}")
+    }
 }
 
 fn parse_provider_kind(value: Option<&str>) -> Result<RuntimeProviderKind> {

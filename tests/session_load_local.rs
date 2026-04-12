@@ -9,12 +9,15 @@ use agent_client_protocol::{
 use agent_client_protocol_test::testy::TestyCommand;
 use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
-use fireline_runtime::bootstrap::{BootstrapConfig, start};
 use fireline_harness::TopologySpec;
+use fireline_runtime::bootstrap::{BootstrapConfig, start};
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
+
+#[path = "support/stream_server.rs"]
+mod stream_server;
 
 struct WebSocketTransport {
     url: String,
@@ -84,16 +87,13 @@ fn temp_peer_directory() -> PathBuf {
     std::env::temp_dir().join(format!("fireline-peers-{}.toml", Uuid::new_v4()))
 }
 
-fn temp_stream_data_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("fireline-streams-{}", Uuid::new_v4()))
-}
-
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
 #[tokio::test]
 async fn session_load_returns_explicit_non_resumable_error_with_durable_record() -> Result<()> {
+    let stream_server = stream_server::TestStreamServer::spawn().await?;
     let handle = start(BootstrapConfig {
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
@@ -103,10 +103,9 @@ async fn session_load_returns_explicit_non_resumable_error_with_durable_record()
         agent_command: vec![testy_bin()],
         mounted_resources: Vec::new(),
         state_stream: None,
-        stream_storage: None,
+        durable_streams_url: stream_server.base_url.clone(),
         peer_directory_path: temp_peer_directory(),
         control_plane_url: None,
-        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -152,6 +151,7 @@ async fn session_load_returns_explicit_non_resumable_error_with_durable_record()
     );
 
     handle.shutdown().await?;
+    stream_server.shutdown().await;
     Ok(())
 }
 
@@ -162,9 +162,7 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
     let state_stream = format!("fireline-session-load-{}", Uuid::new_v4());
     let peer_directory_path = temp_peer_directory();
     let cwd = repo_root();
-    let stream_data_dir = temp_stream_data_dir();
-
-    std::fs::create_dir_all(&stream_data_dir)?;
+    let stream_server = stream_server::TestStreamServer::spawn().await?;
 
     let handle = start(BootstrapConfig {
         host: "127.0.0.1".parse::<IpAddr>()?,
@@ -175,12 +173,9 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
         agent_command: vec![testy_bin()],
         mounted_resources: Vec::new(),
         state_stream: Some(state_stream.clone()),
-        stream_storage: Some(fireline_session::StreamStorageConfig::file_durable(
-            stream_data_dir.clone(),
-        )),
+        durable_streams_url: stream_server.base_url.clone(),
         peer_directory_path: peer_directory_path.clone(),
         control_plane_url: None,
-        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -198,12 +193,9 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
         agent_command: vec![testy_bin()],
         mounted_resources: Vec::new(),
         state_stream: Some(state_stream),
-        stream_storage: Some(fireline_session::StreamStorageConfig::file_durable(
-            stream_data_dir,
-        )),
+        durable_streams_url: stream_server.base_url.clone(),
         peer_directory_path,
         control_plane_url: None,
-        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -235,12 +227,14 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
     );
 
     restarted.shutdown().await?;
+    stream_server.shutdown().await;
     Ok(())
 }
 
 #[tokio::test]
 async fn session_load_reattaches_against_runtime_owned_terminal_when_agent_supports_it()
 -> Result<()> {
+    let stream_server = stream_server::TestStreamServer::spawn().await?;
     let handle = start(BootstrapConfig {
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
@@ -250,10 +244,9 @@ async fn session_load_reattaches_against_runtime_owned_terminal_when_agent_suppo
         agent_command: vec![resumable_testy_bin()],
         mounted_resources: Vec::new(),
         state_stream: None,
-        stream_storage: None,
+        durable_streams_url: stream_server.base_url.clone(),
         peer_directory_path: temp_peer_directory(),
         control_plane_url: None,
-        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -276,6 +269,7 @@ async fn session_load_reattaches_against_runtime_owned_terminal_when_agent_suppo
     assert_eq!(response, "reattach succeeded");
 
     handle.shutdown().await?;
+    stream_server.shutdown().await;
     Ok(())
 }
 
@@ -286,9 +280,7 @@ async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not
     let state_stream = format!("fireline-session-load-resumable-{}", Uuid::new_v4());
     let peer_directory_path = temp_peer_directory();
     let cwd = repo_root();
-    let stream_data_dir = temp_stream_data_dir();
-
-    std::fs::create_dir_all(&stream_data_dir)?;
+    let stream_server = stream_server::TestStreamServer::spawn().await?;
 
     let handle = start(BootstrapConfig {
         host: "127.0.0.1".parse::<IpAddr>()?,
@@ -299,12 +291,9 @@ async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not
         agent_command: vec![resumable_testy_bin()],
         mounted_resources: Vec::new(),
         state_stream: Some(state_stream.clone()),
-        stream_storage: Some(fireline_session::StreamStorageConfig::file_durable(
-            stream_data_dir.clone(),
-        )),
+        durable_streams_url: stream_server.base_url.clone(),
         peer_directory_path: peer_directory_path.clone(),
         control_plane_url: None,
-        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -322,12 +311,9 @@ async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not
         agent_command: vec![resumable_testy_bin()],
         mounted_resources: Vec::new(),
         state_stream: Some(state_stream),
-        stream_storage: Some(fireline_session::StreamStorageConfig::file_durable(
-            stream_data_dir,
-        )),
+        durable_streams_url: stream_server.base_url.clone(),
         peer_directory_path,
         control_plane_url: None,
-        external_state_stream_url: None,
         topology: TopologySpec::default(),
     })
     .await?;
@@ -349,6 +335,7 @@ async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not
     );
 
     restarted.shutdown().await?;
+    stream_server.shutdown().await;
     Ok(())
 }
 

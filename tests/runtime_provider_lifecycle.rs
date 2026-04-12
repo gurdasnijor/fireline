@@ -6,17 +6,20 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use durable_streams::{Client as DsClient, Offset};
+use fireline_harness::TopologySpec;
+use fireline_runtime::LocalProvider;
+use fireline_runtime::RuntimeRegistry;
 use fireline_runtime::runtime_host::{
     CreateRuntimeSpec, RuntimeHost, RuntimeProviderKind, RuntimeProviderRequest, RuntimeStatus,
 };
-use fireline_runtime::RuntimeRegistry;
-use fireline_runtime::LocalProvider;
 use fireline_runtime::{
     Endpoint, ManagedRuntime, RuntimeHost as ConductorRuntimeHost, RuntimeLaunch, RuntimeManager,
 };
-use fireline_harness::TopologySpec;
 use serde_json::Value;
 use uuid::Uuid;
+
+#[path = "support/stream_server.rs"]
+mod stream_server;
 
 fn testy_bin() -> String {
     PathBuf::from(env!("CARGO_BIN_EXE_fireline-testy"))
@@ -36,6 +39,7 @@ fn temp_peer_directory() -> PathBuf {
 async fn runtime_host_pins_provider_and_persists_runtime_descriptor() -> Result<()> {
     let registry = RuntimeRegistry::load(temp_runtime_registry())?;
     let runtime_host = RuntimeHost::new(registry);
+    let stream_server = stream_server::TestStreamServer::spawn().await?;
 
     let descriptor = runtime_host
         .create(CreateRuntimeSpec {
@@ -46,6 +50,7 @@ async fn runtime_host_pins_provider_and_persists_runtime_descriptor() -> Result<
             port: 0,
             name: "provider-test".to_string(),
             agent_command: vec![testy_bin()],
+            durable_streams_url: stream_server.base_url.clone(),
             resources: Vec::new(),
             state_stream: None,
             stream_storage: None,
@@ -84,6 +89,7 @@ async fn runtime_host_pins_provider_and_persists_runtime_descriptor() -> Result<
         Some(runtime_key.clone())
     );
     assert!(runtime_host.get(&runtime_key)?.is_none());
+    stream_server.shutdown().await;
 
     Ok(())
 }
@@ -105,6 +111,7 @@ async fn conductor_runtime_host_stays_starting_until_register_arrives() -> Resul
             port: 0,
             name: "pending-provider-test".to_string(),
             agent_command: vec![testy_bin()],
+            durable_streams_url: "http://127.0.0.1:4444/v1/stream".to_string(),
             resources: Vec::new(),
             state_stream: None,
             stream_storage: None,
@@ -126,17 +133,17 @@ async fn conductor_runtime_host_stays_starting_until_register_arrives() -> Resul
 
     let registered = runtime_host
         .register(
-        &descriptor.runtime_key,
-        fireline_runtime::RuntimeRegistration {
-            runtime_id: descriptor.runtime_id.clone(),
-            node_id: descriptor.node_id.clone(),
-            provider: RuntimeProviderKind::Local,
-            provider_instance_id: "fake-provider-instance".to_string(),
-            advertised_acp_url: descriptor.acp.url.clone(),
-            advertised_state_stream_url: descriptor.state.url.clone(),
-            helper_api_base_url: None,
-        },
-    )
+            &descriptor.runtime_key,
+            fireline_runtime::RuntimeRegistration {
+                runtime_id: descriptor.runtime_id.clone(),
+                node_id: descriptor.node_id.clone(),
+                provider: RuntimeProviderKind::Local,
+                provider_instance_id: "fake-provider-instance".to_string(),
+                advertised_acp_url: descriptor.acp.url.clone(),
+                advertised_state_stream_url: descriptor.state.url.clone(),
+                helper_api_base_url: None,
+            },
+        )
         .await?;
     assert_eq!(registered.status, RuntimeStatus::Ready);
 

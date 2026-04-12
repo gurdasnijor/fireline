@@ -134,6 +134,7 @@ pub struct CreateRuntimeSpec {
     pub port: u16,
     pub name: String,
     pub agent_command: Vec<String>,
+    pub durable_streams_url: String,
     #[serde(default)]
     pub resources: Vec<ResourceRef>,
     pub state_stream: Option<String>,
@@ -177,6 +178,7 @@ struct PersistedRuntimeSpecWire {
     port: u16,
     name: String,
     agent_command: Vec<String>,
+    durable_streams_url: String,
     #[serde(default)]
     resources: Vec<ResourceRef>,
     state_stream: Option<String>,
@@ -198,6 +200,7 @@ impl Serialize for PersistedRuntimeSpec {
             port: self.create_spec.port,
             name: self.create_spec.name.clone(),
             agent_command: self.create_spec.agent_command.clone(),
+            durable_streams_url: self.create_spec.durable_streams_url.clone(),
             resources: self.create_spec.resources.clone(),
             state_stream: self.create_spec.state_stream.clone(),
             stream_storage: self.create_spec.stream_storage.clone(),
@@ -225,6 +228,7 @@ impl<'de> Deserialize<'de> for PersistedRuntimeSpec {
                 port: wire.port,
                 name: wire.name,
                 agent_command: wire.agent_command,
+                durable_streams_url: wire.durable_streams_url,
                 resources: wire.resources,
                 state_stream: wire.state_stream,
                 stream_storage: wire.stream_storage,
