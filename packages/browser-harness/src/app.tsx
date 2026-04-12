@@ -25,8 +25,6 @@ import { createFirelineDB, type FirelineDB } from '@fireline/state'
 
 const STATE_STREAM_NAME =
   import.meta.env.VITE_FIRELINE_STATE_STREAM ?? 'fireline-harness-state'
-const ACP_PROXY_URL = `ws://${window.location.host}/acp`
-const STATE_PROXY_URL = `${window.location.origin}/v1/stream/${STATE_STREAM_NAME}`
 const HARNESS_API_BASE = `${window.location.origin}/api`
 const CONTROL_PLANE_URL = `${window.location.origin}/cp`
 
@@ -61,12 +59,12 @@ function useDb(): FirelineDB {
 }
 
 export function App() {
-  const [dbEnabled, setDbEnabled] = useState(false)
-  const [dbEpoch, setDbEpoch] = useState(0)
+  const [stateStreamUrl, setStateStreamUrl] = useState<string | null>(null)
   const db = useMemo(
-    () => (dbEnabled ? createFirelineDB({ stateStreamUrl: STATE_PROXY_URL }) : null),
-    [dbEnabled, dbEpoch],
+    () => (stateStreamUrl ? createFirelineDB({ stateStreamUrl }) : null),
+    [stateStreamUrl],
   )
+  const dbEnabled = stateStreamUrl !== null
   const [dbReady, setDbReady] = useState(false)
   const [dbError, setDbError] = useState<string | null>(null)
 
@@ -124,11 +122,12 @@ export function App() {
             dbActive={dbEnabled}
             dbReady={dbReady}
             dbError={dbError}
-            onHandleChanged={(_, status) => {
-              setDbEnabled(
-                status === 'ready' || status === 'busy' || status === 'idle',
+            onHandleChanged={(handle, status) => {
+              setStateStreamUrl(
+                handle && (status === 'ready' || status === 'busy' || status === 'idle')
+                  ? handle.state.url
+                  : null,
               )
-              setDbEpoch((current) => current + 1)
             }}
           />
         </div>
@@ -227,8 +226,10 @@ function SessionHarness({
   }, [events.length])
 
   async function openConnection(mode: 'new' | 'load') {
+    let currentHandle = handle
+
     if (!runtimeReady) {
-      if (handle) {
+      if (currentHandle) {
         setLastError(
           `Runtime is not ready yet (${sandboxStatus ?? 'unknown'})`,
         )
@@ -245,6 +246,7 @@ function SessionHarness({
       if (!launched) {
         return
       }
+      currentHandle = launched
     }
 
     if (mode === 'load' && !sessionIdRef.current) {
@@ -253,12 +255,18 @@ function SessionHarness({
       return
     }
 
+    if (!currentHandle) {
+      setLastError('No active runtime handle is available')
+      setStatus('error')
+      return
+    }
+
     await disconnect({ preserveSessionId: true, clearError: true })
     setStatus('connecting')
     setLastError(null)
-    pushEvent('connection', { mode, url: ACP_PROXY_URL })
+    pushEvent('connection', { mode, url: currentHandle.acp.url })
 
-    const websocket = new WebSocket(ACP_PROXY_URL)
+    const websocket = new WebSocket(currentHandle.acp.url)
     websocketRef.current = websocket
 
     try {
@@ -429,10 +437,10 @@ function SessionHarness({
     }
   }
 
-  async function launchRuntime(): Promise<boolean> {
+  async function launchRuntime(): Promise<SandboxHandle | null> {
     if (!selectedAgentId) {
       setLastError('No launchable agent selected')
-      return false
+      return null
     }
 
     setRuntimePending(true)
@@ -458,12 +466,12 @@ function SessionHarness({
         handle: next,
         status,
       })
-      return true
+      return next
     } catch (error) {
       const message = toErrorMessage(error)
       setLastError(message)
       pushEvent('error', { message })
-      return false
+      return null
     } finally {
       setRuntimePending(false)
     }

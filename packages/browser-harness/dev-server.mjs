@@ -4,8 +4,6 @@ import { mkdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { createFirelineClient } from '@fireline/client'
-
 const packageDir = dirname(fileURLToPath(import.meta.url))
 const repoRoot = dirname(dirname(packageDir))
 const tmpDir = join(packageDir, '.tmp')
@@ -18,30 +16,22 @@ const controlPlaneUrl = 'http://127.0.0.1:4440'
 const preferPush = process.env.PREFER_PUSH === 'true'
 const durableStreamsUrl = process.env.DURABLE_STREAMS_URL ?? 'http://127.0.0.1:7474/v1/stream'
 
-const client = createFirelineClient({
-  host: {
-    controlPlaneUrl,
+const agents = [
+  {
+    source: 'local',
+    id: 'fireline-testy-load',
+    name: 'Fireline Testy Load',
+    version: 'local',
+    description: 'Local Fireline proof agent with loadSession support',
+    launchable: true,
+    distributionKind: 'command',
   },
-  catalog: {
-    localEntries: [
-      {
-        source: 'local',
-        id: 'fireline-testy-load',
-        name: 'Fireline Testy Load',
-        version: 'local',
-        description: 'Local Fireline proof agent with loadSession support',
-        distributions: [
-          {
-            kind: 'command',
-            command: [firelineTestyLoadBin],
-          },
-        ],
-      },
-    ],
-  },
-})
+]
 
-let currentRuntime = null
+const resolvedCommands = new Map([
+  ['fireline-testy-load', [firelineTestyLoadBin]],
+])
+
 let controlPlaneProcess = null
 let streamsProcess = null
 
@@ -63,26 +53,7 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1:4436')
 
     if (req.method === 'GET' && url.pathname === '/api/agents') {
-      const agents = await client.catalog.listAgents()
-      const items = await Promise.all(
-        agents.map(async (agent) => {
-          try {
-            const launch = await client.catalog.resolveAgent(agent.id)
-            return {
-              ...agent,
-              launchable: true,
-              distributionKind: launch.distributionKind,
-            }
-          } catch (error) {
-            return {
-              ...agent,
-              launchable: false,
-              unavailableReason: toErrorMessage(error),
-            }
-          }
-        }),
-      )
-      sendJson(res, 200, { agents: items })
+      sendJson(res, 200, { agents })
       return
     }
 
@@ -92,50 +63,12 @@ const server = createServer(async (req, res) => {
         sendJson(res, 400, { error: 'missing_agent_id' })
         return
       }
-      try {
-        const resolved = await client.catalog.resolveAgent(agentId)
-        sendJson(res, 200, { agentCommand: resolved.command })
-      } catch (error) {
-        sendJson(res, 400, { error: toErrorMessage(error) })
-      }
-      return
-    }
-
-    if (req.method === 'GET' && url.pathname === '/api/runtime') {
-      if (!currentRuntime) {
-        sendJson(res, 200, { runtime: null })
+      const resolved = resolvedCommands.get(agentId)
+      if (!resolved) {
+        sendJson(res, 404, { error: `unknown_agent_id: ${agentId}` })
         return
       }
-      const runtime = await client.host.get(currentRuntime.runtimeKey)
-      currentRuntime = runtime
-      sendJson(res, 200, { runtime })
-      return
-    }
-
-    if (req.method === 'POST' && url.pathname === '/api/runtime') {
-      const body = await readJson(req)
-      const agentId = typeof body?.agentId === 'string' ? body.agentId : null
-      if (!agentId) {
-        sendJson(res, 400, { error: 'missing_agent_id' })
-        return
-      }
-      await stopCurrentRuntime()
-
-      const resolved = await client.catalog.resolveAgent(agentId)
-      currentRuntime = await createRuntime({
-        name: 'browser-harness',
-        agentCommand: resolved.command,
-        stateStream: 'fireline-harness-state',
-        topology: { components: [] },
-      })
-
-      sendJson(res, 200, { runtime: currentRuntime })
-      return
-    }
-
-    if (req.method === 'DELETE' && url.pathname === '/api/runtime') {
-      await stopCurrentRuntime()
-      sendJson(res, 200, { runtime: null })
+      sendJson(res, 200, { agentCommand: resolved })
       return
     }
 
@@ -156,22 +89,8 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   })
 }
 
-async function stopCurrentRuntime() {
-  if (!currentRuntime) {
-    return
-  }
-
-  try {
-    await client.host.delete(currentRuntime.runtimeKey)
-  } finally {
-    currentRuntime = null
-  }
-}
-
 async function shutdown() {
   server.close()
-  await stopCurrentRuntime()
-  await client.close()
   await stopControlPlane()
   await stopEmbeddedStreams()
 }
@@ -278,20 +197,6 @@ async function startControlPlane() {
   }
 
   await waitForHttpReady(`${controlPlaneUrl}/healthz`, controlPlaneProcess)
-}
-
-async function createRuntime(spec) {
-  const response = await fetch(`${controlPlaneUrl}/v1/runtimes`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-    },
-    body: JSON.stringify(spec),
-  })
-  if (!response.ok) {
-    throw new Error(`runtime create failed (${response.status}): ${await response.text()}`)
-  }
-  return response.json()
 }
 
 async function stopControlPlane() {
