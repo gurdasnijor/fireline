@@ -10,10 +10,13 @@ use fireline_harness::TopologySpec;
 use fireline_host::auth::RuntimeTokenStore;
 use fireline_host::heartbeat::HeartbeatTracker;
 use fireline_host::router::{AppState, build_router};
-use fireline_runtime::{
-    CreateRuntimeSpec, Endpoint, HeartbeatReport, LocalProvider, LocalRuntimeLauncher,
-    ManagedRuntime, RuntimeDescriptor, RuntimeHost, RuntimeLaunch, RuntimeManager,
-    RuntimeProviderKind, RuntimeRegistration, RuntimeRegistry, RuntimeStatus,
+use fireline_sandbox::{
+    CreateRuntimeSpec, LocalProvider, LocalRuntimeLauncher, ManagedRuntime, MountedResource,
+    RuntimeHost, RuntimeLaunch, RuntimeManager, RuntimeRegistry,
+};
+use fireline_session::{
+    Endpoint, HeartbeatReport, RuntimeDescriptor, RuntimeProviderKind, RuntimeProviderRequest,
+    RuntimeRegistration, RuntimeStatus,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -195,7 +198,7 @@ impl TestHarness {
             .create(CreateRuntimeSpec {
                 runtime_key: None,
                 node_id: None,
-                provider: fireline_runtime::RuntimeProviderRequest::Local,
+                provider: RuntimeProviderRequest::Local,
                 host: "127.0.0.1".parse::<IpAddr>()?,
                 port: 0,
                 name: name.to_string(),
@@ -286,7 +289,7 @@ impl LocalRuntimeLauncher for FakeRuntimeLauncher {
         spec: CreateRuntimeSpec,
         _runtime_key: String,
         _node_id: String,
-        _mounted_resources: Vec<fireline_runtime::MountedResource>,
+        _mounted_resources: Vec<MountedResource>,
     ) -> Result<RuntimeLaunch> {
         Ok(RuntimeLaunch {
             status: RuntimeStatus::Starting,

@@ -32,9 +32,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use fireline_resources::{FileBackend, LocalFileBackend, RuntimeStreamFileBackend};
-use fireline_runtime::{LocalPathMounter, MountedResource, ResourceMounter, ResourceRef};
 use fireline_harness::{TopologyComponentSpec, TopologySpec};
+use fireline_resources::{
+    FileBackend, LocalFileBackend, LocalPathMounter, MountedResource, ResourceMounter, ResourceRef,
+    RuntimeStreamFileBackend,
+};
 use managed_agent_suite::{
     DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec, create_session,
     pending_contract, prompt_session, temp_path, testy_fs_bin, wait_for_event_count,
@@ -123,8 +125,7 @@ async fn resources_local_file_backend_reads_through_mount_mapping() -> Result<()
         .context("LocalFileBackend::read should translate mount path to host path")?;
 
     assert_eq!(
-        bytes,
-        b"hello from file backend",
+        bytes, b"hello from file backend",
         "INVARIANT (Resources): backend read returns the seeded bytes"
     );
 
@@ -218,17 +219,12 @@ async fn resources_fs_backend_captures_write_as_durable_event() -> Result<()> {
                 "INVARIANT (Resources): scripted testy-fs must accept the write_file command",
             )?;
 
-        let fs_ops = wait_for_event_count(
-            runtime.state_stream_url(),
-            "fs_op",
-            1,
-            DEFAULT_TIMEOUT,
-        )
-        .await
-        .context(
-            "INVARIANT (Resources): the FsBackendComponent must capture fs/write_text_file \
+        let fs_ops = wait_for_event_count(runtime.state_stream_url(), "fs_op", 1, DEFAULT_TIMEOUT)
+            .await
+            .context(
+                "INVARIANT (Resources): the FsBackendComponent must capture fs/write_text_file \
              as a durable fs_op envelope on the state stream",
-        )?;
+            )?;
 
         let fs_op = fs_ops
             .into_iter()
@@ -300,17 +296,13 @@ async fn resources_session_log_backend_supports_cross_runtime_reads() -> Result<
             .await
             .context("backend A must accept an fs write to the shared stream")?;
 
-        let bytes = backend_b
-            .read(path)
-            .await
-            .context(
-                "INVARIANT (Resources): backend B pointed at the same stream URL must project \
+        let bytes = backend_b.read(path).await.context(
+            "INVARIANT (Resources): backend B pointed at the same stream URL must project \
                  the file written by backend A without any additional coordination",
-            )?;
+        )?;
 
         assert_eq!(
-            bytes,
-            payload,
+            bytes, payload,
             "INVARIANT (Resources): cross-runtime read returns the bytes the other runtime wrote"
         );
 

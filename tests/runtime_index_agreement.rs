@@ -30,8 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use fireline_session::RuntimeMaterializer;
-use fireline_runtime::runtime_index::{RuntimeIndex, RuntimeInstanceStatus};
+use fireline_session::{RuntimeIndex, RuntimeInstanceStatus, RuntimeMaterializer, RuntimeStatus};
 use managed_agent_suite::{ControlPlaneHarness, DEFAULT_TIMEOUT, ManagedAgentHarnessSpec};
 
 /// Precondition: control plane is up with its shared state stream;
@@ -56,8 +55,8 @@ async fn runtime_index_agrees_with_registry_on_a_live_managed_runtime() -> Resul
     let control_plane = ControlPlaneHarness::spawn(true).await?;
 
     let result = async {
-        let spec = ManagedAgentHarnessSpec::new("runtime-index-agreement-live")
-            .with_testy_load_agent();
+        let spec =
+            ManagedAgentHarnessSpec::new("runtime-index-agreement-live").with_testy_load_agent();
         let runtime = control_plane.create_runtime_from_spec(spec).await?;
 
         let index = Arc::new(RuntimeIndex::new());
@@ -79,7 +78,9 @@ async fn runtime_index_agrees_with_registry_on_a_live_managed_runtime() -> Resul
             runtime.runtime_key
         );
         assert_eq!(
-            spec_from_index.as_ref().map(|spec| spec.runtime_key.as_str()),
+            spec_from_index
+                .as_ref()
+                .map(|spec| spec.runtime_key.as_str()),
             Some(runtime.runtime_key.as_str()),
             "INVARIANT (stream-as-truth): runtime_spec.runtime_key must match the \
              envelope key the control plane wrote",
@@ -103,16 +104,17 @@ async fn runtime_index_agrees_with_registry_on_a_live_managed_runtime() -> Resul
         // status, timestamps) without reading through RuntimeRegistry.
         // This is the load-bearing agreement — once it holds for every
         // mutation point, the read path can flip to the projection.
-        let endpoints_from_index = index
-            .endpoints_for(&runtime.runtime_key)
-            .await
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "INVARIANT (stream-as-truth): runtime_endpoints envelope must be \
+        let endpoints_from_index =
+            index
+                .endpoints_for(&runtime.runtime_key)
+                .await
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "INVARIANT (stream-as-truth): runtime_endpoints envelope must be \
                      observable for every control-plane-managed runtime (missing for {})",
-                    runtime.runtime_key
-                )
-            })?;
+                        runtime.runtime_key
+                    )
+                })?;
         assert_eq!(
             endpoints_from_index.runtime_key, runtime.runtime_key,
             "INVARIANT (stream-as-truth): runtime_endpoints.runtime_key must equal the \
@@ -170,8 +172,8 @@ async fn runtime_index_observes_stopped_runtimes_on_the_shared_stream() -> Resul
     let control_plane = ControlPlaneHarness::spawn(true).await?;
 
     let result = async {
-        let spec = ManagedAgentHarnessSpec::new("runtime-index-agreement-stopped")
-            .with_testy_load_agent();
+        let spec =
+            ManagedAgentHarnessSpec::new("runtime-index-agreement-stopped").with_testy_load_agent();
         let runtime = control_plane.create_runtime_from_spec(spec).await?;
         control_plane.stop_runtime(&runtime.runtime_key).await?;
 
@@ -187,9 +189,7 @@ async fn runtime_index_observes_stopped_runtimes_on_the_shared_stream() -> Resul
         let task = materializer.connect(control_plane.shared_state_url());
         tokio::time::timeout(DEFAULT_TIMEOUT, task.preload())
             .await
-            .context(
-                "INVARIANT (stream-as-truth): RuntimeIndex preload must reach live edge",
-            )??;
+            .context("INVARIANT (stream-as-truth): RuntimeIndex preload must reach live edge")??;
 
         // The runtime's spec should still be on the stream — specs
         // are monotonic inserts, not tombstoned on stop.
@@ -227,10 +227,7 @@ async fn runtime_index_observes_stopped_runtimes_on_the_shared_stream() -> Resul
                 )
             })?;
         assert!(
-            matches!(
-                endpoints.status,
-                fireline_runtime::RuntimeStatus::Stopped
-            ),
+            matches!(endpoints.status, RuntimeStatus::Stopped),
             "INVARIANT (stream-as-truth): runtime_endpoints.status must reflect \
              the Stopped transition after a control-plane stop (got {:?})",
             endpoints.status

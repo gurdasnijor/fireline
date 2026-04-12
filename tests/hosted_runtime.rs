@@ -6,7 +6,7 @@ use agent_client_protocol::{InitializeRequest, ProtocolVersion};
 use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
 use fireline_harness::TopologySpec;
-use fireline_runtime::bootstrap::{BootstrapConfig, start};
+use fireline_host::bootstrap::{BootstrapConfig, start};
 use uuid::Uuid;
 
 #[path = "support/stream_server.rs"]

@@ -7,7 +7,7 @@ use agent_client_protocol_test::testy::TestyCommand;
 use anyhow::{Context, Result, anyhow};
 use axum::Router;
 use durable_streams::{Client as DsClient, Offset};
-use fireline_runtime::runtime_host::{RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
+use fireline_session::{RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
 use futures::{SinkExt, StreamExt};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -442,20 +442,7 @@ impl SharedStreamServer {
 
 fn ensure_control_plane_binaries_built() -> Result<()> {
     let status = std::process::Command::new("cargo")
-        .args([
-            "build",
-            "--quiet",
-            "-p",
-            "fireline",
-            "--bin",
-            "fireline",
-            "--bin",
-            "fireline-testy",
-            "-p",
-            "fireline-control-plane",
-            "--bin",
-            "fireline-control-plane",
-        ])
+        .args(["build", "--quiet", "-p", "fireline", "--bins"])
         .status()
         .context("build fireline test binaries")?;
     if !status.success() {
@@ -466,10 +453,6 @@ fn ensure_control_plane_binaries_built() -> Result<()> {
 
 fn fireline_bin() -> PathBuf {
     target_bin("fireline")
-}
-
-fn control_plane_bin() -> PathBuf {
-    target_bin("fireline-control-plane")
 }
 
 fn testy_bin() -> String {
@@ -504,8 +487,9 @@ async fn spawn_control_plane(
         .rsplit(':')
         .next()
         .ok_or_else(|| anyhow!("missing control-plane port"))?;
-    let mut command = Command::new(control_plane_bin());
+    let mut command = Command::new(fireline_bin());
     command
+        .arg("--control-plane")
         .arg("--host")
         .arg("127.0.0.1")
         .arg("--port")
@@ -529,7 +513,7 @@ async fn spawn_control_plane(
         .stderr(Stdio::inherit())
         .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
 
-    let mut child = command.spawn().context("spawn fireline-control-plane")?;
+    let mut child = command.spawn().context("spawn fireline --control-plane")?;
     wait_for_http_ok(&format!("{base_url}/healthz"), &mut child).await?;
     Ok(child)
 }

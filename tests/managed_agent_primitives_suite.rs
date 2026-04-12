@@ -25,8 +25,10 @@ use agent_client_protocol::{
 use anyhow::Result;
 use durable_streams::Client as DsClient;
 use fireline_harness::{TopologyComponentSpec, TopologySpec};
-use fireline_resources::{FsBackendComponent, LocalFileBackend};
-use fireline_runtime::{LocalPathMounter, ResourceMounter, ResourceRef};
+use fireline_resources::{
+    FsBackendComponent, LocalFileBackend, LocalPathMounter, ResourceMounter, ResourceRef,
+};
+use fireline_session::RuntimeStatus;
 use managed_agent_suite::{
     ControlPlaneHarness, ManagedAgentHarnessSpec, count_events, create_session, load_session,
     prompt_session, testy_fs_bin, testy_load_bin, wait_for_event_count,
@@ -218,10 +220,7 @@ async fn managed_agent_orchestration_acceptance_contract() -> Result<()> {
         }
 
         assert_eq!(resumed.runtime_key, runtime.runtime_key);
-        assert_eq!(
-            resumed.status,
-            fireline_runtime::runtime_host::RuntimeStatus::Ready
-        );
+        assert_eq!(resumed.status, RuntimeStatus::Ready);
         assert_ne!(
             resumed.runtime_id, runtime.runtime_id,
             "cold-start resume should produce a new runtime process identity"

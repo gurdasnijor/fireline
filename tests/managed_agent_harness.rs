@@ -36,8 +36,8 @@ mod managed_agent_suite;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use fireline_runtime::runtime_host::RuntimeStatus;
 use fireline_harness::{TopologyComponentSpec, TopologySpec};
+use fireline_session::RuntimeStatus;
 use managed_agent_suite::{
     ControlPlaneHarness, DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec,
     append_approval_resolved, count_events, create_session, load_session_then_prompt,

@@ -9,7 +9,6 @@ members = [
     "crates/fireline-sandbox",
     "crates/fireline-resources",
     "crates/fireline-tools",
-    "crates/fireline-runtime",
     "verification/stateright",
 ]
 resolver = "2"
@@ -30,7 +29,6 @@ fireline-host = { path = "crates/fireline-host" }
 fireline-sandbox = { path = "crates/fireline-sandbox" }
 fireline-resources = { path = "crates/fireline-resources" }
 fireline-tools = { path = "crates/fireline-tools" }
-fireline-runtime = { path = "crates/fireline-runtime" }
 
 # Async runtime + utility
 anyhow = "1"
@@ -99,7 +97,6 @@ description = "Fireline runtime substrate for ACP-compatible agents"
 [dependencies]
 # Workspace crates
 fireline-orchestration.workspace = true
-fireline-runtime.workspace = true
 fireline-session.workspace = true
 fireline-harness.workspace = true
 fireline-host.workspace = true
@@ -160,27 +157,3 @@ agent-client-protocol-test.workspace = true
 [[bin]]
 name = "fireline"
 path = "src/main.rs"
-
-[[bin]]
-name = "fireline-dashboard"
-path = "src/bin/dashboard.rs"
-
-[[bin]]
-name = "fireline-agents"
-path = "src/bin/agents.rs"
-
-[[bin]]
-name = "fireline-testy"
-path = "src/bin/testy.rs"
-
-[[bin]]
-name = "fireline-testy-load"
-path = "src/bin/testy_load.rs"
-
-[[bin]]
-name = "fireline-testy-fs"
-path = "src/bin/testy_fs.rs"
-
-[[bin]]
-name = "fireline-testy-prompt"
-path = "src/bin/testy_prompt.rs"

@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
 use fireline_harness::TopologySpec;
-use fireline_runtime::bootstrap::{BootstrapConfig, start};
+use fireline_host::bootstrap::{BootstrapConfig, start};
 use serde_json::Value;
 use uuid::Uuid;
 

@@ -13,11 +13,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use durable_streams::{Client as DsClient, Offset};
 use fireline_harness::TopologySpec;
+use fireline_host::bootstrap::{BootstrapConfig, BootstrapHandle, start};
 use fireline_resources::{FsOpRecord, RuntimeStreamFileRecord};
-use fireline_runtime::bootstrap::{BootstrapConfig, BootstrapHandle, start};
-use fireline_runtime::runtime_host::{RuntimeDescriptor, RuntimeStatus};
-use fireline_runtime::{LocalPathMounter, PersistedRuntimeSpec, ResourceMounter, ResourceRef};
-use fireline_session::SessionRecord;
+use fireline_resources::{LocalPathMounter, ResourceMounter, ResourceRef};
+use fireline_session::{PersistedRuntimeSpec, RuntimeDescriptor, RuntimeStatus, SessionRecord};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value as JsonValue, json};
 use tokio::process::{Child, Command as TokioCommand};
@@ -160,10 +159,6 @@ pub(crate) fn fireline_bin() -> PathBuf {
     target_bin("fireline")
 }
 
-pub(crate) fn control_plane_bin() -> PathBuf {
-    target_bin("fireline-control-plane")
-}
-
 pub(crate) fn testy_bin() -> PathBuf {
     target_bin("fireline-testy")
 }
@@ -192,33 +187,17 @@ pub(crate) fn target_bin(name: &str) -> PathBuf {
 
 pub(crate) fn ensure_control_plane_binaries_built() -> Result<()> {
     let fireline = fireline_bin();
-    let control_plane = control_plane_bin();
     let testy = testy_bin();
-    if fireline.exists() && control_plane.exists() && testy.exists() {
+    if fireline.exists() && testy.exists() {
         return Ok(());
     }
 
     let status = StdCommand::new("cargo")
-        .args([
-            "build",
-            "--quiet",
-            "-p",
-            "fireline",
-            "--bin",
-            "fireline",
-            "--bin",
-            "fireline-testy",
-            "-p",
-            "fireline-control-plane",
-            "--bin",
-            "fireline-control-plane",
-        ])
+        .args(["build", "--quiet", "-p", "fireline", "--bins"])
         .status()
-        .context("build fireline control-plane test binaries")?;
+        .context("build fireline test binaries")?;
     if !status.success() {
-        return Err(anyhow!(
-            "failed to build fireline control-plane test binaries"
-        ));
+        return Err(anyhow!("failed to build fireline test binaries"));
     }
     Ok(())
 }
@@ -734,8 +713,9 @@ async fn spawn_control_plane(
     // to reserve-and-drop a port and then hand the integer to the subprocess,
     // only to have another parallel test binary grab the same port first.
     let inherit_child_logs = std::env::var_os("FIRELINE_TEST_CHILD_LOGS").is_some();
-    let mut command = TokioCommand::new(control_plane_bin());
+    let mut command = TokioCommand::new(fireline_bin());
     command
+        .arg("--control-plane")
         .arg("--host")
         .arg("127.0.0.1")
         .arg("--port")
@@ -767,7 +747,7 @@ async fn spawn_control_plane(
         command.arg("--prefer-push");
     }
 
-    let mut child = command.spawn().context("spawn fireline-control-plane")?;
+    let mut child = command.spawn().context("spawn fireline --control-plane")?;
     let bound_addr = wait_for_listen_addr_file(&listen_addr_file, &mut child).await?;
     let base_url = format!("http://{bound_addr}");
     wait_for_http_ok(&format!("{base_url}/healthz"), &mut child).await?;
@@ -1225,7 +1205,7 @@ where
 // of the known entity types from production code:
 //
 // - `SessionRecord` — from `fireline_session`
-// - `PersistedRuntimeSpec` — from `fireline_runtime`
+// - `PersistedRuntimeSpec` — from `fireline_session`
 // - `FsOpRecord` — from `fireline_resources`
 // - `RuntimeStreamFileRecord` — same
 //

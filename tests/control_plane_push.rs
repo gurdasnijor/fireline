@@ -4,10 +4,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use fireline_runtime::RuntimeRegistry;
-use fireline_runtime::runtime_host::{
-    Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus,
-};
+use fireline_sandbox::RuntimeRegistry;
+use fireline_session::{Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
 use reqwest::StatusCode;
 use serde_json::json;
 use tokio::process::{Child, Command};
@@ -18,10 +16,6 @@ mod stream_server;
 
 fn fireline_bin() -> PathBuf {
     target_bin("fireline")
-}
-
-fn control_plane_bin() -> PathBuf {
-    target_bin("fireline-control-plane")
 }
 
 fn testy_bin() -> PathBuf {
@@ -175,20 +169,7 @@ async fn register_becomes_stale_and_recovers_on_heartbeat() -> Result<()> {
 
 fn ensure_control_plane_binaries_built() -> Result<()> {
     let status = std::process::Command::new("cargo")
-        .args([
-            "build",
-            "--quiet",
-            "-p",
-            "fireline",
-            "--bin",
-            "fireline",
-            "--bin",
-            "fireline-testy",
-            "-p",
-            "fireline-control-plane",
-            "--bin",
-            "fireline-control-plane",
-        ])
+        .args(["build", "--quiet", "-p", "fireline", "--bins"])
         .status()
         .context("build fireline test binaries")?;
     if !status.success() {
@@ -226,8 +207,9 @@ async fn spawn_control_plane(
         .rsplit(':')
         .next()
         .ok_or_else(|| anyhow!("missing control-plane port"))?;
-    let mut command = Command::new(control_plane_bin());
+    let mut command = Command::new(fireline_bin());
     command
+        .arg("--control-plane")
         .arg("--host")
         .arg("127.0.0.1")
         .arg("--port")
@@ -252,7 +234,7 @@ async fn spawn_control_plane(
         command.arg("--prefer-push");
     }
 
-    let mut child = command.spawn().context("spawn fireline-control-plane")?;
+    let mut child = command.spawn().context("spawn fireline --control-plane")?;
     wait_for_http_ok(&format!("{base_url}/healthz"), &mut child).await?;
     Ok(child)
 }

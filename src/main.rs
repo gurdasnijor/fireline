@@ -7,21 +7,30 @@
 //! `fireline` library shim.
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use fireline_harness::TopologySpec;
 use fireline_host::bootstrap::{self, BootstrapConfig};
-use fireline_runtime::RuntimeRegistry;
-use fireline_runtime::control_plane_client::ControlPlaneClient;
-use fireline_runtime::runtime_host::{
-    Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus,
+use fireline_host::control_plane::{self, ControlPlaneConfig, ProviderMode};
+use fireline_host::control_plane_client::ControlPlaneClient;
+use fireline_resources::MountedResource;
+use fireline_sandbox::RuntimeRegistry;
+use fireline_session::{
+    Endpoint, HeartbeatMetrics, RuntimeDescriptor, RuntimeProviderKind, RuntimeRegistration,
+    RuntimeStatus,
 };
-use fireline_runtime::{HeartbeatMetrics, MountedResource, RuntimeRegistration};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use uuid::Uuid;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ControlPlaneProvider {
+    Local,
+    Docker,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -45,9 +54,17 @@ struct Cli {
     #[arg(long)]
     state_stream: Option<String>,
 
-    /// Base URL for the external durable-streams service, e.g. `http://127.0.0.1:8787/v1/stream`.
+    /// Run the host/runtime HTTP API instead of bootstrapping a single ACP runtime.
     #[arg(long)]
-    durable_streams_url: String,
+    control_plane: bool,
+
+    /// Base URL for the external durable-streams service, e.g. `http://127.0.0.1:8787/v1/stream`.
+    #[arg(long, required_unless_present = "control_plane")]
+    durable_streams_url: Option<String>,
+
+    /// Optional path to write the bound listener address after binding.
+    #[arg(long)]
+    listen_addr_file: Option<PathBuf>,
 
     /// Optional explicit path for the runtime registry file.
     #[arg(long)]
@@ -56,6 +73,50 @@ struct Cli {
     /// Optional explicit path for the peer directory file.
     #[arg(long)]
     peer_directory_path: Option<PathBuf>,
+
+    /// Optional explicit path to the Fireline binary used for child runtime launches.
+    #[arg(long, hide = true)]
+    fireline_bin: Option<PathBuf>,
+
+    /// Child runtime startup timeout in milliseconds.
+    #[arg(long, default_value_t = 20_000)]
+    startup_timeout_ms: u64,
+
+    /// Child runtime shutdown timeout in milliseconds.
+    #[arg(long, default_value_t = 10_000)]
+    stop_timeout_ms: u64,
+
+    /// Runtime provider to enable for control-plane mode.
+    #[arg(long = "provider", value_enum, default_value_t = ControlPlaneProvider::Local)]
+    control_plane_provider: ControlPlaneProvider,
+
+    /// Prefer push registration over polling when managing child runtimes.
+    #[arg(long)]
+    prefer_push: bool,
+
+    /// Heartbeat stale scan interval in milliseconds.
+    #[arg(long, default_value_t = 5_000)]
+    heartbeat_scan_interval_ms: u64,
+
+    /// Runtime heartbeat stale timeout in milliseconds.
+    #[arg(long, default_value_t = 30_000)]
+    stale_timeout_ms: u64,
+
+    /// Compatibility flag accepted for the old control-plane launcher path.
+    #[arg(long, hide = true)]
+    shared_stream_base_url: Option<String>,
+
+    /// Optional Docker build context for control-plane docker mode.
+    #[arg(long)]
+    docker_build_context: Option<PathBuf>,
+
+    /// Dockerfile path for control-plane docker mode.
+    #[arg(long, default_value = "docker/fireline-runtime.Dockerfile")]
+    dockerfile: PathBuf,
+
+    /// Docker image tag for control-plane docker mode.
+    #[arg(long, default_value = "fireline-runtime:dev")]
+    docker_image: String,
 
     /// Optional explicit runtime key for control-plane-managed subprocess mode.
     #[arg(long, env = "FIRELINE_RUNTIME_KEY", hide = true)]
@@ -94,7 +155,7 @@ struct Cli {
     mounted_resources_json: Option<String>,
 
     /// The agent command to run, e.g. `npx -y @zed-industries/claude-code-acp`.
-    #[arg(trailing_var_arg = true, required = true)]
+    #[arg(trailing_var_arg = true)]
     agent_command: Vec<String>,
 }
 
@@ -121,18 +182,80 @@ async fn main() -> Result<()> {
         Some(json) => serde_json::from_str::<Vec<MountedResource>>(json)?,
         None => Vec::new(),
     };
+    if cli.control_plane {
+        if cli.runtime_key.is_some() || cli.node_id.is_some() {
+            anyhow::bail!("--control-plane cannot be combined with --runtime-key/--node-id");
+        }
+        if !cli.agent_command.is_empty() {
+            anyhow::bail!("--control-plane does not accept a trailing agent command");
+        }
+        return run_control_plane_host(cli, host).await;
+    }
+
+    if cli.agent_command.is_empty() {
+        anyhow::bail!(
+            "an agent command is required unless --control-plane is set; pass it after `--`"
+        );
+    }
+
+    let durable_streams_url = cli
+        .durable_streams_url
+        .clone()
+        .context("--durable-streams-url is required unless --control-plane is set")?;
     let managed_runtime_key = cli.runtime_key.clone();
     let managed_node_id = cli.node_id.clone();
 
     match (managed_runtime_key, managed_node_id) {
         (Some(runtime_key), Some(node_id)) => {
-            run_managed_runtime(cli, host, topology, mounted_resources, runtime_key, node_id).await
+            run_managed_runtime(
+                cli,
+                host,
+                topology,
+                mounted_resources,
+                durable_streams_url,
+                runtime_key,
+                node_id,
+            )
+            .await
         }
-        (None, None) => run_direct_host(cli, host, topology, mounted_resources).await,
+        (None, None) => {
+            run_direct_host(cli, host, topology, mounted_resources, durable_streams_url).await
+        }
         _ => Err(anyhow::anyhow!(
             "--runtime-key and --node-id must be provided together"
         )),
     }
+}
+
+async fn run_control_plane_host(cli: Cli, host: IpAddr) -> Result<()> {
+    let fireline_bin = match cli.fireline_bin {
+        Some(path) => path,
+        None => std::env::current_exe().context("resolve current fireline binary path")?,
+    };
+    let provider = match cli.control_plane_provider {
+        ControlPlaneProvider::Local => ProviderMode::Local,
+        ControlPlaneProvider::Docker => ProviderMode::Docker,
+    };
+
+    control_plane::run_control_plane(ControlPlaneConfig {
+        host,
+        port: cli.port,
+        listen_addr_file: cli.listen_addr_file,
+        fireline_bin,
+        runtime_registry_path: cli.runtime_registry_path,
+        peer_directory_path: cli.peer_directory_path,
+        startup_timeout: Duration::from_millis(cli.startup_timeout_ms),
+        stop_timeout: Duration::from_millis(cli.stop_timeout_ms),
+        provider,
+        prefer_push: cli.prefer_push,
+        heartbeat_scan_interval: Duration::from_millis(cli.heartbeat_scan_interval_ms),
+        stale_timeout: Duration::from_millis(cli.stale_timeout_ms),
+        shared_stream_base_url: cli.shared_stream_base_url,
+        docker_build_context: cli.docker_build_context,
+        dockerfile: cli.dockerfile,
+        docker_image: cli.docker_image,
+    })
+    .await
 }
 
 async fn run_direct_host(
@@ -140,6 +263,7 @@ async fn run_direct_host(
     host: IpAddr,
     topology: TopologySpec,
     mounted_resources: Vec<MountedResource>,
+    durable_streams_url: String,
 ) -> Result<()> {
     let runtime_key = format!("runtime:{}", Uuid::new_v4());
     let node_id = default_node_id(host);
@@ -157,7 +281,7 @@ async fn run_direct_host(
         agent_command: cli.agent_command,
         mounted_resources,
         state_stream: cli.state_stream,
-        durable_streams_url: cli.durable_streams_url,
+        durable_streams_url,
         peer_directory_path,
         control_plane_url: None,
         topology,
@@ -189,6 +313,7 @@ async fn run_managed_runtime(
     host: IpAddr,
     topology: TopologySpec,
     mounted_resources: Vec<MountedResource>,
+    durable_streams_url: String,
     runtime_key: String,
     node_id: String,
 ) -> Result<()> {
@@ -206,7 +331,7 @@ async fn run_managed_runtime(
         agent_command: cli.agent_command,
         mounted_resources,
         state_stream: cli.state_stream,
-        durable_streams_url: cli.durable_streams_url.clone(),
+        durable_streams_url,
         peer_directory_path,
         control_plane_url: cli.control_plane_url.clone(),
         topology,
