@@ -11,6 +11,10 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./admin": {
+      "types": "./dist/admin.d.ts",
+      "default": "./dist/admin.js"
+    },
     "./core": {
       "types": "./dist/core/index.d.ts",
       "default": "./dist/core/index.js"
@@ -38,6 +42,10 @@
     "./host-hosted-api": {
       "types": "./dist/host-hosted-api/index.d.ts",
       "default": "./dist/host-hosted-api/index.js"
+    },
+    "./middleware": {
+      "types": "./dist/middleware.d.ts",
+      "default": "./dist/middleware.js"
     },
     "./browser": {
       "types": "./dist/browser.d.ts",
