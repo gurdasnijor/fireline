@@ -1,90 +1,85 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 340" fill="none">
-  <defs>
-    <linearGradient id="bg2" x1="0" y1="0" x2="900" y2="340">
-      <stop offset="0%" stop-color="#0a0e1a"/>
-      <stop offset="100%" stop-color="#0f1628"/>
-    </linearGradient>
-    <filter id="glow2">
-      <feGaussianBlur stdDeviation="2" result="blur"/>
-      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-  </defs>
-
-  <rect width="900" height="340" fill="url(#bg2)" rx="12"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 340">
+  <rect width="900" height="340" fill="#0b1020" rx="12"/>
 
   <!-- Title -->
-  <text x="450" y="38" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, sans-serif" font-size="18" font-weight="600">Middleware Pipeline</text>
-  <text x="450" y="58" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="12">Each middleware is a serializable spec. The Rust conductor interprets them in order.</text>
+  <text x="450" y="38" text-anchor="middle" fill="#e2e8f0" font-family="ui-monospace, monospace" font-size="18" font-weight="600">Middleware Pipeline</text>
+  <text x="450" y="58" text-anchor="middle" fill="#64748b" font-family="ui-monospace, monospace" font-size="11">Each middleware is a serializable spec. The Rust conductor interprets them in order.</text>
+
+  <!-- Arrow marker -->
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8" fill="#475569"/>
+    </marker>
+  </defs>
 
   <!-- App label -->
   <rect x="30" y="115" width="80" height="80" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
-  <text x="70" y="150" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="11">Your</text>
-  <text x="70" y="166" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, sans-serif" font-size="12" font-weight="600">App</text>
+  <text x="70" y="150" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="11">Your</text>
+  <text x="70" y="166" text-anchor="middle" fill="#e2e8f0" font-family="ui-monospace, monospace" font-size="12" font-weight="600">App</text>
 
   <!-- Arrow -->
   <line x1="115" y1="155" x2="145" y2="155" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
-  <defs><marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8" fill="#475569"/></marker></defs>
 
   <!-- trace() -->
   <rect x="150" y="95" width="120" height="120" rx="10" fill="#0f172a" stroke="#3b82f6" stroke-width="1.5"/>
-  <rect x="150" y="95" width="120" height="30" rx="10" fill="#3b82f6" opacity="0.2"/>
-  <text x="210" y="116" text-anchor="middle" fill="#60a5fa" font-family="monospace" font-size="12" font-weight="600">trace()</text>
-  <text x="210" y="145" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">Log every</text>
-  <text x="210" y="160" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">effect to the</text>
-  <text x="210" y="175" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">durable stream</text>
-  <text x="210" y="200" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="9">observe</text>
+  <rect x="150" y="95" width="120" height="30" rx="10" fill="#3b82f6" fill-opacity="0.2"/>
+  <text x="210" y="116" text-anchor="middle" fill="#60a5fa" font-family="ui-monospace, monospace" font-size="12" font-weight="600">trace()</text>
+  <text x="210" y="145" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="10">Log every</text>
+  <text x="210" y="160" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="10">effect to the</text>
+  <text x="210" y="175" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="10">durable stream</text>
+  <text x="210" y="200" text-anchor="middle" fill="#475569" font-family="ui-monospace, monospace" font-size="9">observe</text>
 
   <!-- Arrow -->
   <line x1="275" y1="155" x2="305" y2="155" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
 
   <!-- approve() -->
   <rect x="310" y="95" width="120" height="120" rx="10" fill="#0f172a" stroke="#f59e0b" stroke-width="1.5"/>
-  <rect x="310" y="95" width="120" height="30" rx="10" fill="#f59e0b" opacity="0.2"/>
-  <text x="370" y="116" text-anchor="middle" fill="#fbbf24" font-family="monospace" font-size="12" font-weight="600">approve()</text>
-  <text x="370" y="145" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">Pause on</text>
-  <text x="370" y="160" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">tool calls.</text>
-  <text x="370" y="175" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">Wait for human.</text>
-  <text x="370" y="200" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="9">suspend</text>
+  <rect x="310" y="95" width="120" height="30" rx="10" fill="#f59e0b" fill-opacity="0.2"/>
+  <text x="370" y="116" text-anchor="middle" fill="#fbbf24" font-family="ui-monospace, monospace" font-size="12" font-weight="600">approve()</text>
+  <text x="370" y="145" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="10">Pause on</text>
+  <text x="370" y="160" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="10">tool calls.</text>
+  <text x="370" y="175" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="10">Wait for human.</text>
+  <text x="370" y="200" text-anchor="middle" fill="#475569" font-family="ui-monospace, monospace" font-size="9">suspend</text>
 
   <!-- Arrow -->
   <line x1="435" y1="155" x2="465" y2="155" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
 
   <!-- budget() -->
   <rect x="470" y="95" width="120" height="120" rx="10" fill="#0f172a" stroke="#ef4444" stroke-width="1.5"/>
-  <rect x="470" y="95" width="120" height="30" rx="10" fill="#ef4444" opacity="0.2"/>
-  <text x="530" y="116" text-anchor="middle" fill="#f87171" font-family="monospace" font-size="12" font-weight="600">budget()</text>
-  <text x="530" y="145" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">Hard cap at</text>
-  <text x="530" y="160" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">500K tokens.</text>
-  <text x="530" y="175" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">Reject if over.</text>
-  <text x="530" y="200" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="9">filter</text>
+  <rect x="470" y="95" width="120" height="30" rx="10" fill="#ef4444" fill-opacity="0.2"/>
+  <text x="530" y="116" text-anchor="middle" fill="#f87171" font-family="ui-monospace, monospace" font-size="12" font-weight="600">budget()</text>
+  <text x="530" y="145" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="10">Hard cap at</text>
+  <text x="530" y="160" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="10">500K tokens.</text>
+  <text x="530" y="175" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="10">Reject if over.</text>
+  <text x="530" y="200" text-anchor="middle" fill="#475569" font-family="ui-monospace, monospace" font-size="9">filter</text>
 
   <!-- Arrow -->
   <line x1="595" y1="155" x2="625" y2="155" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
 
   <!-- inject() -->
   <rect x="630" y="95" width="120" height="120" rx="10" fill="#0f172a" stroke="#10b981" stroke-width="1.5"/>
-  <rect x="630" y="95" width="120" height="30" rx="10" fill="#10b981" opacity="0.2"/>
-  <text x="690" y="116" text-anchor="middle" fill="#34d399" font-family="monospace" font-size="12" font-weight="600">inject()</text>
-  <text x="690" y="145" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">Prepend</text>
-  <text x="690" y="160" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">context to</text>
-  <text x="690" y="175" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">every prompt</text>
-  <text x="690" y="200" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="9">mapEffect</text>
+  <rect x="630" y="95" width="120" height="30" rx="10" fill="#10b981" fill-opacity="0.2"/>
+  <text x="690" y="116" text-anchor="middle" fill="#34d399" font-family="ui-monospace, monospace" font-size="12" font-weight="600">inject()</text>
+  <text x="690" y="145" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="10">Prepend</text>
+  <text x="690" y="160" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="10">context to</text>
+  <text x="690" y="175" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="10">every prompt</text>
+  <text x="690" y="200" text-anchor="middle" fill="#475569" font-family="ui-monospace, monospace" font-size="9">mapEffect</text>
 
   <!-- Arrow -->
   <line x1="755" y1="155" x2="785" y2="155" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
 
   <!-- Agent -->
   <rect x="790" y="115" width="80" height="80" rx="10" fill="#1e293b" stroke="#8b5cf6" stroke-width="1.5"/>
-  <text x="830" y="148" text-anchor="middle" fill="#a78bfa" font-family="system-ui, sans-serif" font-size="11">Agent</text>
-  <text x="830" y="166" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, sans-serif" font-size="10" font-weight="600">Process</text>
+  <text x="830" y="148" text-anchor="middle" fill="#a78bfa" font-family="ui-monospace, monospace" font-size="11">Agent</text>
+  <text x="830" y="166" text-anchor="middle" fill="#e2e8f0" font-family="ui-monospace, monospace" font-size="10" font-weight="600">Process</text>
 
   <!-- Bottom: code -->
   <rect x="100" y="245" width="700" height="65" rx="8" fill="#1e293b" stroke="#334155" stroke-width="1"/>
-  <text x="120" y="268" fill="#94a3b8" font-family="monospace" font-size="11">middleware([</text>
-  <text x="120" y="286" fill="#60a5fa" font-family="monospace" font-size="11">  trace()</text>
-  <text x="218" y="286" fill="#64748b" font-family="monospace" font-size="11">,</text>
-  <text x="232" y="286" fill="#fbbf24" font-family="monospace" font-size="11">approve({ scope: 'tool_calls' })</text>
-  <text x="561" y="286" fill="#64748b" font-family="monospace" font-size="11">,</text>
-  <text x="575" y="286" fill="#f87171" font-family="monospace" font-size="11">budget({ tokens: 500_000 })</text>
-  <text x="120" y="300" fill="#94a3b8" font-family="monospace" font-size="11">])</text>
+  <text x="120" y="268" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="11">middleware([</text>
+  <text x="120" y="286" fill="#60a5fa" font-family="ui-monospace, monospace" font-size="11">  trace()</text>
+  <text x="218" y="286" fill="#64748b" font-family="ui-monospace, monospace" font-size="11">,</text>
+  <text x="232" y="286" fill="#fbbf24" font-family="ui-monospace, monospace" font-size="11">approve({ scope: 'tool_calls' })</text>
+  <text x="561" y="286" fill="#64748b" font-family="ui-monospace, monospace" font-size="11">,</text>
+  <text x="575" y="286" fill="#f87171" font-family="ui-monospace, monospace" font-size="11">budget({ tokens: 500_000 })</text>
+  <text x="120" y="300" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="11">])</text>
 </svg>

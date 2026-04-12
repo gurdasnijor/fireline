@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 560">
+  <rect width="900" height="560" fill="#0b1020" rx="12"/>
+
+  <!-- Title -->
+  <text x="450" y="38" text-anchor="middle" fill="#e2e8f0" font-family="ui-monospace, monospace" font-size="18" font-weight="600">Durable Approval Flow</text>
+  <text x="450" y="58" text-anchor="middle" fill="#64748b" font-family="ui-monospace, monospace" font-size="11">The durable stream is the transport. Approvals survive sandbox restarts.</text>
+
+  <!-- Step 1: Agent requests dangerous tool call -->
+  <rect x="40" y="80" width="200" height="90" rx="8" fill="#0f172a" stroke="#3b82f6" stroke-width="1.5"/>
+  <rect x="40" y="80" width="200" height="26" rx="8" fill="#3b82f6" fill-opacity="0.2"/>
+  <text x="140" y="98" text-anchor="middle" fill="#60a5fa" font-family="ui-monospace, monospace" font-size="10" font-weight="600">1. Agent Tool Call</text>
+  <text x="55" y="122" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">tool: bash</text>
+  <text x="55" y="136" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">cmd: rm -rf /data/old</text>
+  <text x="55" y="150" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">session: abc-123</text>
+
+  <!-- Arrow 1->2 -->
+  <line x1="240" y1="125" x2="280" y2="125" stroke="#475569" stroke-width="1.5"/>
+  <polygon points="278,121 286,125 278,129" fill="#475569"/>
+
+  <!-- Step 2: approve() middleware intercepts -->
+  <rect x="290" y="80" width="200" height="90" rx="8" fill="#0f172a" stroke="#f59e0b" stroke-width="1.5"/>
+  <rect x="290" y="80" width="200" height="26" rx="8" fill="#f59e0b" fill-opacity="0.2"/>
+  <text x="390" y="98" text-anchor="middle" fill="#fbbf24" font-family="ui-monospace, monospace" font-size="10" font-weight="600">2. approve() Intercepts</text>
+  <text x="305" y="122" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">Middleware suspends</text>
+  <text x="305" y="136" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">the agent. Writes a</text>
+  <text x="305" y="150" fill="#fbbf24" font-family="ui-monospace, monospace" font-size="9">permission_request</text>
+  <text x="305" y="162" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">to the durable stream.</text>
+
+  <!-- Arrow 2->3 -->
+  <line x1="490" y1="125" x2="530" y2="125" stroke="#475569" stroke-width="1.5"/>
+  <polygon points="528,121 536,125 528,129" fill="#475569"/>
+
+  <!-- Step 3: Event lands on stream -->
+  <rect x="540" y="80" width="320" height="90" rx="8" fill="#0f172a" stroke="#8b5cf6" stroke-width="1.5"/>
+  <rect x="540" y="80" width="320" height="26" rx="8" fill="#8b5cf6" fill-opacity="0.2"/>
+  <text x="700" y="98" text-anchor="middle" fill="#a78bfa" font-family="ui-monospace, monospace" font-size="10" font-weight="600">3. Durable Stream</text>
+  <text x="555" y="122" fill="#a78bfa" font-family="ui-monospace, monospace" font-size="9">offset:42  permission_request</text>
+  <text x="555" y="136" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">  tool: bash, cmd: rm -rf /data/old</text>
+  <text x="555" y="150" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">  state: pending</text>
+  <text x="555" y="162" fill="#64748b" font-family="ui-monospace, monospace" font-size="9">  requestId: req-7f3a</text>
+
+  <!-- Fan-out arrows from stream to subscribers -->
+  <!-- Arrow to Dashboard -->
+  <line x1="620" y1="170" x2="140" y2="220" stroke="#475569" stroke-width="1" stroke-dasharray="4,3"/>
+  <polygon points="142,216 136,222 146,222" fill="#475569"/>
+  <!-- Arrow to Slack -->
+  <line x1="700" y1="170" x2="440" y2="220" stroke="#475569" stroke-width="1" stroke-dasharray="4,3"/>
+  <polygon points="442,216 436,222 446,222" fill="#475569"/>
+  <!-- Arrow to Policy -->
+  <line x1="780" y1="170" x2="740" y2="220" stroke="#475569" stroke-width="1" stroke-dasharray="4,3"/>
+  <polygon points="742,216 736,222 746,222" fill="#475569"/>
+
+  <!-- Subscriber row label -->
+  <text x="450" y="210" text-anchor="middle" fill="#475569" font-family="ui-monospace, monospace" font-size="9">Any number of subscribers see the pending request</text>
+
+  <!-- Subscriber: Dashboard -->
+  <rect x="40" y="230" width="200" height="80" rx="8" fill="#0f172a" stroke="#10b981" stroke-width="1"/>
+  <rect x="40" y="230" width="200" height="24" rx="8" fill="#10b981" fill-opacity="0.15"/>
+  <text x="140" y="246" text-anchor="middle" fill="#34d399" font-family="ui-monospace, monospace" font-size="10" font-weight="600">Dashboard</text>
+  <text x="55" y="268" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">useLiveQuery(</text>
+  <text x="55" y="280" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">  db.permissions</text>
+  <text x="55" y="292" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">)</text>
+
+  <!-- Subscriber: Slack Bot -->
+  <rect x="290" y="230" width="200" height="80" rx="8" fill="#0f172a" stroke="#10b981" stroke-width="1"/>
+  <rect x="290" y="230" width="200" height="24" rx="8" fill="#10b981" fill-opacity="0.15"/>
+  <text x="390" y="246" text-anchor="middle" fill="#34d399" font-family="ui-monospace, monospace" font-size="10" font-weight="600">Slack Bot</text>
+  <text x="305" y="268" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">db.permissions</text>
+  <text x="305" y="280" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">  .subscribe(perms =&gt;</text>
+  <text x="305" y="292" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">    postToSlack(perms))</text>
+
+  <!-- Subscriber: Auto-policy -->
+  <rect x="630" y="230" width="220" height="80" rx="8" fill="#0f172a" stroke="#10b981" stroke-width="1"/>
+  <rect x="630" y="230" width="220" height="24" rx="8" fill="#10b981" fill-opacity="0.15"/>
+  <text x="740" y="246" text-anchor="middle" fill="#34d399" font-family="ui-monospace, monospace" font-size="10" font-weight="600">Auto-Policy Engine</text>
+  <text x="645" y="268" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">if (matchesPolicy(perm))</text>
+  <text x="645" y="280" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">  approveViaStream(</text>
+  <text x="645" y="292" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">    perm.requestId)</text>
+
+  <!-- Arrow: human approves from Slack -->
+  <line x1="390" y1="310" x2="390" y2="350" stroke="#22c55e" stroke-width="1.5"/>
+  <polygon points="386,348 390,356 394,348" fill="#22c55e"/>
+
+  <!-- Step 4: Resolution event -->
+  <rect x="150" y="360" width="560" height="70" rx="8" fill="#0f172a" stroke="#22c55e" stroke-width="1.5"/>
+  <rect x="150" y="360" width="560" height="24" rx="8" fill="#22c55e" fill-opacity="0.15"/>
+  <text x="430" y="378" text-anchor="middle" fill="#22c55e" font-family="ui-monospace, monospace" font-size="10" font-weight="600">4. Resolution Lands on Stream</text>
+  <text x="170" y="400" fill="#22c55e" font-family="ui-monospace, monospace" font-size="9">offset:43  permission_resolution  requestId: req-7f3a  decision: approved</text>
+  <text x="170" y="414" fill="#64748b" font-family="ui-monospace, monospace" font-size="9">resolvedBy: slack:U04MXYZ  reason: "Senior engineer approved after review"</text>
+
+  <!-- Arrow to step 5 -->
+  <line x1="430" y1="430" x2="430" y2="455" stroke="#475569" stroke-width="1.5"/>
+  <polygon points="426,453 430,461 434,453" fill="#475569"/>
+
+  <!-- Step 5: Agent resumes -->
+  <rect x="200" y="465" width="460" height="70" rx="8" fill="#0f172a" stroke="#3b82f6" stroke-width="1.5"/>
+  <rect x="200" y="465" width="460" height="24" rx="8" fill="#3b82f6" fill-opacity="0.15"/>
+  <text x="430" y="483" text-anchor="middle" fill="#60a5fa" font-family="ui-monospace, monospace" font-size="10" font-weight="600">5. Agent Resumes</text>
+  <text x="220" y="505" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9">Conductor replays resolution from stream. Agent executes the tool call.</text>
+  <text x="220" y="519" fill="#64748b" font-family="ui-monospace, monospace" font-size="9">Even if the sandbox crashed and restarted on a different host between steps 3 and 5.</text>
+
+  <!-- Key insight callout -->
+  <rect x="240" y="540" width="420" height="16" rx="4" fill="#166534" fill-opacity="0.4"/>
+  <text x="450" y="552" text-anchor="middle" fill="#86efac" font-family="ui-monospace, monospace" font-size="9" font-weight="600">The stream is the transport. No WebSocket. No callback URL. No state to lose.</text>
+</svg>

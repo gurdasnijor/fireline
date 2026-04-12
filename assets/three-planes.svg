@@ -1,93 +1,70 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" fill="none">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="900" y2="520">
-      <stop offset="0%" stop-color="#0a0e1a"/>
-      <stop offset="100%" stop-color="#0f1628"/>
-    </linearGradient>
-    <linearGradient id="control" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#3b82f6"/>
-      <stop offset="100%" stop-color="#2563eb"/>
-    </linearGradient>
-    <linearGradient id="session" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#8b5cf6"/>
-      <stop offset="100%" stop-color="#7c3aed"/>
-    </linearGradient>
-    <linearGradient id="observe" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#10b981"/>
-      <stop offset="100%" stop-color="#059669"/>
-    </linearGradient>
-    <filter id="glow">
-      <feGaussianBlur stdDeviation="3" result="blur"/>
-      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-  </defs>
-
-  <rect width="900" height="520" fill="url(#bg)" rx="12"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520">
+  <rect width="900" height="520" fill="#0b1020" rx="12"/>
 
   <!-- Title -->
-  <text x="450" y="45" text-anchor="middle" fill="#e2e8f0" font-family="system-ui, -apple-system, sans-serif" font-size="20" font-weight="600">The Three Planes</text>
-  <text x="450" y="68" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="13">compose().start() returns a handle. The handle connects you to two planes.</text>
+  <text x="450" y="45" text-anchor="middle" fill="#e2e8f0" font-family="ui-monospace, monospace" font-size="18" font-weight="600">The Three Planes</text>
+  <text x="450" y="68" text-anchor="middle" fill="#64748b" font-family="ui-monospace, monospace" font-size="12">compose().start() returns a handle. The handle connects you to two planes.</text>
 
   <!-- Center: SandboxHandle -->
   <rect x="325" y="95" width="250" height="90" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
-  <text x="450" y="122" text-anchor="middle" fill="#94a3b8" font-family="monospace" font-size="11">SandboxHandle</text>
-  <text x="450" y="145" text-anchor="middle" fill="#e2e8f0" font-family="monospace" font-size="12" font-weight="600">{ id, acp, state }</text>
-  <text x="450" y="170" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="10">returned by compose().start()</text>
+  <text x="450" y="122" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="11">SandboxHandle</text>
+  <text x="450" y="145" text-anchor="middle" fill="#e2e8f0" font-family="ui-monospace, monospace" font-size="12" font-weight="600">{ id, acp, state }</text>
+  <text x="450" y="170" text-anchor="middle" fill="#64748b" font-family="ui-monospace, monospace" font-size="10">returned by compose().start()</text>
 
   <!-- Left arrow from handle to Control -->
-  <line x1="350" y1="185" x2="170" y2="250" stroke="#3b82f6" stroke-width="1.5" stroke-dasharray="6,4" opacity="0.6"/>
+  <line x1="350" y1="185" x2="170" y2="250" stroke="#3b82f6" stroke-width="1.5" stroke-dasharray="6,4" stroke-opacity="0.6"/>
 
-  <!-- Right arrow from handle to Session -->
-  <line x1="450" y1="185" x2="450" y2="250" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="6,4" opacity="0.6"/>
+  <!-- Center arrow from handle to Session -->
+  <line x1="450" y1="185" x2="450" y2="250" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="6,4" stroke-opacity="0.6"/>
 
   <!-- Right arrow from handle to Observe -->
-  <line x1="550" y1="185" x2="730" y2="250" stroke="#10b981" stroke-width="1.5" stroke-dasharray="6,4" opacity="0.6"/>
+  <line x1="550" y1="185" x2="730" y2="250" stroke="#10b981" stroke-width="1.5" stroke-dasharray="6,4" stroke-opacity="0.6"/>
 
   <!-- CONTROL PLANE -->
   <rect x="40" y="250" width="260" height="230" rx="12" fill="#0f172a" stroke="#1e3a5f" stroke-width="1.5"/>
-  <rect x="40" y="250" width="260" height="40" rx="12" fill="url(#control)" opacity="0.15"/>
-  <circle cx="65" cy="270" r="8" fill="url(#control)" filter="url(#glow)"/>
-  <text x="82" y="275" fill="#60a5fa" font-family="system-ui, sans-serif" font-size="14" font-weight="600">Control Plane</text>
-  <text x="60" y="310" fill="#94a3b8" font-family="monospace" font-size="11">@fireline/client</text>
+  <rect x="40" y="250" width="260" height="40" rx="12" fill="#3b82f6" fill-opacity="0.15"/>
+  <circle cx="65" cy="270" r="8" fill="#3b82f6"/>
+  <text x="82" y="275" fill="#60a5fa" font-family="ui-monospace, monospace" font-size="13" font-weight="600">Control Plane</text>
+  <text x="60" y="310" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="11">@fireline/client</text>
   <line x1="60" y1="325" x2="280" y2="325" stroke="#1e3a5f" stroke-width="1"/>
-  <text x="60" y="348" fill="#cbd5e1" font-family="monospace" font-size="11">compose()</text>
-  <text x="60" y="368" fill="#cbd5e1" font-family="monospace" font-size="11">  sandbox({ resources })</text>
-  <text x="60" y="388" fill="#cbd5e1" font-family="monospace" font-size="11">  middleware([trace()])</text>
-  <text x="60" y="408" fill="#cbd5e1" font-family="monospace" font-size="11">  agent(['claude-acp'])</text>
-  <text x="60" y="428" fill="#cbd5e1" font-family="monospace" font-size="11">.start({ serverUrl })</text>
-  <text x="60" y="460" fill="#64748b" font-family="system-ui, sans-serif" font-size="10">Provision sandboxes.</text>
-  <text x="60" y="473" fill="#64748b" font-family="system-ui, sans-serif" font-size="10">Wire middleware. Execute.</text>
+  <text x="60" y="348" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11">compose()</text>
+  <text x="60" y="368" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11">  sandbox({ resources })</text>
+  <text x="60" y="388" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11">  middleware([trace()])</text>
+  <text x="60" y="408" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11">  agent(['claude-acp'])</text>
+  <text x="60" y="428" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11">.start({ serverUrl })</text>
+  <text x="60" y="460" fill="#64748b" font-family="ui-monospace, monospace" font-size="10">Provision sandboxes.</text>
+  <text x="60" y="473" fill="#64748b" font-family="ui-monospace, monospace" font-size="10">Wire middleware. Execute.</text>
 
   <!-- SESSION PLANE -->
   <rect x="320" y="250" width="260" height="230" rx="12" fill="#0f172a" stroke="#2e1065" stroke-width="1.5"/>
-  <rect x="320" y="250" width="260" height="40" rx="12" fill="url(#session)" opacity="0.15"/>
-  <circle cx="345" cy="270" r="8" fill="url(#session)" filter="url(#glow)"/>
-  <text x="362" y="275" fill="#a78bfa" font-family="system-ui, sans-serif" font-size="14" font-weight="600">Session Plane</text>
-  <text x="340" y="310" fill="#94a3b8" font-family="monospace" font-size="11">@agentclientprotocol/sdk</text>
+  <rect x="320" y="250" width="260" height="40" rx="12" fill="#8b5cf6" fill-opacity="0.15"/>
+  <circle cx="345" cy="270" r="8" fill="#8b5cf6"/>
+  <text x="362" y="275" fill="#a78bfa" font-family="ui-monospace, monospace" font-size="13" font-weight="600">Session Plane</text>
+  <text x="340" y="310" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="11">@agentclientprotocol/sdk</text>
   <line x1="340" y1="325" x2="560" y2="325" stroke="#2e1065" stroke-width="1"/>
-  <text x="340" y="348" fill="#cbd5e1" font-family="monospace" font-size="11">const conn = new</text>
-  <text x="340" y="368" fill="#cbd5e1" font-family="monospace" font-size="11">  ClientSideConnection(</text>
-  <text x="340" y="388" fill="#cbd5e1" font-family="monospace" font-size="11">    handle.acp.url</text>
-  <text x="340" y="408" fill="#cbd5e1" font-family="monospace" font-size="11">  )</text>
-  <text x="340" y="428" fill="#cbd5e1" font-family="monospace" font-size="11">conn.newSession()</text>
-  <text x="340" y="460" fill="#64748b" font-family="system-ui, sans-serif" font-size="10">ACP protocol. Third-party.</text>
-  <text x="340" y="473" fill="#64748b" font-family="system-ui, sans-serif" font-size="10">Fireline never wraps it.</text>
+  <text x="340" y="348" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11">const conn = new</text>
+  <text x="340" y="368" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11">  ClientSideConnection(</text>
+  <text x="340" y="388" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11">    handle.acp.url</text>
+  <text x="340" y="408" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11">  )</text>
+  <text x="340" y="428" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11">conn.newSession()</text>
+  <text x="340" y="460" fill="#64748b" font-family="ui-monospace, monospace" font-size="10">ACP protocol. Third-party.</text>
+  <text x="340" y="473" fill="#64748b" font-family="ui-monospace, monospace" font-size="10">Fireline never wraps it.</text>
 
   <!-- OBSERVATION PLANE -->
   <rect x="600" y="250" width="260" height="230" rx="12" fill="#0f172a" stroke="#064e3b" stroke-width="1.5"/>
-  <rect x="600" y="250" width="260" height="40" rx="12" fill="url(#observe)" opacity="0.15"/>
-  <circle cx="625" cy="270" r="8" fill="url(#observe)" filter="url(#glow)"/>
-  <text x="642" y="275" fill="#34d399" font-family="system-ui, sans-serif" font-size="14" font-weight="600">Observation Plane</text>
-  <text x="620" y="310" fill="#94a3b8" font-family="monospace" font-size="11">@fireline/state</text>
+  <rect x="600" y="250" width="260" height="40" rx="12" fill="#10b981" fill-opacity="0.15"/>
+  <circle cx="625" cy="270" r="8" fill="#10b981"/>
+  <text x="642" y="275" fill="#34d399" font-family="ui-monospace, monospace" font-size="13" font-weight="600">Observation Plane</text>
+  <text x="620" y="310" fill="#94a3b8" font-family="ui-monospace, monospace" font-size="11">@fireline/state</text>
   <line x1="620" y1="325" x2="840" y2="325" stroke="#064e3b" stroke-width="1"/>
-  <text x="620" y="348" fill="#cbd5e1" font-family="monospace" font-size="11">const db = createFirelineDB(</text>
-  <text x="620" y="368" fill="#cbd5e1" font-family="monospace" font-size="11">  { stateStreamUrl:</text>
-  <text x="620" y="388" fill="#cbd5e1" font-family="monospace" font-size="11">      handle.state.url }</text>
-  <text x="620" y="408" fill="#cbd5e1" font-family="monospace" font-size="11">)</text>
-  <text x="620" y="428" fill="#cbd5e1" font-family="monospace" font-size="11">useLiveQuery(db...)</text>
-  <text x="620" y="460" fill="#64748b" font-family="system-ui, sans-serif" font-size="10">Reactive queries. No polling.</text>
-  <text x="620" y="473" fill="#64748b" font-family="system-ui, sans-serif" font-size="10">The stream IS the API.</text>
+  <text x="620" y="348" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11">const db = createFirelineDB(</text>
+  <text x="620" y="368" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11">  { stateStreamUrl:</text>
+  <text x="620" y="388" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11">      handle.state.url }</text>
+  <text x="620" y="408" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11">)</text>
+  <text x="620" y="428" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11">useLiveQuery(db...)</text>
+  <text x="620" y="460" fill="#64748b" font-family="ui-monospace, monospace" font-size="10">Reactive queries. No polling.</text>
+  <text x="620" y="473" fill="#64748b" font-family="ui-monospace, monospace" font-size="10">The stream IS the API.</text>
 
   <!-- Bottom tagline -->
-  <text x="450" y="508" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="11">No side channels. The handle connects you to exactly two endpoints. Each connects you to a different plane.</text>
+  <text x="450" y="508" text-anchor="middle" fill="#475569" font-family="ui-monospace, monospace" font-size="10">No side channels. The handle connects you to exactly two endpoints. Each connects you to a different plane.</text>
 </svg>

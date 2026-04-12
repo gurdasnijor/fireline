@@ -95,6 +95,38 @@ Middleware composes. Add `peer(['agent:reviewer'])` to route cross-agent calls. 
 
 ---
 
+<picture>
+  <img alt="Secrets Isolation" src="assets/secrets-isolation.svg" width="100%">
+</picture>
+
+## Secrets isolation — credentials the agent can't see
+
+Agents need API keys to do useful work. But if the agent can see the key, it can exfiltrate it. Fireline's `secretsProxy()` middleware injects credentials at call time, scoped to specific domains, without ever exposing the plaintext to the agent.
+
+```typescript
+import { compose, agent, sandbox, middleware } from '@fireline/client'
+import { trace, approve, secretsProxy } from '@fireline/client/middleware'
+
+const handle = await compose(
+  sandbox({ resources: [localPath('.', '/workspace')] }),
+  middleware([
+    trace(),
+    approve({ scope: 'tool_calls' }),
+    secretsProxy({
+      GITHUB_TOKEN: { ref: 'secret:gh-pat', allow: 'api.github.com' },
+      OPENAI_KEY:   { ref: 'secret:openai', allow: 'api.openai.com' },
+    }),
+  ]),
+  agent(['claude-code-acp']),
+).start({ serverUrl: 'http://localhost:4440' })
+```
+
+The agent sees tool schemas without credential parameters. The harness resolves `CredentialRef`s from your secret store (env vars in dev, vault in production), injects them into outbound requests for the allowed domain, and emits an audit envelope to the durable stream — all without the agent ever touching a plaintext token.
+
+→ *Technical deep-dive:* [`docs/proposals/secrets-injection-component.md`](docs/proposals/secrets-injection-component.md)
+
+---
+
 ## Observe everything — reactively, from the stream
 
 Every agent effect lands on a durable stream. `@fireline/state` materializes it into reactive collections you query like a database — no polling, no custom APIs.
@@ -149,6 +181,31 @@ db.collections.childSessionEdges.subscribe(edges => {
 ```
 
 No `whileLoop()` orchestrator. No `wake()` verb. No polling. The durable stream pushes events to you. If your process crashes and restarts, replay from the last offset — nothing is lost.
+
+---
+
+<picture>
+  <img alt="Durable Approval Flow" src="assets/durable-approval-flow.svg" width="100%">
+</picture>
+
+## Durable approval gates — approvals that survive everything
+
+The agent calls a dangerous tool. The `approve()` middleware suspends the agent and writes a `permission_request` to the durable stream. Any subscriber — a dashboard, a Slack bot, an automated policy engine — can resolve it. The resolution lands on the stream. The conductor replays it and the agent resumes.
+
+The key insight: the durable stream is the transport. There's no callback URL to expire, no WebSocket to drop, no in-memory state to lose. If the sandbox crashes between the request and the resolution, restart it anywhere — the approval is already on the stream, waiting to be replayed.
+
+```typescript
+// Auto-approve safe operations, escalate dangerous ones to Slack
+db.collections.permissions.subscribe(perms => {
+  for (const p of perms.filter(p => p.state === 'pending')) {
+    if (isSafeOperation(p)) {
+      approveViaStream(p.requestId)
+    } else {
+      postToSlack(`Agent wants to run: ${p.toolCall.command}`, p.requestId)
+    }
+  }
+})
+```
 
 ---
 
