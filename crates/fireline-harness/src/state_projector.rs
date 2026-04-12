@@ -1,53 +1,22 @@
 use std::collections::{HashMap, HashSet};
 
+use sacp::schema::StopReason;
 use sacp_conductor::trace::{NotificationEvent, RequestEvent, ResponseEvent, TraceEvent};
 use serde::Serialize;
 use serde_json::Value;
+use uuid::Uuid;
 
-use fireline_acp_ids::{RequestId, SessionId};
+use fireline_acp_ids::{PromptRequestRef, RequestId, SessionId, ToolCallId};
 use fireline_session::{SessionRecord, SessionStatus};
 
 pub type StateChange = Value;
 
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
 #[serde(rename_all = "snake_case")]
-enum ConnectionState {
-    Created,
-    Attached,
-    Broken,
-    Closed,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
-#[serde(rename_all = "snake_case")]
-enum PromptTurnState {
-    Queued,
+enum PromptRequestState {
     Active,
     Completed,
-    CancelRequested,
-    Cancelled,
     Broken,
-    TimedOut,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
-#[serde(rename_all = "snake_case")]
-enum PendingRequestState {
-    Pending,
-    Resolved,
-    Orphaned,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
-#[serde(rename_all = "snake_case")]
-enum HostInstanceState {
-    Running,
-    Paused,
-    Stopped,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,37 +32,16 @@ enum ChunkType {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ConnectionRow {
-    logical_connection_id: String,
-    state: ConnectionState,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    latest_session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    queue_paused: Option<bool>,
-    created_at: i64,
-    updated_at: i64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PromptTurnRow {
-    prompt_turn_id: String,
-    logical_connection_id: String,
+struct PromptRequestRow {
     session_id: SessionId,
     request_id: RequestId,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    trace_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    parent_prompt_turn_id: Option<String>,
+    // Derived preview of the submitted prompt for dashboards that want a
+    // one-line summary without rehydrating chunk history.
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
-    state: PromptTurnState,
+    state: PromptRequestState,
     #[serde(skip_serializing_if = "Option::is_none")]
-    position: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stop_reason: Option<String>,
+    stop_reason: Option<StopReason>,
     started_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     completed_at: Option<i64>,
@@ -101,47 +49,55 @@ struct PromptTurnRow {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PendingRequestRow {
-    request_id: RequestId,
-    logical_connection_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    session_id: Option<SessionId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prompt_turn_id: Option<String>,
-    method: String,
-    direction: PendingRequestDirection,
-    state: PendingRequestState,
-    created_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    resolved_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
-#[serde(rename_all = "snake_case")]
-enum PendingRequestDirection {
-    ClientToAgent,
-    AgentToClient,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HostInstanceRow {
-    instance_id: String,
-    #[serde(rename = "runtimeName")]
-    host_name: String,
-    status: HostInstanceState,
-    created_at: i64,
-    updated_at: i64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ChunkRow {
-    chunk_id: String,
+struct LegacyPromptTurnRow {
+    #[serde(rename = "promptTurnId")]
+    row_id: String,
+    #[serde(rename = "logicalConnectionId")]
+    connection_id: String,
     session_id: SessionId,
-    prompt_turn_id: String,
-    logical_connection_id: String,
+    request_id: RequestId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    state: PromptRequestState,
+    #[serde(rename = "stopReason", skip_serializing_if = "Option::is_none")]
+    stop_reason: Option<StopReason>,
+    started_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacySessionRow {
+    #[serde(flatten)]
+    session: SessionRecord,
+    #[serde(rename = "logicalConnectionId")]
+    connection_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChunkRowV2 {
+    session_id: SessionId,
+    request_id: RequestId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<ToolCallId>,
+    #[serde(rename = "type")]
+    chunk_type: ChunkType,
+    content: String,
+    created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyChunkRow {
+    #[serde(rename = "chunkId")]
+    row_id: String,
+    session_id: SessionId,
+    #[serde(rename = "promptTurnId")]
+    prompt_request_key: String,
+    #[serde(rename = "logicalConnectionId")]
+    connection_id: String,
     #[serde(rename = "type")]
     chunk_type: ChunkType,
     content: String,
@@ -167,36 +123,19 @@ struct StateEnvelope<T> {
 #[derive(Debug, Default)]
 struct TraceCorrelationState {
     pending_initialize: HashSet<String>,
-    prompt_request_to_turn: HashMap<String, String>,
-    prompt_turns: HashMap<String, PromptTurnRow>,
-    pending_requests: HashMap<String, PendingRequestRow>,
-    session_active_turn: HashMap<String, String>,
-    chunk_seq: HashMap<String, i64>,
-    turn_counter: u64,
-}
-
-#[derive(Debug, Clone, Default)]
-struct InheritedLineage {
-    trace_id: Option<String>,
-    parent_prompt_turn_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TraceEndpoint {
-    Client,
-    Agent,
-    Proxy(usize),
-    Unknown,
+    pending_session_creates: HashSet<String>,
+    prompts_by_request: HashMap<String, PromptRequestRef>,
+    prompt_rows: HashMap<String, PromptRequestRow>,
+    active_prompts_by_session: HashMap<String, PromptRequestRef>,
+    legacy_chunk_order: HashMap<String, i64>,
 }
 
 pub struct StateProjector {
     host_key: String,
     host_id: String,
     node_id: String,
-    logical_connection_id: String,
-    connection: ConnectionRow,
+    connection_id: String,
     correlation: TraceCorrelationState,
-    inherited_lineage: InheritedLineage,
     supports_load_session: bool,
 }
 
@@ -205,42 +144,20 @@ impl StateProjector {
         host_key: impl Into<String>,
         host_id: impl Into<String>,
         node_id: impl Into<String>,
-        logical_connection_id: impl Into<String>,
+        connection_id: impl Into<String>,
     ) -> Self {
-        let host_key = host_key.into();
-        let host_id = host_id.into();
-        let node_id = node_id.into();
-        let logical_connection_id = logical_connection_id.into();
-        let now = now_ms();
-        let connection = ConnectionRow {
-            logical_connection_id: logical_connection_id.clone(),
-            state: ConnectionState::Created,
-            latest_session_id: None,
-            last_error: None,
-            queue_paused: None,
-            created_at: now,
-            updated_at: now,
-        };
-
         Self {
-            host_key,
-            host_id,
-            node_id,
-            logical_connection_id,
-            connection,
+            host_key: host_key.into(),
+            host_id: host_id.into(),
+            node_id: node_id.into(),
+            connection_id: connection_id.into(),
             correlation: TraceCorrelationState::default(),
-            inherited_lineage: InheritedLineage::default(),
             supports_load_session: false,
         }
     }
 
     pub fn initial_events(&self) -> Vec<StateChange> {
-        vec![state_change(
-            "connection",
-            &self.logical_connection_id,
-            "insert",
-            Some(&self.connection),
-        )]
+        Vec::new()
     }
 
     pub fn project_trace_event(&mut self, event: &TraceEvent) -> Vec<StateChange> {
@@ -264,7 +181,6 @@ impl StateProjector {
                 self.correlation
                     .pending_initialize
                     .insert(request_id_key(&request_id));
-                self.inherited_lineage = parse_fireline_lineage(&req.params);
                 Vec::new()
             }
             "session/new" => {
@@ -274,100 +190,61 @@ impl StateProjector {
                 let Some(request_id) = request_id_from_json_value(&req.id) else {
                     return Vec::new();
                 };
-                let request_key = request_id_key(&request_id);
-                let pending = PendingRequestRow {
-                    request_id: request_id.clone(),
-                    logical_connection_id: self.logical_connection_id.clone(),
-                    session_id: None,
-                    prompt_turn_id: None,
-                    method: req.method.clone(),
-                    direction: PendingRequestDirection::ClientToAgent,
-                    state: PendingRequestState::Pending,
-                    created_at: now_ms(),
-                    resolved_at: None,
-                };
                 self.correlation
-                    .pending_requests
-                    .insert(request_key.clone(), pending.clone());
-                vec![state_change(
-                    "pending_request",
-                    &request_key,
-                    "insert",
-                    Some(&pending),
-                )]
+                    .pending_session_creates
+                    .insert(request_id_key(&request_id));
+                Vec::new()
             }
             "session/prompt" => {
                 if !is_canonical_client_request(req) {
                     return Vec::new();
                 }
-                let session_id = req
-                    .params
-                    .get("sessionId")
-                    .or_else(|| req.params.get("session_id"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_string();
-                let session_id = SessionId::from(session_id);
                 let Some(request_id) = request_id_from_json_value(&req.id) else {
                     return Vec::new();
                 };
-                let request_key = request_id_key(&request_id);
-                let prompt_turn_id = self.next_prompt_turn_id();
-                let trace_id = self
-                    .inherited_lineage
-                    .trace_id
-                    .clone()
-                    .unwrap_or_else(|| prompt_turn_id.clone());
-                let parent_prompt_turn_id = self.inherited_lineage.parent_prompt_turn_id.clone();
-                let text = req
-                    .params
-                    .get("prompt")
-                    .and_then(Value::as_array)
-                    .and_then(|blocks| first_text_block(blocks));
+                let Some(session_id) = session_id_from_params(&req.params) else {
+                    return Vec::new();
+                };
 
-                self.correlation
-                    .prompt_request_to_turn
-                    .insert(request_key.clone(), prompt_turn_id.clone());
-                self.correlation
-                    .session_active_turn
-                    .insert(session_id.to_string(), prompt_turn_id.clone());
-
-                let turn = PromptTurnRow {
-                    prompt_turn_id: prompt_turn_id.clone(),
-                    logical_connection_id: self.logical_connection_id.clone(),
-                    session_id: session_id.clone(),
-                    request_id: request_id.clone(),
-                    trace_id: Some(trace_id),
-                    parent_prompt_turn_id,
-                    text,
-                    state: PromptTurnState::Active,
-                    position: None,
+                let prompt_ref = PromptRequestRef {
+                    session_id,
+                    request_id,
+                };
+                let prompt_key = prompt_request_key(&prompt_ref);
+                let prompt_row = PromptRequestRow {
+                    session_id: prompt_ref.session_id.clone(),
+                    request_id: prompt_ref.request_id.clone(),
+                    text: prompt_text_preview(&req.params),
+                    state: PromptRequestState::Active,
                     stop_reason: None,
                     started_at: now_ms(),
                     completed_at: None,
                 };
-                self.correlation
-                    .prompt_turns
-                    .insert(prompt_turn_id.clone(), turn.clone());
 
-                let pending = PendingRequestRow {
-                    request_id: request_id.clone(),
-                    logical_connection_id: self.logical_connection_id.clone(),
-                    session_id: Some(session_id),
-                    prompt_turn_id: Some(prompt_turn_id.clone()),
-                    method: req.method.clone(),
-                    direction: PendingRequestDirection::ClientToAgent,
-                    state: PendingRequestState::Pending,
-                    created_at: now_ms(),
-                    resolved_at: None,
-                };
+                self.correlation.prompts_by_request.insert(
+                    request_id_key(&prompt_ref.request_id),
+                    prompt_ref.clone(),
+                );
                 self.correlation
-                    .pending_requests
-                    .insert(request_key.clone(), pending.clone());
+                    .prompt_rows
+                    .insert(prompt_key.clone(), prompt_row.clone());
+                self.correlation.active_prompts_by_session.insert(
+                    prompt_ref.session_id.to_string(),
+                    prompt_ref,
+                );
 
                 vec![
-                    state_change("prompt_turn", &prompt_turn_id, "insert", Some(&turn)),
-                    state_change("pending_request", &request_key, "insert", Some(&pending)),
+                    state_change("prompt_request", &prompt_key, "insert", Some(&prompt_row)),
+                    state_change(
+                        "prompt_turn",
+                        &prompt_key,
+                        "insert",
+                        Some(&legacy_prompt_turn_row(
+                            &prompt_row,
+                            &prompt_key,
+                            &self.connection_id,
+                        )),
+                    ),
                 ]
             }
             _ => Vec::new(),
@@ -379,7 +256,6 @@ impl StateProjector {
             return Vec::new();
         };
         let request_key = request_id_key(&request_id);
-        let mut changes = Vec::new();
 
         if self.correlation.pending_initialize.remove(&request_key) {
             self.supports_load_session = resp
@@ -391,105 +267,87 @@ impl StateProjector {
                 .unwrap_or(false);
         }
 
-        if let Some(mut pending) = self.correlation.pending_requests.remove(&request_key) {
-            let was_session_new = pending.method == "session/new";
-            pending.state = PendingRequestState::Resolved;
-            pending.resolved_at = Some(now_ms());
-            changes.push(state_change(
-                "pending_request",
-                &request_key,
-                "update",
-                Some(&pending),
-            ));
-
-            if was_session_new {
-                if resp.is_error {
-                    self.connection.state = ConnectionState::Broken;
-                    self.connection.last_error = Some(resp.payload.to_string());
-                } else if let Some(session_id) = resp
-                    .payload
-                    .get("sessionId")
-                    .or_else(|| resp.payload.get("session_id"))
-                    .and_then(Value::as_str)
-                {
-                    let session_id = SessionId::from(session_id.to_string());
-                    let now = now_ms();
-                    let session = SessionRecord {
-                        session_id: session_id.clone(),
-                        host_key: self.host_key.clone(),
-                        host_id: self.host_id.clone(),
-                        node_id: self.node_id.clone(),
-                        logical_connection_id: self.logical_connection_id.clone(),
-                        state: SessionStatus::Active,
-                        supports_load_session: self.supports_load_session,
-                        trace_id: self.inherited_lineage.trace_id.clone(),
-                        parent_prompt_turn_id: self.inherited_lineage.parent_prompt_turn_id.clone(),
-                        created_at: now,
-                        updated_at: now,
-                        last_seen_at: now,
-                    };
-                    changes.push(state_change(
-                        "session",
-                        &session_id.to_string(),
-                        "insert",
-                        Some(&session),
-                    ));
-
-                    self.connection.state = ConnectionState::Attached;
-                    self.connection.latest_session_id = Some(session_id.to_string());
-                    self.connection.last_error = None;
-                }
-
-                self.connection.updated_at = now_ms();
-                changes.push(state_change(
-                    "connection",
-                    &self.logical_connection_id,
-                    "update",
-                    Some(&self.connection),
-                ));
-                return changes;
+        if self.correlation.pending_session_creates.remove(&request_key) {
+            if resp.is_error {
+                return Vec::new();
             }
+            let Some(session_id) = resp
+                .payload
+                .get("sessionId")
+                .or_else(|| resp.payload.get("session_id"))
+                .and_then(Value::as_str)
+                .map(|value| SessionId::from(value.to_string()))
+            else {
+                return Vec::new();
+            };
+            let now = now_ms();
+            let session = SessionRecord {
+                session_id: session_id.clone(),
+                host_key: self.host_key.clone(),
+                host_id: self.host_id.clone(),
+                node_id: self.node_id.clone(),
+                state: SessionStatus::Active,
+                supports_load_session: self.supports_load_session,
+                created_at: now,
+                updated_at: now,
+                last_seen_at: now,
+            };
+
+            return vec![
+                state_change("session_v2", &session_id.to_string(), "insert", Some(&session)),
+                state_change(
+                    "session",
+                    &session_id.to_string(),
+                    "insert",
+                    Some(&LegacySessionRow {
+                        session,
+                        connection_id: self.connection_id.clone(),
+                    }),
+                ),
+            ];
         }
 
-        if let Some(prompt_turn_id) = self.correlation.prompt_request_to_turn.remove(&request_key) {
-            let stop_reason = if resp.is_error {
-                Some("error".to_string())
-            } else {
-                resp.payload
-                    .get("stopReason")
-                    .or_else(|| resp.payload.get("stop_reason"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            };
+        let Some(prompt_ref) = self.correlation.prompts_by_request.remove(&request_key) else {
+            return Vec::new();
+        };
+        let prompt_key = prompt_request_key(&prompt_ref);
+        let Some(mut prompt_row) = self.correlation.prompt_rows.get(&prompt_key).cloned() else {
+            return Vec::new();
+        };
 
-            let Some(mut turn) = self.correlation.prompt_turns.get(&prompt_turn_id).cloned() else {
-                return changes;
-            };
-            turn.state = if resp.is_error {
-                PromptTurnState::Broken
-            } else {
-                PromptTurnState::Completed
-            };
-            turn.stop_reason = stop_reason;
-            turn.completed_at = Some(now_ms());
-            self.correlation
-                .prompt_turns
-                .insert(prompt_turn_id.clone(), turn.clone());
+        prompt_row.state = if resp.is_error {
+            PromptRequestState::Broken
+        } else {
+            PromptRequestState::Completed
+        };
+        prompt_row.stop_reason = if resp.is_error {
+            None
+        } else {
+            stop_reason_from_payload(&resp.payload)
+        };
+        prompt_row.completed_at = Some(now_ms());
+        self.correlation
+            .prompt_rows
+            .insert(prompt_key.clone(), prompt_row.clone());
+        let session_key = prompt_ref.session_id.to_string();
+        self.correlation
+            .active_prompts_by_session
+            .remove(&session_key);
+        self.correlation.legacy_chunk_order.remove(&prompt_key);
 
-            self.correlation
-                .session_active_turn
-                .retain(|_, value| value != &prompt_turn_id);
-            self.correlation.chunk_seq.remove(&prompt_turn_id);
-
-            changes.push(state_change(
+        vec![
+            state_change("prompt_request", &prompt_key, "update", Some(&prompt_row)),
+            state_change(
                 "prompt_turn",
-                &prompt_turn_id,
+                &prompt_key,
                 "update",
-                Some(&turn),
-            ));
-        }
-
-        changes
+                Some(&legacy_prompt_turn_row(
+                    &prompt_row,
+                    &prompt_key,
+                    &self.connection_id,
+                )),
+            ),
+        ]
     }
 
     fn handle_notification(&mut self, notif: &NotificationEvent) -> Vec<StateChange> {
@@ -497,51 +355,42 @@ impl StateProjector {
             return Vec::new();
         }
 
-        let session_id = notif
+        let Some(session_id) = notif
             .session
             .as_deref()
             .or_else(|| notif.params.get("sessionId").and_then(Value::as_str))
-            .or_else(|| notif.params.get("session_id").and_then(Value::as_str));
-        let Some(session_id) = session_id else {
-            return Vec::new();
-        };
-        let Some(prompt_turn_id) = self
-            .correlation
-            .session_active_turn
-            .get(session_id)
-            .cloned()
+            .or_else(|| notif.params.get("session_id").and_then(Value::as_str))
+            .map(|value| SessionId::from(value.to_string()))
         else {
             return Vec::new();
         };
-        let Some(turn) = self.correlation.prompt_turns.get(&prompt_turn_id).cloned() else {
+        let session_key = session_id.to_string();
+        let Some(prompt_ref) = self
+            .correlation
+            .active_prompts_by_session
+            .get(&session_key)
+            .cloned()
+        else {
             return Vec::new();
         };
 
         let update = notif.params.get("update");
         let update_type = update
-            .and_then(|u| u.get("sessionUpdate").or_else(|| u.get("type")))
+            .and_then(|value| value.get("sessionUpdate").or_else(|| value.get("type")))
             .and_then(Value::as_str);
 
         let (chunk_type, content) = match update_type {
             Some("agent_message_chunk")
             | Some("agentMessageChunk")
             | Some("user_message_chunk")
-            | Some("userMessageChunk") => {
-                let text = update
-                    .and_then(|u| u.get("content"))
-                    .and_then(|c| c.get("text"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                (ChunkType::Text, text.to_string())
-            }
-            Some("agent_thought_chunk") | Some("agentThoughtChunk") => {
-                let text = update
-                    .and_then(|u| u.get("content"))
-                    .and_then(|c| c.get("text"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                (ChunkType::Thinking, text.to_string())
-            }
+            | Some("userMessageChunk") => (
+                ChunkType::Text,
+                update_text_content(update).unwrap_or_default(),
+            ),
+            Some("agent_thought_chunk") | Some("agentThoughtChunk") => (
+                ChunkType::Thinking,
+                update_text_content(update).unwrap_or_default(),
+            ),
             Some("tool_call") | Some("toolCall") => (
                 ChunkType::ToolCall,
                 update.map(Value::to_string).unwrap_or_default(),
@@ -558,70 +407,63 @@ impl StateProjector {
             _ => return Vec::new(),
         };
 
-        let seq = self
+        let prompt_key = prompt_request_key(&prompt_ref);
+        let order = self
             .correlation
-            .chunk_seq
-            .entry(prompt_turn_id.clone())
+            .legacy_chunk_order
+            .entry(prompt_key.clone())
             .or_insert(0);
-        let current_seq = *seq;
-        *seq += 1;
-
-        let chunk = ChunkRow {
-            chunk_id: uuid::Uuid::new_v4().to_string(),
-            session_id: turn.session_id,
-            prompt_turn_id,
-            logical_connection_id: self.logical_connection_id.clone(),
+        let current_order = *order;
+        *order += 1;
+        let created_at = now_ms();
+        let tool_call_id = tool_call_id_from_update(update);
+        let chunk_v2 = ChunkRowV2 {
+            session_id: prompt_ref.session_id.clone(),
+            request_id: prompt_ref.request_id.clone(),
+            tool_call_id: tool_call_id.clone(),
+            chunk_type: chunk_type.clone(),
+            content: content.clone(),
+            created_at,
+        };
+        let legacy_chunk = LegacyChunkRow {
+            row_id: Uuid::new_v4().to_string(),
+            session_id: prompt_ref.session_id,
+            prompt_request_key: prompt_key.clone(),
+            connection_id: self.connection_id.clone(),
             chunk_type,
             content,
-            seq: current_seq,
-            created_at: now_ms(),
+            seq: current_order,
+            created_at,
         };
 
-        vec![state_change(
-            "chunk",
-            &chunk.chunk_id,
-            "insert",
-            Some(&chunk),
-        )]
-    }
-
-    fn next_prompt_turn_id(&mut self) -> String {
-        self.correlation.turn_counter += 1;
-        format!(
-            "{}:{}:{}",
-            self.host_id, self.logical_connection_id, self.correlation.turn_counter
-        )
+        vec![
+            state_change(
+                "chunk_v2",
+                &chunk_row_key(&prompt_key, tool_call_id.as_ref(), current_order),
+                "insert",
+                Some(&chunk_v2),
+            ),
+            state_change("chunk", &legacy_chunk.row_id, "insert", Some(&legacy_chunk)),
+        ]
     }
 }
 
-pub fn host_instance_started(
-    host_id: &str,
-    host_name: &str,
-    created_at: i64,
-) -> StateChange {
-    let row = HostInstanceRow {
-        instance_id: host_id.to_string(),
-        host_name: host_name.to_string(),
-        status: HostInstanceState::Running,
-        created_at,
-        updated_at: created_at,
-    };
-    state_change("runtime_instance", host_id, "insert", Some(&row))
-}
-
-pub fn host_instance_stopped(
-    host_id: &str,
-    host_name: &str,
-    created_at: i64,
-) -> StateChange {
-    let row = HostInstanceRow {
-        instance_id: host_id.to_string(),
-        host_name: host_name.to_string(),
-        status: HostInstanceState::Stopped,
-        created_at,
-        updated_at: now_ms(),
-    };
-    state_change("runtime_instance", host_id, "update", Some(&row))
+fn legacy_prompt_turn_row(
+    row: &PromptRequestRow,
+    prompt_key: &str,
+    connection_id: &str,
+) -> LegacyPromptTurnRow {
+    LegacyPromptTurnRow {
+        row_id: prompt_key.to_string(),
+        connection_id: connection_id.to_string(),
+        session_id: row.session_id.clone(),
+        request_id: row.request_id.clone(),
+        text: row.text.clone(),
+        state: row.state.clone(),
+        stop_reason: row.stop_reason.clone(),
+        started_at: row.started_at,
+        completed_at: row.completed_at,
+    }
 }
 
 fn state_change<T: Serialize>(
@@ -637,6 +479,29 @@ fn state_change<T: Serialize>(
         value,
     })
     .expect("serialize state envelope")
+}
+
+fn session_id_from_params(params: &Value) -> Option<SessionId> {
+    params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(Value::as_str)
+        .map(|value| SessionId::from(value.to_string()))
+}
+
+fn prompt_text_preview(params: &Value) -> Option<String> {
+    params
+        .get("prompt")
+        .and_then(Value::as_array)
+        .and_then(|blocks| first_text_block(blocks))
+}
+
+fn update_text_content(update: Option<&Value>) -> Option<String> {
+    update
+        .and_then(|value| value.get("content"))
+        .and_then(|content| content.get("text"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn first_text_block(blocks: &[Value]) -> Option<String> {
@@ -674,113 +539,64 @@ fn request_id_key(request_id: &RequestId) -> String {
     }
 }
 
-fn parse_fireline_lineage(params: &Value) -> InheritedLineage {
-    let top_level_meta = params.get("_meta").and_then(Value::as_object);
-    let client_meta = params
-        .get("clientCapabilities")
-        .or_else(|| params.get("client_capabilities"))
-        .and_then(|caps| caps.get("_meta").or_else(|| caps.get("meta")))
-        .and_then(Value::as_object);
+fn prompt_request_key(prompt_ref: &PromptRequestRef) -> String {
+    format!(
+        "{}:{}",
+        prompt_ref.session_id,
+        request_id_key(&prompt_ref.request_id)
+    )
+}
 
-    let trace_id = top_level_meta
-        .and_then(|meta| meta.get("fireline"))
-        .and_then(Value::as_object)
-        .and_then(|fireline| fireline.get("traceId"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| {
-            top_level_meta
-                .and_then(|meta| meta.get("fireline/trace-id"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .or_else(|| {
-            client_meta
-                .and_then(|meta| meta.get("fireline"))
-                .and_then(Value::as_object)
-                .and_then(|fireline| fireline.get("traceId"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .or_else(|| {
-            client_meta
-                .and_then(|meta| meta.get("fireline/trace-id"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
-
-    let parent_prompt_turn_id = top_level_meta
-        .and_then(|meta| meta.get("fireline"))
-        .and_then(Value::as_object)
-        .and_then(|fireline| fireline.get("parentPromptTurnId"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| {
-            top_level_meta
-                .and_then(|meta| meta.get("fireline/parent-prompt-turn-id"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .or_else(|| {
-            client_meta
-                .and_then(|meta| meta.get("fireline"))
-                .and_then(Value::as_object)
-                .and_then(|fireline| fireline.get("parentPromptTurnId"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .or_else(|| {
-            client_meta
-                .and_then(|meta| meta.get("fireline/parent-prompt-turn-id"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
-
-    InheritedLineage {
-        trace_id,
-        parent_prompt_turn_id,
+fn chunk_row_key(prompt_key: &str, tool_call_id: Option<&ToolCallId>, ordinal: i64) -> String {
+    match tool_call_id {
+        Some(tool_call_id) => format!("{prompt_key}:{tool_call_id}:{ordinal}"),
+        None => format!("{prompt_key}:{ordinal}"),
     }
 }
 
-fn parse_trace_endpoint(raw: &str) -> TraceEndpoint {
-    let value = raw.trim();
+fn tool_call_id_from_update(update: Option<&Value>) -> Option<ToolCallId> {
+    let raw = update
+        .and_then(|value| value.get("toolCallId").or_else(|| value.get("tool_call_id")))
+        .or_else(|| {
+            update
+                .and_then(|value| value.get("content"))
+                .and_then(|content| {
+                    content
+                        .get("toolCallId")
+                        .or_else(|| content.get("tool_call_id"))
+                })
+        })
+        .and_then(Value::as_str)?;
+    Some(ToolCallId::from(raw.to_string()))
+}
 
-    if value.eq_ignore_ascii_case("client") {
-        return TraceEndpoint::Client;
-    }
-    if value.eq_ignore_ascii_case("agent") {
-        return TraceEndpoint::Agent;
-    }
+fn stop_reason_from_payload(payload: &Value) -> Option<StopReason> {
+    payload
+        .get("stopReason")
+        .or_else(|| payload.get("stop_reason"))
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
 
-    let lower = value.to_ascii_lowercase();
-    if let Some(idx) = lower
-        .strip_prefix("proxy(")
-        .and_then(|s| s.strip_suffix(')'))
-        .and_then(|s| s.parse::<usize>().ok())
-    {
-        return TraceEndpoint::Proxy(idx);
-    }
-    if let Some(idx) = lower
-        .strip_prefix("proxy:")
-        .and_then(|s| s.parse::<usize>().ok())
-    {
-        return TraceEndpoint::Proxy(idx);
-    }
+fn is_client_endpoint(raw: &str) -> bool {
+    raw.trim().eq_ignore_ascii_case("client")
+}
 
-    TraceEndpoint::Unknown
+fn is_agent_endpoint(raw: &str) -> bool {
+    raw.trim().eq_ignore_ascii_case("agent")
+}
+
+fn is_proxy_zero_endpoint(raw: &str) -> bool {
+    let value = raw.trim().to_ascii_lowercase();
+    value == "proxy(0)" || value == "proxy:0"
 }
 
 fn is_canonical_client_request(req: &RequestEvent) -> bool {
-    let from = parse_trace_endpoint(&req.from);
-    let to = parse_trace_endpoint(&req.to);
-    from == TraceEndpoint::Client && matches!(to, TraceEndpoint::Proxy(0) | TraceEndpoint::Agent)
+    is_client_endpoint(&req.from) && (is_proxy_zero_endpoint(&req.to) || is_agent_endpoint(&req.to))
 }
 
 fn is_canonical_session_update_notification(notif: &NotificationEvent) -> bool {
-    matches!(
-        parse_trace_endpoint(&notif.to),
-        TraceEndpoint::Proxy(0) | TraceEndpoint::Client
-    )
+    is_proxy_zero_endpoint(&notif.to) || is_client_endpoint(&notif.to)
 }
 
 fn now_ms() -> i64 {

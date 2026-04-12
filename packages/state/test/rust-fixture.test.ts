@@ -12,6 +12,8 @@ import {
   sessionSchema,
 } from '../src/schema.js'
 
+const requestIdSchema = z.union([z.null(), z.string(), z.number().int()])
+
 const stateHeadersSchema = z
   .object({
     operation: z.enum(['insert', 'update', 'delete']),
@@ -29,11 +31,45 @@ const baseEnvelopeSchema = z
 
 const strictValueSchemas = {
   chunk: chunkSchema.strict(),
+  chunk_v2: z
+    .object({
+      sessionId: z.string(),
+      requestId: requestIdSchema,
+      toolCallId: z.string().optional(),
+      type: z.enum(['text', 'tool_call', 'thinking', 'tool_result', 'error', 'stop']),
+      content: z.string(),
+      createdAt: z.number(),
+    })
+    .strict(),
   connection: connectionSchema.strict(),
   pending_request: pendingRequestSchema.strict(),
+  prompt_request: z
+    .object({
+      sessionId: z.string(),
+      requestId: requestIdSchema,
+      text: z.string().optional(),
+      state: z.enum(['active', 'completed', 'broken']),
+      stopReason: z.string().optional(),
+      startedAt: z.number(),
+      completedAt: z.number().optional(),
+    })
+    .strict(),
   prompt_turn: promptTurnSchema.strict(),
   runtime_instance: runtimeInstanceSchema.strict(),
   session: sessionSchema.strict(),
+  session_v2: z
+    .object({
+      sessionId: z.string(),
+      runtimeKey: z.string(),
+      runtimeId: z.string(),
+      nodeId: z.string(),
+      state: z.enum(['active', 'broken', 'closed']),
+      supportsLoadSession: z.boolean(),
+      createdAt: z.number(),
+      updatedAt: z.number(),
+      lastSeenAt: z.number(),
+    })
+    .strict(),
 } as const
 
 describe('Rust producer fixture', () => {
@@ -53,9 +89,8 @@ describe('Rust producer fixture', () => {
     for (const line of lines) {
       const parsed = baseEnvelopeSchema.parse(JSON.parse(line))
 
-      // ACP canonical-identifiers Phase 3 deletes the child_session_edge writer first.
-      // Keep this fixture parser tolerant until the Rust fixture is regenerated
-      // without that transitional write-only entity.
+      // ACP canonical-identifiers Phase 3 deletes the child_session_edge writer
+      // before the fixture is regenerated.
       if (parsed.type === 'child_session_edge') {
         continue
       }

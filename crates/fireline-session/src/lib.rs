@@ -42,13 +42,8 @@ pub struct SessionRecord {
     #[serde(rename = "runtimeId")]
     pub host_id: String,
     pub node_id: String,
-    pub logical_connection_id: String,
     pub state: SessionStatus,
     pub supports_load_session: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trace_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_prompt_turn_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub last_seen_at: i64,

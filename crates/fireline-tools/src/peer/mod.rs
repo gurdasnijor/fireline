@@ -28,7 +28,7 @@ use std::sync::{Arc, OnceLock};
 
 use sacp::{Client, ConnectTo, Proxy};
 
-use self::lookup::{ActiveTurnLookup, ChildSessionEdgeSink};
+use self::lookup::ActiveTurnLookup;
 use self::mcp_server::build_peer_mcp_server;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -52,22 +52,16 @@ pub trait PeerRegistry: Send + Sync {
 pub struct PeerComponent {
     peer_registry: Arc<dyn PeerRegistry>,
     active_turn_lookup: Arc<dyn ActiveTurnLookup>,
-    child_session_edge_sink: Arc<dyn ChildSessionEdgeSink>,
-    host_id: String,
 }
 
 impl PeerComponent {
     pub fn new(
         peer_registry: Arc<dyn PeerRegistry>,
         active_turn_lookup: Arc<dyn ActiveTurnLookup>,
-        child_session_edge_sink: Arc<dyn ChildSessionEdgeSink>,
-        host_id: impl Into<String>,
     ) -> Self {
         Self {
             peer_registry,
             active_turn_lookup,
-            child_session_edge_sink,
-            host_id: host_id.into(),
         }
     }
 }
@@ -76,8 +70,6 @@ impl ConnectTo<sacp::Conductor> for PeerComponent {
     async fn connect_to(self, client: impl ConnectTo<Proxy>) -> Result<(), sacp::Error> {
         let peer_registry = self.peer_registry;
         let active_turn_lookup = self.active_turn_lookup;
-        let child_session_edge_sink = self.child_session_edge_sink;
-        let host_id = self.host_id;
 
         sacp::Proxy
             .builder()
@@ -87,15 +79,11 @@ impl ConnectTo<sacp::Conductor> for PeerComponent {
                 {
                     let peer_registry = peer_registry.clone();
                     let active_turn_lookup = active_turn_lookup.clone();
-                    let child_session_edge_sink = child_session_edge_sink.clone();
-                    let host_id = host_id.clone();
                     async move |request: sacp::schema::NewSessionRequest, responder, cx| {
                         let session_binding = Arc::new(OnceLock::new());
                         let mcp_server = build_peer_mcp_server(
                             peer_registry.clone(),
                             active_turn_lookup.clone(),
-                            child_session_edge_sink.clone(),
-                            host_id.clone(),
                             session_binding.clone(),
                         );
                         cx.build_session_from(request)

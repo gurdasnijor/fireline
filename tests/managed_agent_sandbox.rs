@@ -132,26 +132,26 @@ async fn sandbox_provisioned_runtime_serves_multiple_execute_calls() -> Result<(
             );
         }
 
-        // Each prompt should land as a distinct prompt_turn envelope on the
+        // Each prompt should land as a distinct prompt_request envelope on the
         // durable stream. Use count-aware polling to avoid the race where
-        // the substring helper returns after only the first prompt_turn is
+        // the substring helper returns after only the first prompt_request is
         // visible.
-        let prompt_turns = wait_for_event_count(
+        let prompt_requests = wait_for_event_count(
             runtime.state_stream_url(),
-            "prompt_turn",
+            "prompt_request",
             3,
             Duration::from_secs(10),
         )
         .await
         .context(
-            "INVARIANT (Sandbox ∘ Session): each execute yields a distinct prompt_turn \
+            "INVARIANT (Sandbox ∘ Session): each execute yields a distinct prompt_request \
              envelope in the durable log",
         )?;
         assert!(
-            prompt_turns.len() >= 3,
-            "INVARIANT (Sandbox ∘ Session): wait_for_event_count returned {} prompt_turn \
+            prompt_requests.len() >= 3,
+            "INVARIANT (Sandbox ∘ Session): wait_for_event_count returned {} prompt_request \
              envelopes, expected at least 3",
-            prompt_turns.len()
+            prompt_requests.len()
         );
 
         Ok(())

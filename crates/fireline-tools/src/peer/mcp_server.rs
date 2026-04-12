@@ -16,7 +16,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PeerRegistry;
-use super::lookup::{ActiveTurnLookup, ChildSessionEdgeInput, ChildSessionEdgeSink};
+use super::lookup::ActiveTurnLookup;
 use super::transport;
 use crate::ToolDescriptor;
 
@@ -85,8 +85,6 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
 pub(crate) fn build_peer_mcp_server(
     peer_registry: Arc<dyn PeerRegistry>,
     active_turn_lookup: Arc<dyn ActiveTurnLookup>,
-    child_session_edge_sink: Arc<dyn ChildSessionEdgeSink>,
-    host_id: String,
     session_binding: Arc<OnceLock<String>>,
 ) -> sacp::mcp_server::McpServer<Conductor, impl sacp::RunWithConnectionTo<Conductor>> {
     sacp::mcp_server::McpServer::builder("fireline-peer")
@@ -121,8 +119,6 @@ pub(crate) fn build_peer_mcp_server(
             {
                 let peer_registry = peer_registry.clone();
                 let active_turn_lookup = active_turn_lookup.clone();
-                let child_session_edge_sink = child_session_edge_sink.clone();
-                let host_id = host_id.clone();
                 let session_binding = session_binding.clone();
                 async move |input: PromptPeerInput, cx| {
                     let peer = peer_registry
@@ -166,31 +162,7 @@ pub(crate) fn build_peer_mcp_server(
                         ))
                     })?;
 
-                    let parent_prompt_turn_id = parent_lineage
-                        .parent_prompt_turn_id
-                        .ok_or_else(|| {
-                            sacp::util::internal_error(
-                                "prompt_peer: parent lineage is missing an active turn id; \
-                                 the active-turn projection may be lagging behind the session"
-                            )
-                        })?;
-
-                    child_session_edge_sink
-                        .emit_child_session_edge(ChildSessionEdgeInput {
-                            trace_id: parent_lineage.trace_id.clone(),
-                            parent_host_id: host_id.clone(),
-                            parent_session_id: session_id,
-                            parent_prompt_turn_id,
-                            child_host_id: peer.host_id.clone(),
-                            child_session_id: result.child_session_id.to_string(),
-                        })
-                        .await
-                        .map_err(|e| {
-                            sacp::util::internal_error(format!(
-                                "record child session edge '{}': {e}",
-                                input.agent_name
-                            ))
-                        })?;
+                    let _ = session_id;
 
                     Ok(PromptPeerOutput {
                         host_id: peer.host_id,
