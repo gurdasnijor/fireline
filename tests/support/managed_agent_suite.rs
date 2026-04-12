@@ -717,7 +717,7 @@ async fn spawn_control_plane(
         .arg(heartbeat_scan_interval_ms.to_string())
         .arg("--stale-timeout-ms")
         .arg(stale_timeout_ms.to_string())
-        .arg("--shared-stream-base-url")
+        .arg("--durable-streams-url")
         .arg(shared_stream_base_url);
     if inherit_child_logs {
         command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
