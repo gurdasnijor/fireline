@@ -275,3 +275,15 @@ npx fireline deploy reviewer.ts --provider anthropic --peer agent
 without changing the agent definition itself.
 
 If Fireline can make that true, it becomes much more than a runtime. It becomes the bridge between experimentation and operations.
+
+## Target architecture (post-canonical-identifiers)
+
+This demo currently uses today's public surfaces: `compose(...).start()`, `FirelineAgent`, `fireline.db()`, and `appendApprovalResolved()`.
+
+Those are the current runtime APIs, not the final architecture target.
+
+For the identifier model Fireline is moving toward, see [ACP Canonical Identifiers](../proposals/acp-canonical-identifiers.md): agent-layer state should be keyed by canonical `SessionId`, `RequestId`, and `ToolCallId`, with no synthetic ids.
+
+For the generalized workflow substrate behind the demo's approval handshake, see [Durable Subscriber](../proposals/durable-subscriber.md): approvals become one instance of a broader durable suspend / wake pattern.
+
+For the eventual awakeable sugar that replaces today's ad-hoc resolve pattern, see [Durable Promises](../proposals/durable-promises.md).
