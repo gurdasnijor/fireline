@@ -3,8 +3,9 @@
 The `fireline` CLI runs declarative agent specs — `npx fireline agent.ts`
 boots a durable-streams server, a Fireline control plane, and provisions
 the sandbox defined by the spec's default export. Any ACP client can
-then connect to the printed URL. It also ships a `deploy` subcommand
-that pushes the same spec to a remote hosted Fireline instance.
+then connect to the printed URL. It also ships a `build` subcommand
+that emits a hosted Fireline OCI image locally and can scaffold
+target-specific deployment files.
 
 ## Usage
 
@@ -21,8 +22,11 @@ npx fireline run agent.ts --state-stream my-session
 # Override the sandbox provider from the spec
 npx fireline run agent.ts --provider docker
 
-# Deploy the spec to a hosted Fireline instance
-npx fireline deploy agent.ts --remote https://agents.example.com
+# Build the hosted image locally
+npx fireline build agent.ts
+
+# Build and scaffold a target descriptor
+npx fireline build agent.ts --target fly
 ```
 
 ## Spec shape
@@ -50,9 +54,11 @@ be invoked with `npx tsx` directly.
 - The existing examples in `examples/` do not export a default spec; they
   call `.start()` imperatively at module scope. They still run with
   `npx tsx examples/<name>/index.ts` (unchanged).
-- `fireline deploy` is currently an MVP shell. It requires `--remote`,
-  supports only a direct `--token` auth override, and does not yet wire
-  always-on deployment policy.
+- `fireline build` shells out to `docker build` against the hosted
+  Dockerfile in `docker/` and passes the serialized spec as a build arg.
+- `fireline deploy --to <platform>` and `fireline push` are deferred to
+  later phases. The current CLI does not talk to a Fireline-owned deploy
+  endpoint.
 - The `--repl` flag is still a stub. For now, connect any ACP client to
   the printed ACP URL.
 

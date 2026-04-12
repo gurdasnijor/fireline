@@ -1,12 +1,16 @@
 import { ChildProcess, spawn } from 'node:child_process'
-import { dirname, resolve as resolvePath } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { existsSync } from 'node:fs'
+import { writeFile } from 'node:fs/promises'
+import { basename, dirname, parse as parsePath, resolve as resolvePath } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { tsImport } from 'tsx/esm/api'
 import { resolveBinary } from './resolve-binary.js'
 
-interface ParsedArgs {
-  readonly command: 'run' | 'deploy' | 'help'
-  readonly helpFor: 'general' | 'run' | 'deploy'
+export type BuildTarget = 'cloudflare' | 'docker' | 'fly' | 'k8s'
+
+export interface ParsedArgs {
+  readonly command: 'run' | 'build' | 'help'
+  readonly helpFor: 'general' | 'run' | 'build'
   readonly file: string | null
   readonly port: number
   readonly streamsPort: number
@@ -14,16 +18,31 @@ interface ParsedArgs {
   readonly name: string | null
   readonly repl: boolean
   readonly providerOverride: string | null
-  readonly remote: string | null
-  readonly token: string | null
+  readonly target: BuildTarget | null
+}
+
+export interface DockerBuildPlan {
+  readonly command: 'docker'
+  readonly args: readonly string[]
+  readonly buildArg: string
+  readonly buildContext: string
+  readonly dockerfile: string
+  readonly imageTag: string
+}
+
+export interface TargetScaffoldPlan {
+  readonly target: BuildTarget
+  readonly fileName: string
+  readonly filePath: string
+  readonly contents: string
 }
 
 const GENERAL_HELP = `
-fireline — run or deploy declarative agent specs
+fireline — run specs locally or build hosted images
 
 Usage:
   fireline [run] <file.ts>           Boot conductor + streams, provision agent locally
-  fireline deploy <file.ts>          Push spec to a remote Fireline instance
+  fireline build <file.ts>           Build hosted Fireline OCI image
   fireline --help                    Show this help
 
 Run flags:
@@ -34,13 +53,11 @@ Run flags:
   --provider <p>       Override sandbox.provider from spec
   --repl               Print ACP URL and wait (TODO: interactive REPL)
 
-Deploy flags:
-  --remote <url>       Hosted Fireline base URL (required)
-  --token <token>      Bearer token for the remote instance
-  --state-stream <s>   Explicit durable state stream name
-  --name <s>           Logical deployment name (default: from spec or 'default')
-  --provider <p>       Override sandbox.provider from spec
-  --repl               Print ACP URL and wait (TODO: interactive REPL)
+Build flags:
+  --target <platform>  Scaffold target config: cloudflare | fly | docker | k8s
+  --state-stream <s>   Override durable state stream name baked into the spec
+  --name <s>           Override deployment name baked into the spec
+  --provider <p>       Override sandbox.provider baked into the spec
 
 Env:
   FIRELINE_BIN          Override path to fireline binary
@@ -48,7 +65,7 @@ Env:
 
 Example:
   fireline run examples/code-review-agent/index.ts
-  fireline deploy agent.ts --remote https://agents.example.com
+  fireline build agent.ts --target fly
 `.trim()
 
 const RUN_HELP = `
@@ -67,19 +84,17 @@ Flags:
   --help               Show this help
 `.trim()
 
-const DEPLOY_HELP = `
-fireline deploy — push a spec to a remote Fireline instance
+const BUILD_HELP = `
+fireline build — build a hosted Fireline OCI image from a spec
 
 Usage:
-  fireline deploy <file.ts> --remote <url> [flags]
+  fireline build <file.ts> [flags]
 
 Flags:
-  --remote <url>       Hosted Fireline base URL (required)
-  --token <token>      Bearer token for the remote instance
-  --state-stream <s>   Explicit durable state stream name
-  --name <s>           Logical deployment name (default: from spec or 'default')
-  --provider <p>       Override sandbox.provider from spec
-  --repl               Print ACP URL and wait (TODO: interactive REPL)
+  --target <platform>  Scaffold target config: cloudflare | fly | docker | k8s
+  --state-stream <s>   Override durable state stream name baked into the spec
+  --name <s>           Override deployment name baked into the spec
+  --provider <p>       Override sandbox.provider baked into the spec
   --help               Show this help
 `.trim()
 
@@ -91,8 +106,8 @@ export async function main(argv: readonly string[]): Promise<void> {
       console.log(helpText(args.helpFor))
       return
     }
-    exitCode = args.command === 'deploy'
-      ? await deploy(args)
+    exitCode = args.command === 'build'
+      ? await build(args)
       : await run(args)
   } catch (error) {
     console.error(`fireline: ${(error as Error).message}`)
@@ -103,8 +118,8 @@ export async function main(argv: readonly string[]): Promise<void> {
 
 export function parseArgs(argv: readonly string[]): ParsedArgs {
   const out = {
-    command: 'run' as 'run' | 'deploy' | 'help',
-    helpFor: 'run' as 'general' | 'run' | 'deploy',
+    command: 'run' as 'run' | 'build' | 'help',
+    helpFor: 'run' as 'general' | 'run' | 'build',
     file: null as string | null,
     port: 4440,
     streamsPort: 7474,
@@ -112,11 +127,16 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     name: null as string | null,
     repl: false,
     providerOverride: null as string | null,
-    remote: null as string | null,
-    token: null as string | null,
+    target: null as BuildTarget | null,
+  }
+  const seen = {
+    port: false,
+    streamsPort: false,
+    repl: false,
+    target: false,
   }
   let i = 0
-  if (argv[0] === 'run' || argv[0] === 'deploy') {
+  if (argv[0] === 'run' || argv[0] === 'build') {
     out.command = argv[0]
     out.helpFor = argv[0]
     i++
@@ -132,9 +152,11 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case '-h':
         return { ...out, command: 'help' }
       case '--port':
+        seen.port = true
         out.port = parseIntArg(argv[++i], '--port')
         break
       case '--streams-port':
+        seen.streamsPort = true
         out.streamsPort = parseIntArg(argv[++i], '--streams-port')
         break
       case '--state-stream':
@@ -146,13 +168,12 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case '--provider':
         out.providerOverride = required(argv[++i], '--provider')
         break
-      case '--remote':
-        out.remote = required(argv[++i], '--remote')
-        break
-      case '--token':
-        out.token = required(argv[++i], '--token')
+      case '--target':
+        seen.target = true
+        out.target = parseBuildTarget(argv[++i])
         break
       case '--repl':
+        seen.repl = true
         out.repl = true
         break
       default:
@@ -162,14 +183,17 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     }
   }
 
-  if (out.command === 'deploy' && !out.remote) {
-    throw new Error('deploy requires --remote <url>')
+  if (out.command === 'run' && seen.target) {
+    throw new Error('--target is only valid with build')
   }
-  if (out.command === 'run' && out.remote) {
-    throw new Error('--remote is only valid with deploy')
+  if (out.command === 'build' && seen.port) {
+    throw new Error('--port is only valid with run')
   }
-  if (out.command === 'run' && out.token) {
-    throw new Error('--token is only valid with deploy')
+  if (out.command === 'build' && seen.streamsPort) {
+    throw new Error('--streams-port is only valid with run')
+  }
+  if (out.command === 'build' && seen.repl) {
+    throw new Error('--repl is only valid with run')
   }
 
   return out
@@ -179,8 +203,8 @@ function helpText(topic: ParsedArgs['helpFor']): string {
   switch (topic) {
     case 'run':
       return RUN_HELP
-    case 'deploy':
-      return DEPLOY_HELP
+    case 'build':
+      return BUILD_HELP
     case 'general':
       return GENERAL_HELP
   }
@@ -195,6 +219,25 @@ function parseIntArg(value: string | undefined, flag: string): number {
 function required(value: string | undefined, flag: string): string {
   if (value === undefined) throw new Error(`${flag} requires an argument`)
   return value
+}
+
+function parseBuildTarget(value: string | undefined): BuildTarget {
+  const normalized = required(value, '--target').toLowerCase()
+  switch (normalized) {
+    case 'cloudflare':
+    case 'cf':
+      return 'cloudflare'
+    case 'docker':
+      return 'docker'
+    case 'fly':
+    case 'flyio':
+      return 'fly'
+    case 'k8s':
+    case 'kubernetes':
+      return 'k8s'
+    default:
+      throw new Error(`unsupported build target: ${normalized} (expected cloudflare, fly, docker, or k8s)`)
+  }
 }
 
 async function run(args: ParsedArgs): Promise<number> {
@@ -225,7 +268,6 @@ async function run(args: ParsedArgs): Promise<number> {
   }
 
   try {
-    // 1. Start durable-streams
     const streamsProc = spawn(streamsBin, [], {
       stdio: ['ignore', 'inherit', 'inherit'],
       env: { ...process.env, PORT: String(args.streamsPort) },
@@ -233,7 +275,6 @@ async function run(args: ParsedArgs): Promise<number> {
     teardown.push(() => stopChild(streamsProc))
     await waitForHttp(`http://127.0.0.1:${args.streamsPort}/healthz`, 10_000, 'fireline-streams')
 
-    // 2. Start control plane
     const controlPlaneArgs = [
       '--control-plane',
       '--port', String(args.port),
@@ -246,22 +287,20 @@ async function run(args: ParsedArgs): Promise<number> {
     teardown.push(() => stopChild(firelineProc))
     await waitForHttp(`http://127.0.0.1:${args.port}/healthz`, 15_000, 'fireline')
 
-    // 3. Provision the agent via spec.start()
     const startOptions: Record<string, unknown> = {
       serverUrl: `http://127.0.0.1:${args.port}`,
     }
     if (args.stateStream) startOptions.stateStream = args.stateStream
     if (args.name) startOptions.name = args.name
 
-    // If --provider override is set, mutate the spec before starting.
     const effectiveSpec = args.providerOverride
       ? { ...spec, sandbox: { ...spec.sandbox, provider: args.providerOverride } }
       : spec
 
-    const handle = await effectiveSpec.start(startOptions)
-    teardown.push(() => destroySandbox(handle.id, args.port))
+    const agentHandle = await effectiveSpec.start(startOptions)
+    teardown.push(() => destroySandbox(agentHandle.id, args.port))
 
-    printReady(handle, args)
+    printReady(agentHandle, args)
     if (args.repl) {
       console.log('\nREPL mode coming soon. Connect any ACP client to the URL above.')
     }
@@ -275,44 +314,42 @@ async function run(args: ParsedArgs): Promise<number> {
   }
 }
 
-interface DeployRequestBody {
-  readonly name: string
-  readonly spec: Record<string, unknown>
-}
-
-async function deploy(args: ParsedArgs): Promise<number> {
+async function build(args: ParsedArgs): Promise<number> {
   const specPath = resolvePath(process.cwd(), args.file!)
   const spec = await loadSpec(specPath)
   const effectiveSpec = materializeSpec(spec, args)
-  const remoteBaseUrl = args.remote!.replace(/\/+$/, '')
+  const appName = defaultAppName(specPath, effectiveSpec.name)
+  const imageTag = defaultImageTag(appName)
 
-  const response = await fetch(`${remoteBaseUrl}/v1/deployments`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      ...(args.token ? { authorization: `Bearer ${args.token}` } : {}),
-    },
-    body: JSON.stringify({
-      name: effectiveSpec.name,
-      spec: effectiveSpec,
-    } satisfies DeployRequestBody),
-    signal: AbortSignal.timeout(15_000),
+  const dockerfile = findWorkspacePath('docker/fireline-host.Dockerfile')
+  const buildContext = dirname(dirname(dockerfile))
+  const plan = createDockerBuildPlan({
+    buildContext,
+    dockerfile,
+    imageTag,
+    spec: effectiveSpec,
   })
 
-  if (!response.ok) {
-    const detail = await readResponseDetail(response)
-    throw new Error(
-      `deploy failed (${response.status} ${response.statusText})` +
-        (detail ? `: ${detail}` : ''),
-    )
+  const scaffoldPlan = args.target
+    ? createTargetScaffoldPlan({
+        target: args.target,
+        cwd: process.cwd(),
+        appName,
+        imageTag,
+      })
+    : null
+
+  console.log(`fireline: building ${plan.imageTag}`)
+  const exitCode = await runChild(plan.command, plan.args, { cwd: buildContext })
+  if (exitCode !== 0) return exitCode
+
+  const scaffoldedFiles: string[] = []
+  if (scaffoldPlan) {
+    await writeTargetScaffold(scaffoldPlan)
+    scaffoldedFiles.push(scaffoldPlan.filePath)
   }
 
-  const handle = await response.json() as PrintedHandle
-  validatePrintedHandle(handle, 'deploy')
-  printReady(handle, args)
-  if (args.repl) {
-    console.log('\nREPL mode coming soon. Connect any ACP client to the URL above.')
-  }
+  printBuildResult(plan.imageTag, scaffoldedFiles)
   return 0
 }
 
@@ -327,10 +364,8 @@ interface LoadedSpec {
 }
 
 async function loadSpec(specPath: string): Promise<LoadedSpec> {
-  // tsImport's specifier must be a path relative to parentURL, or an absolute
-  // file URL resolved via parentURL pointing at the same directory.
   const parentURL = pathToFileURL(`${dirname(specPath)}/`).href
-  const mod = await tsImport(`./${specPath.split('/').pop()}`, parentURL)
+  const mod = await tsImport(`./${basename(specPath)}`, parentURL)
   const candidate = (mod as { default?: unknown }).default
   if (!candidate || typeof candidate !== 'object') {
     throw new Error(
@@ -385,6 +420,30 @@ async function stopChild(child: ChildProcess): Promise<void> {
   })
 }
 
+async function runChild(
+  command: string,
+  args: readonly string[],
+  options: { readonly cwd?: string } = {},
+): Promise<number> {
+  const child = spawn(command, [...args], {
+    cwd: options.cwd,
+    stdio: ['ignore', 'inherit', 'inherit'],
+    env: { ...process.env },
+  })
+  return await new Promise<number>((resolveWait, reject) => {
+    child.once('error', (error) => {
+      reject(new Error(`failed to start ${command}: ${(error as Error).message}`))
+    })
+    child.once('exit', (code, signal) => {
+      if (signal) {
+        reject(new Error(`${command} exited from signal ${signal}`))
+        return
+      }
+      resolveWait(code ?? 1)
+    })
+  })
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolveWait) => setTimeout(resolveWait, ms))
 }
@@ -395,7 +454,7 @@ interface PrintedHandle {
   readonly state: { readonly url: string }
 }
 
-interface SerializedHarnessSpec extends Record<string, unknown> {
+export interface SerializedHarnessSpec extends Record<string, unknown> {
   readonly name: string
   readonly sandbox: Record<string, unknown>
 }
@@ -421,9 +480,186 @@ function serializeHarnessSpec(spec: LoadedSpec): SerializedHarnessSpec {
   return JSON.parse(JSON.stringify(spec)) as SerializedHarnessSpec
 }
 
-async function readResponseDetail(response: Response): Promise<string> {
-  const text = await response.text()
-  return text.trim()
+export function createDockerBuildPlan(options: {
+  readonly buildContext: string
+  readonly dockerfile: string
+  readonly imageTag: string
+  readonly spec: SerializedHarnessSpec
+}): DockerBuildPlan {
+  const buildArg = `FIRELINE_EMBEDDED_SPEC=${JSON.stringify(options.spec)}`
+  return {
+    command: 'docker',
+    args: [
+      'build',
+      '--file', options.dockerfile,
+      '--tag', options.imageTag,
+      '--build-arg', buildArg,
+      options.buildContext,
+    ],
+    buildArg,
+    buildContext: options.buildContext,
+    dockerfile: options.dockerfile,
+    imageTag: options.imageTag,
+  }
+}
+
+export function createTargetScaffoldPlan(options: {
+  readonly target: BuildTarget
+  readonly cwd: string
+  readonly appName: string
+  readonly imageTag: string
+}): TargetScaffoldPlan {
+  const fileName = scaffoldFileName(options.target)
+  const filePath = resolvePath(options.cwd, fileName)
+  if (existsSync(filePath)) {
+    throw new Error(`refusing to overwrite existing scaffold file: ${filePath}`)
+  }
+  return {
+    target: options.target,
+    fileName,
+    filePath,
+    contents: renderTargetScaffold(options),
+  }
+}
+
+export async function writeTargetScaffold(plan: TargetScaffoldPlan): Promise<void> {
+  await writeFile(plan.filePath, plan.contents, { flag: 'wx' })
+}
+
+function scaffoldFileName(target: BuildTarget): string {
+  switch (target) {
+    case 'cloudflare':
+      return 'wrangler.toml'
+    case 'docker':
+      return 'Dockerfile'
+    case 'fly':
+      return 'fly.toml'
+    case 'k8s':
+      return 'k8s.yaml'
+  }
+}
+
+function renderTargetScaffold(options: {
+  readonly target: BuildTarget
+  readonly appName: string
+  readonly imageTag: string
+}): string {
+  switch (options.target) {
+    case 'cloudflare':
+      return [
+        '# Scaffold only. Wire this image into your Cloudflare Containers config.',
+        `name = "${options.appName}"`,
+        `compatibility_date = "${new Date().toISOString().slice(0, 10)}"`,
+        '',
+        '[vars]',
+        `FIRELINE_IMAGE = "${options.imageTag}"`,
+        'FIRELINE_PORT = "4440"',
+        '',
+      ].join('\n')
+    case 'docker':
+      return [
+        '# Scaffold only. This target reuses the image built by `fireline build`.',
+        `FROM ${options.imageTag}`,
+        '',
+        'EXPOSE 4440',
+        '',
+      ].join('\n')
+    case 'fly':
+      return [
+        `app = "${options.appName}"`,
+        'primary_region = "sea"',
+        '',
+        '[build]',
+        `  image = "${options.imageTag}"`,
+        '',
+        '[http_service]',
+        '  internal_port = 4440',
+        '  force_https = true',
+        '  auto_start_machines = true',
+        '  auto_stop_machines = "off"',
+        '',
+        '  [[http_service.checks]]',
+        '    grace_period = "20s"',
+        '    interval = "15s"',
+        '    method = "GET"',
+        '    path = "/healthz"',
+        '    timeout = "5s"',
+        '',
+      ].join('\n')
+    case 'k8s':
+      return [
+        'apiVersion: apps/v1',
+        'kind: Deployment',
+        'metadata:',
+        `  name: ${options.appName}`,
+        'spec:',
+        '  replicas: 1',
+        '  selector:',
+        '    matchLabels:',
+        `      app: ${options.appName}`,
+        '  template:',
+        '    metadata:',
+        '      labels:',
+        `        app: ${options.appName}`,
+        '    spec:',
+        '      containers:',
+        `        - name: ${options.appName}`,
+        `          image: ${options.imageTag}`,
+        '          ports:',
+        '            - containerPort: 4440',
+        '          readinessProbe:',
+        '            httpGet:',
+        '              path: /healthz',
+        '              port: 4440',
+        '          livenessProbe:',
+        '            httpGet:',
+        '              path: /healthz',
+        '              port: 4440',
+        '---',
+        'apiVersion: v1',
+        'kind: Service',
+        'metadata:',
+        `  name: ${options.appName}`,
+        'spec:',
+        '  selector:',
+        `    app: ${options.appName}`,
+        '  ports:',
+        '    - port: 80',
+        '      targetPort: 4440',
+        '',
+      ].join('\n')
+  }
+}
+
+function findWorkspacePath(relativePath: string): string {
+  let dir = dirname(fileURLToPath(import.meta.url))
+  for (let i = 0; i < 10; i++) {
+    const candidate = resolvePath(dir, relativePath)
+    if (existsSync(candidate)) return candidate
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  throw new Error(`could not locate ${relativePath} from ${import.meta.url}`)
+}
+
+function defaultAppName(specPath: string, name: string): string {
+  if (name && name !== 'default') return slugify(name)
+  return slugify(parsePath(specPath).name || 'default')
+}
+
+function defaultImageTag(appName: string): string {
+  return `fireline-${appName}:latest`
+}
+
+function slugify(value: string): string {
+  const slug = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  if (slug) return slug
+  return slugify(parsePath(value).name || 'default')
 }
 
 function validatePrintedHandle(handle: PrintedHandle, label: string): void {
@@ -436,14 +672,26 @@ function printReady(
   handle: PrintedHandle,
   args: ParsedArgs,
 ): void {
+  validatePrintedHandle(handle, 'run')
   console.log('')
   console.log('  \x1b[32m✓\x1b[0m fireline ready')
   console.log('')
-  console.log(`    ${args.command === 'deploy' ? 'deployment' : 'sandbox'}:   ${handle.id}`)
+  console.log(`    sandbox:   ${handle.id}`)
   console.log(`    ACP:       ${handle.acp.url}`)
   console.log(`    state:     ${handle.state.url}`)
   if (args.stateStream) console.log(`    stream:    ${args.stateStream}`)
   console.log('')
   console.log('  Press Ctrl+C to shut down.')
+  console.log('')
+}
+
+function printBuildResult(imageTag: string, scaffoldedFiles: readonly string[]): void {
+  console.log('')
+  console.log('  \x1b[32m✓\x1b[0m fireline build complete')
+  console.log('')
+  console.log(`    image:     ${imageTag}`)
+  for (const filePath of scaffoldedFiles) {
+    console.log(`    scaffold:  ${filePath}`)
+  }
   console.log('')
 }

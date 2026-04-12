@@ -21,6 +21,11 @@ npx fireline run agent.ts
 #     sandbox: runtime:59f5ed5a-d624-…
 #     ACP:     ws://127.0.0.1:54896/acp
 #     state:   http://127.0.0.1:7474/v1/stream/fireline-state-runtime-…
+
+npx fireline build agent.ts --target fly
+#   ✓ fireline build complete
+#     image:     fireline-agent:latest
+#     scaffold:  /path/to/fly.toml
 ```
 
 Connect any ACP client to the printed URL. See the [`@fireline/cli` guide](docs/guide/cli.md).
@@ -60,12 +65,16 @@ export default compose(
 
 ```bash
 npx fireline run agent.ts
+npx fireline build agent.ts --target fly
 ```
 
 The `@fireline/cli` package boots durable streams in-process, spawns the control plane,
 provisions the sandbox, and prints the ACP endpoint for any
 [ACP client](https://agentclientprotocol.com/get-started/clients) to
-connect. See the [CLI guide](docs/guide/cli.md).
+connect. `fireline build` shells out to `docker build` against the hosted
+image Dockerfile in `docker/`, bakes the serialized spec into a build arg,
+and can scaffold target config such as `fly.toml` or `k8s.yaml`. See the
+[CLI guide](docs/guide/cli.md).
 
 ### Imperative: `FirelineAgent` from code
 

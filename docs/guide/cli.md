@@ -4,7 +4,8 @@ The `@fireline/cli` package (see [`packages/fireline/`](../../packages/fireline/
 runs declarative agent specs. `npx fireline agent.ts` boots a
 durable-streams server, a Fireline control plane, and provisions the
 sandbox defined by the spec's default export. Any ACP client can then
-connect to the printed URL.
+connect to the printed URL. It also supports `npx fireline build
+agent.ts --target <platform>` for Tier A hosted-image packaging.
 
 Package source:
 [`packages/fireline/src/cli.ts`](../../packages/fireline/src/cli.ts),
@@ -18,6 +19,12 @@ npx fireline run agent.ts
 
 # Shorthand — the `run` subcommand is optional.
 npx fireline agent.ts
+
+# Build the hosted Fireline OCI image with the spec embedded as a build arg.
+npx fireline build agent.ts
+
+# Build and scaffold a target-native deploy descriptor.
+npx fireline build agent.ts --target fly
 
 # Override the control-plane and durable-streams ports.
 npx fireline run agent.ts --port 4440 --streams-port 7474
@@ -62,6 +69,8 @@ export default compose(
 
 ## What the CLI does
 
+### `fireline run`
+
 1. Loads the spec file with `tsx/esm`'s `tsImport`
 2. Verifies the default export is a `Harness` (has `.start()`)
 3. Resolves the `fireline-streams` and `fireline` Rust binaries (see
@@ -76,6 +85,18 @@ export default compose(
 9. Waits for `SIGINT` / `SIGTERM`
 10. Tears down in reverse order: destroy sandbox → stop control plane →
     stop durable streams
+
+### `fireline build`
+
+1. Loads the spec file with the same `tsx/esm` path as `run`
+2. Serializes the Harness into the hosted build manifest
+3. Resolves the hosted image Dockerfile at `docker/fireline-host.Dockerfile`
+4. Runs `docker build --build-arg FIRELINE_EMBEDDED_SPEC=...`
+5. Tags the image as `fireline-<spec-name>:latest`
+6. Optionally writes one scaffold file for `cloudflare`, `fly`, `docker`, or `k8s`
+
+`build` does not call a Fireline-owned deploy API. Deployment remains
+target-native and sits in a later CLI phase.
 
 ## Output
 
@@ -93,7 +114,7 @@ durable-streams ready at http://127.0.0.1:7474/v1/stream
 
 Connect any ACP client to the printed `ACP:` URL to prompt the agent.
 
-## Flags
+## Run flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -103,6 +124,16 @@ Connect any ACP client to the printed `ACP:` URL to prompt the agent.
 | `--name <s>` | from spec | Logical agent name |
 | `--provider <p>` | from spec | Override sandbox provider |
 | `--repl` | `false` | Stub — prints a message, waits on ACP URL |
+| `--help` / `-h` | — | Print help |
+
+## Build flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--target <platform>` | none | Scaffold `wrangler.toml`, `fly.toml`, `Dockerfile`, or `k8s.yaml` |
+| `--state-stream <s>` | from spec | Override the embedded state stream name |
+| `--name <s>` | from spec | Override the embedded deployment name |
+| `--provider <p>` | from spec | Override the embedded sandbox provider |
 | `--help` / `-h` | — | Print help |
 
 ## Env vars
@@ -139,7 +170,7 @@ cargo build --bin fireline --bin fireline-streams
 - Existing examples in `examples/` do not export a default spec — they
   call `.start()` imperatively at module scope. They still run with
   `npx tsx examples/<name>/index.ts` (unchanged).
-- `fireline deploy` is not implemented yet — only `run`.
+- `fireline build` packages the hosted image locally, but `fireline deploy --to <platform>` and `fireline push` are deferred to later phases.
 - The `--repl` flag is a stub. Connect any ACP client (pi-acp, use-acp,
   claude-code, a custom client) to the printed ACP URL.
 - Platform-specific npm packages are not published yet, so `npx
