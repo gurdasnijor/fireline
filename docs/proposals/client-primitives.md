@@ -17,15 +17,15 @@ This doc proposes the public TypeScript substrate API for Fireline, after a desi
 
 1. **There is no client-side Session interface.** Clients read materialized state through `@fireline/state`'s existing tanstack-react-db collections. There is no `emitEvent` verb on the client side; the write path is ACP (prompt into a running runtime) or control-plane (wake/stop) or direct durable-streams producer (external appends like `approval_resolved`).
 2. **Topology is not a primitive — combinators are.** The `managed-agents-mapping.md` doc documents seven base combinators (observe, mapEffect, appendToSession, filter, substitute, suspend, fanout) into which every existing Fireline component decomposes. A `Topology` is just a list of `Combinator` values. Named components (`approvalGate`, `budget`, `audit`) become pure helper functions that produce `Combinator` values, not first-class runtime types.
-3. **`Host` and `Sandbox` are distinct primitives.** Anthropic's Sandbox primitive is the **tool-execution** environment inside a running session. What Fireline has been calling "the thing that provisions a runtime" is really the Host primitive — the thing that owns session lifecycle and exposes the `wake(session_id)` verb. Conflating them was a v1 mistake that made the Claude-managed satisfier (stress-tested below) impossible to express cleanly.
+3. **`Host` and `Sandbox` are distinct primitives, and `Host` hands out *runtimes*, not sessions.** Anthropic's Sandbox primitive is the **tool-execution** environment inside a running runtime. The Host primitive is the thing that provisions a runtime and exposes the `wake(handle)` verb. **Sessions live on the ACP data plane inside a provisioned runtime — not as a Host-primitive verb.** Conflating Sandbox and Host was a v1 mistake that made the Claude-managed stress test impossible to express cleanly, and conflating Host with session lifecycle was a semantic drift from Tier 2 that the `37db346` rename fixed (`createSession → provision`, `SessionHandle → HostHandle` carrying `acp` + `state` endpoints, `SessionSpec → ProvisionSpec`, `SessionStatus → HostStatus`, `stopSession → stop`, `sendInput` / `SessionInput` / `SessionOutput` deleted).
 
-The rest of this doc describes the revised primitive surface, the module layout, concrete TypeScript signatures, a worked example against the Fireline host, a stress-test example against the Claude Agent SDK v2 preview's session-resume, and a build/migration order.
+The rest of this doc describes the revised primitive surface, the module layout, concrete TypeScript signatures, a worked example against the Fireline host, a retrospective on the Claude Agent SDK v2 stress test (attempted and deleted in commit `37db346`), and a build/migration order.
 
 ## What changed from v1
 
 | v1 Module | v2 Disposition |
 |---|---|
-| `@fireline/client/core` | **Kept and narrowed.** Pure serializable types only: `Combinator` union + named helpers, `ResourceRef`, `ToolDescriptor`, `CapabilityRef`, `TransportRef`, `CredentialRef`, `SessionSpec`. |
+| `@fireline/client/core` | **Kept and narrowed.** Pure serializable types only: `Combinator` union + named helpers, `ResourceRef`, `ToolDescriptor`, `CapabilityRef`, `TransportRef`, `CredentialRef`, `ProvisionSpec`. |
 | `@fireline/client/control` | **Deleted as a public module.** Control-plane interaction is an implementation detail of the Fireline `Host` satisfier, not a primitive. |
 | `@fireline/client/acp` | **Kept as internal glue.** `connectAcp` stays but is an implementation concern of the Fireline `Host` — not the public primitive surface consumers compose against. |
 | `@fireline/client/state` | **Deleted.** Already exists as the separate `@fireline/state` package with eight tanstack-react-db live collections. Consumers use that package directly. |
@@ -39,12 +39,11 @@ The rest of this doc describes the revised primitive surface, the module layout,
 ```
 @fireline/client/
 ├── core/           pure serializable data — Combinator union, named helpers,
-│                   ResourceRef, ToolDescriptor, CapabilityRef, SessionSpec
-├── host/           Host primitive: createSession / wake / status / stopSession
+│                   ResourceRef, ToolDescriptor, CapabilityRef, ProvisionSpec
+├── host/           Host primitive: provision / wake / status / stop
 ├── orchestration/  Orchestrator primitive: wake-centric scheduler builders
 ├── sandbox/        Sandbox primitive (tool execution, separate from Host)
-├── host-fireline/  Host satisfier that wraps the Fireline control plane + ACP
-└── (optional) host-claude/  Host satisfier that wraps the Claude Agent SDK v2
+└── host-fireline/  Host satisfier that wraps the Fireline control plane + ACP
 
 @fireline/state/    UNCHANGED — existing package, eight tanstack-react-db
                     live collections backed by @durable-streams/state. This IS
@@ -254,7 +253,7 @@ export type ResourceRef =
 // Session spec — the "tell me what kind of session you want" payload.
 // Notably a UNION of host-specific needs; each Host satisfier honors what
 // it understands and ignores the rest.
-export type SessionSpec = {
+export type ProvisionSpec = {
   readonly topology?: Topology                   // Fireline-host uses this
   readonly resources?: readonly ResourceRef[]    // Fireline-host uses this
   readonly capabilities?: readonly CapabilityRef[] // Fireline-host uses this (attach_tool)
@@ -265,22 +264,29 @@ export type SessionSpec = {
 }
 ```
 
-A future typing pass can split `SessionSpec` into discriminated-union variants per host kind. For v2 the union-of-fields shape is fine because each satisfier ignores fields it doesn't understand.
+A future typing pass can split `ProvisionSpec` into discriminated-union variants per host kind. For v2 the union-of-fields shape is fine because each satisfier ignores fields it doesn't understand.
 
 ---
 
 ## Module 2: `@fireline/client/host` — the Host primitive
 
-A `Host` is the thing that runs agent **sessions**. It owns session lifecycle and exposes the `wake` verb. This is the primitive the v1 proposal mistakenly called `Sandbox`.
+A `Host` is the thing that hands you a **runtime** — a place where an agent process can run. It owns runtime lifecycle and exposes the `wake` verb. Sessions live *inside* a provisioned runtime on the ACP data plane and are minted by `session/new`; the Host primitive does not own a session verb.
 
 ```ts
-// An opaque handle to a session the host has created. Host satisfiers
+// An opaque handle to a runtime the host has provisioned. Satisfiers
 // define the shape. At minimum it carries an identifier the orchestrator
-// can pass around.
-export type SessionHandle = { readonly id: string; readonly kind: string }
+// can pass around, plus the ACP and state-stream endpoints the caller
+// needs to actually talk to the runtime — so downstream code doesn't
+// have to hardcode a proxy URL.
+export type HostHandle = {
+  readonly id: string
+  readonly kind: string
+  readonly acp: Endpoint
+  readonly state: Endpoint
+}
 
 // Status shape — hosts fill in their own state enum via `kind`.
-export type SessionStatus =
+export type HostStatus =
   | { readonly kind: 'created' }
   | { readonly kind: 'running' }
   | { readonly kind: 'idle' }
@@ -291,41 +297,26 @@ export type SessionStatus =
 // What wake returned. Orchestrators use this to decide whether to keep
 // pumping or back off.
 export type WakeOutcome =
-  | { readonly kind: 'noop' }          // nothing to do; session is up to date
+  | { readonly kind: 'noop' }          // nothing to do; runtime is up to date
   | { readonly kind: 'advanced'; readonly steps: number }
   | { readonly kind: 'blocked'; readonly reason: SuspendReasonSpec }
 
-// Optional streaming input surface. Not every host satisfies this — some
-// are purely wake-driven with inputs persisted to a durable event registry.
-export type SessionInput =
-  | { readonly kind: 'prompt'; readonly text: string }
-  | { readonly kind: 'tool_result'; readonly tool_call_id: string; readonly result: JsonValue }
-
-export type SessionOutput =
-  | { readonly kind: 'message'; readonly message: JsonValue }
-  | { readonly kind: 'chunk'; readonly chunk: JsonValue }
-  | { readonly kind: 'tool_call'; readonly tool_call: JsonValue }
-  | { readonly kind: 'done' }
-
 export interface Host {
-  createSession(spec: SessionSpec): Promise<SessionHandle>
-  wake(handle: SessionHandle): Promise<WakeOutcome>
-  status(handle: SessionHandle): Promise<SessionStatus>
-  stopSession(handle: SessionHandle): Promise<void>
-
-  // Optional — hosts that support live streaming input (Fireline ACP,
-  // Claude query streaming) implement this. Pure wake-driven hosts do not.
-  sendInput?(handle: SessionHandle, input: SessionInput): AsyncIterable<SessionOutput>
+  provision(spec: ProvisionSpec): Promise<HostHandle>
+  wake(handle: HostHandle): Promise<WakeOutcome>
+  status(handle: HostHandle): Promise<HostStatus>
+  stop(handle: HostHandle): Promise<void>
 }
 ```
 
+Note what's deliberately **not** here: no `sendInput` method, no `SessionInput` / `SessionOutput` types, no session lifecycle verb. Live input into a running agent is an ACP data-plane concern — clients open their own WebSocket to `handle.acp.url` and speak ACP directly (via `@agentclientprotocol/sdk`'s `ClientSideConnection`). The Host primitive's job ends once the runtime is reachable; what happens over the ACP socket after that is the agent and the client's business, not the primitive's.
+
 ### Host contract
 
-- **`createSession`** reserves (or provisions) a session identifier. For Fireline this POSTs to the control plane and waits for `Ready`. For Claude-managed this is a local UUID plus an initial record in our durable stream.
-- **`wake(handle)`** is the heart of the contract. It MUST be idempotent and retry-safe: calling it multiple times with the same handle — even concurrently — must converge on the same session state. It advances the session by one "step" (whatever that means for the host) and returns a `WakeOutcome`.
+- **`provision`** hands out a runtime. For Fireline this POSTs `/v1/runtimes` on the control plane and waits for `Ready`. For a hypothetical hosted-API satisfier this allocates a runtime id and endpoint on the remote service. The returned `HostHandle` carries both the runtime identifier and the `acp` + `state` endpoints the caller needs to reach the runtime.
+- **`wake(handle)`** is the heart of the contract. It MUST be idempotent and retry-safe: calling it multiple times with the same handle — even concurrently — must converge on the same runtime state. It advances the runtime by one "step" (whatever that means for the host) and returns a `WakeOutcome`. Per the TLA spec, `wake` on a `ready` runtime is a noop; `wake` on a `stopped` runtime reprovisions with a new `runtime_id` and preserves session bindings.
 - **`status(handle)`** is observational. It never mutates. Orchestrators use it to decide whether to call `wake` again.
-- **`stopSession(handle)`** tears down the session's execution state but does NOT delete the durable log. Subsequent calls to `createSession` with the same session ID (if the host supports it) should be able to resume from the log.
-- **`sendInput`** is optional. Hosts that use it expose live streaming — user types into an input box, sees output stream back. Hosts without it require inputs to be written to the durable stream via external append, and then `wake` is called to drain them.
+- **`stop(handle)`** tears down the runtime's execution state but does NOT delete the durable log. Subsequent calls to `provision` with an equivalent spec can re-bind the same logical runtime, and ACP sessions that were living inside survive on the durable stream for later replay via `session/load`.
 
 ### The built-in `whileLoopOrchestrator` and the orchestrator contract
 
@@ -367,9 +358,9 @@ export function httpOrchestrator(opts: {
 }): Orchestrator
 ```
 
-**The orchestrator is Host-independent.** It only knows how to call the `WakeHandler` with a session ID and retry. It does NOT know about `SessionHandle` at all — only strings. The handler's body is what dispatches to a `Host.wake(handle)`, and constructing that handle from the string is a satisfier-layer concern, not a primitive-layer one.
+**The orchestrator is Host-independent.** It only knows how to call the `WakeHandler` with a session ID and retry. It does NOT know about `HostHandle` at all — only strings. The handler's body is what dispatches to a `Host.wake(handle)`, and constructing that handle from the string is a satisfier-layer concern, not a primitive-layer one.
 
-**Deliberately NOT included at the primitive layer:** a generic `orchestratorFor(host, opts)` helper or any `resolveHandle(host, session_id)` function. An earlier draft of this doc sketched such a helper; it was a design mistake. There is no generic way to reconstruct a `SessionHandle` from a `session_id` string without knowing the specific Host satisfier's handle shape, and if you know the satisfier you're already outside the primitive layer. Each Host satisfier provides its own convenience factory that closes over the host and produces a `WakeHandler` internally. For example:
+**Deliberately NOT included at the primitive layer:** a generic `orchestratorFor(host, opts)` helper or any `resolveHandle(host, session_id)` function. An earlier draft of this doc sketched such a helper; it was a design mistake. There is no generic way to reconstruct a `HostHandle` from a `session_id` string without knowing the specific Host satisfier's handle shape, and if you know the satisfier you're already outside the primitive layer. Each Host satisfier provides its own convenience factory that closes over the host and produces a `WakeHandler` internally. For example:
 
 ```ts
 // Tier 3 / satisfier-layer sketch — NOT part of @fireline/client/orchestration
@@ -467,7 +458,7 @@ function ApprovalPanel({ sessionId }: { sessionId: string }) {
 
 ### External writes that are not host writes
 
-Some demo-relevant writes to the durable stream are neither `Host.wake` nor `Host.sendInput` — specifically, external approval responses. These are appends to the durable stream from a component outside the runtime (the browser UI, an admin CLI, a Slack bot).
+Some demo-relevant writes to the durable stream are neither `Host.wake` nor live ACP input — specifically, external approval responses. These are appends to the durable stream from a component outside the runtime (the browser UI, an admin CLI, a Slack bot).
 
 The substrate pattern for these is already in place: `tests/support/managed_agent_suite.rs::append_approval_resolved` writes a `permission` entity_type row directly to the shared stream via `@durable-streams`'s client, and the runtime's approval-gate combinator interpreter is listening. A matching TS helper belongs in a thin utility module:
 
@@ -498,11 +489,11 @@ These are thin wrappers over `@durable-streams` producers. They do not deserve a
 
 This is where the existing Fireline control plane becomes one concrete `Host` satisfier. It wraps:
 
-- `POST /v1/runtimes` → `createSession`
+- `POST /v1/runtimes` → `provision`
 - `fireline::orchestration::resume` → `wake`
 - `GET /v1/runtimes/{key}` → `status`
-- `POST /v1/runtimes/{key}/stop` → `stopSession`
-- ACP over WebSocket → `sendInput` (for live-streaming interactions)
+- `POST /v1/runtimes/{key}/stop` → `stop`
+- ACP over WebSocket is **not** wrapped by the Host primitive — callers read `handle.acp.url` off the returned `HostHandle` and open an `@agentclientprotocol/sdk` `ClientSideConnection` directly
 
 ```ts
 // @fireline/client/host-fireline
@@ -530,8 +521,8 @@ The existing `createHostClient` and `HostClient.resume(sessionId)` (from commit 
 export function createHostClient(opts: HostClientOptions): HostClient {
   const host = createFirelineHost({ /* ... */ })
   return {
-    create: (spec) => host.createSession(toSessionSpec(spec)),
-    stop: (key) => host.stopSession({ id: key, kind: 'fireline' }),
+    create: (spec) => host.provision(toProvisionSpec(spec)),
+    stop: (key) => host.stop({ id: key, kind: 'fireline', acp: { url: '' }, state: { url: '' } }),
     resume: (id) => host.wake({ id, kind: 'fireline' }),   // delegates to wake
     // ... rest of the HostClient surface, each method delegates
   }
@@ -604,19 +595,20 @@ const { host, orchestrator } = createFirelineClient({
 })
 await orchestrator.start()
 
-// 3. Create a session and send an initial prompt
-const handle = await host.createSession({
+// 3. Provision a runtime and record the initial prompt on the durable stream
+const handle = await host.provision({
   topology: demoTopology,
   agentCommand: ['fireline-testy-load'],
   initialPrompt: 'please pause_here for approval',
 })
 
-// 4. Stream the session interaction
-if (host.sendInput) {
-  for await (const output of host.sendInput(handle, { kind: 'prompt', text: '...' })) {
-    // output.kind === 'chunk', 'message', 'tool_call', or 'done'
-  }
-}
+// 4. Talk to the agent over ACP directly — the Host primitive doesn't
+//    wrap the data plane. `handle.acp.url` is the WebSocket to open.
+import { ClientSideConnection, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
+const connection = new ClientSideConnection(/* ...handler... */, createWebSocket(handle.acp.url))
+await connection.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: { fs: { readTextFile: false } }, clientInfo: { name: 'demo', version: '0.0.1' } })
+const { sessionId } = await connection.newSession({ cwd: '/', mcpServers: [] })
+await connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'please pause_here for approval' }] })
 
 // 5. In the demo UI, a separate component renders live state
 function DemoApp() {
@@ -640,7 +632,7 @@ function DemoApp() {
           })}
         />
       ))}
-      <button onClick={() => host.stopSession(handle)}>Stop runtime</button>
+      <button onClick={() => host.stop(handle)}>Stop runtime</button>
       <button onClick={() => orchestrator.wakeOne(handle.id)}>Wake</button>
     </>
   )
@@ -651,207 +643,19 @@ Every import is a shipping primitive or a `@fireline/state` collection. There is
 
 ---
 
-## Stress-test example — Claude Agent SDK v2 host
+## Stress test, in retrospect — the Claude Agent SDK v2 thought experiment
 
-This satisfier proves the primitive interfaces are not Fireline-specific. It talks to the **Claude Agent SDK v2 preview** (`@anthropic-ai/claude-agent-sdk`'s `unstable_v2_*` surface) directly. No control plane, no runtime provisioning, no shared stream infrastructure from us — just a process-lifetime `Map<handle.id, SDKSession>` bridging our durable stream to Claude's live session object.
+**Status: the host-claude satisfier was attempted, informed the design, and was deleted in commit `37db346`.**
 
-> **SDK reference:** the V2 preview surface is documented at [`https://code.claude.com/docs/en/agent-sdk/typescript-v2-preview`](https://code.claude.com/docs/en/agent-sdk/typescript-v2-preview). The full divergence analysis, V1-vs-V2 comparison, and the reasoning behind the shape below lives in [`../explorations/claude-agent-sdk-v2-findings.md`](../explorations/claude-agent-sdk-v2-findings.md). Anyone touching this section should read the findings doc first — the V2 programming model is meaningfully different from V1, and an earlier draft of this sketch was written against V1.
+An earlier draft of this doc carried a ~150-line `createClaudeHost` sketch as the stress-test example: *"this satisfier proves the primitive interfaces are not Fireline-specific."* The full code walk, its divergence analysis against the V2 preview SDK, and the design conclusions it produced are preserved as design history in [`../explorations/claude-agent-sdk-v2-findings.md`](../explorations/claude-agent-sdk-v2-findings.md). Anyone reasoning about a future second-satisfier should start there.
 
-```ts
-// @fireline/client/host-claude
-import {
-  unstable_v2_createSession,
-  unstable_v2_resumeSession,
-  type SDKMessage,
-  type SDKSession,
-} from '@anthropic-ai/claude-agent-sdk'
-import type { Host, WakeOutcome } from '@fireline/client/host'
+The exercise taught three things that are now load-bearing in the design above:
 
-// Authentication: the SDK picks up ANTHROPIC_API_KEY from the environment.
-// No explicit field on the options type — same convention as every other
-// Anthropic TS SDK. If the SDK ever grows an explicit auth option, add it
-// here; until then, env-var is the contract.
+1. **`Host` is primitive-shaped, not SDK-shaped.** Both the fireline-native satisfier and the Claude V2 SDK (two radically different internal programming models — control-plane + ACP WebSocket vs. live `SDKSession` with a `send/stream` split) fit the same four-method `Host` interface without bridging code. That validated the Host/Sandbox cleave: had we stayed with v1's conflated `Sandbox.provision + execute + shutdown` shape, V2's `SDKSession` object model would have forced awkward per-tool-execution glue.
+2. **`wake(handle)` is the right universal verb.** It admits every programming model we could name: stateless-per-call, live-session-with-send/stream, control-plane-reprovision, cron over HTTP. Only "idempotent, retry-safe advance" is required; every satisfier picks its own internal state model.
+3. **A `Host` should hand back a *runtime*, not a *session*.** The Claude V2 exercise surfaced a semantic drift that had been hiding in the `Host.createSession` name since Tier 2: the primitive's job is to hand you a place where an agent can run, and sessions live inside that place on the ACP data plane (or whatever equivalent the satisfier exposes). The rename landed in commit `37db346` — `createSession → provision`, `SessionHandle → HostHandle` (now carrying `acp` + `state` endpoints so callers don't hardcode a proxy URL), `SessionSpec → ProvisionSpec`, `SessionStatus → HostStatus`, `stopSession → stop`, `sendInput` deleted (clients speak ACP directly via `handle.acp.url`), `SessionInput` / `SessionOutput` deleted, and `packages/client/src/host-claude/` deleted.
 
-export function createClaudeHost(opts: {
-  readonly model?: string
-  readonly stateProducer: StreamProducer        // mirrors Claude output into our durable stream
-  readonly pendingInputs: PendingInputRegistry  // user's way of saying "process this next"
-}): Host {
-  // Process-lifetime cache of live SDKSession handles. Rebuilt lazily
-  // on wake() via unstable_v2_resumeSession when a handle is missing
-  // (e.g. after a process restart). This is symmetric to how FirelineHost
-  // transparently reconnects to a live runtime via RuntimeRegistry after
-  // a control-plane restart.
-  const live = new Map<string, SDKSession>()
-  const model = opts.model ?? 'claude-opus-4-6'
-
-  // Central acquire() helper — the bridge between "in-memory live session"
-  // and "persistent session id in our durable stream". Handles both the
-  // already-warm path and the cold-restart path. Robust to either close()
-  // semantic: if close() turns out to destroy server-side state, the
-  // resumeSession call will fail and the fallback path creates fresh.
-  async function acquire(handleId: string): Promise<SDKSession> {
-    const existing = live.get(handleId)
-    if (existing) return existing
-
-    // Restore from the durable stream — we stashed the Claude
-    // sessionId on the first successful wake.
-    const stashed = await opts.stateProducer.readOne({ type: 'session', key: handleId })
-    const claudeSessionId: string | undefined = stashed?.value?.claudeSessionId
-    try {
-      const sdkSession = claudeSessionId
-        ? unstable_v2_resumeSession(claudeSessionId, { model })
-        : unstable_v2_createSession({ model })
-      live.set(handleId, sdkSession)
-      return sdkSession
-    } catch (err) {
-      // resumeSession may fail if the server-side state was dropped
-      // (TTL expiry, deployment restart, close() actually deleted).
-      // Fall back to a fresh session and log the divergence for the
-      // durable trail.
-      const sdkSession = unstable_v2_createSession({ model })
-      live.set(handleId, sdkSession)
-      await opts.stateProducer.append({
-        type: 'session',
-        key: handleId,
-        headers: { operation: 'update' },
-        value: {
-          claudeSessionId: sdkSession.sessionId,
-          state: 'running',
-          note: `resume failed, recreated fresh: ${String(err)}`,
-        },
-      })
-      return sdkSession
-    }
-  }
-
-  return {
-    async createSession(spec) {
-      const id = `claude:${crypto.randomUUID()}`
-      // V2 session creation is synchronous — no round-trip required,
-      // so we can do it eagerly. In V1 this was deferred to wake()
-      // because query() was stateless-per-call.
-      const sdkSession = unstable_v2_createSession({ model: spec.model ?? model })
-      live.set(id, sdkSession)
-      await opts.stateProducer.append({
-        type: 'session',
-        key: id,
-        headers: { operation: 'insert' },
-        value: {
-          sessionId: id,
-          host: 'claude',
-          model: spec.model ?? model,
-          state: 'created',
-          createdAt: Date.now(),
-          // V2 exposes sessionId directly on the SDKSession object —
-          // no need to wait for an init system-message like V1 required.
-          claudeSessionId: sdkSession.sessionId,
-        },
-      })
-      if (spec.initialPrompt) {
-        await opts.pendingInputs.push(id, { kind: 'prompt', text: spec.initialPrompt })
-      }
-      return { id, kind: 'claude' }
-    },
-
-    async wake(handle): Promise<WakeOutcome> {
-      // 1. Drain pending inputs from our own stream (the user's way of
-      //    saying "please advance this session with this next prompt").
-      //    If none, return noop — no work to do.
-      const pending = await opts.pendingInputs.drain(handle.id)
-      if (pending.length === 0) return { kind: 'noop' }
-
-      // 2. Acquire a live SDKSession for this handle — either from the
-      //    in-memory cache or by resuming from the claudeSessionId we
-      //    stashed on first createSession.
-      const sdkSession = await acquire(handle.id)
-      const prompt = pending.map(p => p.text).join('\n\n')
-
-      // 3. V2 splits send() and stream() — send() dispatches the user
-      //    message, stream() yields the agent response for THAT turn.
-      //    This is different from V1's single query() call returning
-      //    an async iterable.
-      await sdkSession.send(prompt)
-
-      // 4. Mirror everything the session emits into our durable stream.
-      //    The @fireline/state collections see these rows reactively.
-      //    Every SDKMessage carries session_id, so we can key by it.
-      let steps = 0
-      for await (const msg of sdkSession.stream()) {
-        await opts.stateProducer.append({
-          type: 'claude_message',
-          key: `${handle.id}:${msg.session_id}:${steps}`,
-          headers: { operation: 'insert' },
-          value: msg,
-        })
-        steps += 1
-      }
-
-      // 5. Update the durable state row and mark pending as resolved.
-      await opts.stateProducer.append({
-        type: 'session',
-        key: handle.id,
-        headers: { operation: 'update' },
-        value: { state: 'running', claudeSessionId: sdkSession.sessionId },
-      })
-      await opts.stateProducer.append({
-        type: 'pending_resolved',
-        key: handle.id,
-        headers: { operation: 'insert' },
-        value: { count: pending.length, resolvedAt: Date.now() },
-      })
-
-      return { kind: 'advanced', steps }
-    },
-
-    async status(handle) {
-      const pending = await opts.pendingInputs.peek(handle.id)
-      return pending.length > 0 ? { kind: 'needs_wake' } : { kind: 'idle' }
-    },
-
-    async stopSession(handle) {
-      // V2 exposes session.close() for local cleanup. The server-side
-      // semantics (whether close() destroys persisted session state or
-      // just disconnects the local handle) are unverified from the V2
-      // docs alone — see claude-agent-sdk-v2-findings.md §5. The
-      // acquire() helper above is defensive against either outcome:
-      // a subsequent wake() that tries resumeSession will fall back
-      // to createSession if the server-side state is gone.
-      const sdkSession = live.get(handle.id)
-      sdkSession?.close()
-      live.delete(handle.id)
-      await opts.stateProducer.append({
-        type: 'session',
-        key: handle.id,
-        headers: { operation: 'update' },
-        value: { state: 'stopped' },
-      })
-    },
-  }
-}
-```
-
-**~150 lines.** Plug it into the same `whileLoopOrchestrator` + `@fireline/state` collections the Fireline host uses. The browser demo UI is identical — it reads the same materialized collections, it calls `host.wake(handle)` and `host.createSession(spec)` and `host.stopSession(handle)`, it doesn't know or care whether the host is Fireline or Claude.
-
-**What this proves about the design — and why the V2 divergence actually validates it:**
-
-The V2 programming model is fundamentally different from V1. V1 had a single stateless `query({ prompt, options: { resume } })` call that returned an async iterable. V2 has three entrypoints (`unstable_v2_createSession`, `unstable_v2_resumeSession`, `unstable_v2_prompt`) and a live `SDKSession` object with a `send()` / `stream()` split that you hold across turns. **Despite the drastic shape change, the `Host` primitive interface survives unchanged.** That is the critical finding from the stress test.
-
-Specifically:
-
-1. **`Host` is primitive-shaped, not SDK-shaped.** Both "spawn a Rust subprocess via HTTP control plane + WebSocket ACP" (FirelineHost) and "hold an SDKSession with per-turn send/stream" (ClaudeHost V2) satisfy the same four-method interface — `createSession / wake / status / stopSession`. The interface abstracts over the satisfier's internal state model entirely. Had we stayed with the earlier `Sandbox.provision + execute + shutdown` conflation, the V2 divergence would've been much worse: V2's `SDKSession` is inherently session-lifetime, not per-tool-execution, and the old conflated shape would've forced awkward bridging code. **The Host/Sandbox cleave is what makes both V1 and V2 satisfiers trivial.**
-
-2. **`wake(handle)` is the right universal verb.** It admits every known programming model: V1's one-shot `query()` call, V2's per-turn `send/stream`, Fireline's control-plane reprovision + ACP session/load, a cron job calling `wake` over HTTP. The verb only requires "idempotent, retry-safe advance by one step" and every satisfier can choose its own internal model.
-
-3. **`@fireline/state` is the universal read surface.** Every host mirrors its output via the STATE-PROTOCOL shape into the durable stream, and the same tanstack-react-db collections render in the browser regardless of which host produced the rows. Host-agnostic UI.
-
-4. **The `Combinator` + `Topology` types are Fireline-specific by design.** The Claude host ignores them — V2's topology is opaque to us, controlled by Anthropic's managed service. That's fine. `SessionSpec` is a union-of-needs per the earlier design decision; each host honors the fields it understands.
-
-5. **Session lifecycle state can live in the satisfier, not the interface.** FirelineHost keeps runtime_keys in the control plane's RuntimeRegistry. ClaudeHost keeps `SDKSession` handles in a process-lifetime `Map`. Neither leaks into the Host interface. The `acquire(handleId)` pattern in the V2 sketch above is the pure-functional-ish equivalent of the Fireline satisfier's lazy runtime reconnection — both satisfy the same contract ("give me back a ready session regardless of process-restart state"), both invisible through the Host trait.
-
-**Unresolved before a concrete ClaudeHost ships:** how V2 surfaces `tool_use` / `tool_result` events in the `stream()` generator. The V2 docs describe the session's assistant message flow but not the tool-execution model. If V2 streams `tool_use` events back to the caller and expects `tool_result` to be sent via `send()`, then ClaudeHost can delegate tool execution to a separate `Sandbox` satisfier (e.g. `MicrosandboxSandbox`) — which is the §7 story in `runtime-host-split.md` working as intended. If V2 bundles tool execution inside Claude's managed sandbox opaquely, the Sandbox-delegation story doesn't apply to ClaudeHost and the scope shrinks. This is the one genuine blocker for Step 3 (Tier E) code; see `claude-agent-sdk-v2-findings.md` §5 for the open items list.
-
-**Open question:** The wake loop assumes each wake processes a pending prompt. If the user wants a cron that calls `wake` on a timer without a pending input, the `noop` return is correct. Future work: a `wake(..., reason: 'poll')` variant for polling-style satisfiers. Out of scope for v2; file as a follow-up if it comes up.
+The satisfier code itself was removed because (a) the V2 preview's tool-execution model was never clarified well enough to commit to a Sandbox-delegation story without guesswork, and (b) its genuine contribution was the design lessons above, which are now baked into the main body of this doc.
 
 ---
 
@@ -864,16 +668,16 @@ Each tier is individually reviewable and individually useful.
 - `Combinator` union + supporting spec types (`EffectPattern`, `RewriteSpec`, `ProjectSpec`, `SuspendReasonSpec`, `ObserveSinkRef`, `FanoutSplitSpec`, `FanoutMergeSpec`)
 - Named helpers: `observe`, `audit`, `durableTrace`, `contextInjection`, `budget`, `approvalGate`, `approvalGateOnPattern`, `peer`, `parallelPeers`
 - `topology(...)` factory, `validateTopology`
-- `ResourceRef`, `ToolDescriptor`, `CapabilityRef`, `TransportRef`, `CredentialRef`, `SessionSpec`
+- `ResourceRef`, `ToolDescriptor`, `CapabilityRef`, `TransportRef`, `CredentialRef`, `ProvisionSpec`
 - Zero runtime dependencies. All pure. Unit tests verify JSON round-trips.
 
 ### Tier 2 — `@fireline/client/host` + `@fireline/client/orchestration` (day)
 
-- `Host` interface + `SessionHandle`, `SessionStatus`, `WakeOutcome`, `SessionInput`, `SessionOutput` types
-- `Orchestrator` interface + `WakeHandler = (session_id: string) => Promise<void>` type. Note: `WakeHandler` deals in strings, never in `SessionHandle`. Handle construction is a satisfier-layer concern.
+- `Host` interface + `HostHandle`, `HostStatus`, `WakeOutcome`, `ProvisionSpec` types
+- `Orchestrator` interface + `WakeHandler = (id: string) => Promise<void>` type. Note: `WakeHandler` deals in strings (a `HostHandle.id`), never in `HostHandle` objects. Handle construction is a satisfier-layer concern.
 - `whileLoopOrchestrator` live builder + `cronOrchestrator` / `httpOrchestrator` stubbed signatures (future satisfiers)
-- `SessionRegistry` interface (`listPending(): AsyncIterable<string>`, `onPendingChange`) + `streamSessionRegistry` default satisfier
-- **No generic `orchestratorFor(host)` convenience factory.** See the "Deliberately NOT included at the primitive layer" callout in Module 2 — a generic `orchestratorFor` requires resolving a `SessionHandle` from a string without knowing the satisfier's handle shape, which isn't possible at the interface layer. Per-satisfier convenience factories live in Tier 3 (`createFirelineHostOrchestrator`) and Tier 6 (`createClaudeHostOrchestrator`) respectively.
+- `SessionRegistry` interface (`listPending(): AsyncIterable<string>`, `onPendingChange`) + `streamSessionRegistry` default satisfier. (The name predates the `37db346` rename and still reflects the orchestrator's job — watching durable-stream rows that represent long-running logical work — even though at the Host primitive layer the id passed to `wake` is a `HostHandle.id` rather than an ACP session id. A follow-up pass may rename the registry type to `HandleRegistry`; not urgent.)
+- **No generic `orchestratorFor(host)` convenience factory.** See the "Deliberately NOT included at the primitive layer" callout in Module 2 — a generic `orchestratorFor` requires resolving a `HostHandle` from a string without knowing the satisfier's handle shape, which isn't possible at the interface layer. Per-satisfier convenience factories live in Tier 3 (`createFirelineHostOrchestrator`).
 - Zero runtime dependencies on Fireline specifics. Tests use a mock `Host`.
 
 ### Tier 3 — `@fireline/client/host-fireline` (day)
@@ -895,14 +699,12 @@ Each tier is individually reviewable and individually useful.
 
 - `packages/browser-harness/src/app.tsx` re-plumbed to use `@fireline/client/core` + `@fireline/client/host-fireline` + `@fireline/state` collections
 - Add an `ApprovalPanel` reading `useLiveQuery(pendingPermissions({ sessionId }))`
-- Add a "Stop runtime" and "Wake" button pair that exercises `Host.stopSession` + `Orchestrator.wakeOne`
+- Add a "Stop runtime" and "Wake" button pair that exercises `Host.stop` + `Orchestrator.wakeOne`
 - The existing state inspector UI stays — it already reads from tanstack-react-db collections
 
-### Tier 6 — (optional) `@fireline/client/host-claude` (day)
+### ~~Tier 6 — (optional) `@fireline/client/host-claude`~~ (deleted)
 
-- `createClaudeHost` satisfier wrapping `@anthropic-ai/agent-sdk`'s `query({ resume })`
-- Shipped as a separate sub-package so users who don't want the Claude dependency don't pull it in
-- Demo rewrite gets a toggle: "run against Fireline host" / "run against Claude host". Same UI.
+The optional Claude-host satisfier tier was attempted, informed the `Host.provision` / `HostHandle` rename in commit `37db346`, and was then deleted from the tree along with its code in the same commit. The design conclusions are preserved in §6 "Stress test, in retrospect" above and in [`../explorations/claude-agent-sdk-v2-findings.md`](../explorations/claude-agent-sdk-v2-findings.md). If a second real `Host` satisfier lands in a future tier, it should start from the primitive surface as it stands today, not from the Claude V2 sketch.
 
 ### Tier 7 — (post-demo) Rust combinator interpreter collapse
 
@@ -912,19 +714,17 @@ Each tier is individually reviewable and individually useful.
 - Likely surfaces hidden coupling (the combinators aren't perfectly independent today)
 - Not on the critical path; cleanup after the primitive surface is shipped
 
-**Total critical path (Tiers 1–5): ~3 days of focused work.** Optional Tier 6 adds a day for the Claude stress-test satisfier. Tier 7 is weeks and can wait.
+**Total critical path (Tiers 1–5): ~3 days of focused work.** Tier 6 (Claude stress-test satisfier) was attempted and deleted; its design takeaways are baked into the main body. Tier 7 is weeks and can wait.
 
 ---
 
 ## Open questions
 
-1. **Claude SDK version.** The v2 preview's exact `query` signature may differ from the sketch above. The stress-test example needs verification against the actual SDK docs at `code.claude.com/docs/en/agent-sdk/typescript-v2-preview#session-resume` before landing `@fireline/client/host-claude`. The shape is believed correct; field names may not be.
-2. **`SessionSpec` discriminated union vs. union-of-fields.** v2 ships the union-of-fields shape (each host ignores fields it doesn't understand). Future typing pass could split into `FirelineSessionSpec | ClaudeSessionSpec | DockerSessionSpec`. Decide when a third or fourth satisfier exists to ground the typing.
-3. **Package layout.** Should `host-fireline` and `host-claude` ship as separate sub-packages (`@fireline/client-fireline`, `@fireline/client-claude`) or as internal modules of `@fireline/client` that are tree-shakeable? The former makes optional deps cleaner but adds workspace-management overhead. Lean toward sub-packages for the Claude case (it has a real optional dep on `@anthropic-ai/agent-sdk`); Fireline can stay inline.
-4. **`sendInput` vs. `wake`-only.** Some hosts (Fireline ACP) naturally expose streaming input. Others (Claude managed via wake-only) don't. Demo UI needs streaming for the chat display, which argues for keeping `sendInput` as a first-class optional Host method. But the combinator interpreter in the Fireline case is driven by wake (not sendInput), so the two paths overlap. A future pass might unify them. For v2, keep `sendInput` as optional and document which hosts implement it.
-5. **Tool execution via the separate `Sandbox` primitive.** v2 proposes the interface but doesn't require shipping a satisfier on the critical path. The microsandbox evaluation (see `../handoff-2026-04-11-stream-as-truth-and-runtime-abstraction.md`) is the natural forcing function for the first real `Sandbox` satisfier.
-6. **Event-write helpers in `@fireline/client/events`.** Do external writes like `appendApprovalResolved` deserve a dedicated tiny module, or do they live inside `host-fireline`? Argues-for-dedicated: they work against any durable-streams host, not just Fireline. Argues-for-inline: demo-driven work only exercises them from the browser-harness which already imports `host-fireline`. Lean toward a dedicated tiny module so Claude-host users can write external approval events without depending on `host-fireline`.
-7. **What `status` should expose.** The rough `SessionStatus` kinds (`created`/`running`/`idle`/`needs_wake`/`stopped`/`error`) are adequate for a demo but poorer than Fireline's full `RuntimeStatus` union (which has `Busy`/`Stale` etc.). Either (a) include an opaque `details: JsonValue` field for host-specific state or (b) let hosts add variants. Probably (a) — variants don't compose across hosts.
+1. **`ProvisionSpec` discriminated union vs. union-of-fields.** v2 ships the union-of-fields shape (each host ignores fields it doesn't understand). Future typing pass could split into `FirelineProvisionSpec | DockerProvisionSpec | RemoteApiProvisionSpec` etc. Decide when a third or fourth satisfier exists to ground the typing.
+2. **Package layout for future satisfiers.** If/when a non-Fireline `Host` satisfier ships (e.g. a remote hosted-API satisfier), it should probably live as a separate sub-package (`@fireline/client-<satisfier>`) so users who don't want that dependency don't pull it in. The Fireline satisfier can stay inline in `@fireline/client/host-fireline`. The deleted `host-claude` attempt had a real optional dep on `@anthropic-ai/claude-agent-sdk`; that's what the sub-package pattern is for.
+3. **Tool execution via the separate `Sandbox` primitive.** v2 proposes the interface but doesn't require shipping a satisfier on the critical path. The microsandbox evaluation (see `../handoff-2026-04-11-stream-as-truth-and-runtime-abstraction.md`) is the natural forcing function for the first real `Sandbox` satisfier.
+4. **Event-write helpers in `@fireline/client/events`.** Do external writes like `appendApprovalResolved` deserve a dedicated tiny module, or do they live inside `host-fireline`? Argues-for-dedicated: they work against any durable-streams host, not just Fireline. Argues-for-inline: demo-driven work only exercises them from the browser-harness which already imports `host-fireline`. Lean toward a dedicated tiny module so non-fireline hosts can write external approval events without depending on `host-fireline`.
+5. **What `status` should expose.** The rough `HostStatus` kinds (`created`/`running`/`idle`/`needs_wake`/`stopped`/`error`) are adequate for a demo but poorer than Fireline's full `RuntimeStatus` union (which has `Busy`/`Stale` etc.). Either (a) include an opaque `details: JsonValue` field for host-specific state or (b) let hosts add variants. Probably (a) — variants don't compose across hosts.
 
 ---
 
@@ -934,9 +734,9 @@ Types referenced above but not fully expanded here. Each is straightforward and 
 
 - `ContextSourceRef` — `{ kind: 'static_text' | 'workspace_file' | 'datetime', ... }`
 - `ValidationResult<T>` — `{ ok: true; value: T } | { ok: false; errors: readonly ValidationError[] }`
-- `Unsubscribe` — `() => void`
+- `Unsubscribe` — `() => void` (lives in `@fireline/client/core` per the `37db346` reorg; was previously in a deleted `core/session.ts`)
+- `Endpoint` — `{ readonly url: string; readonly headers?: Readonly<Record<string, string>> }`, used by `HostHandle.acp` and `HostHandle.state`
 - `StreamProducer` — thin wrapper over `@durable-streams` client's producer, `append(envelope) → Promise<void>`
-- `PendingInputRegistry` — Claude-host's pending-input store, `push / drain / peek`
 
 ---
 
@@ -954,6 +754,6 @@ What v2 changes is the shape — three layers of simplification (no Session inte
 
 ## Closing
 
-The design conversation that produced v2 stress-tested the primitive interfaces against two real satisfiers (Fireline control plane, Claude Agent SDK v2) and one skeptical product layer (browser harness reading materialized state). The interfaces held up in both stress tests, and the simplifications that fell out are each genuine: **the seven combinators were already in the mapping doc, `@fireline/state` already has the live collections, and the `Host` vs. `Sandbox` split was always implicit in the Anthropic primitive table.** v1 had the right philosophy but the wrong shape. v2 is what the philosophy produces when you take each insight seriously.
+The design conversation that produced v2 stress-tested the primitive interfaces against two candidate satisfiers (Fireline control plane, Claude Agent SDK v2 — the latter attempted and deleted, with its design lessons preserved in §6) and one skeptical product layer (browser harness reading materialized state). The interfaces held up in both stress tests, and the simplifications that fell out are each genuine: **the seven combinators were already in the mapping doc, `@fireline/state` already has the live collections, and the `Host` vs. `Sandbox` split was always implicit in the Anthropic primitive table.** v1 had the right philosophy but the wrong shape. v2 is what the philosophy produces when you take each insight seriously — and the `provision` rename in `37db346` is what happens when you take the second-satisfier stress test seriously enough to notice the semantic drift in the first satisfier's method name.
 
-Execute in the tier order above. Stop after Tier 5 for demo-day. Resume with Tier 6 (Claude host) as the stress-test demonstration if time permits, and Tier 7 (Rust combinator interpreter collapse) as post-demo cleanup.
+Execute in the tier order above. Stop after Tier 5 for demo-day. Tier 7 (Rust combinator interpreter collapse) is post-demo cleanup.
