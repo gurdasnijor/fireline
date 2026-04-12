@@ -1,719 +1,397 @@
 # Deployment and Remote Handoff
 
+> Status: design rewrite
+>
+> This version replaces the older flag-heavy deployment proposal with a DX-first design.
+
 ## TL;DR
 
-**Two deployable artifacts, one hub, one binary.** Local development
-and remote production run the *exact same* `fireline` binary — the
-only difference is config. The durable-streams service doubles as the
-transport for session logs, state, trace events, file mounts, and
-encrypted secret envelopes. That collapses the local→remote handoff
-from "rebuild everything for the cloud" into "point your local
-fireline at a different URL."
+Fireline should have one primary authoring surface: `compose()`. The CLI is a thin runner around that surface.
 
-The demo narrative this enables is the single strongest story on the
-roadmap: **a session that started on a user's laptop can migrate
-mid-conversation to a remote node without losing a single token of
-state, because the durable-streams service never moved.** Wake
-semantics (`WakeOnReadyIsNoop`, `WakeOnStoppedChangesRuntimeId`,
-`WakeOnStoppedPreservesSessionBinding`) keep working across the
-topology change for free — those invariants are stated in
-`verification/spec/managed_agents.tla` over the session log, not over
-the physical Host identity.
+If a deployment concern has no representation in the agent spec or a companion config file, it should not become a first-class CLI flag. CLI flags are for runtime overrides like `--port`, `--verbose`, and local debugging. They are not where users should encode provider choice, peer topology, or "always-on" behavior.
 
-## 1. Deployment topology
+The design in this doc is:
 
-Three nodes, all externally addressable over the network:
+- `npx fireline agent.ts` stays the local path
+- `npx fireline deploy agent.ts --target production` selects a named target from `fireline.config.ts`
+- `alwaysOn` is target policy, not a CLI switch
+- `peer()` stays in the spec, not on the command line
+- provider defaults stay in `sandbox(...)`; environment-specific overrides live in config, not CLI flags
 
+Current reality:
+
+- `packages/fireline/src/cli.ts` only implements local `run`; there is no `deploy` command yet.
+- `packages/client/src/sandbox.ts` still expects `start({ serverUrl })`; it has not moved to the no-arg local / `remote` model yet.
+- `packages/client/src/types.ts` already has the right raw ingredients for the spec surface: `sandbox.provider`, `resources`, `fsBackend`, labels, and peer middleware config.
+- `packages/client/src/agent.ts` and `packages/client/src/db.ts` already expose the imperative runtime surface that apps need after deployment: `FirelineAgent.connect()`, `.resolvePermission()`, `.stop()`, and `fireline.db()`.
+
+## 1. DX Principle
+
+The design rule is simple:
+
+> The `compose()` API is the product surface. The CLI is a thin runner. If a deployment concern has no representation in `compose()` or a companion config file, it should not become a CLI flag.
+
+This implies a strict split:
+
+- The spec file describes portable agent behavior.
+- The config file describes environment-specific deployment targets.
+- The CLI chooses which spec to run and which target to use.
+
+This keeps the API coherent:
+
+- the agent file stays portable between laptop, CI, and cloud
+- target selection is reusable across multiple agent files
+- "production" means one named thing, not a shell alias the team half-remembers
+- deployment commands stay readable instead of becoming a second configuration language
+
+It also gives Fireline a better product story than the current direction in `docs/gaps-declarative-agent-api.md` and `docs/proposals/declarative-agent-api-design.md`, which still assume too many deploy-time flags.
+
+## 2. Deployment Target Declaration
+
+The right primitive is a project-level `fireline.config.ts`.
+
+Why this beats the alternatives:
+
+- Better than embedding deployment config in `agent.ts`: the agent file should remain a portable runtime spec, not a cloud-environment manifest.
+- Better than raw CLI flags: named targets scale to multiple agents, multiple environments, and team use without command drift.
+- Better than hidden shell env conventions: the config file is inspectable, reviewable, and can be validated.
+
+### Proposed shape
+
+```ts
+// fireline.config.ts
+export default {
+  defaultTarget: 'staging',
+  targets: {
+    staging: {
+      host: 'https://agents-staging.example.com',
+      auth: { tokenFromEnv: 'FIRELINE_TOKEN' },
+      sandbox: {
+        provider: 'docker',
+        image: 'ghcr.io/acme/pi-acp:staging',
+      },
+      lifecycle: {
+        alwaysOn: false,
+      },
+      state: {
+        namespace: 'acme-staging',
+      },
+    },
+    production: {
+      host: 'https://agents.example.com',
+      auth: { tokenFromEnv: 'FIRELINE_TOKEN' },
+      sandbox: {
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-20250514',
+      },
+      lifecycle: {
+        alwaysOn: true,
+      },
+      state: {
+        namespace: 'acme-prod',
+      },
+    },
+  },
+}
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Durable Streams Service  (well-known URL)                   │
-│  - Deployed as: durable-streams-server docker image          │
-│    https://thesampaton.github.io/durable-streams-rust-server │
-│  - Single source of truth for:                               │
-│      • session logs                                          │
-│      • session state envelopes                               │
-│      • trace events                                          │
-│      • file/document transfer (NEW — blob streams)           │
-│      • encrypted secret envelopes (NEW — secrets streams)    │
-│  - Reachable by: every fireline Host + every sandbox VM      │
-│  - Survives: Host death, sandbox death, network partition    │
-└─────────────────────────────────────────────────────────────┘
-                          ↑
-        ┌─────────────────┼─────────────────┐
-        │                 │                 │
-┌───────┴──────┐  ┌───────┴──────┐  ┌──────┴───────┐
-│  fireline    │  │  fireline    │  │  fireline    │
-│  Host A      │  │  Host B      │  │  Host (local)│
-│  (cloud)     │  │  (cloud)     │  │  (laptop)    │
-│              │  │              │  │              │
-│  - bin: same │  │  - bin: same │  │  - bin: same │
-│    fireline  │  │    fireline  │  │    fireline  │
-│  - Deployed: │  │  - Deployed: │  │  - bare      │
-│    OCI image │  │    OCI image │  │    metal     │
-│  - Sandbox:  │  │  - Sandbox:  │  │  - Sandbox:  │
-│    micro-    │  │    micro-    │  │    local     │
-│    sandbox   │  │    sandbox   │  │    subproc   │
-│    daemon    │  │    daemon    │  │    or micro- │
-│              │  │              │  │    sandbox   │
-└──────────────┘  └──────────────┘  └──────────────┘
-        │                 │                 │
-        ▼                 ▼                 ▼
-   ┌─────────┐       ┌─────────┐       ┌─────────┐
-   │ Sandbox │       │ Sandbox │       │ Sandbox │
-   │ VM (OCI │       │ VM (OCI │       │ VM or   │
-   │ image)  │       │ image)  │       │ local   │
-   └─────────┘       └─────────┘       │ process │
-                                       └─────────┘
-```
 
-### The two deployable artifacts
+The important property is not the exact field names. It is where the information lives:
 
-1. **`fireline` OCI image** — the Host binary, containerized. Same
-   binary you run locally. Deploy via any container orchestrator
-   (k8s, Nomad, fly.io, ECS, bare Docker).
-2. **`durable-streams-server` OCI image** — the external, well-known
-   durable log service. Deploy once per environment. It has an
-   existing production deployment guide at
-   https://thesampaton.github.io/durable-streams-rust-server/deployment/production.html
+- remote host URL
+- auth source
+- environment-specific sandbox override
+- always-on policy
+- stream namespace or tenancy defaults
 
-**`microsandbox`** is not an "artifact" in the deployment sense —
-it's *host infrastructure*, installed on each fireline node the same
-way Docker is installed. microsandbox then consumes standard OCI
-images per
-https://docs.microsandbox.dev/images/overview#oci-images, so the
-user's "deploy my agent" story is just "push a Dockerfile to a
-registry." No new packaging format, no build system, no lock-in.
+All of that is environment configuration. None of it belongs in `agent.ts`, and none of it should require its own CLI switch.
 
-### Key architectural consequence
+### Why not export deployment metadata from `agent.ts`?
 
-The durable-streams service is the **only stateful** component in the
-topology. fireline Hosts are stateless — any Host can resume any
-session by reading from the shared stream. microsandbox VMs are
-stateless — they boot from OCI images, do their work, write captured
-effects back to the stream. This is what makes the topology
-dynamic: **nodes can come and go without losing session state.**
+That couples one portable agent definition to one deployment environment. It sounds convenient until one file needs `staging`, `production`, `preview`, or customer-specific targets. Then the spec file becomes a config file in disguise.
 
-## 2. Local and remote run the same binary
+The spec should answer:
 
-The fireline binary takes its deployment posture from config alone:
+- what is this agent?
+- what middleware does it run?
+- what peers does it expect?
+- what resources does it mount?
+
+The config should answer:
+
+- where does this go?
+- how is it authenticated?
+- should this target keep it warm?
+- what provider override does this environment need?
+
+## 3. Command Model
+
+### Local run
+
+Local run stays simple:
 
 ```bash
-# Local dev (laptop, experimentation, tests)
-fireline \
-  --durable-streams-url=http://localhost:7474 \
-  --sandbox-provider=local-subprocess
-
-# Remote production (cloud, k8s pod, VM)
-fireline \
-  --durable-streams-url=https://streams.prod.internal \
-  --sandbox-provider=microsandbox
+npx fireline agent.ts
 ```
 
-Everything going through the `Host` primitive (create session, wake,
-status, stop) is primitive-identical. The ACP surface (`fireline-harness`)
-is identical. The runtime HTTP API is identical. The only thing that
-differs is **which sandbox provider** the Host uses to spawn tool
-execution environments, and **which durable-streams URL** it writes
-to.
+This should remain the default learning path. It aligns with the direction already described in `docs/gaps-declarative-agent-api.md` and `docs/proposals/platform-sdk-api-design.md`: local Fireline should feel like running a script, not assembling infrastructure.
 
-This has a powerful implication for the handoff: **pointing your
-local fireline at a cloud durable-streams URL is already a partial
-migration**. Your session logs are now durable against a remote
-service, and any other Host in the world that can reach the same URL
-can resume your session. The sandboxes are the last thing to
-migrate — and that's a per-session choice, not a deployment choice.
-
-## 3. The handoff: two real friction points
-
-When a user moves from "I'm experimenting on my laptop" to "I want
-this to run in the cloud," two things that trivially work locally
-suddenly don't:
-
-### 3.1 Local context and documents
-
-Agents work against files on the user's machine:
-
-- The git repo they're editing
-- Reference documents they've copied into `~/projects/notes/`
-- `.env` files, config files, data fixtures
-- Screenshots, PDFs, CSVs the user is asking questions about
-
-Remote fireline Hosts don't have any of that. A naive "sync my
-filesystem to the cloud" is both too much (you don't want to upload
-`/home/user` wholesale) and too little (sync happens once, diverges
-after).
-
-### 3.2 Local security and trust
-
-Agents need credentials to be useful:
-
-- Anthropic / OpenAI / other LLM API keys
-- `gh auth login` session token
-- AWS / GCP / Azure credentials
-- Private registry pull tokens
-- MCP server API keys
-- Database connection strings
-
-Remote fireline Hosts don't have any of those either. And even if
-you copied them — you now have a secret sprawl problem: every cloud
-Host has a copy of every credential, nothing rotates, audit is
-lost.
-
-## 4. Solving context and documents
-
-> **Forward reference:** resource sync is being reframed as
-> **publish/discover via a shared `resources:tenant-<id>` stream**,
-> parallel to the `hosts:tenant-<id>` stream that [`./cross-host-discovery.md`](./cross-host-discovery.md)
-> introduces for cross-Host agent handoff. See
-> [`./resource-discovery.md`](./resource-discovery.md) for the full
-> design of the resource-discovery stream, the
-> `StreamResourceRegistry` satisfier, and how it composes with the
-> existing `FsBackendComponent`. §4's `DurableStreamBlob` variant
-> below **remains valid** — it's one of the backing stores the
-> resource-discovery stream can reference, alongside
-> `OciImageLayer` and `HttpUrl`. The discovery proposal changes
-> *how* resources are found across Hosts, not *where* their bytes
-> live.
-
-### Use the Resources primitive with durable-streams as the transport
-
-`ResourceRef` is already `{ source_ref, mount_path }` in the
-client-primitives contract. Today `source_ref` is effectively a local
-path. Extend it with three new variants:
-
-```rust
-enum ResourceSourceRef {
-    LocalPath(PathBuf),                                     // existing
-    DurableStreamBlob { stream: String, key: String },      // NEW
-    OciImageLayer { image: String, path: String },          // NEW
-    HttpUrl(Url),                                           // NEW
-}
-```
-
-**The key insight**: the durable-streams server already has blob
-storage. We don't need S3, we don't need a separate file service,
-we don't need to build an artifact registry. The durable-streams
-server becomes the **universal hub** — it's already reachable from
-every fireline Host and every sandbox VM by definition.
-
-### The sync flow
-
-User declares intent with a normal `ResourceRef`:
-
-```typescript
-const handle = await host.provision({
-  agentCommand,
-  resources: [
-    { source_ref: { kind: 'local_path', path: '~/projects/foo' },
-      mount_path: '/workspace/foo' },
-  ],
-  metadata: { ... },
-})
-```
-
-When the Host is running **locally** and the resource source is
-`local_path`, the mount works today via the existing `LocalPathMounter`.
-
-When the user wants to migrate to remote, they run:
+Useful local-only overrides are still fine:
 
 ```bash
-fireline sync-to-remote \
-  --durable-streams-url=https://streams.prod.internal \
-  ~/projects/foo \
-  --resource-name=foo
+npx fireline agent.ts --port 4440 --verbose
+npx fireline agent.ts --provider docker
 ```
 
-This:
+`--provider` is acceptable here only as a local override for testing. It should not be the main deployment story.
 
-1. Reads the directory contents locally
-2. Chunks them into a blob stream on the target durable-streams
-   server (`resources:foo/*`)
-3. Emits a manifest event with tree structure + content hashes
-4. Returns a new `ResourceRef` that points at
-   `DurableStreamBlob { stream: "resources:foo", key: "/" }`
+### Deploy
 
-The user embeds the returned ref in their `ProvisionSpec.resources`
-instead of the local path, or — better — the fireline CLI rewrites it
-automatically when it detects the resource is a local path and the
-durable-streams URL is remote.
-
-### Mount on the remote side
-
-A remote fireline Host resuming the session reads the session log
-(as it already does), sees the `DurableStreamBlob` reference, and
-has a `DurableStreamMounter` (sibling of `LocalPathMounter` in
-`fireline-resources`) that:
-
-1. Reads the blob stream + manifest
-2. Materializes the contents to a tmpfs under the sandbox's mount
-   root
-3. Captures outbound writes back into the same stream via
-   `FsBackendComponent` — which we already have in
-   `fireline-resources/src/fs_backend.rs`
-
-**No new transport infrastructure.** The durable-streams server is
-the universal file transport because it's already the universal
-log transport, and the semantics are the same: append-only, durable,
-replayable.
-
-### Composition with the existing FsBackendComponent
-
-Today `FsBackendComponent` captures sandbox-side writes as `fs_op`
-envelopes on the session stream. After the extension above, the
-same component:
-
-- On **initialization**: reads the `DurableStreamBlob` manifest to
-  materialize the initial mount
-- On **writes**: captures them as `fs_op` envelopes (existing
-  behavior)
-
-So the read-side and write-side both go through the same stream.
-Round-tripping a file from local → cloud → local works without
-special-casing: the cloud Host wrote an `fs_op` to the stream, the
-local Host's `FsBackendComponent` reads it back when syncing
-locally.
-
-## 5. Solving secrets and credentials
-
-### A new SecretsInjectionComponent, sibling of BudgetComponent
-
-Today `crates/fireline-harness/src/budget.rs` implements
-`BudgetComponent` — a `ConnectTo<sacp::Conductor>` proxy component
-that intercepts `PromptRequest` flowing through the ACP pipeline,
-counts tokens, and can terminate a turn that exceeds a configured
-ceiling. It runs at the harness layer, sees every request between
-client and agent, and has a clean place to inject per-session logic.
-
-**`SecretsInjectionComponent` uses the same pattern, different
-payload.**
-
-```rust
-// crates/fireline-harness/src/secrets.rs  (sibling of budget.rs)
-
-pub struct SecretsInjectionComponent {
-    resolver: Arc<dyn CredentialResolver>,
-    injections: Vec<InjectionRule>,
-}
-
-pub struct InjectionRule {
-    pub target: InjectionTarget,
-    pub credential_ref: CredentialRef,  // reuses CoreType from Tools primitive
-    pub scope: InjectionScope,
-}
-
-pub enum InjectionTarget {
-    /// Set an env var in the sandbox env before any tool spawns.
-    EnvVar(String),
-    /// Add a header to outbound MCP server requests for a named server.
-    McpServerHeader { server: String, header: String },
-    /// Inline a value into a tool call argument at a JSON-path.
-    ToolArg { tool: String, arg_path: String },
-}
-
-pub enum InjectionScope {
-    /// Resolve once at session start; pinned for the lifetime of the session.
-    Session,
-    /// Resolve at every tool invocation.
-    PerCall,
-    /// Resolve once, cache until revoked.
-    Once,
-}
-
-#[async_trait]
-pub trait CredentialResolver: Send + Sync {
-    async fn resolve(
-        &self,
-        credential_ref: &CredentialRef,
-        session_id: &str,
-    ) -> Result<SecretValue>;
-}
-
-pub struct SecretValue(Zeroizing<String>);  // zeroizes on drop
-```
-
-### Invariants the component enforces
-
-These map directly onto the TLA properties already checked in
-`verification/spec/managed_agents.tla`:
-
-1. **The agent never sees the raw credential.** It sees only the
-   `ToolDescriptor` (schema only). This is the existing
-   `ToolDescriptorNoCredentialLeak` invariant — the harness layer
-   already enforces it on the descriptor projection path.
-2. **The durable stream never logs raw credentials.** Only
-   `CredentialRef`s (`CredentialRef::secret("gh_token")`) appear in
-   the log; resolved values never get serialized. A new
-   `credential_injected` event records the ref name + session + tool
-   for audit, without the value.
-3. **Injection is auditable and replay-safe.** Resolution happens at
-   the harness layer; replay-from-offset reconstructs the session
-   without needing the secret values because the sandbox outputs
-   captured in the log are post-injection.
-4. **Revocation is a stream event.** A `credential_revoked` envelope
-   drops the cache on every fireline Host tailing the stream. No
-   central revocation service needed.
-
-### Two CredentialResolver implementations
-
-**`LocalCredentialResolver`** — for dev:
-
-```rust
-pub struct LocalCredentialResolver {
-    toml_path: PathBuf,             // ~/.config/fireline/secrets.toml
-    env_fallback: bool,              // also check std::env::var
-    gh_fallback: bool,               // parse ~/.config/gh/hosts.yml
-    aws_fallback: bool,              // parse ~/.aws/credentials
-}
-```
-
-Reads from familiar local sources. No encryption, no remote calls.
-Good enough for laptop dev, not shipped to production.
-
-**`DurableStreamsCredentialResolver`** — for production and the
-remote half of the handoff:
-
-```rust
-pub struct DurableStreamsCredentialResolver {
-    client: DurableStreamsClient,
-    secrets_stream: String,          // "secrets:<scope>"
-    private_key: Arc<PrivateKey>,    // deploy-time, mounted from
-                                     // k8s secret / vault / env
-}
-```
-
-Reads envelopes from a dedicated **secrets stream** on the
-durable-streams server. Envelopes are **encrypted at rest** with a
-deploy-time public key that the remote fireline Host has the private
-half of. The durable-streams server never sees plaintext even if
-compromised.
-
-### The sync tool for secrets
+The deploy command should be:
 
 ```bash
-fireline sync-secrets \
-  --durable-streams-url=https://streams.prod.internal \
-  --from-local \
-  --encrypt-to=deploy-public-key.age \
-  --scope=session-id-or-project
+npx fireline deploy agent.ts --target production
 ```
 
-Steps:
+The semantics are:
 
-1. Reads from local stores (`LocalCredentialResolver` paths)
-2. Encrypts each secret with the provided public key
-   (age / libsodium sealed box — library choice, not central to the
-   design)
-3. Appends each encrypted value as an envelope to the
-   `secrets:<scope>` stream on the target durable-streams server,
-   keyed by the `CredentialRef` name
-4. Rotation is append-only: a new envelope for the same key with a
-   newer timestamp supersedes; old envelopes stay for audit
+1. Load the default export from `agent.ts`.
+2. Load `fireline.config.ts`.
+3. Resolve the `production` target.
+4. Merge the spec with the target's deployment overrides.
+5. Send the result to the remote Fireline host declared by that target.
 
-**Critical invariants at the sync boundary**:
+The key point is that `--target` is not configuration. It is a lookup key.
 
-- Secrets **must** be encrypted before upload — never plaintext in
-  transit
-- The remote fireline Host has the private key mounted from its
-  deploy-time secret store (k8s Secret, HashiCorp Vault, AWS Secrets
-  Manager, etc.)
-- The durable-streams server has no key material — compromise of the
-  stream service is bounded to "attacker sees ciphertext"
-- The local `fireline sync-secrets` tool **never** writes plaintext
-  secrets to disk except the original local store the user already
-  had
+That means `--target` is acceptable without violating the principle. It does not create a second configuration surface. It selects one.
 
-### The hard case: OAuth tokens from browser flows
+### If there is only one target
 
-The `gh auth login` case is harder because the credential was minted
-via a local browser session. Three options, increasing rigor:
+If `fireline.config.ts` has `defaultTarget`, then this should work:
 
-1. **File copy as a Resource** — treat `~/.config/gh/hosts.yml` as a
-   Resource, let it flow through the file-sync pipeline in §4, and
-   install it at the sandbox mount root. Simple; works today with
-   no extra code. Downside: the token has full local scope and
-   lives in a stream envelope for its lifetime.
-2. **Token exchange at resolve time** — the `CredentialResolver`
-   for an oauth provider knows how to run a short refresh-token
-   flow. The user uploads only the refresh token (not the access
-   token); the remote fireline Host mints fresh access tokens on
-   demand and caches them in-memory. Access tokens are short-lived,
-   so a stream leak is bounded. Requires the `CredentialResolver`
-   to know the provider.
-3. **Browser proxying** — the cloud fireline Host exposes
-   `/v1/oauth/begin/:provider` and `/v1/oauth/callback/:provider`.
-   The user runs `fireline remote-auth github --host-url=https://...`,
-   which opens a local browser pointed at the cloud Host's oauth
-   start route. The cloud Host completes the oauth handshake itself
-   and stores the result in its own local secrets resolver. No
-   local→remote token movement at all. Cleanest, but most work to
-   ship.
+```bash
+npx fireline deploy agent.ts
+```
 
-**Recommended rollout**: ship option 1 for the demo era; design for
-option 2 as the post-demo hardening path; option 3 only if
-enterprise / compliance asks for it.
+That keeps the happy path short without forcing people to invent shell aliases.
 
-## 6. The demo narrative
+## 4. What Lives in the Spec vs the Config vs the CLI
 
-This is the punchline, and it's why the handoff story is worth
-front-loading into the demo. The narrative comes in two phases.
-Phase 1 shows a single session surviving a local→remote topology
-migration. Phase 2 shows two *different* Hosts discovering each
-other over the same durable-streams service and handing off a
-task mid-turn. The two phases share the same underlying mechanic
-— "the stream is the truth, the Hosts are stateless" — applied at
-different scales.
+### Belongs in `agent.ts`
 
-### Phase 1: Session migration — the "topology migration mid-session" beat
+These are properties of the agent itself:
 
-1. Open the browser harness. Launch an agent locally. Run a few
-   prompts — the user sees them land in the session log via the
-   state explorer panel.
-2. Click a new "Migrate to Remote" button (or run a CLI equivalent).
-   - The local fireline Host uploads resources and encrypted
-     secrets to the cloud durable-streams server
-   - A remote fireline Host is woken via `host.wake(handle)` pointing
-     at the same `session_id` — `WakeOnStoppedChangesRuntimeId`
-     applies: same `runtime_key`, new runtime identity
-   - The local Host's wake returns `{ kind: 'noop' }` because from
-     the session's point of view nothing new needs to happen —
-     `WakeOnReadyIsNoop` applies
-3. Send another prompt. It round-trips through the remote Host.
-   **The session history is unbroken** — the state explorer shows
-   turns from before and after the migration in a single continuous
-   log.
-4. Kill the remote Host (simulate a deploy, a crash, a region
-   failover). Wake again. A different cloud node picks up the
-   session, reads the log, mounts the resources from the blob
-   stream, resolves credentials from the secrets stream, and keeps
-   going. **Zero conversation state is lost.**
+- `agent([...])`
+- `middleware([...])`
+- `peer({ peers: [...] })`
+- `trace()`, `approve()`, `budget()`, `secretsProxy()`
+- mounted resources
+- default sandbox provider when it is part of the agent's identity
 
-### Phase 2: Cross-Host agent handoff
+Example:
 
-Phase 1 showed *one* session crossing a topology boundary. Phase 2
-shows *two different agents on two different Hosts* discovering
-each other at runtime through the same durable-streams service and
-handing off a task mid-turn. This is where the durable-streams
-service stops being "just a state plane" and reveals itself as a
-**discovery plane** — Host presence, runtime presence, and
-resource presence all become discoverable by reading per-tenant
-streams.
+```ts
+export default compose(
+  sandbox({ provider: 'anthropic' }),
+  middleware([
+    trace(),
+    approve({ scope: 'tool_calls' }),
+    peer({ peers: ['reviewer'] }),
+  ]),
+  agent(['pi-acp']),
+)
+```
 
-The setup: Agent A is running on my laptop Host. Mid-conversation,
-it realizes it needs help from a specialist agent deployed on a
-cloud Host it has never seen before.
+This is portable behavior and should move with the file.
 
-1. Agent A's Host reads the `hosts:tenant-demo` stream.
-2. Agent A finds Agent B's Host registered there, with the Host's
-   ACP URL embedded in the registration envelope.
-3. Agent A opens an ACP connection to Agent B's URL directly.
-4. Agent A hands off the task via a normal ACP message — a prompt,
-   a tool-call, or a lineage-stamped peer call.
+### Belongs in `fireline.config.ts`
 
-Agent B's Host sees the incoming ACP request, loads the relevant
-session state from the shared durable-streams service — **the same
-stream Agent A writes to** — picks up the conversation where Agent
-A left off, and continues. The user watching the browser harness
-sees a single conversation thread flow across the network boundary
-without a pause in the state explorer.
+These are environment concerns:
 
-**Zero operator configuration.** No Consul, no DNS SRV records, no
-k8s Services, no service mesh, no bootstrap config files, no
-explicitly-shared peer-directory TOML. **The same durable-streams
-service that carries session state IS the service discovery
-mechanism.** Two Hosts share one tenant stream, and they discover
-each other by reading it.
+- remote Fireline host URL
+- auth token source
+- default stream namespace / tenant
+- deployment labels and placement defaults
+- environment-specific provider override
+- always-on lifecycle policy
 
-**Zero conversation state lost across the handoff**, because the
-session log already lives in the shared stream and both Hosts are
-readers of it. This isn't "migration" in the Phase 1 sense — it's
-**the Hosts are stateless and the stream is the truth**. Phase 1
-is a session moving; Phase 2 is two Hosts cooperating on a session
-neither of them owns.
+This is where "dev uses local Docker, prod uses Anthropic" belongs if it is an environment difference rather than an agent identity choice.
 
-> **The demo beat:** we'll show Agent A on a laptop discovering a
-> cloud-hosted agent at runtime, handing off mid-turn, and the user
-> watching a single conversation thread flow across the network
-> boundary without a pause.
+### Belongs on the CLI
 
-The full mechanism lives in
-[`./cross-host-discovery.md`](./cross-host-discovery.md) (in
-progress) — which specifies the `hosts:tenant-<id>` stream schema,
-the registration envelope shape, the TTL / stale-collapse rule,
-and the `StreamDeploymentPeerRegistry` implementation that replaces
-the deleted `LocalPeerDirectory` and `ControlPlanePeerRegistry`.
-The demo's mechanics land on top of whatever that proposal ships.
+Only runtime overrides and diagnostics:
 
-### Why this works
+- `--target`
+- `--port`
+- `--verbose`
+- `--dry-run`
+- `--provider` for local test override only
 
-Every "magic" moment in that demo traces back to a property we
-already proved in the TLA model:
+Not acceptable as primary deploy flags:
 
-| Demo moment | TLA invariant |
-|---|---|
-| *Phase 1 — Session migration* | |
-| Session history survives local→remote | `SessionDurableAcrossRuntimeDeath` |
-| Wake on remote Host rehydrates correctly | `WakeOnStoppedPreservesSessionBinding` |
-| Local Host's final wake is a no-op | `WakeOnReadyIsNoop` |
-| Remote Host gets a new runtime id, same key | `WakeOnStoppedChangesRuntimeId` |
-| Two concurrent wakes during migration don't double-provision | `ConcurrentWakeSingleWinner` |
-| The state explorer's log never rewinds | `SessionAppendOnly` |
-| Resources mounted on the remote sandbox match the local intent | `ResourceMountMappingCorrect` |
-| Tool invocations on the remote side don't leak credentials through the descriptor | `ToolDescriptorNoCredentialLeak` |
-| *Phase 2 — Cross-Host agent handoff* | |
-| Agent A discovers Host B from a single stream read | `HostRegisteredIsEventuallyDiscoverable` (new — future `deployment_discovery.tla`) |
-| Stale Hosts never show up in discovery | `StaleHeartbeatCollapsesToInvisible` (new — future `deployment_discovery.tla`) |
+- `--always-on`
+- `--peer`
+- `--provider` for real deployments
+- `--durable-streams-url`
+- `--model`
 
-**Every Phase 1 property is already checked in
-`verification/spec/managed_agents.tla` today.** Phase 2's two new
-invariants are not yet encoded — they belong in a future
-`deployment_discovery.tla` spec that pairs with
-[`./cross-host-discovery.md`](./cross-host-discovery.md). The
-design posture is unchanged: every "magic" moment in the demo
-traces back to a formal property, whether already-verified (Phase
-1) or scheduled-to-be-verified (Phase 2). **The deployment story
-is not a new architecture — it's the physical manifestation of
-invariants the formal spec has been encoding the whole time.** That's
-the best possible demo posture: "we designed this from the
-primitives up; here's the distributed topology that falls out."
+If a user needs to type those every deploy, the design has already failed.
 
-## 7. Implementation mapping
+## 5. What `alwaysOn` Means
 
-All of the above composes out of existing primitives. Nothing
-requires a new crate or a new primitive — just concrete satisfiers,
-new components, and two CLI subcommands.
+`alwaysOn` is not "pass a flag and hope the process stays up." It is a host-side deployment policy.
 
-| Deployment need | Primitive used | New work |
-|---|---|---|
-| Fireline binary in cloud | **Host** (`fireline-host`) | OCI Dockerfile, ~30 lines |
-| Durable streams at well-known URL | external service | deployment config only, no Fireline code |
-| Sandbox isolation from OCI images | **Sandbox** (`fireline-sandbox::MicrosandboxSandbox`) | already exists behind feature flag `microsandbox-provider`; needs image-pull wiring |
-| Resources at the sandbox | **Resources** (`fireline-resources`) | extend `ResourceSourceRef` enum; new `DurableStreamMounter` |
-| File sync transport | durable-streams blob streams | extend `FsBackendComponent` to read mount content from stream manifest |
-| Secret injection | **Harness** Component | new `SecretsInjectionComponent` in `fireline-harness/src/secrets.rs`, ~300 lines |
-| Credential resolution | **Tools** (`CredentialRef` already exists) | two `CredentialResolver` impls (local + durable-streams) |
-| Local→cloud file sync | new `fireline sync-to-remote` CLI subcommand | ~200 lines, reuses durable-streams client |
-| Local→cloud secret sync | new `fireline sync-secrets` CLI subcommand | ~150 lines + encryption layer |
-| OAuth-minted credentials | post-demo hardening path (option 2 above) | new `OAuthCredentialResolver`, ~200 lines per provider |
-| Browser-proxied oauth | post-demo | new `/v1/oauth/*` routes in `fireline-host`, ~300 lines |
+Concretely, a target with `lifecycle.alwaysOn = true` means:
 
-## 8. Milestones and sequencing
+- the remote Fireline host persists the desired deployment
+- the host keeps a sandbox for that deployment running, or recreates it after failure
+- the agent is resumed against the same durable state stream when possible
+- operators interact with the same logical deployment even if the backing sandbox is replaced
 
-Everything here is **post-restructure**. Do not start any of it until
-`fireline-runtime` and `fireline-control-plane` have dissolved into
-`fireline-host` and `cargo check --workspace` is green on the new
-crate layout. See `docs/proposals/crate-restructure-manifest.md`
-§"Execution status".
+This is exactly why `alwaysOn` belongs in config or spec, not in the CLI. It is durable policy, not an invocation preference.
 
-Then, in order of decreasing demo value:
+It also aligns with the wake semantics already formalized in `verification/spec/managed_agents.tla` and enabled in `verification/spec/ManagedAgents.cfg`:
 
-### M1 — Minimal demo path (pre-demo polish, if time)
+- `WakeOnReadyIsNoop`
+- `WakeOnStoppedChangesRuntimeId`
+- `WakeOnStoppedPreservesSessionBinding`
+- `ConcurrentWakeSingleWinner`
+- `SessionDurableAcrossRuntimeDeath`
 
-- Single `fireline` binary with `--durable-streams-url` required
-- Browser harness talks to it as it does today
-- **No migration UX yet**. The demo just shows "same binary, local
-  mode," "same binary, pointed at a cloud durable-streams URL" —
-  even as two separate runs, that's already a compelling story.
+Those names matter because they tell us what "always on" should actually mean in Fireline:
 
-### M2 — Resource sync (first week post-demo)
+- a healthy deployment should not churn on every wake
+- a crashed runtime can be replaced without losing the session binding
+- the logical deployment survives runtime replacement
+- concurrent recovery attempts converge
 
-- Extend `ResourceSourceRef` with `DurableStreamBlob` variant
-- Add `DurableStreamMounter` sibling of `LocalPathMounter`
-- Wire `FsBackendComponent` to read mount manifests from the stream
-- Ship `fireline sync-to-remote` CLI subcommand
-- Add an integration test: local Host uploads a directory, remote
-  Host mounts it into a sandbox, captured writes round-trip back
+That is the right semantic base for an always-on deployment model.
 
-### M3 — SecretsInjectionComponent + local resolver (second week)
+## 6. Deployment Topology
 
-- `crates/fireline-harness/src/secrets.rs` — component + trait +
-  injection rules
-- `LocalCredentialResolver` — reads from
-  `~/.config/fireline/secrets.toml` + env + gh/aws fallbacks
-- Wire the component through the harness topology
-- Enforce the four invariants on the resolve path
-- Integration test: tool call with a `CredentialRef::env("OPENAI_API_KEY")`
-  resolves correctly, agent never sees the value, stream never logs
-  it
+This part of the previous proposal stays valid. The topology is still hub-and-spoke around durable streams:
 
-### M4 — DurableStreamsCredentialResolver + sync tool (third week)
+```text
+┌───────────────────────────────────────────────────────┐
+│ Durable Streams Service                              │
+│ - session/state truth                                │
+│ - cross-host discovery substrate                     │
+│ - survives host or sandbox death                     │
+└───────────────────────────────────────────────────────┘
+                     ▲                  ▲
+                     │                  │
+          ┌──────────┴──────────┐  ┌────┴──────────────┐
+          │ Fireline Host       │  │ Fireline Host     │
+          │ local / laptop      │  │ remote / cloud    │
+          │ - run agent.ts      │  │ - deploy target   │
+          │ - local provider    │  │ - always-on policy│
+          └──────────┬──────────┘  └────┬──────────────┘
+                     │                  │
+                     ▼                  ▼
+               local sandbox      remote sandbox
+```
 
-- `DurableStreamsCredentialResolver` reading encrypted envelopes
-  from a secrets stream
-- `fireline sync-secrets` CLI with age/libsodium encryption
-- Key rotation via append-only envelopes
-- Integration test: local sync → remote resolve → tool call works
-  end-to-end
+The deployment command does not replace this topology. It chooses where in this topology a given spec should live.
 
-### M5 — Migration demo UX (fourth week)
+The important architectural point remains:
 
-- "Migrate to Remote" button in the browser harness
-- Live demo: start a session locally, run prompts, migrate, continue
-  prompting, kill the remote node, wake again, keep going
-- Record it. **This is the keynote moment.**
+- durable streams is the shared truth plane
+- hosts are replaceable
+- sandboxes are replaceable
+- deployment targets decide placement and policy, not state ownership
 
-### M6 — OAuth hardening (post-keynote, enterprise lane)
+## 7. Remote Handoff Story
 
-- Option 2: `OAuthCredentialResolver` with refresh-token exchange
-- Option 3: `/v1/oauth/*` routes for browser-proxied flow
+The handoff story also stays, but it should be framed in DX terms.
 
-## 9. Open questions
+The north-star user experience is:
 
-1. **Key distribution**: the deploy-time public key for the secrets
-   encryption — how does the user get it on first setup?
-   `fireline init --generate-keys` that bootstraps a keypair and
-   prints instructions for installing the private half on the
-   remote Host?
-2. **Multi-tenant secret scoping**: is `secrets:<scope>` per-session,
-   per-project, or per-user? Recommendation: **per-project**, with
-   the project ID as a stable identifier the user provides. Per-session
-   is too granular (can't share credentials across sessions);
-   per-user is too coarse (can't isolate projects).
-3. **Blob stream garbage collection**: when resources are no longer
-   referenced by any live session, do we leave them in the stream
-   forever? Recommendation: **yes, for now**. Append-only storage
-   is cheap, audit is more valuable than cleanup, and the durable-streams
-   server has its own retention config for operators who need to
-   reclaim space.
-4. **Concurrent Host handoff**: two fireline Hosts both trying to
-   wake the same session simultaneously during a migration.
-   `ConcurrentWakeSingleWinner` says this converges, but the demo
-   should show it explicitly — scripted test where two Hosts race,
-   exactly one wins. Good to bank as a safety property.
-5. **Sandbox-to-sandbox file transfer**: can sandbox A read a file
-   written by sandbox B in the same session? Yes, via the
-   `fs_op`-captured stream. Worth documenting as a deliberate
-   capability, not an accident.
-6. **Cost model**: writing every file to a durable-streams server
-   costs storage and bandwidth. For large binary artifacts, is
-   there a size cutoff where we fall back to an object store like
-   S3 referenced by URL? Flag for M2 planning.
+1. Run locally:
 
-## 10. Non-goals (what this proposal explicitly doesn't cover)
+   ```bash
+   npx fireline agent.ts
+   ```
 
-- **Cross-region durable-streams replication.** Out of scope —
-  the durable-streams service handles its own replication posture.
-  Fireline Hosts don't care; they just point at a URL.
-- **Control-plane federation.** Previously discussed and rejected
-  in favor of "one binary, per-Host HTTP API." A cluster is N
-  fireline binaries, each with its own listener. Routing is an
-  infra concern (DNS, k8s service, service mesh).
-- **Registry authentication for OCI image pulls.** Standard
-  microsandbox / OCI flow; not a Fireline concern.
-- **Secret scanning.** Preventing a user from accidentally
-  committing secrets into the stream via a regex scan on envelope
-  content. Potentially a post-demo hardening item; not in scope
-  here.
-- **End-user-facing "Migrate" UX polish.** The demo version is a
-  single button that runs the sync commands and re-wakes against
-  a different durable-streams URL. A proper enterprise UX (diff
-  view, selective migration, preview of what'll move) is a post-
-  keynote product lane.
+2. Validate the middleware, resources, and behavior.
 
----
+3. Promote the same file:
 
-**See also**:
-- `docs/proposals/client-primitives.md` — the client-facing primitive surface this composes against
-- `docs/proposals/runtime-host-split.md` §7 — the Host/Sandbox/Orchestrator taxonomy that makes this cleanly expressible
-- `docs/proposals/crate-restructure-manifest.md` — the dependency graph this sits on top of
-- `verification/spec/managed_agents.tla` — the formal invariants this relies on
-- `crates/fireline-harness/src/budget.rs` — the reference pattern for `SecretsInjectionComponent`
+   ```bash
+   npx fireline deploy agent.ts --target production
+   ```
+
+4. The session can continue on the remote target because the durable stream is still the truth.
+
+What makes this credible is not the CLI. It is the runtime model:
+
+- `packages/client/src/agent.ts` already treats the live deployment as a `FirelineAgent`
+- `packages/client/src/db.ts` already treats state observation as a stream-backed database
+- `packages/client/src/sandbox.ts` already serializes the harness spec into a provision request
+
+The remaining work is mostly packaging and policy:
+
+- target resolution
+- deploy command
+- host-side deployment records
+- local-to-remote resource and secret handoff
+
+Important honesty point: the handoff story is not complete today.
+
+What exists:
+
+- stream-backed state
+- wake semantics in the TLA model
+- cross-host discovery as a backend concept
+- `FirelineAgent` and `fireline.db()` on the client side
+
+What does not exist yet:
+
+- `fireline.config.ts`
+- `fireline deploy`
+- a finished `start()` API that defaults to local and uses `remote` instead of `serverUrl`
+- polished resource and secret promotion UX
+
+So the right claim is:
+
+> Fireline already has the state model that makes remote handoff believable. It does not yet have the DX layer that makes remote handoff pleasant.
+
+That is exactly what this proposal is trying to fix.
+
+## 8. Migration from the Current Single-Host Model
+
+Current state:
+
+- `packages/fireline/src/cli.ts` boots a local streams process and a local host, then calls `spec.start({ serverUrl })`
+- `packages/client/src/sandbox.ts` still models `start()` as a remote control-plane call
+- the current design docs still assume too many deploy-time flags
+
+Migration plan:
+
+1. Keep `npx fireline agent.ts` working as the local path.
+2. Add `fireline.config.ts` target discovery.
+3. Add `fireline deploy <file> --target <name>`.
+4. Move client `start()` toward the API already described in `docs/proposals/platform-sdk-api-design.md`:
+   - `start()` for local
+   - `start({ remote })` for remote
+5. Introduce host-side deployment records and lifecycle reconciliation for `alwaysOn`.
+6. Move deploy-time environment differences out of CLI flags and into target config.
+
+Compatibility rule during migration:
+
+- old local debugging flags can remain temporarily
+- new deploy features should not introduce fresh primary flags for provider, peering, or always-on behavior
+
+## Recommendation
+
+Use option (a): `fireline.config.ts` with named targets.
+
+Allow option (c) only in the narrow sense that `--target` is a lookup key into that config.
+
+Reject option (b): do not put deployment targets inside `agent.ts`.
+
+That gives Fireline the cleanest long-term story:
+
+- the spec file defines the agent
+- the config file defines where it goes
+- the CLI only runs the plan
+
+Anything else turns the CLI into a second API, and Fireline does not need a second API.

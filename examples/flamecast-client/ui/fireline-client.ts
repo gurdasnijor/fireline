@@ -85,13 +85,15 @@ export interface FlamecastClient {
       }
     }
   }
+  rememberSession(session: Session): void
+  getCachedSession(id: string): Session | undefined
+  listCachedSessions(): Session[]
+  forgetSession(id: string): void
   fetchSettings(): Promise<FlamecastSettings>
   updateSettings(patch: Partial<FlamecastSettings>): Promise<FlamecastSettings>
   fetchAgentTemplates(): Promise<AgentTemplate[]>
   registerAgentTemplate(body: RegisterAgentTemplateBody): Promise<AgentTemplate>
   updateAgentTemplate(id: string, body: UpdateAgentTemplateBody): Promise<AgentTemplate>
-  fetchSessions(): Promise<Session[]>
-  fetchSession(id: string, opts?: { includeFileSystem?: boolean; showAllFiles?: boolean }): Promise<Session>
   fetchSessionFilePreview(id: string, path: string): Promise<FilePreview>
   fetchSessionFileSystem(
     id: string,
@@ -102,9 +104,8 @@ export interface FlamecastClient {
     cwd?: string
     agentTemplateId?: string
     runtimeInstance?: string
-    name?: string
+      name?: string
   }): Promise<Session>
-  terminateSession(id: string): Promise<void>
   fetchSessionSettings(id: string): Promise<SessionSettings>
   updateSessionSettings(id: string, patch: Partial<SessionSettings>): Promise<SessionSettings>
   listMessageQueue(): Promise<QueuedMessage[]>
@@ -114,8 +115,6 @@ export interface FlamecastClient {
   sendQueuedMessage(id: number): Promise<Record<string, unknown>>
   removeQueuedMessage(id: number): Promise<void>
   clearMessageQueue(): Promise<void>
-  fetchRuntimes(): Promise<RuntimeInfo[]>
-  fetchRuntimeFilePreview(instanceName: string, path: string): Promise<FilePreview>
   fetchRuntimeFileSystem(
     instanceName: string,
     opts?: { showAllFiles?: boolean; path?: string },
@@ -149,6 +148,7 @@ export function createFlamecastClient(options: FlamecastClientOptions): Flamecas
   const fetchImpl = options.fetch ?? fetch
   const sandbox = new Sandbox({ serverUrl: baseUrl })
   const admin = new SandboxAdmin({ serverUrl: baseUrl })
+  const sessionCache = new Map<string, Session>()
 
   const request = async <T>(path: string, init: RequestInit = {}): Promise<T> => {
     const response = await fetchImpl(`${baseUrl}${path}`, {
@@ -208,6 +208,18 @@ export function createFlamecastClient(options: FlamecastClientOptions): Flamecas
         },
       },
     },
+    rememberSession(session) {
+      sessionCache.set(session.id, session)
+    },
+    getCachedSession(id) {
+      return sessionCache.get(id)
+    },
+    listCachedSessions() {
+      return [...sessionCache.values()]
+    },
+    forgetSession(id) {
+      sessionCache.delete(id)
+    },
     fetchSettings() {
       return request('/api/settings')
     },
@@ -226,20 +238,6 @@ export function createFlamecastClient(options: FlamecastClientOptions): Flamecas
         body: JSON.stringify(body),
       })
     },
-    fetchSessions() {
-      return request('/api/agents')
-    },
-    fetchSession(id, opts = {}) {
-      const search = new URLSearchParams()
-      if (opts.includeFileSystem) {
-        search.set('includeFileSystem', 'true')
-      }
-      if (opts.showAllFiles) {
-        search.set('showAllFiles', 'true')
-      }
-      const suffix = search.toString()
-      return request(`/api/agents/${encodeURIComponent(id)}${suffix ? `?${suffix}` : ''}`)
-    },
     fetchSessionFilePreview(id, path) {
       return request(
         `/api/agents/${encodeURIComponent(id)}/files?${new URLSearchParams({ path }).toString()}`,
@@ -255,11 +253,13 @@ export function createFlamecastClient(options: FlamecastClientOptions): Flamecas
       }
       return request(`/api/agents/${encodeURIComponent(id)}/fs/snapshot?${search.toString()}`)
     },
-    createSession(body) {
-      return request('/api/agents', { method: 'POST', body: JSON.stringify(body) })
-    },
-    async terminateSession(id) {
-      await request(`/api/agents/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    async createSession(body) {
+      const session = await request<Session>('/api/agents', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })
+      sessionCache.set(session.id, session)
+      return session
     },
     fetchSessionSettings(id) {
       return request(`/api/agents/${encodeURIComponent(id)}/settings`)
@@ -284,14 +284,6 @@ export function createFlamecastClient(options: FlamecastClientOptions): Flamecas
     },
     async clearMessageQueue() {
       await request('/api/message-queue', { method: 'DELETE' })
-    },
-    fetchRuntimes() {
-      return request('/api/runtimes')
-    },
-    fetchRuntimeFilePreview(instanceName, path) {
-      return request(
-        `/api/runtimes/${encodeURIComponent(instanceName)}/files?${new URLSearchParams({ path }).toString()}`,
-      )
     },
     fetchRuntimeFileSystem(instanceName, opts = {}) {
       const search = new URLSearchParams()

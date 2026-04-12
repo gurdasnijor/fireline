@@ -4,20 +4,20 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer as createViteServer } from "vite";
-import { type ChunkRow, type PermissionRow, type PromptTurnRow } from "../../packages/state/src/index.ts";
 import {
   agent,
-  appendApprovalResolved,
   compose,
-  connectAcp,
   db as openFirelineDb,
+  type FirelineAgent,
+  type Middleware,
   middleware,
   sandbox,
   type FirelineDB,
-} from "../../packages/client/src/index.ts";
-import { SandboxAdmin } from "../../packages/client/src/admin.ts";
-import { approve, trace } from "../../packages/client/src/middleware.ts";
-import { localPath } from "../../packages/client/src/resources.ts";
+} from "@fireline/client";
+import { SandboxAdmin } from "@fireline/client/admin";
+import { approve, secretsProxy, trace } from "@fireline/client/middleware";
+import { localPath } from "@fireline/client/resources";
+import { type ChunkRow, type PermissionRow, type PromptTurnRow } from "@fireline/state";
 import type {
   AgentSpawn,
   AgentTemplate,
@@ -36,12 +36,7 @@ import type {
 type RuntimeRecord = {
   typeName: string;
   instanceName: string;
-  handle: {
-    id: string;
-    provider: string;
-    acp: { url: string };
-    state: { url: string };
-  };
+  handle: FirelineAgent;
   status: "running" | "stopped" | "paused";
   createdAt: string;
   updatedAt: string;
@@ -50,13 +45,8 @@ type RuntimeRecord = {
 type SessionRecord = {
   sessionId: string;
   sandboxId: string;
-  handle: {
-    id: string;
-    provider: string;
-    acp: { url: string };
-    state: { url: string };
-  };
-  connection: Awaited<ReturnType<typeof connectAcp>>;
+  handle: FirelineAgent;
+  connection: Awaited<ReturnType<FirelineAgent["connect"]>>;
   runtimeInstance: string;
   agentTemplateId: string;
   agentName: string;
@@ -80,8 +70,8 @@ const defaultRuntimeInstance = process.env.FLAMECAST_DEFAULT_RUNTIME ?? "workspa
 const defaultSpawn = parseCommand(
   process.env.AGENT_COMMAND ?? "npx -y @anthropic-ai/claude-code-acp",
 );
-const sharedEnv = process.env.ANTHROPIC_API_KEY
-  ? { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY }
+const sharedSecrets = process.env.ANTHROPIC_API_KEY
+  ? { ANTHROPIC_API_KEY: { ref: "env:ANTHROPIC_API_KEY" } }
   : undefined;
 
 const admin = new SandboxAdmin({ serverUrl: firelineUrl });
@@ -241,7 +231,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL) {
       }
       if (method === "DELETE" && segments.length === 3) {
         const runtime = requireRuntime(instanceName);
-        await admin.destroy(runtime.handle.id);
+        await runtime.handle.destroy();
         runtimes.delete(instanceName);
         return json(res, 200, { ok: true });
       }
@@ -444,6 +434,7 @@ async function createSession(body: {
     spawn: template.spawn,
     provider: (template.runtime.provider ?? defaultRuntimeType) as ProviderName,
     envVars: template.env,
+    image: template.runtime.image,
     labels: {
       demo: "flamecast-client",
       kind: "session",
@@ -453,7 +444,7 @@ async function createSession(body: {
   });
   await ensureStateDb(handle.state.url);
 
-  const connection = await connectAcp(handle.acp, `flamecast-session-${Date.now()}`);
+  const connection = await handle.connect(`flamecast-session-${Date.now()}`);
   const cwd = sanitizeCwd(body.cwd ?? workspaceRoot);
   const session = await connection.newSession({ cwd, mcpServers: [] });
 
@@ -492,7 +483,7 @@ async function terminateSession(sessionId: string) {
   const record = requireSession(sessionId);
   record.status = "killed";
   record.lastUpdatedAt = nowIso();
-  await admin.destroy(record.sandboxId);
+  await record.handle.destroy();
   await record.connection.close();
 }
 
@@ -502,10 +493,7 @@ async function resolveSessionPermission(
   body: PermissionResponseBody,
 ) {
   const record = requireSession(sessionId);
-  await appendApprovalResolved({
-    streamUrl: record.handle.state.url,
-    sessionId,
-    requestId,
+  await record.handle.resolvePermission(sessionId, requestId, {
     allow: "optionId" in body,
     resolvedBy: "flamecast-client",
   });
@@ -629,13 +617,14 @@ async function autoApprovePendingPermissions() {
       continue;
     }
     autoApproved.add(key);
-    await appendApprovalResolved({
-      streamUrl: stateStreamUrl,
-      sessionId: permission.sessionId,
-      requestId: permission.requestId,
-      allow: true,
-      resolvedBy: "flamecast-client:auto-approve",
-    });
+    const session = sessions.get(permission.sessionId);
+    if (session) {
+      await session.handle.resolvePermission(permission.sessionId, permission.requestId, {
+        allow: true,
+        resolvedBy: "flamecast-client:auto-approve",
+      });
+      continue;
+    }
   }
 }
 
@@ -643,25 +632,76 @@ async function provisionSandbox(options: {
   spawn: AgentSpawn;
   provider: ProviderName;
   envVars?: Record<string, string>;
+  image?: string;
+  model?: string;
   labels: Record<string, string>;
 }) {
   const resources =
     options.provider === "local" ? [localPath(workspaceRoot, workspaceRoot, false)] : [];
+  const middlewareChain: Middleware[] = [trace(), approve({ scope: "tool_calls" })];
+  if (sharedSecrets) {
+    middlewareChain.push(secretsProxy(sharedSecrets));
+  }
 
   return compose(
-    sandbox({
+    buildSandboxConfig({
       provider: options.provider,
+      image: options.image,
+      model: options.model,
       resources,
-      envVars: { ...(sharedEnv ?? {}), ...(options.envVars ?? {}) },
+      envVars: options.envVars,
       labels: options.labels,
     }),
-    middleware([trace(), approve({ scope: "tool_calls" })]),
+    middleware(middlewareChain),
     agent([options.spawn.command, ...options.spawn.args]),
   ).start({
     serverUrl: firelineUrl,
     name: `${options.labels.kind}-${options.labels.instance ?? options.labels.template ?? randomUUID()}`,
     stateStream: sharedStateStream,
   });
+}
+
+function buildSandboxConfig(options: {
+  provider: ProviderName;
+  resources: ReturnType<typeof localPath>[];
+  envVars?: Record<string, string>;
+  labels: Record<string, string>;
+  image?: string;
+  model?: string;
+}) {
+  switch (options.provider) {
+    case "docker":
+      return sandbox({
+        provider: "docker",
+        resources: options.resources,
+        envVars: options.envVars,
+        labels: options.labels,
+        ...(options.image ? { image: options.image } : {}),
+      });
+    case "anthropic":
+      return sandbox({
+        provider: "anthropic",
+        resources: options.resources,
+        envVars: options.envVars,
+        labels: options.labels,
+        ...(options.model ? { model: options.model } : {}),
+      });
+    case "microsandbox":
+      return sandbox({
+        provider: "microsandbox",
+        resources: options.resources,
+        envVars: options.envVars,
+        labels: options.labels,
+      });
+    case "local":
+    default:
+      return sandbox({
+        provider: "local",
+        resources: options.resources,
+        envVars: options.envVars,
+        labels: options.labels,
+      });
+  }
 }
 
 function resolveTemplate(templateId?: string): AgentTemplate {
@@ -991,7 +1031,6 @@ function seedTemplates() {
     name: "Claude Code",
     spawn: defaultSpawn,
     runtime: { provider: defaultRuntimeType },
-    env: sharedEnv,
   };
   templates.set(template.id, template);
 }

@@ -163,7 +163,13 @@ export function useSessionState(sessionId: string, _ws: RuntimeWebSocketHandle) 
     return acp.agent.cancel({ sessionId });
   }, [acp.agent, sessionId]);
 
-  const terminate = useCallback(() => client.terminateSession(sessionId), [client, sessionId]);
+  const terminate = useCallback(async () => {
+    if (!session?.sandboxId) {
+      throw new Error("Session sandbox is not available yet");
+    }
+    await client.admin.destroy(session.sandboxId);
+    client.forgetSession(sessionId);
+  }, [client, session?.sandboxId, sessionId]);
 
   const requestFsSnapshot = useCallback(
     async (opts?: { showAllFiles?: boolean }) => {

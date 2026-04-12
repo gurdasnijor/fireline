@@ -21,12 +21,7 @@
       "@flamecast/protocol/session": ["./ui/fireline-types.ts"],
       "@flamecast/protocol/storage": ["./ui/fireline-types.ts"],
       "@flamecast/protocol/session-host": ["./ui/fireline-types.ts"],
-      "@flamecast/protocol/ws/channels": ["./ui/ws-types.ts"],
-      "@fireline/client": ["../../packages/client/src/index.ts"],
-      "@fireline/client/admin": ["../../packages/client/src/admin.ts"],
-      "@fireline/client/middleware": ["../../packages/client/src/middleware.ts"],
-      "@fireline/client/resources": ["../../packages/client/src/resources.ts"],
-      "@fireline/state": ["../../packages/state/src/index.ts"]
+      "@flamecast/protocol/ws/channels": ["./ui/ws-types.ts"]
     }
   },
   "include": [

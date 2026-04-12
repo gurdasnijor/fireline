@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { useLiveQuery } from "@tanstack/react-db";
 import { useQuery } from "@tanstack/react-query";
 import type { SessionRow } from "@fireline/state";
-import type { Session } from "../fireline-types.js";
+import type { PendingPermission, Session } from "../fireline-types.js";
 import { useFirelineDb, useFlamecastClient } from "../provider.js";
 
 export function useSessions() {
@@ -13,8 +13,8 @@ export function useSessions() {
   const liveTurns = useLiveQuery((q) => q.from({ t: db.promptTurns }), [db]);
   const livePermissions = useLiveQuery((q) => q.from({ p: db.permissions }), [db]);
   const metadata = useQuery({
-    queryKey: ["sessions"],
-    queryFn: () => client.fetchSessions(),
+    queryKey: ["session-cache"],
+    queryFn: () => client.listCachedSessions(),
     staleTime: Infinity,
   });
 
@@ -42,27 +42,43 @@ export function useSessions() {
 
 function mergeSessions(
   metadata: Session[],
-  rows: SessionRow[],
-  turns: readonly { sessionId: string; state: string }[],
-  permissions: readonly { sessionId: string; state: string }[],
+  rows: readonly SessionRow[],
+  turns: readonly { sessionId: string; state: string; text?: string | null; startedAt: number }[],
+  permissions: readonly {
+    sessionId: string;
+    state: string;
+    requestId: string;
+    toolCallId?: string | null;
+    title?: string | null;
+    options?: PendingPermission["options"];
+  }[],
 ): Session[] {
   const metadataById = new Map(metadata.map((session) => [session.id, session]));
   const processingBySession = new Map<string, boolean>();
-  const pendingPermissionBySession = new Map<string, boolean>();
+  const pendingPermissionBySession = new Map<string, PendingPermission>();
+  const titleBySession = new Map<string, string>();
 
   for (const turn of turns) {
     if (turn.state === "queued" || turn.state === "active") {
       processingBySession.set(turn.sessionId, true);
     }
+    if (turn.text && !titleBySession.has(turn.sessionId)) {
+      titleBySession.set(turn.sessionId, turn.text);
+    }
   }
 
   for (const permission of permissions) {
     if (permission.state === "pending") {
-      pendingPermissionBySession.set(permission.sessionId, true);
+      pendingPermissionBySession.set(permission.sessionId, {
+        requestId: permission.requestId,
+        toolCallId: permission.toolCallId ?? "",
+        title: permission.title ?? "Permission required",
+        options: permission.options ?? [],
+      });
     }
   }
 
-  const merged = rows.map((row) => {
+  const merged: Session[] = rows.map((row) => {
     const current = metadataById.get(row.sessionId);
     const lastUpdatedAt = new Date(Math.max(row.updatedAt, row.lastSeenAt, row.createdAt)).toISOString();
     const status = toSessionStatus(row.state);
@@ -80,22 +96,26 @@ function mergeSessions(
         fileSystem: null,
         promptQueue: null,
         runtime: row.runtimeKey,
+        title: titleBySession.get(row.sessionId) ?? row.sessionId,
       } satisfies Session);
 
     return {
       ...base,
       status,
       lastUpdatedAt,
+      title: base.title ?? titleBySession.get(row.sessionId) ?? row.sessionId,
       promptQueue: base.promptQueue
         ? {
             ...base.promptQueue,
             processing: processingBySession.get(row.sessionId) ?? false,
           }
-        : null,
-      pendingPermission:
-        pendingPermissionBySession.get(row.sessionId) ?? false
-          ? base.pendingPermission
-          : null,
+        : {
+            processing: processingBySession.get(row.sessionId) ?? false,
+            paused: false,
+            items: [],
+            size: 0,
+          },
+      pendingPermission: pendingPermissionBySession.get(row.sessionId) ?? null,
     };
   });
 
