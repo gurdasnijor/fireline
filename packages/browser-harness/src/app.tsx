@@ -117,7 +117,7 @@ export function App() {
             borderRight: '1px solid #1f2a44',
           }}
         >
-          <HarnessHeader />
+          <HarnessHeader stateStreamUrl={stateStreamUrl} />
           <SessionHarness
             dbActive={dbEnabled}
             dbReady={dbReady}
@@ -146,7 +146,11 @@ export function App() {
   )
 }
 
-function HarnessHeader() {
+function HarnessHeader({ stateStreamUrl }: { stateStreamUrl: string | null }) {
+  const stateStreamLabel = stateStreamUrl
+    ? formatEndpointPath(stateStreamUrl)
+    : `provisioned handle.state.url (harness default: /v1/stream/${STATE_STREAM_NAME})`
+
   return (
     <div
       style={{
@@ -160,8 +164,8 @@ function HarnessHeader() {
         Fireline Browser Harness
       </div>
       <div style={{ marginTop: 6, fontSize: 12, color: '#95a2c0' }}>
-        Live ACP over <code>/acp</code> plus durable state over{' '}
-        <code>/v1/stream/{STATE_STREAM_NAME}</code>.
+        Live ACP over the provisioned <code>handle.acp.url</code> plus durable
+        state over <code>{stateStreamLabel}</code>.
       </div>
     </div>
   )
@@ -1094,6 +1098,15 @@ async function toText(data: Blob | ArrayBuffer | string): Promise<string> {
     return await data.text()
   }
   return new TextDecoder().decode(data)
+}
+
+function formatEndpointPath(url: string): string {
+  try {
+    const parsed = new URL(url)
+    return `${parsed.pathname}${parsed.search}`
+  } catch {
+    return url
+  }
 }
 
 function buttonStyle(background: string) {
