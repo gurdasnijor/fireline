@@ -18,14 +18,17 @@ use fireline_tools::CredentialRef;
 use serde::Deserialize;
 use sacp::schema::PromptRequest;
 use sacp::{Agent, Client, ConnectTo, Proxy};
+use tokio::sync::OnceCell;
 use zeroize::Zeroizing;
+
+type SessionEnvMap = HashMap<String, Arc<SecretValue>>;
 
 /// Harness-layer secret-resolution policy and cache.
 #[derive(Clone)]
 pub struct SecretsInjectionComponent {
     resolver: Arc<dyn CredentialResolver>,
     rules: Arc<[InjectionRule]>,
-    session_cache: Arc<Mutex<HashMap<String, HashMap<String, Arc<SecretValue>>>>>,
+    session_cache: Arc<Mutex<HashMap<String, Arc<OnceCell<SessionEnvMap>>>>>,
     once_cache: Arc<Mutex<HashMap<usize, Arc<SecretValue>>>>,
 }
 
@@ -47,43 +50,53 @@ impl SecretsInjectionComponent {
         &self,
         session_id: &str,
     ) -> Result<(), CredentialResolverError> {
-        if self.cached_session_env(session_id).is_some() || !self.has_session_env_rules() {
+        if !self.has_session_env_rules() {
             return Ok(());
         }
 
-        let mut resolved = HashMap::new();
-        for rule in self.rules.iter() {
-            let InjectionTarget::EnvVar(name) = &rule.target else {
-                continue;
-            };
-            if rule.scope != InjectionScope::Session {
-                continue;
+        let session_id = session_id.to_string();
+        let cell = self.session_env_cell(&session_id);
+        let resolver = self.resolver.clone();
+        let rules = self.rules.clone();
+        cell.get_or_try_init(|| async move {
+            let mut resolved = HashMap::new();
+            for rule in rules.iter() {
+                let InjectionTarget::EnvVar(name) = &rule.target else {
+                    continue;
+                };
+                if rule.scope != InjectionScope::Session {
+                    continue;
+                }
+                let value = Arc::new(resolver.resolve(&rule.credential_ref, &session_id).await?);
+                resolved.insert(name.clone(), value);
             }
-            let value = Arc::new(self.resolver.resolve(&rule.credential_ref, session_id).await?);
-            resolved.insert(name.clone(), value);
-        }
-
-        let mut session_cache = self
-            .session_cache
-            .lock()
-            .expect("secrets session cache poisoned");
-        let entry = session_cache.entry(session_id.to_string()).or_default();
-        for (name, value) in resolved {
-            entry.entry(name).or_insert(value);
-        }
+            Ok(resolved)
+        })
+        .await?;
         Ok(())
     }
 
-    pub fn session_env(&self, session_id: &str) -> HashMap<String, Arc<SecretValue>> {
+    pub fn session_env(&self, session_id: &str) -> SessionEnvMap {
         self.cached_session_env(session_id).unwrap_or_default()
     }
 
-    fn cached_session_env(&self, session_id: &str) -> Option<HashMap<String, Arc<SecretValue>>> {
-        self.session_cache
+    fn cached_session_env(&self, session_id: &str) -> Option<SessionEnvMap> {
+        let cell = self
+            .session_cache
             .lock()
             .expect("secrets session cache poisoned")
             .get(session_id)
-            .cloned()
+            .cloned()?;
+        cell.get().cloned()
+    }
+
+    fn session_env_cell(&self, session_id: &str) -> Arc<OnceCell<SessionEnvMap>> {
+        self.session_cache
+            .lock()
+            .expect("secrets session cache poisoned")
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .clone()
     }
 
     fn has_session_env_rules(&self) -> bool {
@@ -401,7 +414,9 @@ mod tests {
     use fireline_tools::CredentialRef;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::sync::Notify;
 
     #[test]
     fn secret_value_debug_is_redacted() {
@@ -596,6 +611,49 @@ work = "gho_work"
         assert_eq!(resolver.call_count(), 2);
     }
 
+    #[tokio::test]
+    async fn concurrent_pre_resolve_session_env_shares_one_resolution() {
+        let resolver = Arc::new(BlockingResolver::new("resolved-token"));
+        let component = Arc::new(SecretsInjectionComponent::new(
+            resolver.clone(),
+            vec![InjectionRule {
+                target: InjectionTarget::EnvVar("OPENAI_API_KEY".to_string()),
+                credential_ref: CredentialRef::Secret {
+                    key: "openai_api_key".to_string(),
+                },
+                scope: InjectionScope::Session,
+            }],
+        ));
+
+        let first = {
+            let component = component.clone();
+            tokio::spawn(async move { component.pre_resolve_session_env("sess-1").await })
+        };
+
+        resolver.wait_until_first_entered().await;
+
+        let second = {
+            let component = component.clone();
+            tokio::spawn(async move { component.pre_resolve_session_env("sess-1").await })
+        };
+
+        tokio::task::yield_now().await;
+        resolver.release_first();
+
+        first.await.expect("first join").expect("first resolve");
+        second.await.expect("second join").expect("second resolve");
+
+        assert_eq!(resolver.call_count(), 1);
+        assert_eq!(
+            component
+                .session_env("sess-1")
+                .get("OPENAI_API_KEY")
+                .expect("env entry")
+                .expose(),
+            "resolved-token"
+        );
+    }
+
     fn write_temp_file(contents: &str) -> PathBuf {
         let path = unique_temp_path();
         std::fs::write(&path, contents).expect("write temp secrets file");
@@ -642,6 +700,53 @@ work = "gho_work"
         ) -> Result<SecretValue, CredentialResolverError> {
             let mut calls = self.calls.lock().expect("counting resolver poisoned");
             *calls += 1;
+            Ok(SecretValue::new(self.value.clone()))
+        }
+    }
+
+    #[derive(Debug)]
+    struct BlockingResolver {
+        value: String,
+        calls: AtomicUsize,
+        first_entered: Notify,
+        release_first: Notify,
+    }
+
+    impl BlockingResolver {
+        fn new(value: &str) -> Self {
+            Self {
+                value: value.to_string(),
+                calls: AtomicUsize::new(0),
+                first_entered: Notify::new(),
+                release_first: Notify::new(),
+            }
+        }
+
+        async fn wait_until_first_entered(&self) {
+            self.first_entered.notified().await;
+        }
+
+        fn release_first(&self) {
+            self.release_first.notify_one();
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl CredentialResolver for BlockingResolver {
+        async fn resolve(
+            &self,
+            _credential_ref: &CredentialRef,
+            _session_id: &str,
+        ) -> Result<SecretValue, CredentialResolverError> {
+            let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call_index == 0 {
+                self.first_entered.notify_one();
+                self.release_first.notified().await;
+            }
             Ok(SecretValue::new(self.value.clone()))
         }
     }
