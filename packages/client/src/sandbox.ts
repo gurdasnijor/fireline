@@ -9,13 +9,31 @@ import type {
   SandboxHandle,
 } from './types.js'
 
+/**
+ * Connection settings for the Fireline host that provisions sandboxes.
+ *
+ * @example `const client = new Sandbox({ serverUrl: 'http://127.0.0.1:4440' })`
+ *
+ * @remarks Anthropic primitive: Sandbox.
+ */
 export interface SandboxClientOptions {
+  /** Base URL for the Fireline host or control plane. */
   readonly serverUrl: string
+  /** Optional bearer token forwarded to the host on every request. */
   readonly token?: string
 }
 
+/**
+ * Control-plane client for provisioning sandboxes from harness configs.
+ *
+ * @example `const handle = await new Sandbox({ serverUrl }).provision(config)`
+ *
+ * @remarks Anthropic primitive: Sandbox.
+ */
 export class Sandbox {
+  /** Base URL for the Fireline host or control plane. */
   readonly serverUrl: string
+  /** Optional bearer token forwarded to the host on every request. */
   readonly token?: string
 
   constructor(options: SandboxClientOptions) {
@@ -23,6 +41,13 @@ export class Sandbox {
     this.token = options.token
   }
 
+  /**
+   * Provisions a sandbox for the supplied harness config and returns ACP/state endpoints.
+   *
+   * @example `const handle = await client.provision(compose(sandbox(), [trace()], agent(['node', 'agent.mjs'])))`
+   *
+   * @remarks Anthropic primitive: Sandbox.
+   */
   async provision(config: SandboxConfig): Promise<SandboxHandle> {
     const request = buildProvisionRequest(config)
 
@@ -60,6 +85,13 @@ export class Sandbox {
   }
 }
 
+/**
+ * Creates a serializable agent process definition for `compose()`.
+ *
+ * @example `const cfg = agent(['npx', '-y', '@anthropic-ai/claude-code-acp'])`
+ *
+ * @remarks Anthropic primitive: Harness.
+ */
 export function agent(command: readonly string[]): AgentConfig {
   return {
     kind: 'agent',
@@ -67,6 +99,13 @@ export function agent(command: readonly string[]): AgentConfig {
   }
 }
 
+/**
+ * Creates a serializable sandbox definition for `compose()`.
+ *
+ * @example `const cfg = sandbox({ resources: [], provider: 'local' })`
+ *
+ * @remarks Anthropic primitive: Sandbox.
+ */
 export function sandbox(config: Omit<SandboxDefinition, 'kind'> = {}): SandboxDefinition {
   return {
     kind: 'sandbox',
@@ -74,6 +113,13 @@ export function sandbox(config: Omit<SandboxDefinition, 'kind'> = {}): SandboxDe
   }
 }
 
+/**
+ * Composes sandbox, middleware, and agent specs into a runnable harness config.
+ *
+ * @example `const config = compose(sandbox(), [trace()], agent(['node', 'agent.mjs']))`
+ *
+ * @remarks Anthropic primitive: Harness.
+ */
 export function compose(
   sandboxConfig: SandboxDefinition,
   middleware: readonly Middleware[],
