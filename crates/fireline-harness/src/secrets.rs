@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use fireline_tools::CredentialRef;
 use serde::Deserialize;
+use sacp::schema::PromptRequest;
+use sacp::{Agent, Client, ConnectTo, Proxy};
 use zeroize::Zeroizing;
 
 /// Harness-layer secret-resolution policy and cache.
@@ -41,18 +43,82 @@ impl SecretsInjectionComponent {
         &self.rules
     }
 
-    pub(crate) fn resolver(&self) -> &Arc<dyn CredentialResolver> {
-        &self.resolver
-    }
-
-    pub(crate) fn session_cache(
+    pub async fn pre_resolve_session_env(
         &self,
-    ) -> &Arc<Mutex<HashMap<String, HashMap<String, Arc<SecretValue>>>>> {
-        &self.session_cache
+        session_id: &str,
+    ) -> Result<(), CredentialResolverError> {
+        if self.cached_session_env(session_id).is_some() || !self.has_session_env_rules() {
+            return Ok(());
+        }
+
+        let mut resolved = HashMap::new();
+        for rule in self.rules.iter() {
+            let InjectionTarget::EnvVar(name) = &rule.target else {
+                continue;
+            };
+            if rule.scope != InjectionScope::Session {
+                continue;
+            }
+            let value = Arc::new(self.resolver.resolve(&rule.credential_ref, session_id).await?);
+            resolved.insert(name.clone(), value);
+        }
+
+        let mut session_cache = self
+            .session_cache
+            .lock()
+            .expect("secrets session cache poisoned");
+        let entry = session_cache.entry(session_id.to_string()).or_default();
+        for (name, value) in resolved {
+            entry.entry(name).or_insert(value);
+        }
+        Ok(())
     }
 
-    pub(crate) fn once_cache(&self) -> &Arc<Mutex<HashMap<usize, Arc<SecretValue>>>> {
-        &self.once_cache
+    pub fn session_env(&self, session_id: &str) -> HashMap<String, Arc<SecretValue>> {
+        self.cached_session_env(session_id).unwrap_or_default()
+    }
+
+    fn cached_session_env(&self, session_id: &str) -> Option<HashMap<String, Arc<SecretValue>>> {
+        self.session_cache
+            .lock()
+            .expect("secrets session cache poisoned")
+            .get(session_id)
+            .cloned()
+    }
+
+    fn has_session_env_rules(&self) -> bool {
+        self.rules.iter().any(|rule| {
+            matches!(rule.target, InjectionTarget::EnvVar(_))
+                && rule.scope == InjectionScope::Session
+        })
+    }
+}
+
+impl ConnectTo<sacp::Conductor> for SecretsInjectionComponent {
+    async fn connect_to(self, client: impl ConnectTo<Proxy>) -> Result<(), sacp::Error> {
+        let this = self.clone();
+        sacp::Proxy
+            .builder()
+            .name("fireline-secrets")
+            .on_receive_request_from(
+                Client,
+                {
+                    let this = this.clone();
+                    async move |request: PromptRequest, responder, cx| {
+                        let session_id = request.session_id.to_string();
+                        this.pre_resolve_session_env(&session_id).await.map_err(|error| {
+                            sacp::util::internal_error(format!(
+                                "secrets_injection: session {session_id} env resolution failed: {error}"
+                            ))
+                        })?;
+                        cx.send_request_to(Agent, request)
+                            .forward_response_to(responder)
+                    }
+                },
+                sacp::on_receive_request!(),
+            )
+            .connect_to(client)
+            .await
     }
 }
 
@@ -329,10 +395,12 @@ fn normalize_env_name(value: &str) -> String {
 mod tests {
     use super::{
         CredentialResolver, CredentialResolverError, LocalCredentialResolver, SecretValue,
+        SecretsInjectionComponent, InjectionRule, InjectionScope, InjectionTarget,
         normalize_env_name, oauth_env_var_name, secret_env_var_name,
     };
     use fireline_tools::CredentialRef;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -456,6 +524,78 @@ work = "gho_work"
         );
     }
 
+    #[tokio::test]
+    async fn pre_resolve_session_env_caches_values_once_per_session() {
+        let resolver = Arc::new(CountingResolver::new("resolved-token"));
+        let component = SecretsInjectionComponent::new(
+            resolver.clone(),
+            vec![
+                InjectionRule {
+                    target: InjectionTarget::EnvVar("OPENAI_API_KEY".to_string()),
+                    credential_ref: CredentialRef::Secret {
+                        key: "openai_api_key".to_string(),
+                    },
+                    scope: InjectionScope::Session,
+                },
+                InjectionRule {
+                    target: InjectionTarget::ToolArg {
+                        tool: "call_api".to_string(),
+                        arg_path: "$.token".to_string(),
+                    },
+                    credential_ref: CredentialRef::Secret {
+                        key: "unused".to_string(),
+                    },
+                    scope: InjectionScope::PerCall,
+                },
+            ],
+        );
+
+        component
+            .pre_resolve_session_env("sess-1")
+            .await
+            .expect("first resolution should succeed");
+        component
+            .pre_resolve_session_env("sess-1")
+            .await
+            .expect("cached resolution should succeed");
+
+        let env = component.session_env("sess-1");
+        assert_eq!(env.len(), 1);
+        assert_eq!(
+            env.get("OPENAI_API_KEY").expect("env entry").expose(),
+            "resolved-token"
+        );
+        assert_eq!(resolver.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn pre_resolve_session_env_isolated_by_session_id() {
+        let resolver = Arc::new(CountingResolver::new("resolved-token"));
+        let component = SecretsInjectionComponent::new(
+            resolver.clone(),
+            vec![InjectionRule {
+                target: InjectionTarget::EnvVar("OPENAI_API_KEY".to_string()),
+                credential_ref: CredentialRef::Secret {
+                    key: "openai_api_key".to_string(),
+                },
+                scope: InjectionScope::Session,
+            }],
+        );
+
+        component
+            .pre_resolve_session_env("sess-1")
+            .await
+            .expect("first session should resolve");
+        component
+            .pre_resolve_session_env("sess-2")
+            .await
+            .expect("second session should resolve");
+
+        assert_eq!(component.session_env("sess-1").len(), 1);
+        assert_eq!(component.session_env("sess-2").len(), 1);
+        assert_eq!(resolver.call_count(), 2);
+    }
+
     fn write_temp_file(contents: &str) -> PathBuf {
         let path = unique_temp_path();
         std::fs::write(&path, contents).expect("write temp secrets file");
@@ -472,5 +612,37 @@ work = "gho_work"
             .expect("system time")
             .as_nanos();
         std::env::temp_dir().join(format!("fireline-secrets-{nanos}.toml"))
+    }
+
+    #[derive(Debug)]
+    struct CountingResolver {
+        value: String,
+        calls: Mutex<usize>,
+    }
+
+    impl CountingResolver {
+        fn new(value: &str) -> Self {
+            Self {
+                value: value.to_string(),
+                calls: Mutex::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            *self.calls.lock().expect("counting resolver poisoned")
+        }
+    }
+
+    #[async_trait]
+    impl CredentialResolver for CountingResolver {
+        async fn resolve(
+            &self,
+            _credential_ref: &CredentialRef,
+            _session_id: &str,
+        ) -> Result<SecretValue, CredentialResolverError> {
+            let mut calls = self.calls.lock().expect("counting resolver poisoned");
+            *calls += 1;
+            Ok(SecretValue::new(self.value.clone()))
+        }
     }
 }
