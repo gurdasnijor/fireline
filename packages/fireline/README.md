@@ -5,7 +5,8 @@ boots a durable-streams server, a Fireline control plane, and provisions
 the sandbox defined by the spec's default export. Any ACP client can
 then connect to the printed URL. It also ships a `build` subcommand
 that emits a hosted Fireline OCI image locally and can scaffold
-target-specific deployment files.
+target-specific deployment files, plus a thin `deploy` wrapper that
+hands the image off to target-native tooling.
 
 ## Usage
 
@@ -27,6 +28,12 @@ npx fireline build agent.ts
 
 # Build and scaffold a target descriptor
 npx fireline build agent.ts --target fly
+
+# Build, generate a deploy manifest, and hand off to Fly.io
+npx fireline deploy agent.ts --to fly
+
+# Pass extra flags straight through to the native deploy tool
+npx fireline deploy agent.ts --to k8s -- --namespace fireline
 ```
 
 ## Spec shape
@@ -56,9 +63,11 @@ be invoked with `npx tsx` directly.
   `npx tsx examples/<name>/index.ts` (unchanged).
 - `fireline build` shells out to `docker build` against the hosted
   Dockerfile in `docker/` and passes the serialized spec as a build arg.
-- `fireline deploy --to <platform>` and `fireline push` are deferred to
-  later phases. The current CLI does not talk to a Fireline-owned deploy
-  endpoint.
+- `fireline deploy` is a thin wrapper over target-native CLIs:
+  `flyctl deploy`, `wrangler deploy`, `docker compose up -d`, or
+  `kubectl apply -f <generated>`. It does not talk to a Fireline-owned
+  deploy endpoint.
+- `fireline push` is still deferred to a later phase.
 - The `--repl` flag is still a stub. For now, connect any ACP client to
   the printed ACP URL.
 
