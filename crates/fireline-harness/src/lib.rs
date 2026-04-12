@@ -6,6 +6,7 @@ pub mod budget;
 pub mod context;
 pub mod routes_acp;
 mod runtime_topology;
+pub mod secrets;
 pub mod shared_terminal;
 pub mod state_projector;
 pub mod topology;
@@ -19,6 +20,10 @@ pub use budget::{BudgetAction, BudgetComponent, BudgetConfig};
 pub use context::{
     ContextConfig, ContextInjectionComponent, ContextPlacement, ContextSource, DatetimeSource,
     WorkspaceFileSource,
+};
+pub use secrets::{
+    CredentialResolver, CredentialResolverError, InjectionRule, InjectionScope, InjectionTarget,
+    SecretValue, SecretsInjectionComponent,
 };
 pub use routes_acp::{AcpRouteState, BaseComponentsFactory};
 pub use shared_terminal::{AttachError, SharedTerminal, SharedTerminalAttachment};
