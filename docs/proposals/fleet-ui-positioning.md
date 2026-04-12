@@ -1,5 +1,9 @@
 # Fleet UI Positioning
 
+> **⚠️ SUPERSEDED / RETRACTED 2026-04-12.** This item (#8 in the master roadmap) was retracted per user + Opus 1 feedback: `examples/flamecast-client/` stays an **example** (it's the demo proving Fireline shrinks Flamecast's 5300-line codebase to ~200 lines), NOT a product Fireline ships. The real gap is **observability + OTel integration** — Fireline emits OTel spans; users pick their own dashboard (Jaeger / Tempo / Honeycomb / Datadog / etc.). A replacement proposal, `observability-integration.md`, will cover: which spans Fireline emits, which attributes, OTLP export config, recommended backends for the pi-acp → OpenClaw demo visualization. Content below retained for audit trail.
+>
+> ---
+>
 > Status: decision doc
 > Date: 2026-04-12
 > Scope: packaging direction for the existing observation UI and trace-backend choice for fleet lineage
