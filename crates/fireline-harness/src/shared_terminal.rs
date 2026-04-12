@@ -8,6 +8,7 @@ use std::io;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use fireline_tools::agent_catalog::resolve_agent_launch_command;
 use sacp::{Client, ConnectTo, Lines};
 use sacp_tokio::AcpAgent;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -60,7 +61,10 @@ pub struct SharedTerminalAttachment {
 
 impl SharedTerminal {
     pub async fn spawn(agent_command: Vec<String>) -> Result<Self> {
-        let agent = AcpAgent::from_args(agent_command)
+        let resolved_agent_command = resolve_agent_launch_command(agent_command)
+            .await
+            .context("resolve agent command for shared terminal launch")?;
+        let agent = AcpAgent::from_args(resolved_agent_command)
             .map_err(|e| anyhow::anyhow!("agent command: {e}"))?;
         let (stdin, stdout, stderr, child) = agent
             .spawn_process()

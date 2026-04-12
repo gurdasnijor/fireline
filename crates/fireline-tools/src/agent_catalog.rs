@@ -13,6 +13,9 @@ use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use tokio::fs;
+use uuid::Uuid;
 
 pub const REGISTRY_URL: &str =
     "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
@@ -273,6 +276,92 @@ pub fn is_installed(agent_id: &str) -> Result<bool> {
     Ok(installed_command_path(agent_id)?.exists())
 }
 
+pub async fn install_agent_by_id(id: &str) -> Result<PathBuf> {
+    let client = AgentCatalogClient::new()?;
+    if let Ok(cached) = client.load_cached() {
+        if let Some(agent) = cached.lookup(id) {
+            return install_agent(agent).await;
+        }
+
+        let refreshed = client.fetch_and_cache().await.with_context(|| {
+            format!(
+                "cached ACP registry does not contain '{id}' and refreshing the registry failed"
+            )
+        })?;
+        let agent = refreshed
+            .lookup(id)
+            .ok_or_else(|| anyhow!("ACP registry does not contain an agent with id '{id}'"))?;
+        return install_agent(agent).await;
+    }
+
+    let catalog = client
+        .fetch_and_cache()
+        .await
+        .with_context(|| format!("fetch ACP registry while resolving '{id}'"))?;
+    let agent = catalog
+        .lookup(id)
+        .ok_or_else(|| anyhow!("ACP registry does not contain an agent with id '{id}'"))?;
+    install_agent(agent).await
+}
+
+pub async fn install_agent(agent: &RemoteAgent) -> Result<PathBuf> {
+    fs::create_dir_all(install_bin_dir()?)
+        .await
+        .context("create managed ACP agent bin directory")?;
+
+    let install_path = installed_command_path(&agent.id)?;
+    match agent.install_plan()? {
+        InstallPlan::PackageCommand {
+            launcher,
+            package,
+            args,
+            env,
+        } => {
+            write_wrapper(
+                &install_path,
+                launcher,
+                &package,
+                &args,
+                &env,
+                &agent.id,
+            )
+            .await?;
+        }
+        InstallPlan::BinaryArchive { archive, command } => {
+            install_binary_archive(agent, &archive, &command, &install_path).await?;
+        }
+    }
+
+    Ok(install_path)
+}
+
+pub async fn resolve_agent_launch_command(agent_command: Vec<String>) -> Result<Vec<String>> {
+    let Some(token) = agent_command.first().cloned() else {
+        return Ok(agent_command);
+    };
+
+    if agent_command.len() != 1 || is_explicit_path_like(&token) {
+        return Ok(agent_command);
+    }
+
+    let installed_path = installed_command_path(&token)?;
+    if installed_path.exists() {
+        return Ok(vec![installed_path.to_string_lossy().into_owned()]);
+    }
+
+    if command_exists_on_path(&token) {
+        return Ok(agent_command);
+    }
+
+    let installed = install_agent_by_id(&token).await.map_err(|error| {
+        anyhow!(
+            "single-token agent command '{token}' was not found locally and ACP registry fallback failed: {error:#}\nHint: run `fireline-agents add {token}` manually or use an explicit command array."
+        )
+    })?;
+
+    Ok(vec![installed.to_string_lossy().into_owned()])
+}
+
 pub fn current_binary_platform() -> Result<String> {
     let os = match std::env::consts::OS {
         "macos" => "darwin",
@@ -305,6 +394,293 @@ fn installed_executable_name(agent_id: &str) -> String {
     {
         agent_id.to_string()
     }
+}
+
+async fn install_binary_archive(
+    agent: &RemoteAgent,
+    archive_url: &str,
+    command: &str,
+    install_path: &Path,
+) -> Result<()> {
+    let agent_dir = install_agent_dir(&agent.id)?;
+    if agent_dir.exists() {
+        std::fs::remove_dir_all(&agent_dir)
+            .with_context(|| format!("remove prior install dir {}", agent_dir.display()))?;
+    }
+    fs::create_dir_all(&agent_dir)
+        .await
+        .with_context(|| format!("create install dir {}", agent_dir.display()))?;
+
+    let http = HttpClient::builder()
+        .user_agent("fireline-agents/0.0.1")
+        .build()
+        .context("build HTTP client for agent download")?;
+    let bytes = http
+        .get(archive_url)
+        .send()
+        .await
+        .with_context(|| format!("download archive for {}", agent.id))?
+        .error_for_status()
+        .with_context(|| format!("agent archive request failed for {}", agent.id))?
+        .bytes()
+        .await
+        .with_context(|| format!("read downloaded archive for {}", agent.id))?;
+
+    let archive_path = std::env::temp_dir().join(format!(
+        "fireline-agent-{}-{}{}",
+        agent.id,
+        Uuid::new_v4(),
+        archive_extension(archive_url)
+    ));
+    fs::write(&archive_path, &bytes)
+        .await
+        .with_context(|| format!("write temp archive {}", archive_path.display()))?;
+
+    extract_archive(&archive_path, &agent_dir)?;
+
+    let target = normalized_relative_command(command);
+    let target_path = agent_dir.join(&target);
+    if !target_path.exists() {
+        anyhow::bail!(
+            "archive for '{}' extracted successfully but expected command '{}' was not found",
+            agent.id,
+            target_path.display()
+        );
+    }
+
+    write_binary_wrapper(install_path, &target_path, &agent.id).await?;
+
+    let _ = fs::remove_file(&archive_path).await;
+    Ok(())
+}
+
+fn extract_archive(archive_path: &Path, install_dir: &Path) -> Result<()> {
+    let archive = archive_path.to_string_lossy().to_string();
+    let install_dir = install_dir.to_string_lossy().to_string();
+    let status = if archive.ends_with(".tar.gz") || archive.ends_with(".tgz") {
+        Command::new("tar")
+            .args(["-xzf", &archive, "-C", &install_dir])
+            .status()
+            .context("spawn tar for ACP agent archive extraction")?
+    } else if archive.ends_with(".zip") {
+        Command::new("unzip")
+            .args(["-o", &archive, "-d", &install_dir])
+            .status()
+            .context("spawn unzip for ACP agent archive extraction")?
+    } else {
+        anyhow::bail!(
+            "unsupported ACP agent archive format: {}",
+            archive_path.display()
+        );
+    };
+
+    if !status.success() {
+        anyhow::bail!(
+            "archive extraction failed for {} with status {}",
+            archive_path.display(),
+            status
+        );
+    }
+
+    Ok(())
+}
+
+async fn write_wrapper(
+    install_path: &Path,
+    launcher: LauncherKind,
+    package: &str,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+    agent_id: &str,
+) -> Result<()> {
+    #[cfg(windows)]
+    let script = build_windows_package_wrapper(launcher, package, args, env);
+    #[cfg(not(windows))]
+    let script = build_unix_package_wrapper(launcher, package, args, env);
+
+    fs::write(install_path, script)
+        .await
+        .with_context(|| format!("write launcher wrapper for {agent_id}"))?;
+    make_executable(install_path)?;
+    Ok(())
+}
+
+async fn write_binary_wrapper(
+    install_path: &Path,
+    target_path: &Path,
+    agent_id: &str,
+) -> Result<()> {
+    #[cfg(windows)]
+    let script = format!("@echo off\r\n\"{}\" %*\r\n", target_path.display());
+    #[cfg(not(windows))]
+    let script = format!(
+        "#!/usr/bin/env bash\nset -euo pipefail\nexec \"{}\" \"$@\"\n",
+        target_path.display()
+    );
+
+    fs::write(install_path, script)
+        .await
+        .with_context(|| format!("write binary wrapper for {agent_id}"))?;
+    make_executable(install_path)?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn build_unix_package_wrapper(
+    launcher: LauncherKind,
+    package: &str,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+) -> String {
+    let mut script = String::from("#!/usr/bin/env bash\nset -euo pipefail\n");
+    for (key, value) in env {
+        script.push_str(&format!(
+            "export {}={}\n",
+            key,
+            shell_escape_unix(value)
+        ));
+    }
+    let extra_args = args
+        .iter()
+        .map(|arg| shell_escape_unix(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let yes = match launcher {
+        LauncherKind::Npx => " -y",
+        LauncherKind::Uvx => "",
+    };
+    let tail = if extra_args.is_empty() {
+        String::new()
+    } else {
+        format!(" {extra_args}")
+    };
+    script.push_str(&format!(
+        "exec {}{} {}{} \"$@\"\n",
+        launcher.executable(),
+        yes,
+        shell_escape_unix(package),
+        tail
+    ));
+    script
+}
+
+#[cfg(windows)]
+fn build_windows_package_wrapper(
+    launcher: LauncherKind,
+    package: &str,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+) -> String {
+    let mut script = String::from("@echo off\r\n");
+    for (key, value) in env {
+        script.push_str(&format!("set {}={}\r\n", key, value));
+    }
+    let extra_args = args.join(" ");
+    let yes = match launcher {
+        LauncherKind::Npx => " -y",
+        LauncherKind::Uvx => "",
+    };
+    let tail = if extra_args.is_empty() {
+        String::new()
+    } else {
+        format!(" {extra_args}")
+    };
+    script.push_str(&format!(
+        "{}{} {}{} %*\r\n",
+        launcher.executable(),
+        yes,
+        package,
+        tail
+    ));
+    script
+}
+
+#[cfg(not(windows))]
+fn make_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("read wrapper metadata {}", path.display()))?;
+    let mut perms = metadata.permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms)
+        .with_context(|| format!("mark wrapper executable {}", path.display()))
+}
+
+#[cfg(windows)]
+fn make_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn archive_extension(url: &str) -> &'static str {
+    if url.ends_with(".tar.gz") {
+        ".tar.gz"
+    } else if url.ends_with(".tgz") {
+        ".tgz"
+    } else if url.ends_with(".zip") {
+        ".zip"
+    } else {
+        ".bin"
+    }
+}
+
+fn normalized_relative_command(command: &str) -> PathBuf {
+    let trimmed = command.strip_prefix("./").unwrap_or(command);
+    PathBuf::from(trimmed)
+}
+
+fn is_explicit_path_like(command: &str) -> bool {
+    let path = Path::new(command);
+    path.is_absolute() || path.components().count() > 1
+}
+
+fn command_exists_on_path(command: &str) -> bool {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let path_exts = windows_path_exts();
+
+    std::env::split_paths(&paths).any(|dir| {
+        if command_has_known_extension(command) {
+            dir.join(command).is_file()
+        } else {
+            candidate_names(command, &path_exts)
+                .into_iter()
+                .any(|candidate| dir.join(candidate).is_file())
+        }
+    })
+}
+
+#[cfg(windows)]
+fn windows_path_exts() -> Vec<String> {
+    std::env::var("PATHEXT")
+        .ok()
+        .map(|value| value.split(';').map(|part| part.to_ascii_lowercase()).collect())
+        .unwrap_or_else(|| vec![".exe".to_string(), ".cmd".to_string(), ".bat".to_string()])
+}
+
+#[cfg(not(windows))]
+fn windows_path_exts() -> Vec<String> {
+    Vec::new()
+}
+
+fn candidate_names(command: &str, path_exts: &[String]) -> Vec<String> {
+    if path_exts.is_empty() {
+        return vec![command.to_string()];
+    }
+    let mut names = Vec::with_capacity(path_exts.len() + 1);
+    names.push(command.to_string());
+    names.extend(path_exts.iter().map(|ext| format!("{command}{ext}")));
+    names
+}
+
+fn command_has_known_extension(command: &str) -> bool {
+    Path::new(command).extension().is_some()
+}
+
+#[cfg(not(windows))]
+fn shell_escape_unix(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(test)]
@@ -427,6 +803,18 @@ mod tests {
             rendered.contains("fireline/agents/bin") || rendered.contains("fireline\\agents\\bin"),
             "managed install path should live under fireline/agents/bin, got {rendered}",
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_launch_command_leaves_multi_token_commands_untouched() {
+        let command = vec!["node".to_string(), "agent.mjs".to_string()];
+        assert_eq!(resolve_agent_launch_command(command.clone()).await.unwrap(), command);
+    }
+
+    #[tokio::test]
+    async fn resolve_launch_command_leaves_explicit_paths_untouched() {
+        let command = vec!["./pi-acp".to_string()];
+        assert_eq!(resolve_agent_launch_command(command.clone()).await.unwrap(), command);
     }
 
     async fn serve_registry_once(body: &'static str) -> String {
