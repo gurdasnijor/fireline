@@ -717,6 +717,45 @@ pub(crate) async fn prompt_session(acp_url: &str, session_id: &str, text: &str) 
         .map_err(anyhow::Error::from)
 }
 
+#[instrument(skip(text), fields(acp_url, session_id))]
+pub(crate) async fn prompt_session_result(
+    acp_url: &str,
+    session_id: &str,
+    text: &str,
+) -> Result<Result<agent_client_protocol::PromptResponse, sacp::Error>> {
+    let session_id = session_id.to_string();
+    let text = text.to_string();
+    sacp::Client
+        .builder()
+        .connect_with(
+            WebSocketTransport {
+                url: acp_url.to_string(),
+            },
+            move |cx: sacp::ConnectionTo<sacp::Agent>| {
+                let session_id = session_id.clone();
+                let text = text.clone();
+                async move {
+                    let _ = cx
+                        .send_request(agent_client_protocol::InitializeRequest::new(
+                            agent_client_protocol::ProtocolVersion::LATEST,
+                        ))
+                        .block_task()
+                        .await?;
+
+                    Ok(cx
+                        .send_request(agent_client_protocol::PromptRequest::new(
+                            session_id,
+                            vec![text.into()],
+                        ))
+                        .block_task()
+                        .await)
+                }
+            },
+        )
+        .await
+        .map_err(anyhow::Error::from)
+}
+
 impl sacp::ConnectTo<sacp::Client> for WebSocketTransport {
     async fn connect_to(
         self,

@@ -41,6 +41,7 @@ use sacp::schema::{ContentBlock, PromptRequest};
 use sacp::{Agent, Client, ConnectTo, Proxy};
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Default)]
 pub struct ApprovalConfig {
@@ -122,7 +123,13 @@ pub struct ApprovalGateComponent {
     state_producer: Option<Producer>,
     approval_timeout: Option<Duration>,
     approved_sessions: Arc<Mutex<HashSet<String>>>,
-    pending_sessions: Arc<Mutex<HashMap<String, String>>>,
+    pending_sessions: Arc<Mutex<HashMap<String, PendingApproval>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingApproval {
+    request_id: String,
+    reason: String,
 }
 
 impl ApprovalGateComponent {
@@ -173,6 +180,30 @@ impl ApprovalGateComponent {
             .join(" ")
     }
 
+    // The approval gate runs before the state projector materializes a
+    // prompt_turn row, so the final prompt_turn_id is not directly available
+    // here. Prefer a caller-supplied Fireline trace id when present because
+    // it becomes the downstream prompt_turn_id; otherwise fall back to a
+    // stable serialization of the prompt payload so replay of the same prompt
+    // in the same session resolves to the same approval request id.
+    fn prompt_identity(request: &PromptRequest) -> String {
+        request
+            .meta
+            .as_ref()
+            .and_then(fireline_trace_id)
+            .unwrap_or_else(|| {
+                serde_json::to_string(&request.prompt)
+                    .unwrap_or_else(|_| ApprovalGateComponent::join_prompt_text(request))
+            })
+    }
+
+    fn approval_request_id(request: &PromptRequest, policy_id: usize) -> String {
+        let prompt_identity = Self::prompt_identity(request);
+        let material = format!("{}:{policy_id}:{prompt_identity}", request.session_id);
+        let digest = Sha256::digest(material.as_bytes());
+        format!("{digest:x}")
+    }
+
     async fn rebuild_from_log(&self, session_id: &str) -> Result<(), sacp::Error> {
         let Some(state_stream_url) = &self.state_stream_url else {
             return Ok(());
@@ -188,7 +219,7 @@ impl ApprovalGateComponent {
                 sacp::util::internal_error(format!("approval log rebuild: {error}"))
             })?;
 
-        let mut pending_reason = None;
+        let mut pending = None;
         let mut approved = false;
         while let Some(chunk) = reader
             .next_chunk()
@@ -215,12 +246,25 @@ impl ApprovalGateComponent {
 
                 match value.get("kind").and_then(Value::as_str) {
                     Some("permission_request") => {
-                        pending_reason = value
+                        let Some(request_id) = value
+                            .get("requestId")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                        else {
+                            continue;
+                        };
+                        let Some(reason) = value
                             .get("reason")
                             .and_then(Value::as_str)
-                            .map(str::to_string);
+                            .map(str::to_string)
+                        else {
+                            continue;
+                        };
+                        approved = false;
+                        pending = Some(PendingApproval { request_id, reason });
                     }
                     Some("approval_resolved") => {
+                        pending = None;
                         approved = value.get("allow").and_then(Value::as_bool).unwrap_or(false);
                     }
                     _ => {}
@@ -241,11 +285,16 @@ impl ApprovalGateComponent {
                 .lock()
                 .expect("approval state poisoned")
                 .remove(session_id);
-        } else if let Some(reason) = pending_reason {
+        } else if let Some(pending) = pending {
             self.pending_sessions
                 .lock()
                 .expect("approval state poisoned")
-                .insert(session_id.to_string(), reason);
+                .insert(session_id.to_string(), pending);
+        } else {
+            self.pending_sessions
+                .lock()
+                .expect("approval state poisoned")
+                .remove(session_id);
         }
 
         Ok(())
@@ -384,6 +433,19 @@ fn approval_timeout_error(session_id: &str) -> sacp::Error {
     ))
 }
 
+fn fireline_trace_id(meta: &serde_json::Map<String, Value>) -> Option<String> {
+    meta.get("fireline")
+        .and_then(Value::as_object)
+        .and_then(|fireline| fireline.get("traceId"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            meta.get("fireline/trace-id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PermissionEvent {
@@ -433,39 +495,78 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                                 .forward_response_to(responder);
                         }
 
-                        let policy_match = this
-                            .config
-                            .policy_for_prompt(&prompt_text)
-                            .map(|policy| (policy.action, policy.reason.clone()));
+                        let policy_match =
+                            this.config.policies.iter().enumerate().find_map(|(policy_id, policy)| {
+                                policy
+                                    .match_rule
+                                    .matches_prompt(&prompt_text)
+                                    .then(|| (policy_id, policy.action, policy.reason.clone()))
+                            });
 
-                        let Some((action, reason)) = policy_match else {
+                        let Some((policy_id, action, reason)) = policy_match else {
                             return cx
                                 .send_request_to(Agent, request)
                                 .forward_response_to(responder);
                         };
 
                         match action {
-                            ApprovalAction::Deny => Err(sacp::util::internal_error(format!(
-                                "approval_gate denied prompt: {reason}"
-                            ))),
+                            ApprovalAction::Deny => responder.respond_with_error(
+                                sacp::util::internal_error(format!(
+                                    "approval_gate denied prompt: {reason}"
+                                )),
+                            ),
                             ApprovalAction::RequireApproval => {
-                                let request_id = uuid::Uuid::new_v4().to_string();
-                                this.pending_sessions
-                                    .lock()
-                                    .expect("approval state poisoned")
-                                    .insert(session_id.clone(), reason.clone());
-                                this.emit_permission_request(&session_id, &request_id, &reason)
-                                    .await?;
+                                let request_id =
+                                    ApprovalGateComponent::approval_request_id(&request, policy_id);
+                                let should_emit = {
+                                    let mut pending_sessions = this
+                                        .pending_sessions
+                                        .lock()
+                                        .expect("approval state poisoned");
+                                    let should_emit = pending_sessions
+                                        .get(&session_id)
+                                        .map(|pending| pending.request_id != request_id)
+                                        .unwrap_or(true);
+                                    pending_sessions.insert(
+                                        session_id.clone(),
+                                        PendingApproval {
+                                            request_id: request_id.clone(),
+                                            reason: reason.clone(),
+                                        },
+                                    );
+                                    should_emit
+                                };
+                                if should_emit {
+                                    if let Err(error) =
+                                        this.emit_permission_request(&session_id, &request_id, &reason)
+                                            .await
+                                    {
+                                        this.pending_sessions
+                                            .lock()
+                                            .expect("approval state poisoned")
+                                            .remove(&session_id);
+                                        return responder.respond_with_error(error);
+                                    }
+                                }
                                 let allowed =
-                                    this.wait_for_approval(&session_id, &request_id).await?;
+                                    match this.wait_for_approval(&session_id, &request_id).await {
+                                        Ok(allowed) => allowed,
+                                        Err(error) => {
+                                            this.pending_sessions
+                                                .lock()
+                                                .expect("approval state poisoned")
+                                                .remove(&session_id);
+                                            return responder.respond_with_error(error);
+                                        }
+                                    };
                                 this.pending_sessions
                                     .lock()
                                     .expect("approval state poisoned")
                                     .remove(&session_id);
                                 if !allowed {
-                                    return Err(sacp::util::internal_error(format!(
-                                        "approval_gate denied by approver: {reason}"
-                                    )));
+                                    return responder.respond_with_error(sacp::util::internal_error(
+                                        format!("approval_gate denied by approver: {reason}"),
+                                    ));
                                 }
                                 this.approved_sessions
                                     .lock()
@@ -506,7 +607,138 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::{Context, Result};
+    use axum::Router;
     use super::*;
+    use durable_streams::CreateOptions;
+    use tokio::sync::oneshot;
+
+    struct TestStreamServer {
+        base_url: String,
+        shutdown_tx: Option<oneshot::Sender<()>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl TestStreamServer {
+        async fn spawn() -> Result<Self> {
+            let router: Router = fireline_session::build_stream_router(None)?;
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .context("bind durable-streams test listener")?;
+            let addr = listener
+                .local_addr()
+                .context("resolve durable-streams test listener")?;
+            let (shutdown_tx, shutdown_rx) = oneshot::channel();
+            let task = tokio::spawn(async move {
+                let _ = axum::serve(listener, router)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await;
+            });
+            Ok(Self {
+                base_url: format!("http://127.0.0.1:{}/v1/stream", addr.port()),
+                shutdown_tx: Some(shutdown_tx),
+                task,
+            })
+        }
+
+        fn stream_url(&self, stream_name: &str) -> String {
+            format!("{}/{}", self.base_url.trim_end_matches('/'), stream_name)
+        }
+
+        async fn shutdown(mut self) {
+            if let Some(tx) = self.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+            let _ = self.task.await;
+        }
+    }
+
+    fn test_permission_producer(stream_url: &str) -> Producer {
+        let client = DurableStreamsClient::new();
+        let mut stream = client.stream(stream_url);
+        stream.set_content_type("application/json");
+        stream
+            .producer(format!("approval-test-writer-{}", uuid::Uuid::new_v4()))
+            .content_type("application/json")
+            .build()
+    }
+
+    async fn ensure_json_stream_exists(stream_url: &str) -> Result<()> {
+        let client = DurableStreamsClient::new();
+        let stream = client.stream(stream_url);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match stream
+                .create_with(CreateOptions::new().content_type("application/json"))
+                .await
+            {
+                Ok(_) | Err(durable_streams::StreamError::Conflict) => return Ok(()),
+                Err(error) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    tracing::debug!(?error, stream_url, "retrying approval test stream creation");
+                }
+                Err(error) => {
+                    return Err(anyhow::Error::from(error))
+                        .with_context(|| format!("create approval test stream '{stream_url}'"));
+                }
+            }
+        }
+    }
+
+    async fn append_approval_resolved_event(
+        producer: &Producer,
+        session_id: &str,
+        request_id: &str,
+        allow: bool,
+    ) -> Result<()> {
+        producer.append_json(&StateEnvelope {
+            entity_type: "permission",
+            key: format!("{session_id}:{request_id}:resolved"),
+            headers: StateHeaders {
+                operation: "insert",
+            },
+            value: PermissionEvent {
+                kind: "approval_resolved",
+                session_id: session_id.to_string(),
+                request_id: Some(request_id.to_string()),
+                allow: Some(allow),
+                resolved_by: Some("approval-test".to_string()),
+                reason: None,
+                created_at_ms: now_ms(),
+            },
+        });
+        producer
+            .flush()
+            .await
+            .context("flush approval_resolved test event")?;
+        Ok(())
+    }
+
+    async fn seed_permission_stream(producer: &Producer) -> Result<()> {
+        producer.append_json(&StateEnvelope {
+            entity_type: "permission",
+            key: "bootstrap".to_string(),
+            headers: StateHeaders {
+                operation: "insert",
+            },
+            value: PermissionEvent {
+                kind: "permission_request",
+                session_id: "bootstrap-session".to_string(),
+                request_id: Some("bootstrap-request".to_string()),
+                allow: None,
+                resolved_by: None,
+                reason: Some("bootstrap".to_string()),
+                created_at_ms: now_ms(),
+            },
+        });
+        producer
+            .flush()
+            .await
+            .context("flush approval bootstrap event")?;
+        Ok(())
+    }
 
     fn deny_policy(needle: &str, reason: &str) -> ApprovalPolicy {
         ApprovalPolicy {
@@ -581,5 +813,91 @@ mod tests {
         );
         let joined = ApprovalGateComponent::join_prompt_text(&request);
         assert_eq!(joined, "first second");
+    }
+
+    #[test]
+    fn approval_request_id_uses_fireline_trace_id_when_present() {
+        let mut fireline = serde_json::Map::new();
+        fireline.insert("traceId".to_string(), Value::String("trace-123".to_string()));
+        let mut meta = serde_json::Map::new();
+        meta.insert("fireline".to_string(), Value::Object(fireline));
+
+        let request = PromptRequest::new(
+            sacp::schema::SessionId::from("sess-1"),
+            vec![ContentBlock::from("same prompt".to_string())],
+        )
+        .meta(meta);
+
+        let first = ApprovalGateComponent::approval_request_id(&request, 0);
+        let second = ApprovalGateComponent::approval_request_id(&request, 0);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn approval_request_id_changes_with_policy_id() {
+        let request = PromptRequest::new(
+            sacp::schema::SessionId::from("sess-1"),
+            vec![ContentBlock::from("same prompt".to_string())],
+        );
+
+        let first = ApprovalGateComponent::approval_request_id(&request, 0);
+        let second = ApprovalGateComponent::approval_request_id(&request, 1);
+        assert_ne!(first, second);
+    }
+
+    #[tokio::test]
+    async fn concurrent_waiters_are_isolated_by_session_and_request_id() -> Result<()> {
+        let server = TestStreamServer::spawn().await?;
+        let stream_url = server.stream_url(&format!("approval-gate-{}", uuid::Uuid::new_v4()));
+        ensure_json_stream_exists(&stream_url).await?;
+        let producer = test_permission_producer(&stream_url);
+        seed_permission_stream(&producer).await?;
+        let gate = ApprovalGateComponent::with_stream_and_timeout(
+            ApprovalConfig::default(),
+            Some(stream_url),
+            None,
+            Some(Duration::from_secs(5)),
+        );
+
+        let waiter_a = tokio::spawn({
+            let gate = gate.clone();
+            async move { gate.wait_for_approval("session-a", "request-a").await }
+        });
+        let mut waiter_b = tokio::spawn({
+            let gate = gate.clone();
+            async move { gate.wait_for_approval("session-b", "request-b").await }
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        append_approval_resolved_event(&producer, "session-a", "request-a", true).await?;
+
+        let allow_a = tokio::time::timeout(Duration::from_secs(2), waiter_a)
+            .await
+            .context("session A waiter did not resolve after matching approval")?
+            .context("session A waiter panicked")??;
+        assert!(
+            allow_a,
+            "INVARIANT (ApprovalGate): matching approval_resolved must release the corresponding waiter"
+        );
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), &mut waiter_b)
+                .await
+                .is_err(),
+            "INVARIANT (ApprovalGate): resolving session A must not release session B's waiter"
+        );
+
+        append_approval_resolved_event(&producer, "session-b", "request-b", true).await?;
+        let allow_b = tokio::time::timeout(Duration::from_secs(2), waiter_b)
+            .await
+            .context("session B waiter did not resolve after its own approval")?
+            .context("session B waiter panicked")??;
+        assert!(
+            allow_b,
+            "INVARIANT (ApprovalGate): session B must release once its own approval_resolved arrives"
+        );
+
+        server.shutdown().await;
+        Ok(())
     }
 }

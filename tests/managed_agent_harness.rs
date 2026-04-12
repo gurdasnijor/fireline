@@ -33,16 +33,73 @@
 #[path = "support/managed_agent_suite.rs"]
 mod managed_agent_suite;
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use durable_streams::Client as DurableStreamsClient;
 use fireline_harness::{TopologyComponentSpec, TopologySpec};
 use fireline_session::HostStatus;
 use managed_agent_suite::{
     ControlPlaneHarness, DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec,
     append_approval_resolved, count_events, create_session, load_session_then_prompt,
-    prompt_session, read_all_events, wait_for_event_count, wait_for_permission_request,
+    prompt_session, prompt_session_result, read_all_events, wait_for_event_count,
+    wait_for_permission_request,
 };
+use serde_json::json;
+
+async fn append_rebuild_padding_events(state_stream_url: &str, count: usize) -> Result<()> {
+    let client = DurableStreamsClient::new();
+    let mut stream = client.stream(state_stream_url);
+    stream.set_content_type("application/json");
+    let producer = stream
+        .producer(format!(
+            "approval-rebuild-padding-{}",
+            uuid::Uuid::new_v4()
+        ))
+        .content_type("application/json")
+        .build();
+    let payload = "pad".repeat(1024);
+
+    for index in 0..count {
+        producer.append_json(&json!({
+            "type": "approval_rebuild_padding",
+            "key": format!("padding-{index}"),
+            "headers": { "operation": "insert" },
+            "value": { "payload": payload, "index": index },
+        }));
+    }
+
+    producer
+        .flush()
+        .await
+        .context("flush approval rebuild padding events")?;
+    Ok(())
+}
+
+async fn session_permission_request_ids(
+    state_stream_url: &str,
+    session_id: &str,
+) -> Result<Vec<String>> {
+    let events = read_all_events(state_stream_url).await?;
+    Ok(events
+        .into_iter()
+        .filter(|env| env.envelope_type() == Some("permission"))
+        .filter_map(|env| {
+            let value = env.value()?;
+            if value.get("kind").and_then(|kind| kind.as_str()) != Some("permission_request") {
+                return None;
+            }
+            if value.get("sessionId").and_then(|id| id.as_str()) != Some(session_id) {
+                return None;
+            }
+            value
+                .get("requestId")
+                .and_then(|id| id.as_str())
+                .map(str::to_string)
+        })
+        .collect())
+}
 
 /// Precondition: a local runtime has been provisioned with the default
 /// topology (whatever the baseline harness sets up).
@@ -310,6 +367,71 @@ async fn harness_approval_gate_blocks_prompt_until_resolved_via_stream_event() -
     result
 }
 
+#[tokio::test]
+async fn harness_approval_gate_timeout_errors_cleanly() -> Result<()> {
+    let topology = TopologySpec {
+        components: vec![TopologyComponentSpec {
+            name: "approval_gate".to_string(),
+            config: Some(serde_json::json!({
+                "timeoutMs": 500,
+                "policies": [
+                    {
+                        "match": { "kind": "promptContains", "needle": "pause_here" },
+                        "action": "requireApproval",
+                        "reason": "test policy: timeout"
+                    }
+                ]
+            })),
+        }],
+    };
+    let spec =
+        ManagedAgentHarnessSpec::new("harness-approval-gate-timeout").with_topology(topology);
+    let runtime = LocalRuntimeHarness::spawn_with(spec).await?;
+
+    let result = async {
+        let session_id = create_session(runtime.acp_url()).await?;
+        let prompt_result = tokio::time::timeout(
+            Duration::from_secs(5),
+            prompt_session_result(
+                runtime.acp_url(),
+                &session_id,
+                "please pause_here until timeout",
+            ),
+        )
+        .await
+        .context("approval timeout prompt did not return within test timeout")??;
+        let error = prompt_result.expect_err("approval gate should time out without a resolution");
+        let error_text = error
+            .data
+            .as_ref()
+            .and_then(|data| {
+                data.as_str().map(str::to_string).or_else(|| {
+                    data.get("data")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                })
+            })
+            .unwrap_or_default()
+            ;
+        assert!(
+            error_text.contains("approval_gate timed out waiting for approval on session"),
+            "INVARIANT (Harness): timeout path must surface the approval gate timeout message, got: {error_text}"
+        );
+
+        let permission_events = count_events(runtime.state_stream_url(), "permission").await?;
+        assert_eq!(
+            permission_events, 1,
+            "INVARIANT (Harness): timeout path should emit exactly one permission_request and no approval_resolved"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    runtime.shutdown().await?;
+    result
+}
+
 /// Precondition: slice 16 ApprovalGateComponent rebuild-from-log behavior
 /// (exists as `rebuild_from_log` on `LoadSessionRequest`) plus a way to
 /// simulate runtime death mid-prompt without abandoning the client.
@@ -326,11 +448,10 @@ async fn harness_approval_gate_blocks_prompt_until_resolved_via_stream_event() -
 /// the blocked-until-resolved semantic (now proven in
 /// `harness_approval_gate_blocks_prompt_until_resolved_via_stream_event`)
 /// composes with `load_session` rebuild-from-log so the pause survives
-/// mid-flight process loss. Promote once the test can kill the runtime
-/// without losing the client connection that originated the prompt, or
-/// once a scripted agent can emit the pre-pause effects on cold start.
+/// mid-flight process loss. The original blocked ACP request is expected
+/// to die with the old runtime; the proof obligation is that the durable
+/// state lets a cold-started runtime rebuild approval state and continue.
 #[tokio::test]
-#[ignore = "pending deeper harness proof obligation — see refinement-matrix.md HarnessCrashSurvivingPauseResume"]
 async fn harness_durable_suspend_resume_round_trip() -> Result<()> {
     let topology = TopologySpec {
         components: vec![TopologyComponentSpec {
@@ -447,6 +568,120 @@ async fn harness_durable_suspend_resume_round_trip() -> Result<()> {
         assert_eq!(
             permission_count_after, permission_count_before,
             "INVARIANT (Harness): rebuilt approved_sessions must short-circuit the gate; saw new permission events after resumed prompt"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    control_plane.shutdown().await;
+    result
+}
+
+#[tokio::test]
+async fn harness_approval_resolution_during_rebuild_reuses_pending_request() -> Result<()> {
+    let topology = TopologySpec {
+        components: vec![TopologyComponentSpec {
+            name: "approval_gate".to_string(),
+            config: Some(serde_json::json!({
+                "timeoutMs": 15000,
+                "policies": [
+                    {
+                        "match": { "kind": "promptContains", "needle": "pause_here" },
+                        "action": "requireApproval",
+                        "reason": "test policy: rebuild race"
+                    }
+                ]
+            })),
+        }],
+    };
+    let control_plane = ControlPlaneHarness::spawn(true).await?;
+
+    let result = async {
+        let spec = ManagedAgentHarnessSpec::new("harness-approval-rebuild-race")
+            .with_testy_load_agent()
+            .with_topology(topology);
+        let runtime = control_plane.create_runtime_from_spec(spec).await?;
+        let shared_state_url = control_plane.shared_state_url();
+
+        let session_id = create_session(&runtime.acp.url).await?;
+        let blocked_acp_url = runtime.acp.url.clone();
+        let blocked_session_id = session_id.clone();
+        let blocked_prompt = tokio::spawn(async move {
+            prompt_session(
+                &blocked_acp_url,
+                &blocked_session_id,
+                "please pause_here during rebuild",
+            )
+            .await
+        });
+        let blocked_prompt_abort = blocked_prompt.abort_handle();
+
+        let request_id = wait_for_permission_request(&shared_state_url, &session_id, DEFAULT_TIMEOUT)
+            .await
+            .context("approval gate should emit a pending request before rebuild-race stop")?;
+
+        append_rebuild_padding_events(&shared_state_url, 256).await?;
+
+        let stopped = control_plane.stop_runtime(&runtime.host_key).await?;
+        assert_eq!(
+            stopped.status,
+            HostStatus::Stopped,
+            "INVARIANT (Harness): rebuild-race setup must stop the original runtime cleanly"
+        );
+
+        match tokio::time::timeout(Duration::from_secs(5), blocked_prompt).await {
+            Ok(joined) => match joined {
+                Ok(Ok(())) => {
+                    anyhow::bail!(
+                        "INVARIANT (Harness): blocked prompt must not complete successfully after runtime death"
+                    );
+                }
+                Ok(Err(_)) | Err(_) => {}
+            },
+            Err(_) => {
+                blocked_prompt_abort.abort();
+            }
+        }
+
+        let resumed = fireline_orchestration::resume(
+            &control_plane.http,
+            &control_plane.base_url,
+            &shared_state_url,
+            &session_id,
+        )
+        .await
+        .context("resume runtime before rebuild-race load_session")?;
+
+        let resumed_acp_url = resumed.acp.url.clone();
+        let resumed_session_id = session_id.clone();
+        let resumed_prompt = tokio::spawn(async move {
+            load_session_then_prompt(
+                &resumed_acp_url,
+                &resumed_session_id,
+                "please pause_here during rebuild",
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        append_approval_resolved(&shared_state_url, &session_id, &request_id, true).await?;
+
+        tokio::time::timeout(Duration::from_secs(10), resumed_prompt)
+            .await
+            .context("rebuild-race prompt did not complete after external resolution")?
+            .context("rebuild-race prompt task panicked")?
+            .context(
+                "INVARIANT (Harness): runtime should pick up approval_resolved appended during rebuild and complete the resumed prompt",
+            )?;
+
+        let request_ids =
+            session_permission_request_ids(&shared_state_url, &session_id).await?;
+        let unique_request_ids: BTreeSet<_> = request_ids.iter().cloned().collect();
+        assert_eq!(
+            unique_request_ids,
+            BTreeSet::from([request_id.clone()]),
+            "INVARIANT (Harness): rebuild-race flow must reuse the original approval request id rather than minting a fresh one"
         );
 
         Ok(())
