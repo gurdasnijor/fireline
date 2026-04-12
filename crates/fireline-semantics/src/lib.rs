@@ -178,8 +178,8 @@ pub mod liveness {
     #[cfg(test)]
     mod tests {
         use super::{
-            apply, HeartbeatFreshness, ObservableRuntimeStatus, RegistryLivenessAction,
-            RegistryLivenessState, RuntimeKey,
+            HeartbeatFreshness, ObservableRuntimeStatus, RegistryLivenessAction,
+            RegistryLivenessState, RuntimeKey, apply,
         };
 
         #[test]
@@ -385,7 +385,7 @@ pub mod stream_truth {
 
     #[cfg(test)]
     mod tests {
-        use super::{apply, project_runtime_index, StreamTruthAction, StreamTruthState};
+        use super::{StreamTruthAction, StreamTruthState, apply, project_runtime_index};
         use crate::liveness::RuntimeKey;
 
         #[test]
@@ -923,16 +923,16 @@ pub mod resume {
 #[cfg(test)]
 mod tests {
     use super::approval::{
-        apply as apply_approval, first_matching_resolution, ApprovalAction, ApprovalPhase,
-        ApprovalRequestId, ApprovalState, Decision,
+        ApprovalAction, ApprovalPhase, ApprovalRequestId, ApprovalState, Decision,
+        apply as apply_approval, first_matching_resolution,
     };
     use super::resume::{
-        apply as apply_resume, Caller, ResumeAction, ResumeOutcome, ResumeScenario, ResumeState,
-        RuntimeStatus,
+        Caller, ResumeAction, ResumeOutcome, ResumeScenario, ResumeState, RuntimeStatus,
+        apply as apply_resume,
     };
     use super::session::{
-        apply as apply_session, ProducerCommit, ProducerId, SessionAction, SessionEventId,
-        SessionEventKind, SessionState, SessionTransition,
+        ProducerCommit, ProducerId, SessionAction, SessionEventId, SessionEventKind, SessionState,
+        SessionTransition, apply as apply_session,
     };
 
     #[test]

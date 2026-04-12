@@ -17,28 +17,28 @@ use std::collections::BTreeSet;
 
 use fireline_semantics::{
     approval::{
-        apply as apply_approval, first_resolution_for, ApprovalAction as ApprovalProtocolAction,
-        ApprovalPhase as PromptPhase, ApprovalRequestId as RequestId,
-        ApprovalState as ApprovalProtocolState, Decision as ApprovalResolution,
+        ApprovalAction as ApprovalProtocolAction, ApprovalPhase as PromptPhase,
+        ApprovalRequestId as RequestId, ApprovalState as ApprovalProtocolState,
+        Decision as ApprovalResolution, apply as apply_approval, first_resolution_for,
     },
     liveness::{
-        apply as apply_liveness, HeartbeatFreshness, ObservableRuntimeStatus,
+        HeartbeatFreshness, ObservableRuntimeStatus,
         RegistryLivenessAction as LivenessProtocolAction,
-        RegistryLivenessState as LivenessProtocolState, RuntimeKey,
+        RegistryLivenessState as LivenessProtocolState, RuntimeKey, apply as apply_liveness,
     },
     resume::{
-        apply as apply_resume, Caller, CallerPhase, ResumeAction as ResumeProtocolAction,
-        ResumeScenario, ResumeState as ResumeProtocolState, RuntimeStatus,
+        Caller, CallerPhase, ResumeAction as ResumeProtocolAction, ResumeScenario,
+        ResumeState as ResumeProtocolState, RuntimeStatus, apply as apply_resume,
     },
     session::{
-        apply as apply_session, replay_suffix, LoggedEvent, ProducerCommit, ProducerId,
-        ReplayObservation, SessionAction, SessionEventId, SessionEventKind,
-        SessionState as SemanticSessionState, SessionTransition,
+        LoggedEvent, ProducerCommit, ProducerId, ReplayObservation, SessionAction, SessionEventId,
+        SessionEventKind, SessionState as SemanticSessionState, SessionTransition,
+        apply as apply_session, replay_suffix,
     },
     stream_truth::{
-        apply as apply_stream_truth, project_runtime_index,
         StreamTruthAction as StreamTruthProtocolAction,
-        StreamTruthState as StreamTruthProtocolState,
+        StreamTruthState as StreamTruthProtocolState, apply as apply_stream_truth,
+        project_runtime_index,
     },
 };
 use stateright::{Model, Property};
@@ -364,20 +364,17 @@ impl Model for ResumeProtocolModel {
 
     fn properties(&self) -> Vec<Property<Self>> {
         vec![
-            Property::always(
-                "WakeOnReadyIsNoop",
-                |_, state: &ResumeProtocolState| {
-                    if state.scenario != ResumeScenario::Live {
-                        return true;
-                    }
-                    state.reprovision_count == 0
-                        && state.callers.iter().all(|caller| {
-                            caller
-                                .observed_runtime_id
-                                .is_none_or(|id| id == state.initial_runtime_id)
-                        })
-                },
-            ),
+            Property::always("WakeOnReadyIsNoop", |_, state: &ResumeProtocolState| {
+                if state.scenario != ResumeScenario::Live {
+                    return true;
+                }
+                state.reprovision_count == 0
+                    && state.callers.iter().all(|caller| {
+                        caller
+                            .observed_runtime_id
+                            .is_none_or(|id| id == state.initial_runtime_id)
+                    })
+            }),
             Property::always(
                 "ConcurrentWakeSingleWinner",
                 |_, state: &ResumeProtocolState| {
