@@ -2,17 +2,19 @@
 
 Status: proposal
 Date: 2026-04-12
-Scope: infrastructure plan for the hosted Fireline instance that receives `npx fireline deploy` and runs long-lived deployed agents against a co-located durable-streams service.
+Scope: infrastructure plan for the hosted Fireline instance that boots from an embedded spec (Tier A) or, later, a spec stream subscription (Tier C) and runs long-lived deployed agents against a co-located durable-streams service.
 
 ## 1. Architectural decisions
 
 This proposal does not reopen the decisions already recorded in [`docs/status/orchestration-status.md`](../status/orchestration-status.md).
 
+Phase 1 of this document is gated on the tiered deploy model decision in [`hosted-deploy-surface-decision.md`](./hosted-deploy-surface-decision.md) (`77e007d`). Tier A is the MVP boot path: the deployment spec is baked into the OCI image at build time and read on host boot. Tier C is deferred: specs arrive via a durable-streams resource and are materialized by `DeploymentSpecSubscriber`. No Fireline-owned deployment HTTP API is introduced in either tier.
+
 1. Fireline Host ships as a portable OCI image. The deployment target is any cloud container platform that can run a long-lived HTTP/SSE service and attach or colocate durable storage for durable-streams.
 2. Durable-streams is co-located with the hosted Fireline control plane. It is not embedded in sandboxes and it must outlive sandbox crashes, host restarts, and provider churn.
 3. Anthropic managed agents remain the primary cloud sandbox provider for the demo and first hosted path. `microsandbox`, Docker, and local subprocess remain secondary providers behind the existing provider abstraction.
 
-Always-on deployment behavior is not a separate primitive. Hosted Fireline uses the DurableSubscriber substrate, specifically the `AlwaysOnDeploymentSubscriber` profile described by [`durable-subscriber.md`](./durable-subscriber.md), to turn `deployment_wake_requested` into `sandbox_provisioned`.
+Always-on deployment behavior is not a separate primitive. It is spec metadata consumed by the DurableSubscriber substrate, specifically the `AlwaysOnDeploymentSubscriber` profile described by [`durable-subscriber.md`](./durable-subscriber.md), to turn `deployment_wake_requested` into `sandbox_provisioned`.
 
 ### 1.1 Host runtime packaging decision
 
@@ -104,20 +106,27 @@ Cloudflare Containers stays first-class in the design, but not the Phase 1 boots
 
 ```mermaid
 flowchart LR
-    CLI[npx fireline deploy] --> REG[OCI registry]
+    SPEC[agent.ts / compose spec] --> BUILD[fireline build]
+    BUILD --> REG[OCI registry]
     REG --> HOSTA[Hosted Fireline host image<br/>region A]
     REG --> HOSTB[Hosted Fireline host image<br/>region B]
 
     subgraph REGIONA[Region A]
+      HOSTA --> EMBED_A[embedded spec<br/>Tier A]
       HOSTA --> DS_A[durable-streams<br/>sidecar default]
       HOSTA --> ANTH_A[Anthropic provider]
       HOSTA --> SEC_A[tenant secrets / env bridge]
+      SPEC_A[specs:tenant-{id}<br/>Tier C] --> SUB_A[DeploymentSpecSubscriber]
+      SUB_A --> HOSTA
     end
 
     subgraph REGIONB[Region B]
+      HOSTB --> EMBED_B[embedded spec<br/>Tier A]
       HOSTB --> DS_B[durable-streams<br/>sidecar default]
       HOSTB --> ANTH_B[Anthropic provider]
       HOSTB --> SEC_B[tenant secrets / env bridge]
+      SPEC_B[specs:tenant-{id}<br/>Tier C] --> SUB_B[DeploymentSpecSubscriber]
+      SUB_B --> HOSTB
     end
 
     DS_A <-- hosts:tenant-{id} --> DS_B
@@ -132,13 +141,14 @@ Key boundaries:
 - Agent-plane state lives in `state/session/{session_id}` streams.
 - Infrastructure-plane state lives in tenant-scoped discovery and registry streams such as `hosts:tenant-{id}` and sandbox inventory streams.
 - Provider backends do not own durable truth. They consume provisioning instructions and emit observable events back into Fireline-managed state.
+- Tier A boot reads the spec embedded in the OCI image. Tier C boot reads a spec resource via `DeploymentSpecSubscriber`. Both tiers use the same durable-streams-backed state plane once the host is up.
 - Default production topology is host container plus durable-streams sidecar. Bundled single-image mode is a quickstart variant only.
 
-## 4. Deployment Pipeline
+## 4. Boot Paths and Deployment Pipeline
 
-`npx fireline deploy agent.ts --provider anthropic` should be platform-neutral. The CLI chooses a target, emits a portable deploy bundle, and asks the target platform to run the hosted image.
+Hosted Fireline keeps deploy transport out of its runtime contract. Tier A boots from an embedded spec inside the OCI image. Tier C boots from a spec stream watched by `DeploymentSpecSubscriber`. Neither tier introduces a Fireline-owned deploy HTTP control plane.
 
-### 4.1 What happens
+### 4.1 Tier A boot path: OCI image + embedded spec
 
 1. Load `agent.ts` and `fireline.config.ts`.
 2. Resolve the target environment and provider override.
@@ -149,31 +159,41 @@ Key boundaries:
    - secrets references
    - peer declarations
    - tenant/namespace metadata
-4. Build or select `ghcr.io/fireline/hosted-fireline:<tag>`.
+4. Bake that manifest into the OCI image layer at build time.
 5. Push the image to a registry reachable by the target platform.
-6. Publish deployment metadata for the selected platform:
-   - image reference
-   - env vars and secrets bindings
-   - port exposure
-   - durable-streams mode: same-image or sidecar
-   - persistent volume attachment if local durable-streams is used
+6. Use target-native tooling to run the image:
+   - `fly deploy`
+   - `docker run`
+   - `kubectl apply`
+   - equivalent platform-native deploy commands
 7. The target platform pulls the image and starts the hosted Fireline service.
-8. Hosted Fireline provisions the deployment record, initializes or attaches durable-streams, and registers the deployment in infra-plane discovery state.
-9. The `AlwaysOnDeploymentSubscriber` scans deployment intent and ensures the Anthropic-backed sandbox is provisioned when policy requires it.
+8. On boot, the host reads the embedded spec, initializes or attaches durable-streams, and registers itself in infra-plane discovery state.
+9. If the embedded spec declares `alwaysOn`, `AlwaysOnDeploymentSubscriber` ensures the Anthropic-backed sandbox is provisioned when policy requires it.
 
-### 4.2 Artifacts
+### 4.2 Tier C boot path: spec stream subscription (deferred)
+
+1. The hosted image boots with `DeploymentSpecSubscriber` enabled.
+2. A spec resource is appended to a tenant-scoped durable stream such as `specs:tenant-{id}`.
+3. `DeploymentSpecSubscriber` materializes or updates the deployment intent from that stream.
+4. The host reconciles that intent against provider state using the same sandbox inventory and discovery streams as Tier A.
+5. If the streamed spec declares `alwaysOn`, `AlwaysOnDeploymentSubscriber` drives the wake path.
+
+Tier C is intentionally deferred until the durable-subscriber profile is landed and replay-safe. Phase 1 does not depend on it.
+
+### 4.3 Artifacts
 
 | Artifact | Produced by | Consumed by |
 |---|---|---|
-| Agent spec JSON | `compose()` / CLI loader | Hosted Fireline control plane |
+| Embedded deployment spec | `compose()` / CLI build step | Hosted Fireline boot path inside the OCI image |
 | OCI image | CLI build or CI pipeline | Registry + target platform |
 | Platform deploy descriptor | CLI target adapter | Fly/Railway/Render/Cloudflare/K8s/Docker |
 | Tenant secret bindings | target adapter + secret manager | Hosted Fireline runtime |
 | Durable-streams config | target adapter | sidecar or embedded stream process |
+| Tier C spec resource | `fireline push` or direct durable-streams append | `DeploymentSpecSubscriber` |
 
-### 4.3 Platform-neutral rule
+### 4.4 Platform-neutral rule
 
-The deploy command publishes the same hosted image everywhere. Platform adapters change only:
+The build/deploy flow publishes the same hosted image everywhere. Platform adapters change only:
 
 - how the image is launched
 - how persistent storage is attached
@@ -231,15 +251,16 @@ They do not change the Fireline runtime model.
 
 ## 7. Phased Rollout
 
-### Phase 1 — Single-region hosted MVP
+### Phase 1 — OCI image + embedded-spec boot path
 
 **Scope**
 
+- Gate note: depends on [`hosted-deploy-surface-decision.md`](./hosted-deploy-surface-decision.md) (`77e007d`)
 - Bootstrap on Fly.io
-- Portable OCI image produced and deployed manually
+- Portable OCI image produced and deployed with the spec embedded at build time
 - Durable-streams co-located on persistent volume
 - Anthropic provider only
-- Admin API + hosted control plane reachable over TLS
+- No deploy HTTP endpoint; host boots by reading the embedded spec
 
 **Gate**
 
@@ -254,28 +275,29 @@ They do not change the Fireline runtime model.
 
 **Done-when**
 
-- A single tenant can deploy an Anthropic-backed agent to a hosted Fireline instance and reconnect after host restart without transcript loss
+- A single tenant can deploy an Anthropic-backed agent to a hosted Fireline instance via target-native OCI deploy, and reconnect after host restart without transcript loss
 
-### Phase 2 — `npx fireline deploy`
+### Phase 2 — Tier C spec-stream deployments
 
 **Scope**
 
-- Ship the CLI deploy path from [`declarative-agent-api-design.md`](./declarative-agent-api-design.md)
-- Add registry push + platform adapter generation
-- Encode same-image vs sidecar durable-streams choice in target config
+- Land `DeploymentSpecSubscriber` as a DurableSubscriber profile
+- Accept deployment specs from tenant-scoped durable streams such as `specs:tenant-{id}`
+- Materialize the same hosted runtime model from stream-backed specs instead of embedded specs
+- Reuse the same sidecar-default durable-streams topology and Anthropic-primary provider story
 
 **Gate**
 
-- CI smoke test from `agent.ts` to hosted URL using the CLI only
+- Replay-safe subscriber smoke test proves a streamed spec materializes exactly once under replay and host restart
 
 **Risks**
 
-- Target config drift across platforms
-- Build/push auth complexity
+- Duplicate materialization under subscriber replay
+- Operator confusion between embedded-spec and stream-backed deploy sources
 
 **Done-when**
 
-- `npx fireline deploy agent.ts --target <name>` is the primary supported hosted path
+- Tier C can stand up the same deployment model as Tier A by replaying a spec stream into `DeploymentSpecSubscriber`
 
 ### Phase 3 — Multi-region host fleet
 
@@ -284,10 +306,11 @@ They do not change the Fireline runtime model.
 - Add peer discovery across regions
 - Split ingress from region-local host registration
 - Validate remote handoff and peer routing under region loss
+- If Tier C is enabled, assign `DeploymentSpecSubscriber` ownership per region without duplicate winners
 
 **Gate**
 
-- Two-region smoke test with cross-host peer discovery and session continuity
+- Two-region smoke test with cross-host peer discovery and session continuity; Tier C, if enabled, must keep subscriber replay and ownership deterministic
 
 **Risks**
 
@@ -324,10 +347,11 @@ They do not change the Fireline runtime model.
 
 - Introduce rolling or blue-green upgrades where platform support allows it
 - Otherwise formalize halt/resume maintenance using DurableSubscriber wake semantics
+- For Tier C, keep `DeploymentSpecSubscriber` replay-safe across host replacement and restart
 
 **Gate**
 
-- Upgrade smoke test proves sessions survive host replacement and always-on deployments rehydrate without duplicate winners
+- Upgrade smoke test proves sessions survive host replacement and always-on deployments rehydrate without duplicate winners, whether the source of truth is an embedded spec or a replayed spec stream
 
 **Risks**
 
@@ -346,10 +370,11 @@ They do not change the Fireline runtime model.
 - Fleet inventory
 - deployment history
 - hooks for the future fleet UI
+- Record whether a deployment was booted from an embedded spec or a Tier C spec stream
 
 **Gate**
 
-- Admin API exposes enough host/sandbox/deployment state for operator dashboards without reading agent-plane streams directly
+- Admin API exposes enough host/sandbox/deployment state for operator dashboards without reading agent-plane streams directly, including Tier A vs Tier C provenance
 
 **Risks**
 
@@ -363,23 +388,27 @@ They do not change the Fireline runtime model.
 ## 8. Validation Checklist
 
 - [ ] Hosted Fireline is described as a portable OCI image, not a provider-specific binary
+- [ ] Phase 1 explicitly depends on the tiered deploy surface decision in [`hosted-deploy-surface-decision.md`](./hosted-deploy-surface-decision.md) (`77e007d`)
 - [ ] Durable-streams is explicitly outside every sandbox and survives sandbox/host crashes
 - [ ] Sidecar is the default durable-streams topology and same-image mode is clearly marked quickstart-only
 - [ ] Same-image and sidecar durable-streams modes are both documented with tradeoffs
 - [ ] The same-image warning explicitly calls out the persistent-disk requirement and the `SessionDurableAcrossRuntimeDeath` failure mode
 - [ ] Every listed target carries an ACP SSE smoke-test status and the validation contract says `Pending` is not support
 - [ ] Anthropic is the primary hosted sandbox provider, with secondary providers preserved
-- [ ] Always-on behavior is delegated to DurableSubscriber rather than a new primitive
+- [ ] The document explicitly states Tier A boots from an embedded OCI spec and Tier C boots from `DeploymentSpecSubscriber`
+- [ ] HTTP deploy endpoints are retired from this proposal
+- [ ] Always-on behavior is spec metadata delegated to DurableSubscriber rather than a new primitive
 - [ ] The rollout phases have gates, risks, and done-when criteria
 - [ ] The document remains cloud-provider-agnostic even though Phase 1 picks one bootstrap target
 
 ## 9. Architect Review Checklist
 
-- [ ] Does the OCI-first framing preserve the intended product story for `npx fireline deploy`?
+- [ ] Does the OCI-first and embedded-spec framing preserve the intended product story for `fireline build` plus target-native deploy?
 - [ ] Are the sidecar and same-image durable-streams options separated clearly enough?
 - [ ] Is the bootstrap target choice pragmatic without turning the design into a single-platform plan?
 - [ ] Does the hosted topology preserve plane separation between agent state and infrastructure state?
 - [ ] Is Anthropic-primary plus multi-provider-secondary the right default narrative for the hosted demo?
+- [ ] Is the Tier C `DeploymentSpecSubscriber` story deferred cleanly enough that Phase 1 stays minimal?
 - [ ] Are the phase gates crisp enough to dispatch as follow-on execution work?
 
 ## Notes
