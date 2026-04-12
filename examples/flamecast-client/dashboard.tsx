@@ -5,8 +5,10 @@ import { createFirelineDB } from '@fireline/state'
 import { eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
 import { useEffect, useMemo, useState } from 'react'
+import { useAcpClient } from 'use-acp'
 
 export function ReviewDashboard(props: {
+  readonly acpUrl: string
   readonly stateStreamUrl: string
   readonly sessionId: string
 }) {
@@ -19,6 +21,12 @@ export function ReviewDashboard(props: {
     void db.preload().then(() => setReady(true))
     return () => db.close()
   }, [db])
+  const acp = useAcpClient({
+    wsUrl: props.acpUrl,
+    autoConnect: true,
+    initialSessionId: props.sessionId,
+    sessionParams: { cwd: '/workspace', mcpServers: [] },
+  })
 
   const turns = useLiveQuery(
     (q) =>
@@ -43,8 +51,30 @@ export function ReviewDashboard(props: {
   return (
     <section>
       <h2>Review Dashboard</h2>
+      <p>ACP: {acp.connectionState.status}</p>
       <p>Turns: {turns.data?.length ?? 0}</p>
       <p>Pending approvals: {permissions.data?.length ?? 0}</p>
+      <p>ACP notifications: {acp.notifications.length}</p>
+      {acp.pendingPermission ? (
+        <div>
+          <p>{acp.pendingPermission.toolCall.title ?? 'Approval required'}</p>
+          <button
+            onClick={() =>
+              acp.resolvePermission({
+                outcome: {
+                  outcome: 'selected',
+                  optionId: acp.pendingPermission?.options[0]?.optionId ?? 'allow',
+                },
+              })
+            }
+          >
+            Approve
+          </button>
+          <button onClick={() => acp.resolvePermission({ outcome: { outcome: 'cancelled' } })}>
+            Deny
+          </button>
+        </div>
+      ) : null}
       <pre>{turns.data?.map((turn) => turn.text ?? turn.state).join('\n') ?? 'No output yet'}</pre>
     </section>
   )

@@ -12,6 +12,7 @@
     "@tanstack/db": "^0.6.4",
     "@tanstack/react-db": "^0.1.82",
     "react": "^19.2.0",
+    "use-acp": "^0.2.6",
     "ws": "^8.20.0"
   },
   "devDependencies": {

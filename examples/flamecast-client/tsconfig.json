@@ -26,8 +26,9 @@
       "@tanstack/react-db": ["../../packages/browser-harness/node_modules/@tanstack/react-db"],
       "react": ["../../packages/browser-harness/node_modules/@types/react/index.d.ts"],
       "react/jsx-runtime": ["../../packages/browser-harness/node_modules/@types/react/jsx-runtime.d.ts"],
+      "use-acp": ["../shared/use-acp.d.ts"],
       "ws": ["../../packages/client/node_modules/@types/ws/index.d.ts"]
     }
   },
-  "include": ["../shared/*.ts", "./**/*.ts", "./**/*.tsx"]
+  "include": ["../shared/*.ts", "../shared/*.d.ts", "./**/*.ts", "./**/*.tsx"]
 }
