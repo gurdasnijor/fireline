@@ -1,0 +1,18 @@
+{
+  "name": "@fireline/example-anthropic-cloud-agent",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "description": "Fireline example showing Anthropic managed agents as a provider with Fireline composition and durable-state observation",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@fireline/client": "file:../../packages/client",
+    "@fireline/state": "file:../../packages/state"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}
