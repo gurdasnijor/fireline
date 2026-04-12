@@ -2,7 +2,7 @@
 
 > **Status:** authoritative proposal
 > **Type:** design doc
-> **Audience:** Host, Tools, browser-harness, and verification workstreams
+> **Audience:** Host, Tools, example-app, and verification workstreams
 > **Related:**
 > - [`../investigations/stream-backed-peer-discovery.md`](../investigations/stream-backed-peer-discovery.md)
 > - [`./deployment-and-remote-handoff.md`](./deployment-and-remote-handoff.md)
@@ -475,7 +475,7 @@ Current `GET /v1/runtimes` list callers in the repo:
 
 Important non-callers:
 
-- `packages/browser-harness` does **not** depend on `GET /v1/runtimes` list.
+- Example apps do **not** need to depend on `GET /v1/runtimes` list.
   Its smoke path uses `POST /cp/v1/runtimes`, `GET /cp/v1/runtimes/{key}`, and
   `POST /cp/v1/runtimes/{key}/stop`.
 - `packages/client/src/host-fireline/client.ts` and
@@ -593,7 +593,7 @@ focused on Hosts and runtimes.
   `GET /v1/runtimes` discovery read path
 - **M6** — update `docs/proposals/fireline-host-cleanup-plan.md` §C4 / §C5 to
   reflect the deeper scope
-- **M7** — wire the cross-Host migration demo into browser-harness
+- **M7** — wire the cross-Host migration demo into an example application
 
 ## Appendix: Why this is the right primitive boundary
 

@@ -12,8 +12,8 @@ This is the third handoff in the day's sequence. Read those two first for the fu
 - **Crate restructure** — dispatched (codex workspace:13); manifest at `c9a3e8e`
 - **TLA Level 2** — dispatched (codex workspace:12)
 - **Tier 4 host-claude** — landed `2348428`, then **deleted in `37db346`** along with the rest of the Claude-host satisfier code; design lessons preserved in `docs/explorations/claude-agent-sdk-v2-findings.md` (retained as thought-experiment history)
-- **Host primitive rename** — landed `37db346`: `createSession → provision`, `SessionHandle → HostHandle` (now carries `acp` + `state` endpoints), `SessionSpec → ProvisionSpec`, `SessionStatus → HostStatus`, `stopSession → stop`, `sendInput` / `SessionInput` / `SessionOutput` deleted; `packages/client/src/host-claude/` removed. Doc sync across `client-primitives.md`, `deployment-and-remote-handoff.md`, `demo-walkthrough.md`, `demo-runbook.md`, `runtime-host-split.md`, and the findings doc above
-- **Tier 5 browser-harness** — in progress on workspace:4
+- **Host primitive rename** — landed `37db346`: `createSession → provision`, `SessionHandle → HostHandle` (now carries `acp` + `state` endpoints), `SessionSpec → ProvisionSpec`, `SessionStatus → HostStatus`, `stopSession → stop`, `sendInput` / `SessionInput` / `SessionOutput` deleted; `packages/client/src/host-claude/` removed. Doc sync across the client and deployment proposals, `runtime-host-split.md`, and the findings doc above
+- **Tier 5 browser demo** — was in progress on workspace:4 at the time of this handoff
 
 ## TL;DR — where you're picking up
 
@@ -154,7 +154,7 @@ The demo scoreboard at 32 passing tests proves the substrate. A "full featured d
 
 1. **Live tool dispatch for `TransportRef::McpUrl`.** Slice 17 (commit `2681f50` from the earlier session) emits `tool_descriptor` envelopes but does NOT actually connect to external MCP URLs or forward tool calls. A demo showing an agent using a real remote MCP tool (e.g., Notion via Smithery) needs this. Medium scope (~1 day). Follow-up to slice 17.
 2. **`resume(sessionId)` end-to-end in TS.** workspace:10 shipped the helper in `36096b7` with vitest coverage against a real control plane. A demo-quality story would wrap it in a UI: start a session, pause at approval, kill the runtime, resume elsewhere, see the state come back. The substrate proves all of that in `harness_durable_suspend_resume_round_trip` (`tests/managed_agent_harness.rs`) but there's no UI exercising it.
-3. **A minimal UI.** None exists. The `packages/client` is headless. A demo would benefit from even a 500-line chat UI that shows: prompt → streaming response → approval gate → resume across restart. Scope depends on framing — probably Next.js in `packages/browser-harness` where the skeleton already exists.
+3. **A minimal UI.** None exists. The `packages/client` is headless. A demo would benefit from even a 500-line chat UI that shows: prompt → streaming response → approval gate → resume across restart. Scope depends on framing — likely as a dedicated example app under `examples/`.
 4. **Resources launch-spec round-trip in TS.** The `resources` field landed in `4eaf94a` but nothing in TS actually constructs one in a real demo flow. A "here's how you launch an agent with a mounted workspace" path needs to exist.
 
 ### Substrate gaps surfaced by the agreement test
@@ -181,7 +181,7 @@ Run `git status`, `git log --oneline -5`, `gh run list --limit 3`. Confirm `0af8
 
 - **Lowest-cost:** a short `docs/demo-script.md` that walks through what to show (create runtime, watch state stream, trigger approval, resume across restart) and which commands to run. Zero code.
 - **Medium-cost:** live tool dispatch for `TransportRef::McpUrl`. Connect to an existing Smithery-hosted MCP via rmcp's `StreamableHttpClientTransport`; forward tool calls. Enables "watch the agent call a real external tool" in the demo.
-- **Biggest bang-for-buck:** a minimal Next.js UI in `packages/browser-harness` that exercises the existing `@fireline/client` API. Shows streaming, approval gate, and resume. Several days of work but produces the thing a human actually watches.
+- **Biggest bang-for-buck:** a minimal example UI that exercises the existing `@fireline/client` API. Shows streaming, approval gate, and resume. Several days of work but produces the thing a human actually watches.
 
 ### D. Finish stream-as-truth Step 2 (production read-path flip)
 

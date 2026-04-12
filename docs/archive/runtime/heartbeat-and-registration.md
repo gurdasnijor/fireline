@@ -205,7 +205,7 @@ This section is the migration plan.
 - Runtime binary grows `src/control_plane_client.rs` containing a small HTTP client wrapper around `reqwest`, with retry + backoff.
 - A new CLI flag `--control-plane-url <URL>` on the runtime binary switches it from "write to file" mode to "call HTTP endpoints" mode. When the flag is present, the runtime does NOT write to the registry file — the control plane is the sole source of truth for this runtime's existence.
 - `LocalProvider` gets a config switch: `prefer_push: bool`. When false (default for backwards compat), spawns runtimes in polling mode. When true, spawns them with `--control-plane-url` set.
-- The e2e test in `packages/browser-harness` continues to pass against both modes (push and polling) — the browser only sees descriptors, not the mechanism.
+- The browser demo e2e continues to pass against both modes (push and polling) — the browser only sees descriptors, not the mechanism.
 
 **Status:** not yet started. This is what the doc is the blueprint for.
 
@@ -505,7 +505,7 @@ For whoever picks up the implementation PR:
 
 5. **Update `LocalProvider`** in `fireline-control-plane` to optionally spawn runtimes with `--control-plane-url` pointed at the control plane's own listener. Add a `prefer_push: bool` config flag defaulting to `false` for phase 1 compatibility. When `true`, the launcher does NOT poll the registry file; it waits for the runtime's own `/register` call to transition the record to `ready`, with the same startup timeout semantics.
 
-6. **Extend the e2e test** (`packages/browser-harness`) to run against both polling and push modes, parameterized by an env var. Verify the browser sees the same readiness invariants either way.
+6. **Extend the browser demo e2e** to run against both polling and push modes, parameterized by an env var. Verify the browser sees the same readiness invariants either way.
 
 7. **Document the stale/broken state additions to §4a** of `control-and-data-plane.md` as rule 6 (draft phrasing above).
 

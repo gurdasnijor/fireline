@@ -1,11 +1,9 @@
 # Examples
 
-This package does not have standalone example programs yet. Until they land, use the runnable package tests as the canonical examples:
+Standalone Fireline demos now live in the repository-level [examples/](../../../examples/) directory.
 
-- [ACP prompt round-trip](../test/acp.test.ts)
-- [Topology middleware flows](../test/topology.test.ts)
-- [Browser ACP + durable state](../test/browser-acp.browser.test.ts)
-- [Hosted sandbox API](../test/host-hosted-api.test.ts)
-- [Local sandbox client](../test/sandbox-local.test.ts)
+Start with:
 
-These tests exercise the currently exported `@fireline/client` surface and are a better source of truth than the older proposal snippets.
+- [flamecast-client](../../../examples/flamecast-client/)
+- [background-agent](../../../examples/background-agent/)
+- [agent-os](../../../examples/agent-os/)

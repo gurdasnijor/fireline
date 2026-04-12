@@ -4,7 +4,7 @@
 > **Status:** historical design doc. The `Host` interface described here (`createSession` / `wake` / `status` / `stopSession`) was replaced by the `Sandbox` + middleware + agent composition model.
 > **Supersedes:** [`../explorations/typescript-typed-functional-core-api.md`](../explorations/typescript-typed-functional-core-api.md) (v1, retained as the reasoning record)
 > **Type:** design doc
-> **Audience:** whoever is shipping the public `@fireline/client` surface and building the browser-harness demo on top of it
+> **Audience:** whoever is shipping the public `@fireline/client` surface and building example applications on top of it
 > **Source of truth at the time:** [`../explorations/managed-agents-mapping.md`](../explorations/managed-agents-mapping.md) — primitive anchoring, the seven-combinator decomposition, and the acceptance bars
 > **Related:**
 > - [`../explorations/managed-agents-mapping.md`](../explorations/managed-agents-mapping.md) — the Anthropic-primitive table and the combinator algebra
@@ -698,7 +698,7 @@ Each tier is individually reviewable and individually useful.
 
 ### Tier 5 — Demo rewrite (half day)
 
-- `packages/browser-harness/src/app.tsx` re-plumbed to use `@fireline/client/core` + `@fireline/client/host-fireline` + `@fireline/state` collections
+- the example application re-plumbed to use `@fireline/client/core` + `@fireline/client/host-fireline` + `@fireline/state` collections
 - Add an `ApprovalPanel` reading `useLiveQuery(pendingPermissions({ sessionId }))`
 - Add a "Stop runtime" and "Wake" button pair that exercises `Host.stop` + `Orchestrator.wakeOne`
 - The existing state inspector UI stays — it already reads from tanstack-react-db collections
@@ -724,7 +724,7 @@ The optional Claude-host satisfier tier was attempted, informed the `Host.provis
 1. **`ProvisionSpec` discriminated union vs. union-of-fields.** v2 ships the union-of-fields shape (each host ignores fields it doesn't understand). Future typing pass could split into `FirelineProvisionSpec | DockerProvisionSpec | RemoteApiProvisionSpec` etc. Decide when a third or fourth satisfier exists to ground the typing.
 2. **Package layout for future satisfiers.** If/when a non-Fireline `Host` satisfier ships (e.g. a remote hosted-API satisfier), it should probably live as a separate sub-package (`@fireline/client-<satisfier>`) so users who don't want that dependency don't pull it in. The Fireline satisfier can stay inline in `@fireline/client/host-fireline`. The deleted `host-claude` attempt had a real optional dep on `@anthropic-ai/claude-agent-sdk`; that's what the sub-package pattern is for.
 3. **Tool execution via the separate `Sandbox` primitive.** v2 proposes the interface but doesn't require shipping a satisfier on the critical path. The microsandbox evaluation (see `../handoff-2026-04-11-stream-as-truth-and-runtime-abstraction.md`) is the natural forcing function for the first real `Sandbox` satisfier.
-4. **Event-write helpers in `@fireline/client/events`.** Do external writes like `appendApprovalResolved` deserve a dedicated tiny module, or do they live inside `host-fireline`? Argues-for-dedicated: they work against any durable-streams host, not just Fireline. Argues-for-inline: demo-driven work only exercises them from the browser-harness which already imports `host-fireline`. Lean toward a dedicated tiny module so non-fireline hosts can write external approval events without depending on `host-fireline`.
+4. **Event-write helpers in `@fireline/client/events`.** Do external writes like `appendApprovalResolved` deserve a dedicated tiny module, or do they live inside `host-fireline`? Argues-for-dedicated: they work against any durable-streams host, not just Fireline. Argues-for-inline: demo-driven work only exercises them from a first-party example app which already imports `host-fireline`. Lean toward a dedicated tiny module so non-fireline hosts can write external approval events without depending on `host-fireline`.
 5. **What `status` should expose.** The rough `HostStatus` kinds (`created`/`running`/`idle`/`needs_wake`/`stopped`/`error`) are adequate for a demo but poorer than Fireline's full `RuntimeStatus` union (which has `Busy`/`Stale` etc.). Either (a) include an opaque `details: JsonValue` field for host-specific state or (b) let hosts add variants. Probably (a) — variants don't compose across hosts.
 
 ---

@@ -67,7 +67,7 @@ fireline/
 ├── packages/                    # pnpm TS workspace (NOT runtime; build-time)
 │   ├── state/                   # @fireline/state — Zod schema + TanStack helpers
 │   ├── client/                  # @fireline/client — browser/node TS client
-│   └── browser-harness/         # Vite harness for browser tests
+│   └── examples/                # Runnable example apps and demo clients
 │
 ├── docs/                        # architecture, execution slices 01-17, state, runtime
 ├── tests/                       # integration tests (~16 files)

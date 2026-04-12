@@ -11,13 +11,10 @@ const DIVIDER = '='.repeat(64)
 const PORTS = [4436, 4437, 4440, 5173]
 const SUBPATH_EXPORTS = [
   '@fireline/client',
-  '@fireline/client/core',
-  '@fireline/client/host',
-  '@fireline/client/orchestration',
-  '@fireline/client/host-fireline',
-  '@fireline/client/host-claude',
-  '@fireline/client/sandbox',
-  '@fireline/client/sandbox-local',
+  '@fireline/client/middleware',
+  '@fireline/client/admin',
+  '@fireline/client/events',
+  '@fireline/client/resources',
 ]
 
 class CheckFailure extends Error {
@@ -34,10 +31,8 @@ const CHECKS = [
   { id: 1, label: 'Git state (clean, in sync with origin)', run: checkGitState },
   { id: 2, label: 'cargo check --workspace', run: checkCargoWorkspace },
   { id: 3, label: '@fireline/client build', run: checkClientBuild },
-  { id: 4, label: '@fireline/browser-harness lint', run: checkHarnessLint },
-  { id: 5, label: '@fireline/browser-harness build', run: checkHarnessBuild },
-  { id: 6, label: '@fireline/client subpath exports', run: checkClientSubpathExports },
-  { id: 7, label: 'Port availability (4436, 4437, 4440, 5173)', run: checkPortAvailability },
+  { id: 4, label: '@fireline/client subpath exports', run: checkClientSubpathExports },
+  { id: 5, label: 'Port availability (4436, 4437, 4440, 5173)', run: checkPortAvailability },
 ]
 
 async function main() {
@@ -135,26 +130,6 @@ async function checkCargoWorkspace() {
 
 async function checkClientBuild() {
   await runCheckedCommand('@fireline/client build', ['pnpm', '--filter', '@fireline/client', 'build'])
-  return { details: [] }
-}
-
-async function checkHarnessLint() {
-  await runCheckedCommand('@fireline/browser-harness lint', [
-    'pnpm',
-    '--filter',
-    '@fireline/browser-harness',
-    'lint',
-  ])
-  return { details: [] }
-}
-
-async function checkHarnessBuild() {
-  await runCheckedCommand('@fireline/browser-harness build', [
-    'pnpm',
-    '--filter',
-    '@fireline/browser-harness',
-    'build',
-  ])
   return { details: [] }
 }
 

@@ -20,7 +20,7 @@ plane write surface.
 
 This slice ships against `LocalProvider` only. No remote providers. Polling
 remains the default; push is opt-in via a launcher flag, so the existing
-browser-harness e2e keeps passing on the old path.
+the browser demo e2e keeps passing on the old path.
 
 This is the foundation that the first remote provider (`13c`) requires. It is
 deliberately scoped down from what the old single-doc `13b` tried to bundle so
@@ -161,7 +161,7 @@ the registry file; the runtime's own `/register` call drives the transition
 to `ready`.
 
 The default stays `false` so the existing polling path and the existing
-browser-harness e2e do not regress.
+browser demo e2e do not regress.
 
 ### 6. Consolidate the dual launcher surfaces
 
@@ -249,7 +249,7 @@ Docs:
 - `LocalProvider::prefer_push: bool` defaults to `false`; when `true`, the
   launcher spawns runtimes with `--control-plane-url` set and the runtime
   registers via HTTP instead of writing to `runtimes.toml`
-- The browser-harness e2e passes against both `prefer_push: false` (polling)
+- The browser demo e2e passes against both `prefer_push: false` (polling)
   and `prefer_push: true` (push), parameterized by an env var
 - §4a in `control-and-data-plane.md` includes rule 6 for `stale` and
   `broken` as not-ready states
@@ -272,7 +272,7 @@ Docs:
   - resumes heartbeats, asserts the descriptor transitions back to `ready`
 - one runtime test that exercises the consolidated launcher path against
   both `prefer_push: false` and `prefer_push: true`
-- the existing browser-harness e2e parameterized to run against both modes
+- the existing browser demo e2e parameterized to run against both modes
 
 ## Handoff Note
 

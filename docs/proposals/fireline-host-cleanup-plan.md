@@ -52,7 +52,7 @@ Rationale:
 - The audit (§Category A, §Category C) confirms both `crates/fireline-host/src/connections.rs` and `crates/fireline-resources/src/routes_files.rs` are dead TODO stubs with zero production callers. The "lookup file" mechanism they sketched never landed and has been superseded by the combinator / MCP path.
 - ACP's own `fs/read_text_file` and `fs/write_text_file` protocol methods flow through the conductor proxy chain as effects — which is the right boundary for file operations, not a parallel REST surface.
 
-**Pre-C1 investigation flag:** the dispatch explicitly asks to confirm the browser harness isn't currently calling either dead surface before the delete. Based on my earlier reads of `packages/browser-harness/src/app.tsx` and `dev-server.mjs` (Tier 5 rewire, commit `52c31af`), the browser-harness Tier 5 path only calls `/api/agents`, `/api/resolve?agentId=...`, and `/cp/v1/runtimes*`. **No `/fs/*` or connection-lookup REST calls.** The dead-surface deletion in C1 is safe. If a separate dispatch wants a belt-and-suspenders confirmation with a `grep -r` sweep, happy to do that; I did not execute it as part of this plan.
+**Pre-C1 investigation flag:** the dispatch explicitly asked to confirm the old browser demo was not currently calling either dead surface before the delete. Based on the earlier reads of that demo app and its sidecar server (Tier 5 rewire, commit `52c31af`), the path only called `/api/agents`, `/api/resolve?agentId=...`, and `/cp/v1/runtimes*`. **No `/fs/*` or connection-lookup REST calls.** The dead-surface deletion in C1 was safe.
 
 ---
 

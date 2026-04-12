@@ -557,7 +557,7 @@ not. The win is:
 This proposal makes several old or half-built paths obsolete:
 
 - The dead `/api/v1/files/*` REST helper investigated in
-  [`../investigations/file-helper-api-usage.md`](../investigations/file-helper-api-usage.md)
+  the earlier file-helper investigation
 - The `connections.rs` TODO stub that tried to map `connection_id ->
   cwd` for that REST helper
 - `fireline sync-to-remote` as a bespoke file-sync command; it becomes
