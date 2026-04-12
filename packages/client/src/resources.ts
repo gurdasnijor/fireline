@@ -1,10 +1,6 @@
 /**
  * Serializable resource references for the managed-agent Resources primitive
- * defined in `docs/proposals/client-primitives.md` and mapped in
- * `docs/explorations/managed-agents-mapping.md`.
- *
- * Mirrors the Rust `ResourceSourceRef` + `PublishedResourceRef` split in
- * `crates/fireline-resources`.
+ * defined in `docs/proposals/client-api-redesign.md`.
  */
 export type HostId = string
 

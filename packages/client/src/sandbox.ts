@@ -50,36 +50,16 @@ export class Sandbox {
    */
   async provision(config: SandboxConfig): Promise<SandboxHandle> {
     const request = buildProvisionRequest(config)
-
-    try {
-      const handle = await requestControlPlane<SandboxHandle>(
-        this,
-        '/v1/sandboxes',
-        {
-          method: 'POST',
-          body: JSON.stringify(request),
-        },
-      )
-      if (!handle) {
-        throw new Error('control plane returned an empty sandbox handle')
-      }
-      return handle
-    } catch (error) {
-      if (!isMissingEndpoint(error)) {
-        throw error
-      }
-    }
-
     const handle = await requestControlPlane<SandboxHandle>(
       this,
-      '/v1/runtimes',
+      '/v1/sandboxes',
       {
         method: 'POST',
         body: JSON.stringify(request),
       },
     )
     if (!handle) {
-      throw new Error('control plane returned an empty runtime handle')
+      throw new Error('control plane returned an empty sandbox handle')
     }
     return handle
   }
@@ -213,15 +193,6 @@ function middlewareToComponents(middleware: Middleware, name: string): TopologyC
     case 'peer':
       return [{ name: 'peer_mcp' }]
   }
-}
-
-function isMissingEndpoint(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'status' in error &&
-    (error.status === 404 || error.status === 405)
-  )
 }
 
 function cloneDefined<T extends object>(value: T): T {
