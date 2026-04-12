@@ -255,8 +255,6 @@ impl axum::response::IntoResponse for ControlPlaneError {
 #[serde(rename_all = "camelCase")]
 struct IssueRuntimeTokenRequest {
     runtime_key: String,
-    #[serde(default)]
-    _scope: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

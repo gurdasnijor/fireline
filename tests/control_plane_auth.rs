@@ -292,7 +292,6 @@ impl LocalRuntimeLauncher for FakeRuntimeLauncher {
         _mounted_resources: Vec<MountedResource>,
     ) -> Result<RuntimeLaunch> {
         Ok(RuntimeLaunch {
-            status: RuntimeStatus::Starting,
             runtime_id: format!("fireline:{}:fake", spec.name),
             provider_instance_id: PRELAUNCH_PROVIDER_INSTANCE_ID.to_string(),
             acp: Endpoint::new(PRELAUNCH_ACP_URL),

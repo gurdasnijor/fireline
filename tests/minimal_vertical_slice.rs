@@ -4,15 +4,50 @@ use std::time::Duration;
 use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
 use fireline_harness::DurableStreamTracer;
-use fireline_host::build::build_subprocess_conductor;
-use fireline_host::transports::duplex::handle_duplex;
 use fireline_session::build_stream_router;
+use sacp::{Agent, ByteStreams, Client, Conductor, DynConnectTo};
+use sacp_conductor::{ConductorImpl, McpBridgeMode, trace::WriteEvent};
+use sacp_tokio::AcpAgent;
 use tokio::io::duplex;
 use tokio::net::TcpListener;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 fn testy_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fireline-testy"))
+}
+
+fn build_subprocess_conductor(
+    name: impl ToString,
+    agent_command: Vec<String>,
+    components: Vec<DynConnectTo<Conductor>>,
+    trace_writer: impl WriteEvent,
+) -> ConductorImpl<Agent> {
+    ConductorImpl::new_agent(
+        name,
+        move |req| async move {
+            let terminal = DynConnectTo::<Client>::new(
+                AcpAgent::from_args(agent_command)
+                    .map_err(|e| sacp::util::internal_error(format!("agent command: {e}")))?,
+            );
+            Ok((req, components, terminal))
+        },
+        McpBridgeMode::default(),
+    )
+    .trace_to(trace_writer)
+}
+
+async fn handle_duplex(
+    conductor: ConductorImpl<Agent>,
+    stream: tokio::io::DuplexStream,
+) -> Result<()> {
+    let (read_half, write_half) = tokio::io::split(stream);
+    conductor
+        .run(ByteStreams::new(
+            write_half.compat_write(),
+            read_half.compat(),
+        ))
+        .await?;
+    Ok(())
 }
 
 #[tokio::test]

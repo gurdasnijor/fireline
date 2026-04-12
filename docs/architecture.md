@@ -34,7 +34,7 @@ fireline/
 │   │   └── testy_prompt.rs      # echo test agent
 │   ├── bootstrap.rs             # runtime wiring: terminal + conductor + server
 │   ├── stream_host.rs           # embeds durable-streams-server
-│   ├── routes/                  # axum handlers: acp, files
+│   ├── routes/                  # axum handlers: acp
 │   ├── session_index.rs         # in-memory session projection
 │   ├── active_turn_index.rs     # in-memory turn projection
 │   ├── runtime_materializer.rs  # replays durable stream into projections
@@ -46,7 +46,6 @@ fireline/
 │   ├── child_session_edge.rs    # parent→child lineage edge writer
 │   ├── load_coordinator.rs      # session/load matching
 │   ├── orchestration.rs         # resume(sessionId) contract
-│   ├── connections.rs           # per-session lookup TOML files
 │   ├── agent_catalog.rs         # ACP registry client
 │   ├── topology.rs              # component/tracer registration
 │   └── error_codes.rs           # Fireline ACP _meta errors
@@ -166,7 +165,7 @@ Key observations:
 │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐   │
 │  │ axum Router      │  │ embedded         │  │ RuntimeMaterial- │   │
 │  │  /acp (WS)       │  │ durable-streams- │  │ izer             │   │
-│  │  /fs/*           │  │ server           │  │  ├ SessionIndex  │   │
+│  │  /healthz        │  │ server           │  │  ├ SessionIndex  │   │
 │  │  /v1/stream/*    │  │  (same listener) │  │  └ ActiveTurn    │   │
 │  └────────┬─────────┘  └────────┬─────────┘  │    Index         │   │
 │           │                     │            └────────▲─────────┘   │
@@ -441,7 +440,7 @@ enum ApprovalAction { RequireApproval, Deny }
 
 | Task | Spawn site | Lifetime | Job |
 |---|---|---|---|
-| **Axum HTTP server** | `src/bootstrap.rs:211` | Runtime lifetime | Serve `/acp` WS, `/fs/*`, embedded `/v1/stream/*` |
+| **Axum HTTP server** | `src/bootstrap.rs:211` | Runtime lifetime | Serve `/acp` WS, `/healthz`, embedded `/v1/stream/*` |
 | **Runtime materializer consumer** | `src/runtime_materializer.rs:91` | Runtime lifetime | Replay + follow state stream; drive `StateProjection`s |
 | **SharedTerminal actor** | `conductor/shared_terminal.rs:72` | Runtime lifetime | Own agent subprocess; `select!` over attach requests, actor msgs, stdout, shutdown |
 | **Attachment input driver** | `conductor/shared_terminal.rs:234` | Per attachment | Route conductor-output lines into subprocess stdin |
@@ -559,7 +558,6 @@ Key property: two concurrent callers trying to recover the same session's runtim
 | WebSocket | `fireline` | `127.0.0.1:4437` | `GET /acp` | `sacp::Lines` (newline-delimited JSON-RPC, Text/Binary) | none (trusted net) |
 | HTTP | `fireline` | `127.0.0.1:4437` | `GET /healthz` | — | none |
 | HTTP | `fireline` | `127.0.0.1:4437` | `{GET,PUT,HEAD,POST,DELETE} /v1/stream/{name}` | durable-streams protocol | none |
-| HTTP | `fireline` | `127.0.0.1:4438` | `/fs/*` | JSON | none |
 | HTTP | `fireline-control-plane` | `127.0.0.1:4440` | `GET /healthz` | — | none |
 | HTTP | `fireline-control-plane` | | `POST /v1/auth/runtime-token` | JSON | none |
 | HTTP | `fireline-control-plane` | | `GET/POST /v1/runtimes` | JSON | none |

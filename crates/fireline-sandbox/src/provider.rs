@@ -9,7 +9,6 @@ pub use fireline_session::{
 };
 
 pub struct RuntimeLaunch {
-    pub status: RuntimeStatus,
     pub runtime_id: String,
     pub provider_instance_id: String,
     pub acp: Endpoint,
@@ -28,7 +27,6 @@ impl RuntimeLaunch {
         runtime: Box<dyn ManagedRuntime>,
     ) -> Self {
         Self {
-            status: RuntimeStatus::Ready,
             runtime_id,
             provider_instance_id,
             acp,
@@ -40,7 +38,6 @@ impl RuntimeLaunch {
 
     pub fn starting(runtime: Box<dyn ManagedRuntime>) -> Self {
         Self {
-            status: RuntimeStatus::Starting,
             runtime_id: String::new(),
             provider_instance_id: String::new(),
             acp: Endpoint::new(""),

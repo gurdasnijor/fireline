@@ -13,7 +13,7 @@
 //!   (GET/PUT/HEAD/POST/DELETE per the spec)
 //!
 //! Those paths are namespaced enough not to collide with Fireline's
-//! own routes (`/acp`, `/api/v1/files/*`), so merging (rather than
+//! own routes (`/acp`), so merging (rather than
 //! nesting) keeps client URLs aligned with the upstream convention
 //! and with every off-the-shelf `durable-streams` client library.
 //!

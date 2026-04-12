@@ -25,7 +25,7 @@ use fireline_resources::{LocalPathMounter, ResourceMounter, prepare_resources};
 
 use crate::provider::{
     CreateRuntimeSpec, Endpoint, ManagedRuntime, RuntimeLaunch, RuntimeProvider,
-    RuntimeProviderKind, RuntimeStatus, RuntimeTokenIssuer,
+    RuntimeProviderKind, RuntimeTokenIssuer,
 };
 
 const CONTAINER_PORT: u16 = 4437;
@@ -239,7 +239,6 @@ impl RuntimeProvider for DockerProvider {
             .with_context(|| format!("start docker runtime container {container_name}"))?;
 
         Ok(RuntimeLaunch {
-            status: RuntimeStatus::Starting,
             runtime_id: String::new(),
             provider_instance_id,
             acp: Endpoint::new(advertised_acp_url),

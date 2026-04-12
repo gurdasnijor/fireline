@@ -117,7 +117,7 @@ At dispatch time **use Option A exclusively** — the predev's embedded `cargo b
 | Port | Process | What it serves | Started by |
 |---|---|---|---|
 | `4436` | `node ./dev-server.mjs` | Browser-harness control server — `/api/agents`, `/api/resolve`, `/api/runtime` CRUD. Backs the left-pane agent dropdown and legacy runtime lifecycle fallback. | `pnpm dev:server` |
-| `4437` | `target/debug/fireline` | Fireline runtime process — exposes `/acp` (ACP WebSocket), `/v1/stream/*` (durable-streams-server embedded via `stream_host.rs`), `/healthz`, and `/fs/*` helper routes. This is the runtime the control plane spawns on demand when the browser calls `host.provision(...)`. | `fireline-control-plane` (spawned as a child process by the control plane, NOT by the dev server directly) |
+| `4437` | `target/debug/fireline` | Fireline runtime process — exposes `/acp` (ACP WebSocket), `/v1/stream/*` (durable-streams-server embedded via `stream_host.rs`), and `/healthz`. This is the runtime the control plane spawns on demand when the browser calls `host.provision(...)`. | `fireline-control-plane` (spawned as a child process by the control plane, NOT by the dev server directly) |
 | `4440` | `target/debug/fireline-control-plane` | Control plane HTTP API — `POST /v1/runtimes`, `GET /v1/runtimes/{key}`, `POST /v1/runtimes/{key}/stop`, `DELETE /v1/runtimes/{key}`, `GET /healthz`. The `Host` satisfier in the browser talks to this through the vite `/cp` proxy. | `dev-server.mjs` (line 210) |
 | `5173` | `vite` | React dev server + HMR for `packages/browser-harness/src/`. Also hosts the proxy table that routes `/api`, `/cp`, `/acp`, `/v1`, and `/healthz` to the ports above. | `pnpm dev:vite` |
 
