@@ -40,3 +40,18 @@ These guides describe the code that exists in this repository today. Where the p
 - [crates/fireline-harness/src/host_topology.rs](../../crates/fireline-harness/src/host_topology.rs)
 - [crates/fireline-harness/src/approval.rs](../../crates/fireline-harness/src/approval.rs)
 - [crates/fireline-sandbox/src/providers](../../crates/fireline-sandbox/src/providers)
+
+## Upcoming primitives
+
+These guides track the current runtime and package behavior. For the target
+design that is stabilizing underneath them, see:
+
+- [ACP Canonical Identifiers](../proposals/acp-canonical-identifiers.md)
+  The governing identity contract for session/request/tool-call state and
+  the agent-plane vs infrastructure-plane split.
+- [Durable Subscriber Primitive](../proposals/durable-subscriber.md)
+  The upcoming framework-level durable workflow primitive, including the
+  webhook delivery profile in §5.2.
+- [Durable Promises](../proposals/durable-promises.md)
+  The planned imperative awakeable sugar layered on top of durable
+  subscribers.

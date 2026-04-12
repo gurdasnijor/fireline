@@ -88,6 +88,12 @@ The proposal vocabulary sometimes talks about `start()` with no arguments
 roadmap; they are not in the package today. `serverUrl` is still the only
 way to tell the client where to provision.
 
+Upcoming identity note: the target agent-plane identifier cleanup is
+tracked in [ACP Canonical Identifiers](../proposals/acp-canonical-identifiers.md).
+That proposal is not the live runtime yet; it is the design reference
+for the upcoming canonical `SessionId` / `RequestId` / `ToolCallId`
+migration.
+
 ## Connect to ACP
 
 ```ts

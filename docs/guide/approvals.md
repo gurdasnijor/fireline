@@ -130,3 +130,12 @@ That is the durable approval handshake in one sentence: observe
 `approval_resolved` to the stream. The sandbox can die between the
 request and the resolution — when a new one replays the stream, it sees
 the approval and continues.
+
+## Upcoming design references
+
+The current approval guide describes the shipped gate as it exists today.
+For the target generalization, see
+[Durable Subscriber Primitive](../proposals/durable-subscriber.md) for
+the framework-level `DurableSubscriber` abstraction and
+[Durable Promises](../proposals/durable-promises.md) for the planned
+awakeable-style imperative sugar on top.

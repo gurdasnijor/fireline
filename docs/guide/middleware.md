@@ -53,6 +53,12 @@ tool interception lands upstream. See
 [packages/client/src/sandbox.ts](../../packages/client/src/sandbox.ts)
 for the fallback mapping.
 
+Upcoming design note: the approval gate is the reference case for the
+target [Durable Subscriber Primitive](../proposals/durable-subscriber.md).
+That proposal is ahead of the current runtime, but it documents the
+general durable workflow shape this middleware is expected to collapse
+into.
+
 ## `budget({ tokens })`
 
 ```ts
@@ -181,3 +187,8 @@ Current scope of the injection target:
 
 See also:
 [docs/proposals/secrets-injection-component.md](../proposals/secrets-injection-component.md).
+
+Upcoming design note: credential resolution is currently a dedicated
+harness component, but the broader durable workflow direction is tracked
+in [Durable Subscriber Primitive](../proposals/durable-subscriber.md).
+Treat that as target design, not the current middleware contract.
