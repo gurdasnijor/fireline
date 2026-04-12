@@ -1,0 +1,15 @@
+[package]
+name = "fireline-acp-ids"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Canonical ACP identifier types for the Fireline agent plane"
+
+[dependencies]
+sacp.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

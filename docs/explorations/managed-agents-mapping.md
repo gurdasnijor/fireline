@@ -228,7 +228,7 @@ The pieces:
 
 - **Producer side (`emitEvent`)** — `fireline_conductor::trace::DurableStreamTracer` (`crates/fireline-conductor/src/trace.rs`) wraps a `durable_streams::Producer` and writes one event per ACP and conductor activity. Idempotent appends are guaranteed by the producer wire protocol.
 - **Consumer side (`getEvents` / `getSession`)** — two consumers exist today:
-  - **Runtime-local materializers** (`fireline_conductor::state_projector`, `crates/fireline-conductor/src/runtime/...`) that subscribe to the runtime's own stream and project rows for `SessionIndex`, `ActiveTurnIndex`, etc.
+  - **Runtime-local materializers** (`fireline_conductor::state_projector`, `crates/fireline-conductor/src/runtime/...`) that subscribe to the runtime's own stream and project rows for `SessionIndex`, etc.; `ActiveTurnIndex` is transitional here and is slated for deletion in canonical-identifiers Phase 5, see [ACP canonical identifiers](../proposals/acp-canonical-identifiers.md).
   - **TypeScript `StreamDB`** in `packages/state/` that the browser uses for reactive queries against the same stream.
 - **Replay-from-any-point** — `durable-streams` SSE subscriptions accept `offset` and `live` parameters, so any consumer can start at any point in history. The runtime restart story works because per-runtime streams persist independently of compute.
 - **Architectural commitment** — the [control-and-data-plane doc §3b](../runtime/control-and-data-plane.md) explicitly names durable-streams as the *persistence tier of the data plane*, with materialization happening only in consumers, never in the persistence tier.

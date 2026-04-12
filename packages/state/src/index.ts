@@ -1,5 +1,12 @@
 export { firelineState } from './schema.js'
 export type { StateEvent } from '@durable-streams/state'
+export type {
+  SessionId,
+  RequestId,
+  ToolCallId,
+  PromptRequestRef,
+  ToolInvocationRef,
+} from './acp-types.js'
 
 export {
   createFirelineDB,

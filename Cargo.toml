@@ -1,6 +1,7 @@
 [workspace]
 members = [
     ".",
+    "crates/fireline-acp-ids",
     "crates/fireline-semantics",
     "crates/fireline-session",
     "crates/fireline-orchestration",
@@ -22,6 +23,7 @@ repository = "https://github.com/fireline/fireline"
 
 [workspace.dependencies]
 # Internal workspace crates
+fireline-acp-ids = { path = "crates/fireline-acp-ids" }
 fireline-semantics = { path = "crates/fireline-semantics" }
 fireline-session = { path = "crates/fireline-session" }
 fireline-orchestration = { path = "crates/fireline-orchestration" }
