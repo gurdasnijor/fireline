@@ -48,14 +48,14 @@ When ambiguity arises:
 |---|---|---|
 | w10 | **Opus 2 (PM)** | onboarded — owns planning surface |
 | w20 | **Opus 3 (Architect)** | onboarded — has posted Phase 1 review |
-| w12 | Opus 2 → codex | **claimed 14:15** — drift-fix #4 (`unified-materialization.md`). w12 prior Phase 1 variant (wrong crate location, `3a75a06`) superseded by w21's correct fixup per Architect. |
-| w13 | Opus 2 → codex | **claimed 14:15** — drift-fix #5 (`secrets-injection-component.md`) |
-| w17 | Opus 2 → codex | **claimed 14:15** — exploration cleanup (`docs/explorations/managed-agents-mapping.md:231` ActiveTurnIndex reference) |
-| w15 | Opus 2 → codex | **ACTIVE** — drift-fix #6 (webhook merge into durable-subscriber.md §5.2) — dispatched 14:05 |
-| w18 | Opus 2 → codex | **ACTIVE** — drift-fix #2 (platform-sdk-api-design.md) — working (was paused on paste; resumed via `send-key Enter`) |
-| w19 | Opus 2 → codex | **STALLED** — cargo test `control_plane_push` running ~15 min+. Subject to new CI-first directive — to be redirected to push + gh run watch. |
-| w21 | Opus 1 → codex | **ACTIVE** — Phase 1 fixups (fireline-acp-ids crate + @fireline/state shim visible in worktree) |
-| w22 | Opus 2 → codex | **ACTIVE** — drift-fix #3 (client-api-redesign.md) — working (resumed via `send-key Enter`) |
+| w12 | Opus 2 → codex | **ACTIVE** — drift-fix #4 (`unified-materialization.md`), submitted at 14:20 |
+| w13 | Opus 2 → codex | **ACTIVE** — drift-fix #5 (`secrets-injection-component.md`), submitted at 14:20 |
+| w17 | Opus 2 → codex | **LANDED** — drift-fix #7 at `1f3c610` (managed-agents-mapping.md ActiveTurnIndex flagged). Also still holds Opus 1's TLA+ probes as background work. |
+| w15 | Opus 2 → codex | **LANDED** — #6 at `57c144e` (webhook merge + SUPERSEDED banner). Recycling for doc/guide refresh. |
+| w18 | Opus 2 → codex | **LANDED** — #2 at `3fa956e` (canonical ACP ids + plane-separated `fireline.db()`). Recycling for README staleness. |
+| w19 | Opus 2 → codex | **STALLED** — cargo test still running. Redirecting to CI-first directive next. |
+| w21 | Opus 1 → codex | **ACTIVE** — Phase 1 fixups (fireline-acp-ids crate + @fireline/state shim) |
+| w22 | Opus 2 → codex | **LANDED** — #3 at `12bb7cd` (child_session_edge stripped; `_meta` trace context lineage). Recycling for approval-workflow README. |
 
 ### Codex claiming protocol
 
@@ -169,15 +169,26 @@ Drift fixes from `docs/proposals/proposal-index.md §6`, priority order:
 | # | Priority | Proposal | Drift | Status |
 |---|---|---|---|---|
 | 1 | Critical | `durable-subscriber.md` | `CrossSessionKey` / `cross_session` completion shape; replace with caller-local `PromptKey(SessionId, RequestId)` / `ToolKey(SessionId, ToolCallId)`; move cross-session causality to `_meta` trace context. Line ranges `66-70`, `154-157`, `321-327`, `393-401`, `447`. | **LANDED at `7551cb5`** (14:03) |
-| 2 | Critical | `platform-sdk-api-design.md` | `string` ACP ids + infra rows (`PromptTurnRow`, `ConnectionRow`, `TerminalRow`, `RuntimeInstanceRow`) in `fireline.db()`. Swap to `sacp::schema` branded types, rename prompt-turn → prompt-request, move infra rows to admin API. Lines `114-115`, `151-198`, `215`, `395-402`. | **dispatched to w18** (13:50) |
-| 3 | Critical | `client-api-redesign.md` | `child_session_edge` rows + single-tenant stream as lineage. Switch to prompt-request + `_meta` trace context. Lines `190`, `363`, `422`, `437`, `442-475`. | **dispatched to w22** (13:50) |
+| 2 | Critical | `platform-sdk-api-design.md` | `string` ACP ids + infra rows (`PromptTurnRow`, `ConnectionRow`, `TerminalRow`, `RuntimeInstanceRow`) in `fireline.db()`. Swap to `sacp::schema` branded types, rename prompt-turn → prompt-request, move infra rows to admin API. Lines `114-115`, `151-198`, `215`, `395-402`. | **LANDED at `3fa956e`** (14:17) |
+| 3 | Critical | `client-api-redesign.md` | `child_session_edge` rows + single-tenant stream as lineage. Switch to prompt-request + `_meta` trace context. Lines `190`, `363`, `422`, `437`, `442-475`. | **LANDED at `12bb7cd`** (14:18) |
 | 4 | Design | `unified-materialization.md` | `ActiveTurnIndex` / `prompt_turn` as steady state. Rewrite around `SessionIndex`/`HostIndex`. Lines `14`, `89-100`. | **dispatched to w12** (14:15) — different file from #2/#3, no conflict |
 | 5 | Design | `secrets-injection-component.md` | Rust `session_id: String` in session-scoped keys + audit events. Type as `sacp::schema::SessionId`. Lines `147`, `531`. | **dispatched to w13** (14:15) |
-| 7 | Low | `docs/explorations/managed-agents-mapping.md:231` | Line still describes `ActiveTurnIndex` as live substrate (per `proposal-index.md §1.4`). Mark transitional or remove. | **dispatched to w17** (14:15) |
-| 6 | Design | `webhook-support.md` → `durable-subscriber.md` | **MERGE (decided by Architect 2026-04-12)** — absorb `webhook-support.md §6` (`webhook()` middleware + topology lowering + host target config) into `durable-subscriber.md §5.2` as a subsection; mark `webhook-support.md` SUPERSEDED in `proposal-index.md`. | **dispatched to w15** (14:05) — sequential follow-on to #1 |
+| 7 | Low | `docs/explorations/managed-agents-mapping.md:231` | Marked `ActiveTurnIndex` transitional with pointer to canonical-identifiers.md. | **LANDED at `1f3c610`** (14:22) |
+| 6 | Design | `webhook-support.md` → `durable-subscriber.md` | **MERGE** — absorb `webhook-support.md §6` into `durable-subscriber.md §5.2`; mark SUPERSEDED in `proposal-index.md`. | **LANDED at `57c144e`** (14:12) |
 
 Post-w19:
 - Commit + push; verify CI green; log commit sha here.
+
+## PM backlog dispatch (2026-04-12 14:22)
+
+Post-landings recycle (w15/w18/w22 now idle):
+
+| # | Target | Task | Dispatched to |
+|---|---|---|---|
+| B1 | `docs/guide/` | Add references to new proposals (`acp-canonical-identifiers.md`, `durable-subscriber.md`, `durable-promises.md`) in the guide README and linkbacks from relevant guide pages. Proposal-level language, no code vocabulary changes. | w15 |
+| B2 | `README.md` | Staleness check against current main — flag / fix any examples or collection names that drift from today's API surface. | w18 |
+| B3 | `examples/approval-workflow/README.md` | Reframe approval narrative to reference the DurableSubscriber substrate + `awakeable`/`resolveAwakeable` mental model from `durable-promises.md`. Keep current code examples accurate. | w22 |
+| B4 | `w19` | Redirect per CI-first contention rule: stop local cargo test, commit check-green result, push, let CI run suite. | will send to w19 |
 
 Deferred (background / blocked):
 - `docs/guide/` + `README.md` canonical-ids vocabulary refresh — blocked on Phase 1.5 landing (vocabulary not stable yet).
