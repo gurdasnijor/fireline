@@ -23,7 +23,7 @@ pub use context::{
 };
 pub use secrets::{
     CredentialResolver, CredentialResolverError, InjectionRule, InjectionScope, InjectionTarget,
-    SecretValue, SecretsInjectionComponent,
+    LocalCredentialResolver, SecretValue, SecretsInjectionComponent,
 };
 pub use routes_acp::{AcpRouteState, BaseComponentsFactory};
 pub use shared_terminal::{AttachError, SharedTerminal, SharedTerminalAttachment};
