@@ -154,6 +154,36 @@ export interface PeerMiddleware {
 }
 
 /**
+ * A single secret binding that maps a logical name to a credential reference
+ * and an optional domain allow-list for outbound injection.
+ *
+ * @example `{ ref: 'secret:gh-pat', allow: 'api.github.com' }`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export interface SecretBinding {
+  /** Credential reference resolved by the host's credential resolver. */
+  readonly ref: string
+  /** Optional domain allow-list — the secret is only injected for requests to these domains. */
+  readonly allow?: string | readonly string[]
+}
+
+/**
+ * Middleware spec that injects credentials at call time without exposing
+ * plaintext to the agent.
+ *
+ * @example `const mw: SecretsProxyMiddleware = { kind: 'secretsProxy', bindings: { GITHUB_TOKEN: { ref: 'secret:gh-pat', allow: 'api.github.com' } } }`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export interface SecretsProxyMiddleware {
+  /** Stable discriminator for secrets proxy middleware. */
+  readonly kind: 'secretsProxy'
+  /** Map from logical secret name to credential binding. */
+  readonly bindings: Readonly<Record<string, SecretBinding>>
+}
+
+/**
  * Union of every serializable middleware spec accepted by `compose()`.
  *
  * @example `const chain: Middleware[] = [trace(), budget({ tokens: 20_000 })]`
@@ -166,6 +196,7 @@ export type Middleware =
   | BudgetMiddleware
   | ContextInjectionMiddleware
   | PeerMiddleware
+  | SecretsProxyMiddleware
 
 /**
  * Serializable middleware chain accepted by `compose()`.

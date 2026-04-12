@@ -4,6 +4,8 @@ import type {
   ContextInjectionMiddleware,
   ContextSourceSpec,
   PeerMiddleware,
+  SecretBinding,
+  SecretsProxyMiddleware,
   TraceMiddleware,
 } from './types.js'
 
@@ -108,6 +110,23 @@ export function peer(options: {
   return {
     kind: 'peer',
     ...cloneDefined(options),
+  }
+}
+
+/**
+ * Builds a secrets proxy middleware spec that injects credentials at call time
+ * without exposing plaintext to the agent.
+ *
+ * @example `const mw = secretsProxy({ GITHUB_TOKEN: { ref: 'secret:gh-pat', allow: 'api.github.com' } })`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export function secretsProxy(
+  bindings: Readonly<Record<string, SecretBinding>>,
+): SecretsProxyMiddleware {
+  return {
+    kind: 'secretsProxy',
+    bindings: { ...bindings },
   }
 }
 

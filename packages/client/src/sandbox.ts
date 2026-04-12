@@ -216,7 +216,25 @@ function middlewareToComponents(middleware: Middleware, name: string): TopologyC
         },
       ]
     case 'peer':
-      return [{ name: 'peer_mcp' }]
+      return [
+        {
+          name: 'peer_mcp',
+          ...(middleware.peers?.length ? { config: { peers: [...middleware.peers] } } : {}),
+        },
+      ]
+    case 'secretsProxy':
+      return [
+        {
+          name: 'secrets_injection',
+          config: {
+            bindings: Object.entries(middleware.bindings).map(([name, binding]) => ({
+              name,
+              ref: binding.ref,
+              ...(binding.allow ? { allow: Array.isArray(binding.allow) ? [...binding.allow] : [binding.allow] } : {}),
+            })),
+          },
+        },
+      ]
   }
 }
 

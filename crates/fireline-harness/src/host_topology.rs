@@ -23,6 +23,10 @@ use crate::context::{
     ContextConfig, ContextInjectionComponent, ContextPlacement, ContextSource, DatetimeSource,
     WorkspaceFileSource,
 };
+use crate::secrets::{
+    InjectionRule, InjectionScope, InjectionTarget, LocalCredentialResolver,
+    SecretsInjectionComponent,
+};
 use crate::topology::{TopologyRegistry, TopologySpec, TraceWriterInstance};
 
 #[derive(Clone)]
@@ -73,6 +77,24 @@ pub struct ApprovalGateComponentConfig {
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub policies: Vec<ApprovalPolicyConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretsInjectionConfig {
+    #[serde(default)]
+    pub bindings: Vec<SecretsBindingConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretsBindingConfig {
+    pub name: String,
+    #[serde(rename = "ref")]
+    pub credential_ref: String,
+    #[allow(dead_code)]
+    #[serde(default, rename = "allow")]
+    pub allowed_domains: Vec<String>,
 }
 
 /// Config for the `attach_tool` topology component (slice 17
@@ -279,6 +301,31 @@ pub fn build_host_topology_registry(context: ComponentContext) -> TopologyRegist
                 ))
             }
         })
+        .register_component("secrets_injection", move |config| {
+            let parsed = config
+                .cloned()
+                .map(serde_json::from_value::<SecretsInjectionConfig>)
+                .transpose()
+                .context("parse secrets injection config")?
+                .unwrap_or(SecretsInjectionConfig {
+                    bindings: Vec::new(),
+                });
+            let rules = parsed
+                .bindings
+                .into_iter()
+                .map(|binding| {
+                    Ok(InjectionRule {
+                        target: InjectionTarget::EnvVar(binding.name),
+                        credential_ref: parse_credential_ref(&binding.credential_ref)?,
+                        scope: InjectionScope::Session,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(sacp::DynConnectTo::new(SecretsInjectionComponent::new(
+                Arc::new(LocalCredentialResolver::default()),
+                rules,
+            )))
+        })
         .register_tracer("durable_trace", |_config| {
             Ok(Box::new(NoopTraceWriter) as TraceWriterInstance)
         })
@@ -353,6 +400,50 @@ fn build_context_config(config: ContextInjectionConfig) -> ContextConfig {
             ContextPlacementConfig::Append => ContextPlacement::Append,
         },
     }
+}
+
+fn parse_credential_ref(raw: &str) -> Result<fireline_tools::CredentialRef> {
+    if let Some(var) = raw.strip_prefix("env:") {
+        if var.is_empty() {
+            return Err(anyhow!("invalid env credential ref '{raw}': missing variable name"));
+        }
+        return Ok(fireline_tools::CredentialRef::Env {
+            var: var.to_string(),
+        });
+    }
+
+    if let Some(key) = raw.strip_prefix("secret:") {
+        if key.is_empty() {
+            return Err(anyhow!("invalid secret credential ref '{raw}': missing key"));
+        }
+        return Ok(fireline_tools::CredentialRef::Secret {
+            key: key.to_string(),
+        });
+    }
+
+    if let Some(rest) = raw.strip_prefix("oauth:") {
+        let mut parts = rest.split(':');
+        let provider = parts.next().unwrap_or_default();
+        let account = parts.next().map(str::to_string);
+        if provider.is_empty() {
+            return Err(anyhow!(
+                "invalid oauth credential ref '{raw}': missing provider"
+            ));
+        }
+        if parts.next().is_some() {
+            return Err(anyhow!(
+                "invalid oauth credential ref '{raw}': expected oauth:<provider>[:account]"
+            ));
+        }
+        return Ok(fireline_tools::CredentialRef::OauthToken {
+            provider: provider.to_string(),
+            account,
+        });
+    }
+
+    Err(anyhow!(
+        "unsupported credential ref '{raw}': expected env:, secret:, or oauth:"
+    ))
 }
 
 fn build_named_producer(stream_base_url: &str, stream_name: &str, producer_id: String) -> Producer {
