@@ -1,107 +1,132 @@
 # Fireline Orchestration Status
 
-> Live coordination doc for parallel Opus orchestrators + their dispatched agents.
+> Live coordination doc for three parallel Opus orchestrators + their dispatched agents.
 >
 > Updated: 2026-04-12
 
-## How to use this doc
+## Three-role model
 
-If you are an Opus agent coming in fresh, read this doc FIRST before dispatching anything. Then read the four canonical-identifiers docs (§Core proposals below) to understand the architectural direction.
-
-Each orchestrator owns specific workstreams. Do NOT dispatch into workspaces owned by the other orchestrator without explicit handoff.
-
-## Ownership split
-
-| Orchestrator | Owns workstreams | Owns workspaces (cmux) |
+| Role | Workspace | Responsibilities |
 |---|---|---|
-| **Opus 1** (original session) | Canonical-identifiers execution chain + verification + TLA | w12, w13, w17 |
-| **Opus 2** (new session) | Examples, demos, docs, proposal drift fixes, CI, deployment story | w15, w18, w19 (+ any new codex sessions created by the user for Opus 2's streams) |
-| Either | Emergency intervention on any workspace | — |
+| **Opus 1 — Orchestrator** | original session (Manager 1) | Drive execution. Dispatch sequential work (canonical-ids Phase N → N+1). Commit + push outputs. Sequence the refactor. Technical implementation steering. |
+| **Opus 2 — PM** | w10 (Manager 2) | Own docs, proposals, status artifacts. Track workstream completion against proposals. Flag drift between proposals and execution reality. Keep planning artifacts clean, consistent, dispatch-ready. Proactively coordinate — surface blockers, propose sequencing adjustments. |
+| **Opus 3 — Architect** | w20 (Manager 3) | Own technical quality. Review all landed code for architectural alignment: durable-streams as source of truth, correct conductor usage, canonical ACP identifiers. Can draft high-level proposals. Make technical decisions when ambiguous. Deep ACP spec + conductor knowledge. |
 
-Shared: commit + push operations on `main`. Each orchestrator commits their own dispatches' outputs; do not step on each other's working tree changes if running in the same clone.
+### Division of labor
 
-## Core proposals (read first if you're new)
+- **Opus 1** dispatches and sequences execution. Owns the operational cadence.
+- **Opus 2** owns the PLANNING surface — proposals, index, status docs. Proactively reports drift.
+- **Opus 3** owns the TECHNICAL surface — code review, proposal technical soundness, architectural decisions.
 
-1. `docs/proposals/acp-canonical-identifiers.md` — **the governing acceptance criterion.** No synthetic ids on agent-layer rows; ACP schema types only; plane separation; W3C Trace Context via `_meta`.
-2. `docs/proposals/acp-canonical-identifiers-execution.md` — 8-phase execution plan with gates.
-3. `docs/proposals/acp-canonical-identifiers-verification.md` — 5-layer verification (TLA+, Stateright, cargo audit, migration fixtures, E2E scenarios).
-4. `docs/proposals/durable-subscriber.md` — the DurableSubscriber primitive (framework-level).
-5. `docs/proposals/durable-promises.md` — imperative companion (user-level, `ctx.awakeable()`).
-6. `docs/reviews/approval-gate-correctness.md` — proven semantic substrate the refactor builds on.
+When ambiguity arises:
+- Planning question (what order, what scope, is this ready to dispatch?) → Opus 2
+- Architectural question (is this aligned with durable-streams-as-truth? is this ACP-compliant?) → Opus 3
+- Dispatch question (who runs this task, when, where) → Opus 1
 
-## Current in-flight state (as of this doc's date)
+## Core references (read first if you're new)
 
-| Workspace | Owner | Task | ETA signal |
-|---|---|---|---|
-| w12 | Opus 1 | canonical-ids Phase 0 + Phase 1 (type layer) | In progress |
-| w13 | Opus 1 | verification/audit crate + forbidden-identifier grep | In progress |
-| w17 | Opus 1 | TLA+ spec extensions + TLC run on small model | In progress |
-| w15 | Opus 2 | proposal consistency audit → `docs/proposals/proposal-index.md` | In progress |
-| w18 | Opus 2 | examples cleanup per docs/reviews/examples-audit-followup.md | In progress |
-| w19 | Opus 2 | (to be dispatched) CI test harness fix (`/v1/runtimes` → `/v1/sandboxes`) | Pending dispatch |
+### Proposals
+1. `docs/proposals/acp-canonical-identifiers.md` — governing acceptance criterion.
+2. `docs/proposals/acp-canonical-identifiers-execution.md` — 8-phase execution plan.
+3. `docs/proposals/acp-canonical-identifiers-verification.md` — 5-layer verification.
+4. `docs/proposals/durable-subscriber.md` — framework primitive.
+5. `docs/proposals/durable-promises.md` — imperative companion.
+6. `docs/reviews/approval-gate-correctness.md` — proven substrate.
+
+### ACP / conductor
+- ACP spec: https://agentclientprotocol.com/protocol/schema
+- ACP extensibility (_meta): https://agentclientprotocol.com/protocol/extensibility#the-_meta-field
+- Meta-propagation RFD: https://agentclientprotocol.com/rfds/meta-propagation#implementation-details
+- Conductor architecture: https://agentclientprotocol.github.io/symposium-acp/conductor.html
+- ACP Rust SDK schema: https://github.com/agentclientprotocol/rust-sdk/tree/main/src/agent-client-protocol-core/src/schema
+- Durable streams: https://durablestreams.com/stream-db
+- Durable streams server integration: https://thesampaton.github.io/durable-streams-rust-server/integration/sessions.html
+
+## Current workspace topology
+
+| Workspace | Owner / Role | Task |
+|---|---|---|
+| w10 | **Opus 2 (PM)** | onboarding |
+| w20 | **Opus 3 (Architect)** | onboarding |
+| w12 | Opus 1 → codex | canonical-ids Phase 0 + Phase 1 (type layer) |
+| w13 | Opus 1 → codex | verification/audit crate |
+| w17 | Opus 1 → codex | TLA+ spec extensions + TLC run |
+| w15 | Opus 2 → codex | proposal consistency audit → proposal-index.md |
+| w18 | Opus 2 → codex | examples cleanup per audit followup |
+| w19 | Opus 2 → codex | CI test harness fix (/v1/runtimes → /v1/sandboxes) |
+| w21 | **unassigned codex** | idle — Opus 2 or Opus 3 may claim |
+| w22 | **unassigned codex** | idle — Opus 2 or Opus 3 may claim |
+
+### Codex claiming protocol
+
+When an Opus claims an unassigned codex, update this table with the new owner and task. When the codex completes, either recycle it for the next task in that Opus's queue or release it back to unassigned.
+
+### Workspace ownership rules
+
+- Codex agents belong to one Opus orchestrator at a time (noted in the table above).
+- If a codex workspace goes idle, its OWNING Opus dispatches the next task.
+- Do NOT dispatch into another Opus's workspace without explicit handoff.
+- If you want to recycle an exited session, claim it explicitly in this doc first.
 
 ## Sequencing rules (non-negotiable)
 
-1. **Phase N+1 of canonical-identifiers execution cannot start until Phase N's verification gate is green.** See the execution doc's gate table.
-2. **DurableSubscriber implementation cannot start until canonical-identifiers Phases 2 + 5 have landed** (Phase 2: approval gate uses canonical RequestId; Phase 5: W3C Trace Context propagation).
-3. **Audit tooling (`verification/audit/`) runs in warn mode until Phase 1.5 lands.** After Phase 1.5, it flips to strict mode as a CI gate.
-4. **Proposal drift fixes (from `proposal-index.md`) can happen in parallel with Phase execution — they don't block or get blocked.**
+1. Phase N+1 of canonical-ids execution cannot start until Phase N's verification gate is green.
+2. DurableSubscriber implementation cannot start until canonical-ids Phases 2 + 5 land.
+3. Audit tooling runs in warn mode until Phase 1.5 lands, then flips to strict.
+4. Proposal drift fixes can happen in parallel with Phase execution.
+5. **Architect (Opus 3) has veto power** on any landed code that violates core architectural primitives. If Opus 3 flags a regression, the landing is reverted until the architectural issue is resolved.
 
-## Workstream dispatch queues
+## Dispatch queues
 
-### Canonical-identifiers chain (Opus 1)
+### Opus 1 (execution chain)
+- Monitor w12/w13/w17 → commit their work as it lands.
+- After Phase 1 lands: dispatch Phase 1.5 (String → canonical ACP type field renames).
+- After Phase 1.5: dispatch Phase 2 (approval gate uses canonical RequestId).
+- Continue through Phase 8.
+- Review Phase outputs against Opus 3's architectural gates before pushing.
 
-After w12 (Phase 0+1) lands:
-- Phase 1.5 — replace String ACP id fields with sacp::schema types in agent-layer rows. Dispatch to a fresh workspace.
-- Phase 2 — approval gate uses canonical JSON-RPC RequestId (replaces the SHA256 hash derivation).
-- Phase 3 — StateProjector canonical rekeying.
-- Phase 4 — W3C Trace Context propagation.
-- Phase 5 — delete ActiveTurnIndex + child_session_edge.
-- Phase 6 — TS schema migration.
-- Phase 7 — plane separation enforcement (drop host_key/host_id from SessionRecord).
-- Phase 8 — cleanup + migration scaffolding removal.
+### Opus 2 (PM)
+- Monitor w15 → commit `proposal-index.md` when it lands. Dispatch follow-up drift fix patches per the index.
+- Monitor w18 → commit examples cleanup.
+- Monitor w19 → commit CI fix.
+- Own this orchestration-status.md — keep it current.
+- Watch for sequencing or scope drift across proposals. Propose adjustments to Opus 1.
+- When a phase lands, update the "Current workspace topology" table and mark phase gates in the execution doc.
 
-### Examples / demos / docs (Opus 2)
-
-After w15's proposal-index lands:
-- Dispatch drift fixes per the index's priority ordering (critical > design > naming > historical).
-- Revise `docs/demos/pi-acp-to-openclaw.md` to reflect canonical-ids + durable-promises once those primitives exist.
-- Once DurableSubscriber lands in code (post-canonical-ids Phase 5): rewrite `examples/approval-workflow/` to use a subscriber rather than inline subscribe.
-- Once awakeables ship: add an example demonstrating `ctx.awakeable()`.
-
-### CI (Opus 2)
-
-- w19 dispatched: fix `/v1/runtimes` → `/v1/sandboxes` in remaining test files (tests/control_plane_docker.rs, tests/control_plane_push.rs, etc.). Infrastructure-layer work, does not conflict with canonical-identifiers refactor.
-- Post-Phase 1.5: re-run audit tooling, validate zero violations in already-converted crates.
+### Opus 3 (Architect)
+- Review landed code after each phase for:
+  - Durable-streams-as-truth invariants held
+  - No new synthetic identifiers introduced in agent-layer code
+  - ACP schema types used correctly
+  - Conductor composition is idiomatic
+  - `_meta` propagation is present on peer boundaries
+- Can draft high-level proposals (new primitives, architectural direction) that Opus 1 or Opus 2 then operationalize.
+- Can reject a phase landing if it violates architectural invariants.
+- Owns the technical side of open questions listed below.
 
 ## Coordination conventions
 
-- **Commit + push cadence:** each orchestrator commits their dispatched work's output as soon as it lands AND builds clean. Do not batch unrelated dispatches into one commit.
-- **Commit messages:** reference which proposal/phase the work implements. Format: `{Phase/proposal slug}: {short summary}`.
-- **If a workspace becomes idle,** the owning orchestrator dispatches the next task in their queue. Don't hand it across orchestrators — just dispatch fresh.
-- **If a workspace crashes / session exits,** any orchestrator can recycle it by re-dispatching. Note the recycle in this doc.
-- **Status updates:** update this doc when a workspace changes ownership, when a phase gate passes, or when a new sequencing rule emerges.
+- **Commit + push:** each orchestrator commits their dispatched work immediately when it builds clean. Don't batch.
+- **Commit messages:** reference which proposal/phase. Format: `{Phase/proposal slug}: {short summary}`.
+- **Status updates:** update this doc when ownership shifts, when a phase gate passes, or when a new coordination rule emerges.
+- **Cross-orchestrator communication:** in lieu of direct messaging, use this doc or a small scratch section below ("Active cross-Opus notes") to flag things.
 
-## Handoff protocol for new Opus
+## Active cross-Opus notes
 
-Opus 2, on first boot:
+(append short notes here when one Opus needs another's attention)
 
-1. Read this doc.
-2. Read the four core canonical-identifiers proposals.
-3. Check `git log --oneline -20` to see recent commits.
-4. Run `cmux list-workspaces --window window:1` to confirm the current topology.
-5. Spot-check your owned workspaces (w15, w18, w19) via `cmux read-screen --workspace workspace:N --lines 10`.
-6. If any are idle, dispatch the next task from your queue above.
-7. Confirm with Opus 1 (via the user, or a shared note in this doc) before making architectural decisions that cross workstream boundaries.
+*Nothing yet.*
 
-## Open architectural decisions (cross-orchestrator)
+## Open architectural decisions (Opus 3 owns)
 
-- Whether `webhook-support.md` merges into `durable-subscriber.md` or stays standalone — waiting on w15's proposal-index audit to recommend.
-- Whether the `fireline.db()` session-flattened DB should be restructured in Phase 6 or deferred to a post-refactor proposal — pending Phase 6 execution reality.
-- Whether the "always-on" sandbox policy (from the deployment proposal) ships with DurableSubscriber or as its own execution phase — pending DurableSubscriber implementation.
+- Does `webhook-support.md` merge into `durable-subscriber.md` or stay standalone? Waiting on w15's proposal-index audit.
+- Does `fireline.db()` session-flattened DB restructure in canonical-ids Phase 6 or post-refactor?
+- Does "always-on" sandbox policy (from deployment proposal) ship with DurableSubscriber or as its own execution phase?
+- Should chunk ordering strictly derive from durable-streams offset (as proposed) or can we keep a redundant `seq` field as a derived convenience? (Verification doc current answer: strict offset, no redundant field.)
 
 ## Known risks
 
-1. Coordination drift if this doc isn't kept current.
-2. The canonical-identifiers refactor touches many files; merge conflicts between Opus 1 and Opus 2 dispatches are possible if Opus 2 agents edit agent-layer code during Phase execution. Opus 2 dispatches should generally NOT edit agent-layer source during canonical-ids Phases 1.5–7.
-3. If TLC finds a spec bug in w17's work, the refactor phase-gate invariants may need adjustment — propagate to the execution plan.
+1. Coordination drift if this doc isn't kept current — **Opus 2's responsibility to prevent**.
+2. Agent-layer code changes landing during canonical-ids Phases 1.5–7 from non-refactor workstreams may cause merge conflicts. Opus 2 ensures their dispatches don't touch agent-layer source during those phases.
+3. If TLC finds a spec bug in w17's work, phase-gate invariants may need adjustment — **Opus 3 reviews and propagates** to the execution plan.
+4. Architectural decisions made in isolation (without Opus 3 review) may drift from ACP / durable-streams / conductor best practices. **Require Opus 3 sign-off** on any proposal before it becomes execution-ready.
