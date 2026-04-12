@@ -13,7 +13,10 @@ pub use index::{
     ResourceMetadataPatch, ResourcePublishedEvent, ResourceUnpublishedEvent,
     ResourceUpdatedEvent,
 };
-pub use mounter::{LocalPathMounter, MountedResource, ResourceMounter, prepare_resources};
+pub use mounter::{
+    DurableStreamMounter, LocalPathMounter, MountedResource, ResourceMounter,
+    prepare_resources,
+};
 pub use publisher::ResourcePublisher;
 pub use registry::{
     ResourceRegistry, ResourceWatcher, StreamResourceRegistry, Subscription,
