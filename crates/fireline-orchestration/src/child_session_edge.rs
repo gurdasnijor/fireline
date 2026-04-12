@@ -69,6 +69,7 @@ impl ChildSessionEdgeSink for ChildSessionEdgeWriter {
             },
             value: row,
         });
+        self.producer.flush().await?;
 
         Ok(())
     }
