@@ -21,9 +21,9 @@ pub use manager::RuntimeManager;
 pub use microsandbox::{MICROSANDBOX_SANDBOX_KIND, MicrosandboxSandbox, MicrosandboxSandboxConfig};
 pub use primitive::{Sandbox, SandboxHandle, ToolCall, ToolCallResult};
 pub use provider::{
-    CreateRuntimeSpec, Endpoint, HeartbeatMetrics, HeartbeatReport, ManagedRuntime,
-    PersistedRuntimeSpec, RuntimeDescriptor, RuntimeLaunch, RuntimeProvider, RuntimeProviderKind,
-    RuntimeProviderRequest, RuntimeRegistration, RuntimeStatus, RuntimeTokenIssuer,
+    ProvisionSpec, Endpoint, HeartbeatMetrics, HeartbeatReport, ManagedRuntime,
+    PersistedHostSpec, HostDescriptor, RuntimeLaunch, RuntimeProvider, SandboxProviderKind,
+    SandboxProviderRequest, HostRegistration, HostStatus, RuntimeTokenIssuer,
 };
 pub use provider_trait::LocalRuntimeLauncher;
 pub use providers::{DockerProvider, DockerProviderConfig, LocalProvider};
@@ -46,7 +46,7 @@ struct RuntimeHostInner {
     registry: RuntimeRegistry,
     manager: RuntimeManager,
     live_handles: Mutex<HashMap<String, RuntimeLaunch>>,
-    pending_runtime_specs: Mutex<HashMap<String, PersistedRuntimeSpec>>,
+    pending_host_specs: Mutex<HashMap<String, PersistedHostSpec>>,
 }
 
 impl RuntimeHost {
@@ -56,7 +56,7 @@ impl RuntimeHost {
                 registry,
                 manager,
                 live_handles: Mutex::new(HashMap::new()),
-                pending_runtime_specs: Mutex::new(HashMap::new()),
+                pending_host_specs: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -68,10 +68,10 @@ impl RuntimeHost {
         ))
     }
 
-    #[instrument(skip(self, spec), fields(runtime_key = spec.runtime_key.as_deref().unwrap_or("<generated>"), provider = ?spec.provider))]
-    pub async fn provision(&self, spec: CreateRuntimeSpec) -> Result<RuntimeDescriptor> {
-        let runtime_key = spec
-            .runtime_key
+    #[instrument(skip(self, spec), fields(host_key = spec.host_key.as_deref().unwrap_or("<generated>"), provider = ?spec.provider))]
+    pub async fn provision(&self, spec: ProvisionSpec) -> Result<HostDescriptor> {
+        let host_key = spec
+            .host_key
             .clone()
             .unwrap_or_else(|| format!("runtime:{}", Uuid::new_v4()));
         let created_at_ms = now_ms();
@@ -81,15 +81,15 @@ impl RuntimeHost {
             .unwrap_or_else(|| node_id_for(spec.host));
         let provider = self.inner.manager.resolve_kind(spec.provider)?;
         let persisted_spec =
-            PersistedRuntimeSpec::new(runtime_key.clone(), node_id.clone(), spec.clone());
+            PersistedHostSpec::new(host_key.clone(), node_id.clone(), spec.clone());
 
-        self.inner.registry.upsert(RuntimeDescriptor {
-            runtime_key: runtime_key.clone(),
-            runtime_id: String::new(),
+        self.inner.registry.upsert(HostDescriptor {
+            host_key: host_key.clone(),
+            host_id: String::new(),
             node_id: node_id.clone(),
             provider,
-            provider_instance_id: runtime_key.clone(),
-            status: RuntimeStatus::Starting,
+            provider_instance_id: host_key.clone(),
+            status: HostStatus::Starting,
             acp: Endpoint::new(""),
             state: Endpoint::new(""),
             helper_api_base_url: None,
@@ -100,26 +100,26 @@ impl RuntimeHost {
         let (provider, launch) = match self
             .inner
             .manager
-            .start(spec.clone(), runtime_key.clone(), node_id.clone())
+            .start(spec.clone(), host_key.clone(), node_id.clone())
             .await
         {
             Ok(started) => started,
             Err(error) => {
                 self.inner
-                    .pending_runtime_specs
+                    .pending_host_specs
                     .lock()
                     .await
-                    .remove(&runtime_key);
-                let _ = self.inner.registry.remove(&runtime_key);
+                    .remove(&host_key);
+                let _ = self.inner.registry.remove(&host_key);
                 return Err(error);
             }
         };
         self.inner
-            .pending_runtime_specs
+            .pending_host_specs
             .lock()
             .await
-            .insert(runtime_key.clone(), persisted_spec.clone());
-        let launch_runtime_id = launch.runtime_id.clone();
+            .insert(host_key.clone(), persisted_spec.clone());
+        let launch_host_id = launch.host_id.clone();
         let launch_provider_instance_id = launch.provider_instance_id.clone();
         let launch_acp = launch.acp.clone();
         let launch_state = launch.state.clone();
@@ -129,45 +129,45 @@ impl RuntimeHost {
             .live_handles
             .lock()
             .await
-            .insert(runtime_key.clone(), launch);
+            .insert(host_key.clone(), launch);
 
-        if let Some(descriptor) = self.inner.registry.get(&runtime_key)?
-            && (descriptor.status != RuntimeStatus::Starting || !descriptor.runtime_id.is_empty())
+        if let Some(descriptor) = self.inner.registry.get(&host_key)?
+            && (descriptor.status != HostStatus::Starting || !descriptor.host_id.is_empty())
         {
             let pending_spec = self
                 .inner
-                .pending_runtime_specs
+                .pending_host_specs
                 .lock()
                 .await
-                .get(&runtime_key)
+                .get(&host_key)
                 .cloned();
             if let Some(spec) = pending_spec
                 && !descriptor.state.url.is_empty()
             {
-                crate::stream_trace::emit_runtime_spec_persisted(&descriptor.state.url, &spec)
+                crate::stream_trace::emit_host_spec_persisted(&descriptor.state.url, &spec)
                     .await?;
-                crate::stream_trace::emit_runtime_endpoints_persisted(
+                crate::stream_trace::emit_host_endpoints_persisted(
                     &descriptor.state.url,
                     &descriptor,
                 )
                 .await?;
                 self.inner
-                    .pending_runtime_specs
+                    .pending_host_specs
                     .lock()
                     .await
-                    .remove(&runtime_key);
+                    .remove(&host_key);
             }
-            info!(runtime_key, status = ?descriptor.status, "runtime host provision returned existing descriptor");
+            info!(host_key, status = ?descriptor.status, "runtime host provision returned existing descriptor");
             return Ok(descriptor);
         }
 
-        let descriptor = RuntimeDescriptor {
-            runtime_key: runtime_key.clone(),
-            runtime_id: launch_runtime_id,
+        let descriptor = HostDescriptor {
+            host_key: host_key.clone(),
+            host_id: launch_host_id,
             node_id,
             provider,
             provider_instance_id: launch_provider_instance_id,
-            status: RuntimeStatus::Starting,
+            status: HostStatus::Starting,
             acp: launch_acp,
             state: launch_state,
             helper_api_base_url: launch_helper_api_base_url,
@@ -176,108 +176,108 @@ impl RuntimeHost {
         };
         self.inner.registry.upsert(descriptor.clone())?;
         if !descriptor.state.url.is_empty() {
-            crate::stream_trace::emit_runtime_spec_persisted(
+            crate::stream_trace::emit_host_spec_persisted(
                 &descriptor.state.url,
                 &persisted_spec,
             )
             .await?;
-            crate::stream_trace::emit_runtime_endpoints_persisted(
+            crate::stream_trace::emit_host_endpoints_persisted(
                 &descriptor.state.url,
                 &descriptor,
             )
             .await?;
             self.inner
-                .pending_runtime_specs
+                .pending_host_specs
                 .lock()
                 .await
-                .remove(&runtime_key);
+                .remove(&host_key);
         }
 
-        info!(runtime_key, status = ?descriptor.status, "runtime host provisioned runtime descriptor");
+        info!(host_key, status = ?descriptor.status, "runtime host provisioned runtime descriptor");
         Ok(descriptor)
     }
 
-    pub fn get(&self, runtime_key: &str) -> Result<Option<RuntimeDescriptor>> {
-        self.inner.registry.get(runtime_key)
+    pub fn get(&self, host_key: &str) -> Result<Option<HostDescriptor>> {
+        self.inner.registry.get(host_key)
     }
 
-    pub fn list(&self) -> Result<Vec<RuntimeDescriptor>> {
+    pub fn list(&self) -> Result<Vec<HostDescriptor>> {
         self.inner.registry.list()
     }
 
-    #[instrument(skip(self), fields(runtime_key))]
-    pub async fn stop(&self, runtime_key: &str) -> Result<RuntimeDescriptor> {
+    #[instrument(skip(self), fields(host_key))]
+    pub async fn stop(&self, host_key: &str) -> Result<HostDescriptor> {
         let launch = self
             .inner
             .live_handles
             .lock()
             .await
-            .remove(runtime_key)
-            .ok_or_else(|| anyhow!("runtime '{runtime_key}' is not running"))?;
+            .remove(host_key)
+            .ok_or_else(|| anyhow!("runtime '{host_key}' is not running"))?;
 
         launch.runtime.shutdown().await?;
 
         let mut descriptor = self
             .inner
             .registry
-            .get(runtime_key)?
-            .ok_or_else(|| anyhow!("runtime '{runtime_key}' not found"))?;
-        descriptor.status = RuntimeStatus::Stopped;
+            .get(host_key)?
+            .ok_or_else(|| anyhow!("runtime '{host_key}' not found"))?;
+        descriptor.status = HostStatus::Stopped;
         descriptor.updated_at_ms = now_ms();
         self.inner.registry.upsert(descriptor.clone())?;
         if !descriptor.state.url.is_empty() {
-            crate::stream_trace::emit_runtime_endpoints_persisted(
+            crate::stream_trace::emit_host_endpoints_persisted(
                 &descriptor.state.url,
                 &descriptor,
             )
             .await?;
         }
-        info!(runtime_key, "runtime host stopped runtime");
+        info!(host_key, "runtime host stopped runtime");
         Ok(descriptor)
     }
 
-    pub async fn delete(&self, runtime_key: &str) -> Result<Option<RuntimeDescriptor>> {
+    pub async fn delete(&self, host_key: &str) -> Result<Option<HostDescriptor>> {
         if self
             .inner
             .live_handles
             .lock()
             .await
-            .contains_key(runtime_key)
+            .contains_key(host_key)
         {
-            self.stop(runtime_key).await?;
+            self.stop(host_key).await?;
         }
 
-        self.inner.registry.remove(runtime_key)
+        self.inner.registry.remove(host_key)
     }
 
-    #[instrument(skip(self, registration), fields(runtime_key))]
+    #[instrument(skip(self, registration), fields(host_key))]
     pub async fn register(
         &self,
-        runtime_key: &str,
-        registration: RuntimeRegistration,
-    ) -> Result<RuntimeDescriptor> {
+        host_key: &str,
+        registration: HostRegistration,
+    ) -> Result<HostDescriptor> {
         let mut descriptor = self
             .inner
             .registry
-            .get(runtime_key)?
-            .ok_or_else(|| anyhow!("runtime '{runtime_key}' not found"))?;
+            .get(host_key)?
+            .ok_or_else(|| anyhow!("runtime '{host_key}' not found"))?;
 
-        if descriptor.status == RuntimeStatus::Stopped {
+        if descriptor.status == HostStatus::Stopped {
             return Err(anyhow!(
-                "runtime '{runtime_key}' is stopped and cannot re-register"
+                "runtime '{host_key}' is stopped and cannot re-register"
             ));
         }
 
         let next_status = match descriptor.status {
-            RuntimeStatus::Starting | RuntimeStatus::Stale => RuntimeStatus::Ready,
-            RuntimeStatus::Ready => RuntimeStatus::Ready,
-            RuntimeStatus::Busy => RuntimeStatus::Busy,
-            RuntimeStatus::Idle => RuntimeStatus::Idle,
-            RuntimeStatus::Broken => RuntimeStatus::Broken,
-            RuntimeStatus::Stopped => unreachable!("stopped runtimes already returned above"),
+            HostStatus::Starting | HostStatus::Stale => HostStatus::Ready,
+            HostStatus::Ready => HostStatus::Ready,
+            HostStatus::Busy => HostStatus::Busy,
+            HostStatus::Idle => HostStatus::Idle,
+            HostStatus::Broken => HostStatus::Broken,
+            HostStatus::Stopped => unreachable!("stopped runtimes already returned above"),
         };
 
-        descriptor.runtime_id = registration.runtime_id;
+        descriptor.host_id = registration.host_id;
         descriptor.node_id = registration.node_id;
         descriptor.provider = registration.provider;
         descriptor.provider_instance_id = registration.provider_instance_id;
@@ -289,32 +289,32 @@ impl RuntimeHost {
 
         let pending_spec = self
             .inner
-            .pending_runtime_specs
+            .pending_host_specs
             .lock()
             .await
-            .get(runtime_key)
+            .get(host_key)
             .cloned();
         if let Some(spec) = pending_spec
             && !descriptor.state.url.is_empty()
         {
-            crate::stream_trace::emit_runtime_spec_persisted(&descriptor.state.url, &spec).await?;
+            crate::stream_trace::emit_host_spec_persisted(&descriptor.state.url, &spec).await?;
             self.inner
-                .pending_runtime_specs
+                .pending_host_specs
                 .lock()
                 .await
-                .remove(runtime_key);
+                .remove(host_key);
         }
         self.inner.registry.upsert(descriptor.clone())?;
         if !descriptor.state.url.is_empty() {
-            crate::stream_trace::emit_runtime_endpoints_persisted(
+            crate::stream_trace::emit_host_endpoints_persisted(
                 &descriptor.state.url,
                 &descriptor,
             )
             .await?;
         }
         info!(
-            runtime_key,
-            runtime_id = descriptor.runtime_id,
+            host_key,
+            host_id = descriptor.host_id,
             status = ?descriptor.status,
             "runtime registered with host"
         );
@@ -323,23 +323,23 @@ impl RuntimeHost {
 
     pub fn heartbeat(
         &self,
-        runtime_key: &str,
+        host_key: &str,
         report: HeartbeatReport,
-    ) -> Result<RuntimeDescriptor> {
+    ) -> Result<HostDescriptor> {
         let mut descriptor = self
             .inner
             .registry
-            .get(runtime_key)?
-            .ok_or_else(|| anyhow!("runtime '{runtime_key}' not found"))?;
+            .get(host_key)?
+            .ok_or_else(|| anyhow!("runtime '{host_key}' not found"))?;
 
-        if descriptor.status == RuntimeStatus::Stopped {
+        if descriptor.status == HostStatus::Stopped {
             return Err(anyhow!(
-                "runtime '{runtime_key}' is stopped and cannot heartbeat"
+                "runtime '{host_key}' is stopped and cannot heartbeat"
             ));
         }
 
-        if descriptor.status == RuntimeStatus::Stale {
-            descriptor.status = RuntimeStatus::Ready;
+        if descriptor.status == HostStatus::Stale {
+            descriptor.status = HostStatus::Ready;
         }
         descriptor.updated_at_ms = report.ts_ms;
         self.inner.registry.upsert(descriptor.clone())?;

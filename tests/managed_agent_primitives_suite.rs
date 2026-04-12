@@ -29,7 +29,7 @@ use fireline_resources::{
     FsBackendComponent, LocalFileBackend, LocalPathMounter, ResourceMounter, ResourceRef,
     ResourceSourceRef,
 };
-use fireline_session::RuntimeStatus;
+use fireline_session::HostStatus;
 use managed_agent_suite::{
     ControlPlaneHarness, ManagedAgentHarnessSpec, count_events, create_session, load_session,
     prompt_session, testy_fs_bin, testy_load_bin, wait_for_event_count,
@@ -153,22 +153,22 @@ async fn managed_agent_orchestration_acceptance_contract() -> Result<()> {
             last_step = Instant::now();
         }
 
-        let persisted = fireline_orchestration::reconstruct_runtime_spec_from_log(
+        let persisted = fireline_orchestration::reconstruct_host_spec_from_log(
             &runtime.state.url,
-            &runtime.runtime_key,
+            &runtime.host_key,
         )
         .await?;
         if timings {
             eprintln!(
-                "[timing] reconstruct_runtime_spec_from_log: {} ms",
+                "[timing] reconstruct_host_spec_from_log: {} ms",
                 last_step.elapsed().as_millis()
             );
             last_step = Instant::now();
         }
-        assert_eq!(persisted.runtime_key, runtime.runtime_key);
+        assert_eq!(persisted.host_key, runtime.host_key);
         assert_eq!(
-            persisted.create_spec.runtime_key.as_deref(),
-            Some(runtime.runtime_key.as_str())
+            persisted.create_spec.host_key.as_deref(),
+            Some(runtime.host_key.as_str())
         );
         assert_eq!(
             persisted.create_spec.node_id.as_deref(),
@@ -197,7 +197,7 @@ async fn managed_agent_orchestration_acceptance_contract() -> Result<()> {
             last_step = Instant::now();
         }
 
-        let _stopped = control_plane.stop_runtime(&runtime.runtime_key).await?;
+        let _stopped = control_plane.stop_runtime(&runtime.host_key).await?;
         if timings {
             eprintln!(
                 "[timing] stop_runtime: {} ms",
@@ -220,10 +220,10 @@ async fn managed_agent_orchestration_acceptance_contract() -> Result<()> {
             last_step = Instant::now();
         }
 
-        assert_eq!(resumed.runtime_key, runtime.runtime_key);
-        assert_eq!(resumed.status, RuntimeStatus::Ready);
+        assert_eq!(resumed.host_key, runtime.host_key);
+        assert_eq!(resumed.status, HostStatus::Ready);
         assert_ne!(
-            resumed.runtime_id, runtime.runtime_id,
+            resumed.host_id, runtime.host_id,
             "cold-start resume should produce a new runtime process identity"
         );
 
@@ -499,7 +499,7 @@ async fn managed_agent_tools_schema_only_acceptance_contract() -> Result<()> {
                 "transport",
                 "credential",
                 "host",
-                "runtime_key",
+                "host_key",
                 "node_id",
                 "url",
                 "headers",

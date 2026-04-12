@@ -9,10 +9,10 @@ use durable_streams::{Client as DsClient, Offset};
 use fireline_harness::TopologySpec;
 use fireline_host::bootstrap::{self, BootstrapConfig};
 use fireline_sandbox::{
-    CreateRuntimeSpec, Endpoint, LocalProvider, LocalRuntimeLauncher, ManagedRuntime,
+    ProvisionSpec, Endpoint, LocalProvider, LocalRuntimeLauncher, ManagedRuntime,
     MountedResource, RuntimeHost as SandboxRuntimeHost, RuntimeLaunch, RuntimeManager,
-    RuntimeProviderKind, RuntimeProviderRequest, RuntimeRegistration, RuntimeRegistry,
-    RuntimeStatus,
+    SandboxProviderKind, SandboxProviderRequest, HostRegistration, RuntimeRegistry,
+    HostStatus,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -35,16 +35,16 @@ fn temp_peer_directory() -> PathBuf {
 }
 
 #[tokio::test]
-async fn direct_host_bootstrap_emits_runtime_spec_and_exposes_runtime_endpoints() -> Result<()> {
+async fn direct_host_bootstrap_emits_host_spec_and_exposes_host_endpoints() -> Result<()> {
     let stream_server = stream_server::TestStreamServer::spawn().await?;
-    let runtime_key = format!("runtime:{}", Uuid::new_v4());
+    let host_key = format!("runtime:{}", Uuid::new_v4());
     let node_id = "node:provider-test".to_string();
 
     let handle = bootstrap::start(BootstrapConfig {
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
         name: "provider-test".to_string(),
-        runtime_key: runtime_key.clone(),
+        host_key: host_key.clone(),
         node_id,
         agent_command: vec![testy_bin()],
         mounted_resources: Vec::new(),
@@ -57,10 +57,10 @@ async fn direct_host_bootstrap_emits_runtime_spec_and_exposes_runtime_endpoints(
     .await?;
     wait_for_health(&handle.health_url).await?;
 
-    assert!(handle.runtime_id.starts_with("fireline:provider-test:"));
+    assert!(handle.host_id.starts_with("fireline:provider-test:"));
     assert!(handle.acp_url.starts_with("ws://"));
     assert!(handle.state_stream_url.starts_with("http://"));
-    assert_runtime_spec_event(&handle.state_stream_url, &runtime_key).await?;
+    assert_host_spec_event(&handle.state_stream_url, &host_key).await?;
 
     handle.shutdown().await?;
     stream_server.shutdown().await;
@@ -77,10 +77,10 @@ async fn sandbox_runtime_host_stays_starting_until_register_arrives() -> Result<
     );
 
     let descriptor = runtime_host
-        .provision(CreateRuntimeSpec {
-            runtime_key: None,
+        .provision(ProvisionSpec {
+            host_key: None,
             node_id: None,
-            provider: RuntimeProviderRequest::Local,
+            provider: SandboxProviderRequest::Local,
             host: "127.0.0.1".parse::<IpAddr>()?,
             port: 0,
             name: "pending-provider-test".to_string(),
@@ -94,24 +94,24 @@ async fn sandbox_runtime_host_stays_starting_until_register_arrives() -> Result<
         })
         .await?;
 
-    assert_eq!(descriptor.status, RuntimeStatus::Starting);
-    assert_eq!(descriptor.runtime_id, "fireline:pending-provider-test:fake");
+    assert_eq!(descriptor.status, HostStatus::Starting);
+    assert_eq!(descriptor.host_id, "fireline:pending-provider-test:fake");
     assert_eq!(descriptor.acp.url, "ws://127.0.0.1:4444/acp");
     assert_eq!(
         runtime_host
-            .get(&descriptor.runtime_key)?
+            .get(&descriptor.host_key)?
             .expect("descriptor should be persisted")
             .status,
-        RuntimeStatus::Starting
+        HostStatus::Starting
     );
 
     let registered = runtime_host
         .register(
-            &descriptor.runtime_key,
-            RuntimeRegistration {
-                runtime_id: descriptor.runtime_id.clone(),
+            &descriptor.host_key,
+            HostRegistration {
+                host_id: descriptor.host_id.clone(),
                 node_id: descriptor.node_id.clone(),
-                provider: RuntimeProviderKind::Local,
+                provider: SandboxProviderKind::Local,
                 provider_instance_id: "fake-provider-instance".to_string(),
                 advertised_acp_url: descriptor.acp.url.clone(),
                 advertised_state_stream_url: descriptor.state.url.clone(),
@@ -119,7 +119,7 @@ async fn sandbox_runtime_host_stays_starting_until_register_arrives() -> Result<
             },
         )
         .await?;
-    assert_eq!(registered.status, RuntimeStatus::Ready);
+    assert_eq!(registered.status, HostStatus::Ready);
 
     Ok(())
 }
@@ -130,8 +130,8 @@ struct FakeRuntimeLauncher;
 impl LocalRuntimeLauncher for FakeRuntimeLauncher {
     async fn launch_local_runtime(
         &self,
-        spec: CreateRuntimeSpec,
-        _runtime_key: String,
+        spec: ProvisionSpec,
+        _host_key: String,
         _node_id: String,
         _mounted_resources: Vec<MountedResource>,
     ) -> Result<RuntimeLaunch> {
@@ -155,7 +155,7 @@ impl ManagedRuntime for FakeManagedRuntime {
     }
 }
 
-async fn assert_runtime_spec_event(state_stream_url: &str, runtime_key: &str) -> Result<()> {
+async fn assert_host_spec_event(state_stream_url: &str, host_key: &str) -> Result<()> {
     let client = DsClient::new();
     let stream = client.stream(state_stream_url);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -168,17 +168,17 @@ async fn assert_runtime_spec_event(state_stream_url: &str, runtime_key: &str) ->
                 if event.get("type").and_then(Value::as_str) != Some("runtime_spec") {
                     continue;
                 }
-                if event.get("key").and_then(Value::as_str) != Some(runtime_key) {
+                if event.get("key").and_then(Value::as_str) != Some(host_key) {
                     continue;
                 }
 
                 let value = event
                     .get("value")
                     .and_then(Value::as_object)
-                    .expect("runtime_spec row should carry a value object");
+                    .expect("host_spec row should carry a value object");
                 assert_eq!(
                     value.get("runtimeKey").and_then(Value::as_str),
-                    Some(runtime_key)
+                    Some(host_key)
                 );
                 found = true;
                 break;
@@ -193,7 +193,7 @@ async fn assert_runtime_spec_event(state_stream_url: &str, runtime_key: &str) ->
         }
 
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for runtime_spec event for {runtime_key}");
+            anyhow::bail!("timed out waiting for host_spec event for {host_key}");
         }
 
         tokio::time::sleep(Duration::from_millis(50)).await;

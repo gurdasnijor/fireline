@@ -134,7 +134,9 @@ impl ResourceIndex {
     pub fn apply(&mut self, event: ResourceEvent) -> Result<bool> {
         match event {
             ResourceEvent::ResourcePublished(event) => self.apply_published(event),
-            ResourceEvent::ResourceUnpublished(event) => Ok(self.resources.remove(&event.resource_id).is_some()),
+            ResourceEvent::ResourceUnpublished(event) => {
+                Ok(self.resources.remove(&event.resource_id).is_some())
+            }
             ResourceEvent::ResourceUpdated(event) => self.apply_updated(event),
         }
     }
@@ -236,11 +238,13 @@ mod tests {
         assert_eq!(entry.last_updated_ms, 200);
 
         index
-            .apply(ResourceEvent::ResourceUnpublished(ResourceUnpublishedEvent {
-                resource_id: "resource-1".to_string(),
-                reason: "cleanup".to_string(),
-                unpublished_at_ms: 300,
-            }))
+            .apply(ResourceEvent::ResourceUnpublished(
+                ResourceUnpublishedEvent {
+                    resource_id: "resource-1".to_string(),
+                    reason: "cleanup".to_string(),
+                    unpublished_at_ms: 300,
+                },
+            ))
             .unwrap();
         assert!(index.lookup(&"resource-1".to_string()).is_none());
     }
@@ -250,11 +254,15 @@ mod tests {
         let mut index = ResourceIndex::default();
         let event = published_event();
 
-        assert!(index
-            .apply(ResourceEvent::ResourcePublished(event.clone()))
-            .unwrap());
-        assert!(!index
-            .apply(ResourceEvent::ResourcePublished(event))
-            .unwrap());
+        assert!(
+            index
+                .apply(ResourceEvent::ResourcePublished(event.clone()))
+                .unwrap()
+        );
+        assert!(
+            !index
+                .apply(ResourceEvent::ResourcePublished(event))
+                .unwrap()
+        );
     }
 }

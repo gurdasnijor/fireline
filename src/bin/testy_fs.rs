@@ -54,30 +54,21 @@ async fn process_prompt(
 ) -> Result<(), sacp::Error> {
     let session_id = request.session_id.clone();
     let input_text = extract_text_from_prompt(&request.prompt);
-    let command = serde_json::from_str::<FsTestyCommand>(&input_text).unwrap_or(
-        FsTestyCommand::Ready,
-    );
+    let command =
+        serde_json::from_str::<FsTestyCommand>(&input_text).unwrap_or(FsTestyCommand::Ready);
 
     let response_text = match command {
         FsTestyCommand::Ready => "ready".to_string(),
         FsTestyCommand::WriteFile { path, content } => {
             let write_request = WriteTextFileRequest::new(session_id.clone(), &path, content);
-            match connection
-                .send_request(write_request)
-                .block_task()
-                .await
-            {
+            match connection.send_request(write_request).block_task().await {
                 Ok(_) => format!("ok:{}", path.display()),
                 Err(error) => format!("error:{error}"),
             }
         }
         FsTestyCommand::ReadFile { path } => {
             let read_request = ReadTextFileRequest::new(session_id.clone(), &path);
-            match connection
-                .send_request(read_request)
-                .block_task()
-                .await
-            {
+            match connection.send_request(read_request).block_task().await {
                 Ok(response) => response.content,
                 Err(error) => format!("error:{error}"),
             }

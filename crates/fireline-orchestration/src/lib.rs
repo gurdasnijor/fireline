@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use fireline_session::{
-    PersistedRuntimeSpec, RuntimeDescriptor, RuntimeMaterializer, RuntimeStatus, SessionIndex,
+    PersistedHostSpec, HostDescriptor, StateMaterializer, HostStatus, SessionIndex,
 };
 use reqwest::Client as HttpClient;
 use tracing::{info, instrument};
@@ -31,16 +31,16 @@ pub async fn resume(
     control_plane_url: &str,
     shared_state_url: &str,
     session_id: &str,
-) -> Result<RuntimeDescriptor> {
+) -> Result<HostDescriptor> {
     let started = tokio::time::Instant::now();
     let shared_index = wait_for_shared_session_index(shared_state_url, session_id).await?;
     let runtime =
         lookup_runtime_for_session(http, control_plane_url, &shared_index, session_id).await?;
 
-    if runtime.status == RuntimeStatus::Ready {
+    if runtime.status == HostStatus::Ready {
         info!(
             session_id,
-            runtime_key = runtime.runtime_key,
+            host_key = runtime.host_key,
             elapsed_ms = started.elapsed().as_millis(),
             "resume found live ready runtime"
         );
@@ -48,10 +48,10 @@ pub async fn resume(
     }
 
     let persisted = shared_index
-        .runtime_spec_for_session(session_id)
+        .host_spec_for_session(session_id)
         .await
         .ok_or_else(|| {
-            anyhow!("runtime_spec for session '{session_id}' not found in shared session index")
+            anyhow!("host_spec for session '{session_id}' not found in shared session index")
         })?;
     let created = http
         .post(format!(
@@ -64,41 +64,41 @@ pub async fn resume(
         .context("create runtime during resume")?
         .error_for_status()
         .context("control plane rejected resume create")?
-        .json::<RuntimeDescriptor>()
+        .json::<HostDescriptor>()
         .await
         .context("decode resumed runtime descriptor")?;
 
-    let ready = wait_for_runtime_ready(http, control_plane_url, &created.runtime_key).await?;
+    let ready = wait_for_runtime_ready(http, control_plane_url, &created.host_key).await?;
     info!(
         session_id,
-        runtime_key = ready.runtime_key,
+        host_key = ready.host_key,
         elapsed_ms = started.elapsed().as_millis(),
         "resume recreated runtime from persisted spec"
     );
     Ok(ready)
 }
 
-#[instrument(fields(runtime_key, state_stream_url))]
-pub async fn reconstruct_runtime_spec_from_log(
+#[instrument(fields(host_key, state_stream_url))]
+pub async fn reconstruct_host_spec_from_log(
     state_stream_url: &str,
-    runtime_key: &str,
-) -> Result<PersistedRuntimeSpec> {
+    host_key: &str,
+) -> Result<PersistedHostSpec> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut attempts = 0usize;
     loop {
         attempts += 1;
         let index = materialize_session_index(state_stream_url).await?;
-        if let Some(spec) = index.runtime_spec(runtime_key).await {
+        if let Some(spec) = index.host_spec(host_key).await {
             info!(
-                runtime_key,
-                attempts, "reconstructed runtime_spec from durable state"
+                host_key,
+                attempts, "reconstructed host_spec from durable state"
             );
             return Ok(spec);
         }
 
         if tokio::time::Instant::now() >= deadline {
             return Err(anyhow!(
-                "runtime_spec '{runtime_key}' not found in state stream"
+                "host_spec '{host_key}' not found in state stream"
             ));
         }
 
@@ -109,7 +109,7 @@ pub async fn reconstruct_runtime_spec_from_log(
 #[instrument(fields(state_stream_url))]
 pub async fn materialize_session_index(state_stream_url: &str) -> Result<SessionIndex> {
     let index = SessionIndex::new();
-    let materializer = RuntimeMaterializer::new(vec![Arc::new(index.clone())]);
+    let materializer = StateMaterializer::new(vec![Arc::new(index.clone())]);
     let task = materializer.connect(state_stream_url.to_string());
     task.preload().await?;
     task.abort();
@@ -131,7 +131,7 @@ async fn wait_for_shared_session_index(
         attempts += 1;
         let index = materialize_shared_session_index(shared_state_url).await?;
         if index.get(session_id).await.is_some()
-            && index.runtime_spec_for_session(session_id).await.is_some()
+            && index.host_spec_for_session(session_id).await.is_some()
         {
             info!(
                 session_id,
@@ -142,7 +142,7 @@ async fn wait_for_shared_session_index(
 
         if tokio::time::Instant::now() >= deadline {
             return Err(anyhow!(
-                "session '{session_id}' or its runtime_spec was not found in the shared session index at {shared_state_url}"
+                "session '{session_id}' or its host_spec was not found in the shared session index at {shared_state_url}"
             ));
         }
 
@@ -156,7 +156,7 @@ async fn lookup_runtime_for_session(
     control_plane_url: &str,
     index: &SessionIndex,
     session_id: &str,
-) -> Result<RuntimeDescriptor> {
+) -> Result<HostDescriptor> {
     let record = index
         .get(session_id)
         .await
@@ -165,24 +165,24 @@ async fn lookup_runtime_for_session(
     http.get(format!(
         "{}/v1/runtimes/{}",
         control_plane_url.trim_end_matches('/'),
-        record.runtime_key
+        record.host_key
     ))
     .send()
     .await
     .context("fetch runtime for session from control plane")?
     .error_for_status()
     .context("control plane rejected runtime lookup for session")?
-    .json::<RuntimeDescriptor>()
+    .json::<HostDescriptor>()
     .await
     .context("decode control-plane runtime descriptor for session")
 }
 
-#[instrument(skip(http), fields(runtime_key, control_plane_url))]
+#[instrument(skip(http), fields(host_key, control_plane_url))]
 async fn wait_for_runtime_ready(
     http: &HttpClient,
     control_plane_url: &str,
-    runtime_key: &str,
-) -> Result<RuntimeDescriptor> {
+    host_key: &str,
+) -> Result<HostDescriptor> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut polls = 0usize;
     loop {
@@ -191,25 +191,25 @@ async fn wait_for_runtime_ready(
             .get(format!(
                 "{}/v1/runtimes/{}",
                 control_plane_url.trim_end_matches('/'),
-                runtime_key
+                host_key
             ))
             .send()
             .await
             .context("fetch runtime during resume")?
             .error_for_status()
             .context("control plane rejected runtime fetch")?
-            .json::<RuntimeDescriptor>()
+            .json::<HostDescriptor>()
             .await
             .context("decode control-plane runtime descriptor")?;
 
-        if descriptor.status == RuntimeStatus::Ready {
-            info!(runtime_key, polls, "runtime became ready during resume");
+        if descriptor.status == HostStatus::Ready {
+            info!(host_key, polls, "runtime became ready during resume");
             return Ok(descriptor);
         }
 
         if tokio::time::Instant::now() >= deadline {
             return Err(anyhow!(
-                "timed out waiting for runtime '{runtime_key}' to become ready during resume"
+                "timed out waiting for runtime '{host_key}' to become ready during resume"
             ));
         }
 

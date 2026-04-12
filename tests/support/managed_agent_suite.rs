@@ -16,7 +16,7 @@ use fireline_harness::TopologySpec;
 use fireline_host::bootstrap::{BootstrapConfig, BootstrapHandle, start};
 use fireline_resources::{FsOpRecord, RuntimeStreamFileRecord};
 use fireline_resources::{LocalPathMounter, ResourceMounter, ResourceRef};
-use fireline_session::{PersistedRuntimeSpec, RuntimeDescriptor, RuntimeStatus, SessionRecord};
+use fireline_session::{PersistedHostSpec, HostDescriptor, HostStatus, SessionRecord};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value as JsonValue, json};
 use tokio::process::{Child, Command as TokioCommand};
@@ -215,7 +215,7 @@ impl LocalRuntimeHarness {
             host: "127.0.0.1".parse::<IpAddr>()?,
             port: 0,
             name: name.to_string(),
-            runtime_key: format!("runtime:{}", Uuid::new_v4()),
+            host_key: format!("runtime:{}", Uuid::new_v4()),
             node_id: "node:managed-agent-suite".to_string(),
             agent_command: vec![testy_bin().display().to_string()],
             mounted_resources: Vec::new(),
@@ -309,7 +309,7 @@ impl ControlPlaneHarness {
         })
     }
 
-    pub(crate) async fn create_runtime(&self, name: &str) -> Result<RuntimeDescriptor> {
+    pub(crate) async fn create_runtime(&self, name: &str) -> Result<HostDescriptor> {
         self.create_runtime_with_agent(name, &[testy_bin().display().to_string()])
             .await
     }
@@ -319,7 +319,7 @@ impl ControlPlaneHarness {
         &self,
         name: &str,
         agent_command: &[String],
-    ) -> Result<RuntimeDescriptor> {
+    ) -> Result<HostDescriptor> {
         let response = self
             .http
             .post(format!("{}/v1/runtimes", self.base_url))
@@ -336,26 +336,26 @@ impl ControlPlaneHarness {
             .send()
             .await?
             .error_for_status()?;
-        let created = response.json::<RuntimeDescriptor>().await?;
-        self.wait_for_status(&created.runtime_key, RuntimeStatus::Ready)
+        let created = response.json::<HostDescriptor>().await?;
+        self.wait_for_status(&created.host_key, HostStatus::Ready)
             .await
     }
 
-    #[instrument(skip(self), fields(runtime_key, expected = ?expected))]
+    #[instrument(skip(self), fields(host_key, expected = ?expected))]
     pub(crate) async fn wait_for_status(
         &self,
-        runtime_key: &str,
-        expected: RuntimeStatus,
-    ) -> Result<RuntimeDescriptor> {
+        host_key: &str,
+        expected: HostStatus,
+    ) -> Result<HostDescriptor> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             let response = self
                 .http
-                .get(format!("{}/v1/runtimes/{runtime_key}", self.base_url))
+                .get(format!("{}/v1/runtimes/{host_key}", self.base_url))
                 .send()
                 .await?;
             if response.status().is_success() {
-                let descriptor = response.json::<RuntimeDescriptor>().await?;
+                let descriptor = response.json::<HostDescriptor>().await?;
                 if descriptor.status == expected {
                     return Ok(descriptor);
                 }
@@ -363,7 +363,7 @@ impl ControlPlaneHarness {
 
             if tokio::time::Instant::now() >= deadline {
                 return Err(anyhow!(
-                    "timed out waiting for runtime '{runtime_key}' to become '{expected:?}'"
+                    "timed out waiting for runtime '{host_key}' to become '{expected:?}'"
                 ));
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -383,14 +383,14 @@ impl ControlPlaneHarness {
         )
     }
 
-    #[instrument(skip(self), fields(runtime_key))]
-    pub(crate) async fn stop_runtime(&self, runtime_key: &str) -> Result<RuntimeDescriptor> {
+    #[instrument(skip(self), fields(host_key))]
+    pub(crate) async fn stop_runtime(&self, host_key: &str) -> Result<HostDescriptor> {
         self.http
-            .post(format!("{}/v1/runtimes/{runtime_key}/stop", self.base_url))
+            .post(format!("{}/v1/runtimes/{host_key}/stop", self.base_url))
             .send()
             .await?
             .error_for_status()?
-            .json::<RuntimeDescriptor>()
+            .json::<HostDescriptor>()
             .await
             .map_err(anyhow::Error::from)
     }
@@ -403,7 +403,7 @@ impl ControlPlaneHarness {
             .await
         {
             Ok(response) => match response.error_for_status() {
-                Ok(ok) => match ok.json::<Vec<RuntimeDescriptor>>().await {
+                Ok(ok) => match ok.json::<Vec<HostDescriptor>>().await {
                     Ok(runtimes) => runtimes,
                     Err(_) => return,
                 },
@@ -415,11 +415,11 @@ impl ControlPlaneHarness {
         for runtime in runtimes {
             if matches!(
                 runtime.status,
-                RuntimeStatus::Stopped | RuntimeStatus::Broken
+                HostStatus::Stopped | HostStatus::Broken
             ) {
                 continue;
             }
-            let _ = self.stop_runtime(&runtime.runtime_key).await;
+            let _ = self.stop_runtime(&runtime.host_key).await;
         }
     }
 
@@ -933,11 +933,11 @@ impl LocalRuntimeHarness {
         // spec but not yet implemented — they would need their own async
         // mount step here.
         let mounter = LocalPathMounter::new();
-        let runtime_key = format!("runtime:{}", Uuid::new_v4());
+        let host_key = format!("runtime:{}", Uuid::new_v4());
         let mut mounted_resources = Vec::new();
         for resource in &spec.resources {
             if let Some(mounted) = mounter
-                .mount(resource, &runtime_key)
+                .mount(resource, &host_key)
                 .await
                 .context("pre-mount resource before spawn")?
             {
@@ -949,7 +949,7 @@ impl LocalRuntimeHarness {
             host: "127.0.0.1".parse::<IpAddr>()?,
             port: 0,
             name: spec.name.clone(),
-            runtime_key,
+            host_key,
             node_id: "node:managed-agent-suite".to_string(),
             agent_command: spec.agent_command,
             mounted_resources,
@@ -977,7 +977,7 @@ impl ControlPlaneHarness {
     pub(crate) async fn create_runtime_from_spec(
         &self,
         spec: ManagedAgentHarnessSpec,
-    ) -> Result<RuntimeDescriptor> {
+    ) -> Result<HostDescriptor> {
         // If the spec requests SharedExternal, use the requested stream name;
         // otherwise fall back to the harness's default shared stream name
         // (Embedded isn't meaningful in control-plane mode since the control
@@ -1011,8 +1011,8 @@ impl ControlPlaneHarness {
             .context("POST /v1/runtimes with spec")?
             .error_for_status()
             .context("control plane rejected spec-based create")?;
-        let created = response.json::<RuntimeDescriptor>().await?;
-        self.wait_for_status(&created.runtime_key, RuntimeStatus::Ready)
+        let created = response.json::<HostDescriptor>().await?;
+        self.wait_for_status(&created.host_key, HostStatus::Ready)
             .await
     }
 }
@@ -1186,7 +1186,7 @@ where
 // of the known entity types from production code:
 //
 // - `SessionRecord` — from `fireline_session`
-// - `PersistedRuntimeSpec` — from `fireline_session`
+// - `PersistedHostSpec` — from `fireline_session`
 // - `FsOpRecord` — from `fireline_resources`
 // - `RuntimeStreamFileRecord` — same
 //
@@ -1200,7 +1200,7 @@ where
 #[derive(Debug, Clone)]
 pub(crate) enum DecodedStateEntity {
     Session(SessionRecord),
-    RuntimeSpec(PersistedRuntimeSpec),
+    RuntimeSpec(PersistedHostSpec),
     FsOp(FsOpRecord),
     RuntimeStreamFile(RuntimeStreamFileRecord),
     /// Entity type was recognized as a string but no typed decoder exists,
@@ -1232,7 +1232,7 @@ impl StateEnvelope {
                 }),
             "runtime_spec" => value
                 .as_ref()
-                .and_then(|v| serde_json::from_value::<PersistedRuntimeSpec>(v.clone()).ok())
+                .and_then(|v| serde_json::from_value::<PersistedHostSpec>(v.clone()).ok())
                 .map(DecodedStateEntity::RuntimeSpec)
                 .or_else(|| {
                     Some(DecodedStateEntity::Unknown {
@@ -1292,8 +1292,8 @@ impl StateEnvelope {
         }
     }
 
-    /// Convenience: decode into `PersistedRuntimeSpec`.
-    pub(crate) fn as_runtime_spec(&self) -> Option<PersistedRuntimeSpec> {
+    /// Convenience: decode into `PersistedHostSpec`.
+    pub(crate) fn as_host_spec(&self) -> Option<PersistedHostSpec> {
         match self.decode()? {
             DecodedStateEntity::RuntimeSpec(record) => Some(record),
             _ => None,
@@ -1326,14 +1326,14 @@ pub(crate) async fn read_fs_ops_for_session(
 }
 
 /// Read every envelope and return the typed persisted runtime specs.
-/// There is usually exactly one per runtime_key.
-pub(crate) async fn read_persisted_runtime_specs(
+/// There is usually exactly one per host_key.
+pub(crate) async fn read_persisted_host_specs(
     state_stream_url: &str,
-) -> Result<Vec<PersistedRuntimeSpec>> {
+) -> Result<Vec<PersistedHostSpec>> {
     let envelopes = read_all_events(state_stream_url).await?;
     Ok(envelopes
         .iter()
-        .filter_map(StateEnvelope::as_runtime_spec)
+        .filter_map(StateEnvelope::as_host_spec)
         .collect())
 }
 

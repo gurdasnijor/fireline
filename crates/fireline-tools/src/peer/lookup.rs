@@ -10,10 +10,10 @@ pub struct ActiveTurnRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildSessionEdgeInput {
     pub trace_id: Option<String>,
-    pub parent_runtime_id: String,
+    pub parent_host_id: String,
     pub parent_session_id: String,
     pub parent_prompt_turn_id: String,
-    pub child_runtime_id: String,
+    pub child_host_id: String,
     pub child_session_id: String,
 }
 

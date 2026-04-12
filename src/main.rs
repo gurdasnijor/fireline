@@ -19,8 +19,8 @@ use fireline_resources::{
 };
 use fireline_sandbox::RuntimeRegistry;
 use fireline_session::{
-    Endpoint, HeartbeatMetrics, RuntimeDescriptor, RuntimeProviderKind, RuntimeRegistration,
-    RuntimeStatus,
+    Endpoint, HeartbeatMetrics, HostDescriptor, SandboxProviderKind, HostRegistration,
+    HostStatus,
 };
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
@@ -153,7 +153,7 @@ struct Cli {
 
     /// Optional explicit runtime key for control-plane-managed subprocess mode.
     #[arg(long, env = "FIRELINE_RUNTIME_KEY", hide = true)]
-    runtime_key: Option<String>,
+    host_key: Option<String>,
 
     /// Optional explicit node id for control-plane-managed subprocess mode.
     #[arg(long, env = "FIRELINE_NODE_ID", hide = true)]
@@ -222,7 +222,7 @@ async fn main() -> Result<()> {
         None => Vec::new(),
     };
     if cli.control_plane {
-        if cli.runtime_key.is_some() || cli.node_id.is_some() {
+        if cli.host_key.is_some() || cli.node_id.is_some() {
             anyhow::bail!("--control-plane cannot be combined with --runtime-key/--node-id");
         }
         if !cli.agent_command.is_empty() {
@@ -241,18 +241,18 @@ async fn main() -> Result<()> {
         .durable_streams_url
         .clone()
         .context("--durable-streams-url is required unless --control-plane is set")?;
-    let managed_runtime_key = cli.runtime_key.clone();
+    let managed_host_key = cli.host_key.clone();
     let managed_node_id = cli.node_id.clone();
 
-    match (managed_runtime_key, managed_node_id) {
-        (Some(runtime_key), Some(node_id)) => {
+    match (managed_host_key, managed_node_id) {
+        (Some(host_key), Some(node_id)) => {
             run_managed_runtime(
                 cli,
                 host,
                 topology,
                 mounted_resources,
                 durable_streams_url,
-                runtime_key,
+                host_key,
                 node_id,
             )
             .await
@@ -367,7 +367,7 @@ async fn run_direct_host(
     mounted_resources: Vec<MountedResource>,
     durable_streams_url: String,
 ) -> Result<()> {
-    let runtime_key = format!("runtime:{}", Uuid::new_v4());
+    let host_key = format!("runtime:{}", Uuid::new_v4());
     let node_id = default_node_id(host);
     let started_at_ms = now_ms();
     let peer_directory_path = cli.peer_directory_path.unwrap_or_default();
@@ -375,7 +375,7 @@ async fn run_direct_host(
         host,
         port: cli.port,
         name: cli.name,
-        runtime_key: runtime_key.clone(),
+        host_key: host_key.clone(),
         node_id: node_id.clone(),
         agent_command: cli.agent_command,
         mounted_resources,
@@ -388,13 +388,13 @@ async fn run_direct_host(
     .await?;
     wait_for_runtime_listener_ready(&handle.health_url).await?;
 
-    let descriptor = RuntimeDescriptor {
-        runtime_key,
-        runtime_id: handle.runtime_id.clone(),
+    let descriptor = HostDescriptor {
+        host_key,
+        host_id: handle.host_id.clone(),
         node_id,
-        provider: RuntimeProviderKind::Local,
-        provider_instance_id: handle.runtime_id.clone(),
-        status: RuntimeStatus::Ready,
+        provider: SandboxProviderKind::Local,
+        provider_instance_id: handle.host_id.clone(),
+        status: HostStatus::Ready,
         acp: Endpoint::new(handle.acp_url.clone()),
         state: Endpoint::new(handle.state_stream_url.clone()),
         helper_api_base_url: None,
@@ -413,7 +413,7 @@ async fn run_managed_runtime(
     topology: TopologySpec,
     mounted_resources: Vec<MountedResource>,
     durable_streams_url: String,
-    runtime_key: String,
+    host_key: String,
     node_id: String,
 ) -> Result<()> {
     let peer_directory_path = cli.peer_directory_path.unwrap_or_default();
@@ -422,7 +422,7 @@ async fn run_managed_runtime(
         host,
         port: cli.port,
         name: cli.name,
-        runtime_key: runtime_key.clone(),
+        host_key: host_key.clone(),
         node_id: node_id.clone(),
         agent_command: cli.agent_command,
         mounted_resources,
@@ -444,16 +444,16 @@ async fn run_managed_runtime(
         .advertised_state_stream_url
         .clone()
         .unwrap_or_else(|| handle.state_stream_url.clone());
-    let descriptor = RuntimeDescriptor {
-        runtime_key: runtime_key.clone(),
-        runtime_id: handle.runtime_id.clone(),
+    let descriptor = HostDescriptor {
+        host_key: host_key.clone(),
+        host_id: handle.host_id.clone(),
         node_id,
         provider,
         provider_instance_id: cli
             .provider_instance_id
             .clone()
-            .unwrap_or_else(|| handle.runtime_id.clone()),
-        status: RuntimeStatus::Ready,
+            .unwrap_or_else(|| handle.host_id.clone()),
+        status: HostStatus::Ready,
         acp: Endpoint::new(advertised_acp_url),
         state: Endpoint::new(advertised_state_stream_url),
         helper_api_base_url: None,
@@ -467,11 +467,11 @@ async fn run_managed_runtime(
         let control_plane_client = Arc::new(ControlPlaneClient::new(
             control_plane_url,
             token,
-            runtime_key,
+            host_key,
         )?);
         control_plane_client
-            .register(RuntimeRegistration {
-                runtime_id: descriptor.runtime_id.clone(),
+            .register(HostRegistration {
+                host_id: descriptor.host_id.clone(),
                 node_id: descriptor.node_id.clone(),
                 provider: descriptor.provider,
                 provider_instance_id: descriptor.provider_instance_id.clone(),
@@ -498,7 +498,7 @@ async fn run_managed_runtime(
     if cli.control_plane_url.is_none() {
         let registry = load_runtime_registry(cli.runtime_registry_path.clone())?;
         let mut stopped = descriptor;
-        stopped.status = RuntimeStatus::Stopped;
+        stopped.status = HostStatus::Stopped;
         stopped.updated_at_ms = now_ms();
         registry.upsert(stopped)?;
     }
@@ -512,10 +512,10 @@ fn load_runtime_registry(path: Option<PathBuf>) -> Result<RuntimeRegistry> {
     }
 }
 
-fn log_runtime_started(descriptor: &RuntimeDescriptor) {
+fn log_runtime_started(descriptor: &HostDescriptor) {
     tracing::info!(
-        runtime_key = %descriptor.runtime_key,
-        runtime_id = %descriptor.runtime_id,
+        host_key = %descriptor.host_key,
+        host_id = %descriptor.host_id,
         provider = ?descriptor.provider,
         acp_url = %descriptor.acp.url,
         state_stream_url = %descriptor.state.url,
@@ -559,10 +559,10 @@ fn default_node_id(host: IpAddr) -> String {
     }
 }
 
-fn parse_provider_kind(value: Option<&str>) -> Result<RuntimeProviderKind> {
+fn parse_provider_kind(value: Option<&str>) -> Result<SandboxProviderKind> {
     match value {
-        None | Some("local") => Ok(RuntimeProviderKind::Local),
-        Some("docker") => Ok(RuntimeProviderKind::Docker),
+        None | Some("local") => Ok(SandboxProviderKind::Local),
+        Some("docker") => Ok(SandboxProviderKind::Docker),
         Some(other) => Err(anyhow::anyhow!(
             "unsupported runtime provider kind '{other}'"
         )),

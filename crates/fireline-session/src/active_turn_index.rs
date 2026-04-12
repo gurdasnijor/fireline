@@ -15,7 +15,7 @@ use fireline_tools::lookup::{ActiveTurnLookup, ActiveTurnRecord as PeerActiveTur
 use serde::Deserialize;
 use tokio::sync::{Mutex, Notify, RwLock};
 
-use crate::runtime_materializer::{RawStateEnvelope, StateProjection};
+use crate::state_materializer::{RawStateEnvelope, StateProjection};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveTurnRecord {
@@ -169,7 +169,7 @@ struct PromptTurnRecord {
 #[cfg(test)]
 mod tests {
     use super::ActiveTurnIndex;
-    use crate::runtime_materializer::RawStateEnvelope;
+    use crate::state_materializer::RawStateEnvelope;
     use std::time::Duration;
 
     #[tokio::test]

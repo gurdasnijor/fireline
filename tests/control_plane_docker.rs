@@ -7,7 +7,7 @@ use agent_client_protocol_test::testy::TestyCommand;
 use anyhow::{Context, Result, anyhow};
 use axum::Router;
 use durable_streams::{Client as DsClient, Offset};
-use fireline_session::{RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
+use fireline_session::{HostDescriptor, SandboxProviderKind, HostStatus};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::process::{Child, Command};
@@ -88,7 +88,7 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
         &docker_image,
     )
     .await?;
-    let mut created_runtime_keys = Vec::new();
+    let mut created_host_keys = Vec::new();
 
     let result = async {
         let client = reqwest::Client::new();
@@ -96,12 +96,12 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
             &client,
             &base_url,
             &shared_ds.base_url,
-            RuntimeProviderKind::Local,
+            SandboxProviderKind::Local,
             "agent-local",
             vec![testy_bin()],
         )
         .await?;
-        created_runtime_keys.push(local.runtime_key.clone());
+        created_host_keys.push(local.host_key.clone());
 
         let mut docker_runtimes = Vec::new();
         for index in 0..4 {
@@ -109,21 +109,21 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
                 &client,
                 &base_url,
                 &shared_ds.base_url,
-                RuntimeProviderKind::Docker,
+                SandboxProviderKind::Docker,
                 &format!("agent-docker-{}", index + 1),
                 vec!["/usr/local/bin/fireline-testy".to_string()],
             )
             .await?;
-            created_runtime_keys.push(runtime.runtime_key.clone());
+            created_host_keys.push(runtime.host_key.clone());
             docker_runtimes.push(runtime);
         }
 
         let local_ready =
-            wait_for_status(&base_url, &local.runtime_key, RuntimeStatus::Ready).await?;
+            wait_for_status(&base_url, &local.host_key, HostStatus::Ready).await?;
         let mut docker_ready = Vec::new();
         for runtime in &docker_runtimes {
             docker_ready.push(
-                wait_for_status(&base_url, &runtime.runtime_key, RuntimeStatus::Ready).await?,
+                wait_for_status(&base_url, &runtime.host_key, HostStatus::Ready).await?,
             );
         }
 
@@ -132,20 +132,20 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
             .send()
             .await?
             .error_for_status()?
-            .json::<Vec<RuntimeDescriptor>>()
+            .json::<Vec<HostDescriptor>>()
             .await?;
         assert_eq!(listed.len(), 5);
         assert_eq!(
             listed
                 .iter()
-                .filter(|runtime| runtime.provider == RuntimeProviderKind::Local)
+                .filter(|runtime| runtime.provider == SandboxProviderKind::Local)
                 .count(),
             1
         );
         assert_eq!(
             listed
                 .iter()
-                .filter(|runtime| runtime.provider == RuntimeProviderKind::Docker)
+                .filter(|runtime| runtime.provider == SandboxProviderKind::Docker)
                 .count(),
             4
         );
@@ -230,9 +230,9 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
                     Some(parent.prompt_turn_id.as_str())
                 );
                 assert_eq!(child.trace_id.as_deref(), parent.trace_id.as_deref());
-                assert_eq!(edge.parent_runtime_id, local_ready.runtime_id);
+                assert_eq!(edge.parent_host_id, local_ready.host_id);
                 assert_eq!(edge.parent_prompt_turn_id, parent.prompt_turn_id);
-                assert_eq!(edge.child_runtime_id, docker_ready[0].runtime_id);
+                assert_eq!(edge.child_host_id, docker_ready[0].host_id);
                 assert_eq!(edge.parent_session_id, parent.session_id);
                 assert_eq!(edge.child_session_id, child.session_id);
                 assert_eq!(edge.trace_id.as_deref(), parent.trace_id.as_deref());
@@ -251,20 +251,20 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
         let stopped = client
             .post(format!(
                 "{base_url}/v1/runtimes/{}/stop",
-                docker_ready[0].runtime_key
+                docker_ready[0].host_key
             ))
             .send()
             .await?
             .error_for_status()?
-            .json::<RuntimeDescriptor>()
+            .json::<HostDescriptor>()
             .await?;
-        assert_eq!(stopped.status, RuntimeStatus::Stopped);
+        assert_eq!(stopped.status, HostStatus::Stopped);
 
         Ok(())
     }
     .await;
 
-    cleanup_runtimes(&base_url, &created_runtime_keys).await;
+    cleanup_runtimes(&base_url, &created_host_keys).await;
     shutdown_process(&mut control_plane).await;
     shared_ds.shutdown().await;
     result
@@ -274,16 +274,16 @@ async fn create_runtime(
     client: &reqwest::Client,
     base_url: &str,
     durable_streams_url: &str,
-    provider: RuntimeProviderKind,
+    provider: SandboxProviderKind,
     name: &str,
     agent_command: Vec<String>,
-) -> Result<RuntimeDescriptor> {
+) -> Result<HostDescriptor> {
     client
         .post(format!("{base_url}/v1/runtimes"))
         .json(&json!({
             "provider": match provider {
-                RuntimeProviderKind::Local => "local",
-                RuntimeProviderKind::Docker => "docker",
+                SandboxProviderKind::Local => "local",
+                SandboxProviderKind::Docker => "docker",
             },
             "host": "127.0.0.1",
             "port": 0,
@@ -295,25 +295,25 @@ async fn create_runtime(
         .send()
         .await?
         .error_for_status()?
-        .json::<RuntimeDescriptor>()
+        .json::<HostDescriptor>()
         .await
         .context("decode create runtime response")
 }
 
 async fn wait_for_status(
     base_url: &str,
-    runtime_key: &str,
-    expected: RuntimeStatus,
-) -> Result<RuntimeDescriptor> {
+    host_key: &str,
+    expected: HostStatus,
+) -> Result<HostDescriptor> {
     let client = reqwest::Client::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let response = client
-            .get(format!("{base_url}/v1/runtimes/{runtime_key}"))
+            .get(format!("{base_url}/v1/runtimes/{host_key}"))
             .send()
             .await?;
         if response.status().is_success() {
-            let descriptor = response.json::<RuntimeDescriptor>().await?;
+            let descriptor = response.json::<HostDescriptor>().await?;
             if descriptor.status == expected {
                 return Ok(descriptor);
             }
@@ -321,7 +321,7 @@ async fn wait_for_status(
 
         if tokio::time::Instant::now() >= deadline {
             return Err(anyhow!(
-                "timed out waiting for runtime '{runtime_key}' to become '{expected:?}'"
+                "timed out waiting for runtime '{host_key}' to become '{expected:?}'"
             ));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -506,11 +506,11 @@ async fn shutdown_process(child: &mut Child) {
     let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
 }
 
-async fn cleanup_runtimes(base_url: &str, runtime_keys: &[String]) {
+async fn cleanup_runtimes(base_url: &str, host_keys: &[String]) {
     let client = reqwest::Client::new();
-    for runtime_key in runtime_keys {
+    for host_key in host_keys {
         let _ = client
-            .delete(format!("{base_url}/v1/runtimes/{runtime_key}"))
+            .delete(format!("{base_url}/v1/runtimes/{host_key}"))
             .send()
             .await;
     }
@@ -553,10 +553,10 @@ struct PromptTurnEvent {
 
 #[derive(Debug)]
 struct ChildSessionEdgeEvent {
-    parent_runtime_id: String,
+    parent_host_id: String,
     parent_session_id: String,
     parent_prompt_turn_id: String,
-    child_runtime_id: String,
+    child_host_id: String,
     child_session_id: String,
     trace_id: Option<String>,
 }
@@ -596,10 +596,10 @@ fn find_child_session_edge(body: &str) -> Option<ChildSessionEdgeEvent> {
 
         let value = event.get("value")?;
         Some(ChildSessionEdgeEvent {
-            parent_runtime_id: value.get("parentRuntimeId")?.as_str()?.to_string(),
+            parent_host_id: value.get("parentRuntimeId")?.as_str()?.to_string(),
             parent_session_id: value.get("parentSessionId")?.as_str()?.to_string(),
             parent_prompt_turn_id: value.get("parentPromptTurnId")?.as_str()?.to_string(),
-            child_runtime_id: value.get("childRuntimeId")?.as_str()?.to_string(),
+            child_host_id: value.get("childRuntimeId")?.as_str()?.to_string(),
             child_session_id: value.get("childSessionId")?.as_str()?.to_string(),
             trace_id: value
                 .get("traceId")

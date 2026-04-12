@@ -4,7 +4,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use fireline_session::{RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
+use fireline_session::{HostDescriptor, SandboxProviderKind, HostStatus};
 use serde_json::json;
 use tokio::process::{Child, Command};
 use uuid::Uuid;
@@ -67,37 +67,37 @@ async fn assert_runtime_lifecycle_round_trip(prefer_push: bool) -> Result<()> {
             .send()
             .await?
             .error_for_status()?;
-        let created = response.json::<RuntimeDescriptor>().await?;
+        let created = response.json::<HostDescriptor>().await?;
         let runtime =
-            wait_for_status(&base_url, &created.runtime_key, RuntimeStatus::Ready).await?;
+            wait_for_status(&base_url, &created.host_key, HostStatus::Ready).await?;
 
-        assert_eq!(runtime.status, RuntimeStatus::Ready);
-        assert_eq!(runtime.provider, RuntimeProviderKind::Local);
-        assert!(runtime.runtime_id.starts_with("fireline:push-test:"));
-        assert_eq!(runtime.provider_instance_id, runtime.runtime_id);
+        assert_eq!(runtime.status, HostStatus::Ready);
+        assert_eq!(runtime.provider, SandboxProviderKind::Local);
+        assert!(runtime.host_id.starts_with("fireline:push-test:"));
+        assert_eq!(runtime.provider_instance_id, runtime.host_id);
         assert!(runtime.acp.url.starts_with("ws://"));
         assert!(runtime.state.url.starts_with("http://"));
 
         let stopped = client
             .post(format!(
                 "{base_url}/v1/runtimes/{}/stop",
-                runtime.runtime_key
+                runtime.host_key
             ))
             .send()
             .await?
             .error_for_status()?
-            .json::<RuntimeDescriptor>()
+            .json::<HostDescriptor>()
             .await?;
-        assert_eq!(stopped.status, RuntimeStatus::Stopped);
+        assert_eq!(stopped.status, HostStatus::Stopped);
 
         let deleted = client
-            .delete(format!("{base_url}/v1/runtimes/{}", runtime.runtime_key))
+            .delete(format!("{base_url}/v1/runtimes/{}", runtime.host_key))
             .send()
             .await?
             .error_for_status()?
-            .json::<RuntimeDescriptor>()
+            .json::<HostDescriptor>()
             .await?;
-        assert_eq!(deleted.runtime_key, runtime.runtime_key);
+        assert_eq!(deleted.host_key, runtime.host_key);
         Ok(())
     }
     .await;
@@ -181,18 +181,18 @@ async fn spawn_control_plane(
 
 async fn wait_for_status(
     base_url: &str,
-    runtime_key: &str,
-    expected: RuntimeStatus,
-) -> Result<RuntimeDescriptor> {
+    host_key: &str,
+    expected: HostStatus,
+) -> Result<HostDescriptor> {
     let client = reqwest::Client::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let response = client
-            .get(format!("{base_url}/v1/runtimes/{runtime_key}"))
+            .get(format!("{base_url}/v1/runtimes/{host_key}"))
             .send()
             .await?;
         if response.status().is_success() {
-            let descriptor = response.json::<RuntimeDescriptor>().await?;
+            let descriptor = response.json::<HostDescriptor>().await?;
             if descriptor.status == expected {
                 return Ok(descriptor);
             }
@@ -200,7 +200,7 @@ async fn wait_for_status(
 
         if tokio::time::Instant::now() >= deadline {
             return Err(anyhow!(
-                "timed out waiting for runtime '{runtime_key}' to become '{expected:?}'"
+                "timed out waiting for runtime '{host_key}' to become '{expected:?}'"
             ));
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

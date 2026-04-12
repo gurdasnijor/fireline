@@ -158,7 +158,7 @@ async fn session_durable_stream_survives_runtime_death() -> Result<()> {
 
         // Kill the runtime through the control plane. The runtime process
         // goes away; the stream server does not.
-        control_plane.stop_runtime(&runtime.runtime_key).await?;
+        control_plane.stop_runtime(&runtime.host_key).await?;
 
         // NOW verify the stream still has the session record, read by a
         // completely fresh reader against the shared stream URL.
@@ -174,8 +174,7 @@ async fn session_durable_stream_survives_runtime_death() -> Result<()> {
 
         // Also verify that at least one prompt_turn envelope survived — this
         // is the "progress was recorded before death" half of the contract.
-        let prompt_turns_after_death =
-            count_events(&runtime.state.url, "prompt_turn").await?;
+        let prompt_turns_after_death = count_events(&runtime.state.url, "prompt_turn").await?;
         assert!(
             prompt_turns_after_death >= 1,
             "INVARIANT (Session): prompt_turn envelopes must survive runtime death, \
@@ -460,13 +459,10 @@ async fn session_idempotent_append_under_retry() -> Result<()> {
             .content_type("application/json")
             .build();
         producer_b.append_json(&envelope);
-        producer_b
-            .flush()
-            .await
-            .context(
-                "INVARIANT (Session): producer B's duplicate append must succeed \
+        producer_b.flush().await.context(
+            "INVARIANT (Session): producer B's duplicate append must succeed \
                  (returns 204 No Content per PROTOCOL.md §5.2.1), not fail",
-            )?;
+        )?;
 
         // Read from the stream and count envelopes matching our test
         // key. There must be exactly one.
@@ -534,12 +530,10 @@ async fn session_materialized_state_agrees_with_raw_stream() -> Result<()> {
         runtime
             .wait_for_state_rows(&["\"type\":\"session\""], DEFAULT_TIMEOUT)
             .await
-            .context(
-                "INVARIANT (Session): a session envelope must land before materialization",
-            )?;
+            .context("INVARIANT (Session): a session envelope must land before materialization")?;
 
         // Oracle A: the production projector. `materialize_session_index` runs
-        // `RuntimeMaterializer` over the raw stream and folds it into a real
+        // `StateMaterializer` over the raw stream and folds it into a real
         // `SessionIndex`, then aborts the live tail. Whatever it surfaces is
         // exactly what production code would surface for the same stream.
         let index = materialize_session_index(runtime.state_stream_url()).await?;
@@ -572,8 +566,7 @@ async fn session_materialized_state_agrees_with_raw_stream() -> Result<()> {
              one session id after a prompt; otherwise this test proves nothing"
         );
 
-        let only_in_materialized: Vec<&String> =
-            materialized_ids.difference(&raw_ids).collect();
+        let only_in_materialized: Vec<&String> = materialized_ids.difference(&raw_ids).collect();
         let only_in_raw: Vec<&String> = raw_ids.difference(&materialized_ids).collect();
 
         assert!(

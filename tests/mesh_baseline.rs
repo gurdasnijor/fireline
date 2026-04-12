@@ -85,7 +85,7 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
         name: "agent-b".to_string(),
-        runtime_key: format!("runtime:{}", Uuid::new_v4()),
+        host_key: format!("runtime:{}", Uuid::new_v4()),
         node_id: "node:test-mesh".to_string(),
         agent_command: vec![testy_bin()],
         mounted_resources: Vec::new(),
@@ -101,7 +101,7 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
         name: "agent-a".to_string(),
-        runtime_key: format!("runtime:{}", Uuid::new_v4()),
+        host_key: format!("runtime:{}", Uuid::new_v4()),
         node_id: "node:test-mesh".to_string(),
         agent_command: vec![testy_bin()],
         mounted_resources: Vec::new(),
@@ -214,7 +214,7 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
                 "child prompt turn should inherit the parent trace id: {body_b}"
             );
             assert_eq!(
-                edge.parent_runtime_id, handle_a.runtime_id,
+                edge.parent_host_id, handle_a.host_id,
                 "child_session_edge should point at the parent runtime: {body_a}"
             );
             assert_eq!(
@@ -226,7 +226,7 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
                 "child_session_edge should point at the parent turn: {body_a}"
             );
             assert_eq!(
-                edge.child_runtime_id, handle_b.runtime_id,
+                edge.child_host_id, handle_b.host_id,
                 "child_session_edge should point at the child runtime: {body_a}"
             );
             assert_eq!(
@@ -281,10 +281,10 @@ struct PromptTurnEvent {
 
 #[derive(Debug)]
 struct ChildSessionEdgeEvent {
-    parent_runtime_id: String,
+    parent_host_id: String,
     parent_session_id: String,
     parent_prompt_turn_id: String,
-    child_runtime_id: String,
+    child_host_id: String,
     child_session_id: String,
     trace_id: Option<String>,
 }
@@ -324,10 +324,10 @@ fn find_child_session_edge(body: &str) -> Option<ChildSessionEdgeEvent> {
 
         let value = event.get("value")?;
         Some(ChildSessionEdgeEvent {
-            parent_runtime_id: value.get("parentRuntimeId")?.as_str()?.to_string(),
+            parent_host_id: value.get("parentRuntimeId")?.as_str()?.to_string(),
             parent_session_id: value.get("parentSessionId")?.as_str()?.to_string(),
             parent_prompt_turn_id: value.get("parentPromptTurnId")?.as_str()?.to_string(),
-            child_runtime_id: value.get("childRuntimeId")?.as_str()?.to_string(),
+            child_host_id: value.get("childRuntimeId")?.as_str()?.to_string(),
             child_session_id: value.get("childSessionId")?.as_str()?.to_string(),
             trace_id: value
                 .get("traceId")

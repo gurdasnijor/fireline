@@ -5,8 +5,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use fireline_sandbox::{
-    CreateRuntimeSpec, LocalRuntimeLauncher, ManagedRuntime, MountedResource, RuntimeDescriptor,
-    RuntimeLaunch, RuntimeRegistry, RuntimeStatus,
+    ProvisionSpec, LocalRuntimeLauncher, ManagedRuntime, MountedResource, HostDescriptor,
+    RuntimeLaunch, RuntimeRegistry, HostStatus,
 };
 use tokio::process::{Child, Command};
 use tracing::{info, instrument};
@@ -54,23 +54,23 @@ impl ChildProcessRuntimeLauncher {
         }
     }
 
-    #[instrument(skip(self, child), fields(runtime_key))]
+    #[instrument(skip(self, child), fields(host_key))]
     async fn wait_for_runtime_ready(
         &self,
-        runtime_key: &str,
+        host_key: &str,
         child: &mut Child,
-    ) -> Result<RuntimeDescriptor> {
+    ) -> Result<HostDescriptor> {
         let deadline = tokio::time::Instant::now() + self.startup_timeout;
         let mut polls = 0usize;
         loop {
             polls += 1;
-            if let Some(runtime) = self.runtime_registry.get(runtime_key)? {
+            if let Some(runtime) = self.runtime_registry.get(host_key)? {
                 match runtime.status {
-                    RuntimeStatus::Ready => {
-                        info!(runtime_key, polls, "child-process runtime became ready");
+                    HostStatus::Ready => {
+                        info!(host_key, polls, "child-process runtime became ready");
                         return Ok(runtime);
                     }
-                    RuntimeStatus::Broken | RuntimeStatus::Stopped => {
+                    HostStatus::Broken | HostStatus::Stopped => {
                         return Err(anyhow!(
                             "fireline runtime failed during startup with status '{:?}'",
                             runtime.status
@@ -88,7 +88,7 @@ impl ChildProcessRuntimeLauncher {
 
             if tokio::time::Instant::now() >= deadline {
                 return Err(anyhow!(
-                    "timed out waiting for runtime '{runtime_key}' to become ready"
+                    "timed out waiting for runtime '{host_key}' to become ready"
                 ));
             }
 
@@ -101,17 +101,17 @@ impl ChildProcessRuntimeLauncher {
 impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
     #[instrument(
         skip(self, spec, mounted_resources),
-        fields(runtime_key, node_id, provider = "local")
+        fields(host_key, node_id, provider = "local")
     )]
     async fn launch_local_runtime(
         &self,
-        spec: CreateRuntimeSpec,
-        runtime_key: String,
+        spec: ProvisionSpec,
+        host_key: String,
         node_id: String,
         mounted_resources: Vec<MountedResource>,
     ) -> Result<RuntimeLaunch> {
         let state_stream_name = spec.state_stream.clone().unwrap_or_else(|| {
-            format!("fireline-state-{}", sanitize_state_stream_key(&runtime_key))
+            format!("fireline-state-{}", sanitize_state_stream_key(&host_key))
         });
         let advertised_state_stream_url =
             join_stream_url(&spec.durable_streams_url, &state_stream_name);
@@ -124,7 +124,7 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
             .arg("--name")
             .arg(&spec.name)
             .arg("--runtime-key")
-            .arg(&runtime_key)
+            .arg(&host_key)
             .arg("--node-id")
             .arg(&node_id)
             .arg("--runtime-registry-path")
@@ -141,7 +141,7 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
         if self.prefer_push {
             let runtime_token = self
                 .token_store
-                .issue(&runtime_key, Duration::from_secs(60 * 60 * 24));
+                .issue(&host_key, Duration::from_secs(60 * 60 * 24));
             command
                 .arg("--control-plane-url")
                 .arg(&self.control_plane_url)
@@ -181,7 +181,7 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
             .spawn()
             .with_context(|| format!("spawn fireline binary {}", self.fireline_bin.display()))?;
 
-        let descriptor = match self.wait_for_runtime_ready(&runtime_key, &mut child).await {
+        let descriptor = match self.wait_for_runtime_ready(&host_key, &mut child).await {
             Ok(descriptor) => descriptor,
             Err(error) => {
                 let mut runtime = SpawnedRuntime {
@@ -194,7 +194,7 @@ impl LocalRuntimeLauncher for ChildProcessRuntimeLauncher {
         };
 
         Ok(RuntimeLaunch::ready(
-            descriptor.runtime_id.clone(),
+            descriptor.host_id.clone(),
             descriptor.provider_instance_id.clone(),
             descriptor.acp.clone(),
             descriptor.state.clone(),

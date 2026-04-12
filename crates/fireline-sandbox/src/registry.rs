@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::provider::RuntimeDescriptor;
+use crate::provider::HostDescriptor;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeRegistry {
@@ -37,49 +37,49 @@ impl RuntimeRegistry {
         Ok(base.join("fireline").join("runtimes.toml"))
     }
 
-    pub fn list(&self) -> Result<Vec<RuntimeDescriptor>> {
+    pub fn list(&self) -> Result<Vec<HostDescriptor>> {
         Ok(read_registry_file(&self.path)?.runtimes)
     }
 
-    pub fn upsert(&self, descriptor: RuntimeDescriptor) -> Result<()> {
+    pub fn upsert(&self, descriptor: HostDescriptor) -> Result<()> {
         let mut file = read_registry_file(&self.path)?;
         file.runtimes
-            .retain(|existing| existing.runtime_key != descriptor.runtime_key);
+            .retain(|existing| existing.host_key != descriptor.host_key);
         file.runtimes.push(descriptor);
         write_registry_file(&self.path, &file)
     }
 
-    pub fn get(&self, runtime_key: &str) -> Result<Option<RuntimeDescriptor>> {
+    pub fn get(&self, host_key: &str) -> Result<Option<HostDescriptor>> {
         Ok(self
             .list()?
             .into_iter()
-            .find(|runtime| runtime.runtime_key == runtime_key))
+            .find(|runtime| runtime.host_key == host_key))
     }
 
-    pub fn remove(&self, runtime_key: &str) -> Result<Option<RuntimeDescriptor>> {
+    pub fn remove(&self, host_key: &str) -> Result<Option<HostDescriptor>> {
         let mut runtimes = self.list()?;
         let removed = runtimes
             .iter()
-            .find(|runtime| runtime.runtime_key == runtime_key)
+            .find(|runtime| runtime.host_key == host_key)
             .cloned();
-        runtimes.retain(|runtime| runtime.runtime_key != runtime_key);
-        self.forget_liveness(runtime_key);
+        runtimes.retain(|runtime| runtime.host_key != host_key);
+        self.forget_liveness(host_key);
         write_runtimes(&self.path, &runtimes)?;
         Ok(removed)
     }
 
-    pub fn record_liveness(&self, runtime_key: impl Into<String>, seen_at_ms: i64) {
+    pub fn record_liveness(&self, host_key: impl Into<String>, seen_at_ms: i64) {
         self.liveness
             .lock()
             .expect("runtime liveness lock poisoned")
-            .insert(runtime_key.into(), seen_at_ms);
+            .insert(host_key.into(), seen_at_ms);
     }
 
-    pub fn forget_liveness(&self, runtime_key: &str) {
+    pub fn forget_liveness(&self, host_key: &str) {
         self.liveness
             .lock()
             .expect("runtime liveness lock poisoned")
-            .remove(runtime_key);
+            .remove(host_key);
     }
 
     pub fn stale_liveness_keys(&self, stale_before_ms: i64) -> Vec<String> {
@@ -87,9 +87,9 @@ impl RuntimeRegistry {
             .lock()
             .expect("runtime liveness lock poisoned")
             .iter()
-            .filter_map(|(runtime_key, seen_at_ms)| {
+            .filter_map(|(host_key, seen_at_ms)| {
                 if *seen_at_ms <= stale_before_ms {
-                    Some(runtime_key.clone())
+                    Some(host_key.clone())
                 } else {
                     None
                 }
@@ -115,7 +115,7 @@ fn write_registry_file(path: &Path, file: &RuntimeRegistryFile) -> Result<()> {
     Ok(())
 }
 
-fn write_runtimes(path: &Path, runtimes: &[RuntimeDescriptor]) -> Result<()> {
+fn write_runtimes(path: &Path, runtimes: &[HostDescriptor]) -> Result<()> {
     write_registry_file(
         path,
         &RuntimeRegistryFile {
@@ -127,13 +127,13 @@ fn write_runtimes(path: &Path, runtimes: &[RuntimeDescriptor]) -> Result<()> {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct RuntimeRegistryFile {
     #[serde(default)]
-    runtimes: Vec<RuntimeDescriptor>,
+    runtimes: Vec<HostDescriptor>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::{RuntimeRegistry, RuntimeRegistryFile};
-    use crate::{Endpoint, RuntimeDescriptor, RuntimeProviderKind, RuntimeStatus};
+    use crate::{Endpoint, HostDescriptor, SandboxProviderKind, HostStatus};
     use anyhow::Result;
 
     #[test]
@@ -143,13 +143,13 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let registry = RuntimeRegistry::load(&path)?;
-        registry.upsert(RuntimeDescriptor {
-            runtime_key: "runtime:test".to_string(),
-            runtime_id: "runtime-id".to_string(),
+        registry.upsert(HostDescriptor {
+            host_key: "runtime:test".to_string(),
+            host_id: "runtime-id".to_string(),
             node_id: "node:test".to_string(),
-            provider: RuntimeProviderKind::Local,
+            provider: SandboxProviderKind::Local,
             provider_instance_id: "instance:test".to_string(),
-            status: RuntimeStatus::Ready,
+            status: HostStatus::Ready,
             acp: Endpoint::new("ws://127.0.0.1:4444/acp"),
             state: Endpoint::new("http://127.0.0.1:4444/v1/stream/fireline"),
             helper_api_base_url: None,
@@ -161,7 +161,7 @@ mod tests {
 
         let listed = registry.list()?;
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].runtime_key, "runtime:test");
+        assert_eq!(listed[0].host_key, "runtime:test");
         assert_eq!(registry.stale_liveness_keys(122), Vec::<String>::new());
         assert_eq!(
             registry.stale_liveness_keys(123),

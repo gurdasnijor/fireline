@@ -32,7 +32,7 @@ use self::mcp_server::build_peer_mcp_server;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct Peer {
-    pub runtime_id: String,
+    pub host_id: String,
     pub agent_name: String,
     pub acp_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -52,7 +52,7 @@ pub struct PeerComponent {
     peer_registry: Arc<dyn PeerRegistry>,
     active_turn_lookup: Arc<dyn ActiveTurnLookup>,
     child_session_edge_sink: Arc<dyn ChildSessionEdgeSink>,
-    runtime_id: String,
+    host_id: String,
 }
 
 impl PeerComponent {
@@ -60,13 +60,13 @@ impl PeerComponent {
         peer_registry: Arc<dyn PeerRegistry>,
         active_turn_lookup: Arc<dyn ActiveTurnLookup>,
         child_session_edge_sink: Arc<dyn ChildSessionEdgeSink>,
-        runtime_id: impl Into<String>,
+        host_id: impl Into<String>,
     ) -> Self {
         Self {
             peer_registry,
             active_turn_lookup,
             child_session_edge_sink,
-            runtime_id: runtime_id.into(),
+            host_id: host_id.into(),
         }
     }
 }
@@ -76,7 +76,7 @@ impl ConnectTo<sacp::Conductor> for PeerComponent {
         let peer_registry = self.peer_registry;
         let active_turn_lookup = self.active_turn_lookup;
         let child_session_edge_sink = self.child_session_edge_sink;
-        let runtime_id = self.runtime_id;
+        let host_id = self.host_id;
 
         sacp::Proxy
             .builder()
@@ -87,14 +87,14 @@ impl ConnectTo<sacp::Conductor> for PeerComponent {
                     let peer_registry = peer_registry.clone();
                     let active_turn_lookup = active_turn_lookup.clone();
                     let child_session_edge_sink = child_session_edge_sink.clone();
-                    let runtime_id = runtime_id.clone();
+                    let host_id = host_id.clone();
                     async move |request: sacp::schema::NewSessionRequest, responder, cx| {
                         let session_binding = Arc::new(OnceLock::new());
                         let mcp_server = build_peer_mcp_server(
                             peer_registry.clone(),
                             active_turn_lookup.clone(),
                             child_session_edge_sink.clone(),
-                            runtime_id.clone(),
+                            host_id.clone(),
                             session_binding.clone(),
                         );
                         cx.build_session_from(request)

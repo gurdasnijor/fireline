@@ -26,7 +26,7 @@ pub(crate) struct ListPeersInput {}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PeerInfo {
-    pub runtime_id: String,
+    pub host_id: String,
     pub agent_name: String,
     pub acp_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,7 +48,7 @@ pub(crate) struct PromptPeerInput {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PromptPeerOutput {
-    pub runtime_id: String,
+    pub host_id: String,
     pub agent_name: String,
     pub response_text: String,
     pub stop_reason: String,
@@ -86,7 +86,7 @@ pub(crate) fn build_peer_mcp_server(
     peer_registry: Arc<dyn PeerRegistry>,
     active_turn_lookup: Arc<dyn ActiveTurnLookup>,
     child_session_edge_sink: Arc<dyn ChildSessionEdgeSink>,
-    runtime_id: String,
+    host_id: String,
     session_binding: Arc<OnceLock<String>>,
 ) -> sacp::mcp_server::McpServer<Conductor, impl sacp::RunWithConnectionTo<Conductor>> {
     sacp::mcp_server::McpServer::builder("fireline-peer")
@@ -103,7 +103,7 @@ pub(crate) fn build_peer_mcp_server(
                         .map_err(|e| sacp::util::internal_error(format!("list peers: {e}")))?
                         .into_iter()
                         .map(|peer| PeerInfo {
-                            runtime_id: peer.runtime_id,
+                            host_id: peer.host_id,
                             agent_name: peer.agent_name,
                             acp_url: peer.acp_url,
                             state_stream_url: peer.state_stream_url,
@@ -122,7 +122,7 @@ pub(crate) fn build_peer_mcp_server(
                 let peer_registry = peer_registry.clone();
                 let active_turn_lookup = active_turn_lookup.clone();
                 let child_session_edge_sink = child_session_edge_sink.clone();
-                let runtime_id = runtime_id.clone();
+                let host_id = host_id.clone();
                 let session_binding = session_binding.clone();
                 async move |input: PromptPeerInput, cx| {
                     let peer = peer_registry
@@ -169,12 +169,12 @@ pub(crate) fn build_peer_mcp_server(
                     child_session_edge_sink
                         .emit_child_session_edge(ChildSessionEdgeInput {
                             trace_id: parent_lineage.trace_id.clone(),
-                            parent_runtime_id: runtime_id.clone(),
+                            parent_host_id: host_id.clone(),
                             parent_session_id: session_id,
                             parent_prompt_turn_id: parent_lineage
                                 .parent_prompt_turn_id
                                 .expect("parent lineage should always include an active turn id"),
-                            child_runtime_id: peer.runtime_id.clone(),
+                            child_host_id: peer.host_id.clone(),
                             child_session_id: result.child_session_id.clone(),
                         })
                         .await
@@ -186,7 +186,7 @@ pub(crate) fn build_peer_mcp_server(
                         })?;
 
                     Ok(PromptPeerOutput {
-                        runtime_id: peer.runtime_id,
+                        host_id: peer.host_id,
                         agent_name: peer.agent_name,
                         response_text: result.response_text,
                         stop_reason: result.stop_reason,

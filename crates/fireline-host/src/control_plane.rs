@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use fireline_sandbox::{
     DockerProvider, DockerProviderConfig, LocalProvider, RuntimeHost, RuntimeManager,
-    RuntimeRegistry, RuntimeStatus, RuntimeTokenIssuer,
+    RuntimeRegistry, HostStatus, RuntimeTokenIssuer,
 };
 
 use crate::auth::RuntimeTokenStore;
@@ -145,13 +145,13 @@ fn spawn_stale_runtime_task(
                     continue;
                 }
             };
-            for runtime_key in stale_keys {
-                let runtime = match runtime_registry.get(&runtime_key) {
+            for host_key in stale_keys {
+                let runtime = match runtime_registry.get(&host_key) {
                     Ok(runtime) => runtime,
                     Err(error) => {
                         tracing::warn!(
                             ?error,
-                            runtime_key,
+                            host_key,
                             "read runtime while scanning heartbeats"
                         );
                         continue;
@@ -159,21 +159,21 @@ fn spawn_stale_runtime_task(
                 };
 
                 let Some(mut descriptor) = runtime else {
-                    if let Err(error) = heartbeat_tracker.forget(&runtime_key).await {
-                        tracing::warn!(?error, runtime_key, "forget missing runtime heartbeat");
+                    if let Err(error) = heartbeat_tracker.forget(&host_key).await {
+                        tracing::warn!(?error, host_key, "forget missing runtime heartbeat");
                     }
                     continue;
                 };
 
-                if descriptor.status != RuntimeStatus::Ready {
+                if descriptor.status != HostStatus::Ready {
                     if matches!(
                         descriptor.status,
-                        RuntimeStatus::Stopped | RuntimeStatus::Broken
+                        HostStatus::Stopped | HostStatus::Broken
                     ) {
-                        if let Err(error) = heartbeat_tracker.forget(&runtime_key).await {
+                        if let Err(error) = heartbeat_tracker.forget(&host_key).await {
                             tracing::warn!(
                                 ?error,
-                                runtime_key,
+                                host_key,
                                 "forget finalized runtime heartbeat"
                             );
                         }
@@ -181,10 +181,10 @@ fn spawn_stale_runtime_task(
                     continue;
                 }
 
-                descriptor.status = RuntimeStatus::Stale;
+                descriptor.status = HostStatus::Stale;
                 descriptor.updated_at_ms = now_ms();
                 if let Err(error) = runtime_registry.upsert(descriptor) {
-                    tracing::warn!(?error, runtime_key, "mark runtime stale");
+                    tracing::warn!(?error, host_key, "mark runtime stale");
                 }
             }
         }
@@ -225,7 +225,7 @@ struct ControlPlaneTokenIssuer {
 }
 
 impl RuntimeTokenIssuer for ControlPlaneTokenIssuer {
-    fn issue(&self, runtime_key: &str, ttl: Duration) -> String {
-        self.token_store.issue(runtime_key, ttl).token
+    fn issue(&self, host_key: &str, ttl: Duration) -> String {
+        self.token_store.issue(host_key, ttl).token
     }
 }

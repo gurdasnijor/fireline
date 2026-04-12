@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use fireline_resources::{LocalPathMounter, ResourceMounter, prepare_resources};
 
-use crate::provider::{CreateRuntimeSpec, RuntimeLaunch, RuntimeProvider, RuntimeProviderKind};
+use crate::provider::{ProvisionSpec, RuntimeLaunch, RuntimeProvider, SandboxProviderKind};
 use crate::provider_trait::LocalRuntimeLauncher;
 
 #[derive(Clone)]
@@ -28,20 +28,20 @@ impl LocalProvider {
 
 #[async_trait]
 impl RuntimeProvider for LocalProvider {
-    fn kind(&self) -> RuntimeProviderKind {
-        RuntimeProviderKind::Local
+    fn kind(&self) -> SandboxProviderKind {
+        SandboxProviderKind::Local
     }
 
     async fn start(
         &self,
-        spec: CreateRuntimeSpec,
-        runtime_key: String,
+        spec: ProvisionSpec,
+        host_key: String,
         node_id: String,
     ) -> Result<RuntimeLaunch> {
         let mounted_resources =
-            prepare_resources(&spec.resources, &self.mounters, &runtime_key).await?;
+            prepare_resources(&spec.resources, &self.mounters, &host_key).await?;
         self.launcher
-            .launch_local_runtime(spec, runtime_key, node_id, mounted_resources)
+            .launch_local_runtime(spec, host_key, node_id, mounted_resources)
             .await
     }
 }

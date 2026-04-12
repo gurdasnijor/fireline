@@ -8,8 +8,8 @@ use axum::{Json, Router};
 use fireline_resources::ResourceRef;
 use fireline_sandbox::RuntimeHost;
 use fireline_session::{
-    CreateRuntimeSpec, HeartbeatReport, RuntimeDescriptor, RuntimeRegistration,
-    RuntimeProviderRequest, RuntimeStatus, TopologySpec,
+    ProvisionSpec, HeartbeatReport, HostDescriptor, HostRegistration,
+    SandboxProviderRequest, HostStatus, TopologySpec,
 };
 use serde::{Deserialize, Serialize};
 
@@ -51,8 +51,8 @@ pub struct ProvisionRequest {
 
 pub fn build_router(state: AppState) -> Router {
     let protected_runtime_routes = Router::new()
-        .route("/{runtime_key}/register", post(register_runtime))
-        .route("/{runtime_key}/heartbeat", post(heartbeat_runtime))
+        .route("/{host_key}/register", post(register_runtime))
+        .route("/{host_key}/heartbeat", post(heartbeat_runtime))
         .route_layer(axum::middleware::from_fn_with_state(
             state.token_store.clone(),
             require_runtime_bearer,
@@ -62,10 +62,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/v1/runtimes", get(list_runtimes).post(provision_runtime))
         .route(
-            "/v1/runtimes/{runtime_key}",
+            "/v1/runtimes/{host_key}",
             get(get_runtime).delete(delete_runtime),
         )
-        .route("/v1/runtimes/{runtime_key}/stop", post(stop_runtime))
+        .route("/v1/runtimes/{host_key}/stop", post(stop_runtime))
         .nest("/v1/runtimes", protected_runtime_routes)
         .with_state(state)
 }
@@ -76,16 +76,16 @@ async fn healthz() -> &'static str {
 
 async fn list_runtimes(
     State(state): State<AppState>,
-) -> Result<Json<Vec<RuntimeDescriptor>>, ControlPlaneError> {
+) -> Result<Json<Vec<HostDescriptor>>, ControlPlaneError> {
     Ok(Json(state.runtime_host.list()?))
 }
 
 async fn get_runtime(
-    Path(runtime_key): Path<String>,
+    Path(host_key): Path<String>,
     State(state): State<AppState>,
-) -> Result<Json<RuntimeDescriptor>, ControlPlaneError> {
-    let runtime = state.runtime_host.get(&runtime_key)?.ok_or_else(|| {
-        ControlPlaneError::not_found(format!("runtime '{runtime_key}' not found"))
+) -> Result<Json<HostDescriptor>, ControlPlaneError> {
+    let runtime = state.runtime_host.get(&host_key)?.ok_or_else(|| {
+        ControlPlaneError::not_found(format!("runtime '{host_key}' not found"))
     })?;
     Ok(Json(runtime))
 }
@@ -93,11 +93,11 @@ async fn get_runtime(
 async fn provision_runtime(
     State(state): State<AppState>,
     Json(request): Json<ProvisionRequest>,
-) -> Result<(StatusCode, Json<RuntimeDescriptor>), ControlPlaneError> {
-    let spec = CreateRuntimeSpec {
-        runtime_key: None,
+) -> Result<(StatusCode, Json<HostDescriptor>), ControlPlaneError> {
+    let spec = ProvisionSpec {
+        host_key: None,
         node_id: None,
-        provider: RuntimeProviderRequest::Local,
+        provider: SandboxProviderRequest::Local,
         host: state.infra.host,
         port: 0,
         name: request.name,
@@ -114,97 +114,97 @@ async fn provision_runtime(
 }
 
 async fn stop_runtime(
-    Path(runtime_key): Path<String>,
+    Path(host_key): Path<String>,
     State(state): State<AppState>,
-) -> Result<Json<RuntimeDescriptor>, ControlPlaneError> {
-    let runtime = state.runtime_host.stop(&runtime_key).await?;
-    if let Err(error) = state.heartbeat_tracker.forget(&runtime_key).await {
-        tracing::warn!(?error, runtime_key, "forget liveness after stop");
+) -> Result<Json<HostDescriptor>, ControlPlaneError> {
+    let runtime = state.runtime_host.stop(&host_key).await?;
+    if let Err(error) = state.heartbeat_tracker.forget(&host_key).await {
+        tracing::warn!(?error, host_key, "forget liveness after stop");
     }
     Ok(Json(runtime))
 }
 
 async fn delete_runtime(
-    Path(runtime_key): Path<String>,
+    Path(host_key): Path<String>,
     State(state): State<AppState>,
-) -> Result<Json<RuntimeDescriptor>, ControlPlaneError> {
+) -> Result<Json<HostDescriptor>, ControlPlaneError> {
     let runtime = state
         .runtime_host
-        .delete(&runtime_key)
+        .delete(&host_key)
         .await?
         .ok_or_else(|| {
-            ControlPlaneError::not_found(format!("runtime '{runtime_key}' not found"))
+            ControlPlaneError::not_found(format!("runtime '{host_key}' not found"))
         })?;
-    if let Err(error) = state.heartbeat_tracker.forget(&runtime_key).await {
-        tracing::warn!(?error, runtime_key, "forget liveness after delete");
+    if let Err(error) = state.heartbeat_tracker.forget(&host_key).await {
+        tracing::warn!(?error, host_key, "forget liveness after delete");
     }
     Ok(Json(runtime))
 }
 
 async fn register_runtime(
-    Path(runtime_key): Path<String>,
+    Path(host_key): Path<String>,
     Extension(claims): Extension<RuntimeTokenClaims>,
     State(state): State<AppState>,
-    Json(registration): Json<RuntimeRegistration>,
+    Json(registration): Json<HostRegistration>,
 ) -> Result<StatusCode, ControlPlaneError> {
-    enforce_runtime_scope(&claims, &runtime_key)?;
+    enforce_runtime_scope(&claims, &host_key)?;
     if matches!(
         state
             .runtime_host
-            .get(&runtime_key)?
+            .get(&host_key)?
             .map(|runtime| runtime.status),
-        Some(RuntimeStatus::Stopped)
+        Some(HostStatus::Stopped)
     ) {
         return Err(ControlPlaneError::conflict(format!(
-            "runtime '{runtime_key}' is stopped and cannot re-register"
+            "runtime '{host_key}' is stopped and cannot re-register"
         )));
     }
 
     state
         .runtime_host
-        .register(&runtime_key, registration)
+        .register(&host_key, registration)
         .await?;
-    if let Err(error) = state.heartbeat_tracker.record(&runtime_key, now_ms()).await {
-        tracing::warn!(?error, runtime_key, "record liveness after register");
+    if let Err(error) = state.heartbeat_tracker.record(&host_key, now_ms()).await {
+        tracing::warn!(?error, host_key, "record liveness after register");
     }
     Ok(StatusCode::OK)
 }
 
 async fn heartbeat_runtime(
-    Path(runtime_key): Path<String>,
+    Path(host_key): Path<String>,
     Extension(claims): Extension<RuntimeTokenClaims>,
     State(state): State<AppState>,
     Json(report): Json<HeartbeatReport>,
 ) -> Result<StatusCode, ControlPlaneError> {
-    enforce_runtime_scope(&claims, &runtime_key)?;
-    let current = state.runtime_host.get(&runtime_key)?.ok_or_else(|| {
-        ControlPlaneError::not_found(format!("runtime '{runtime_key}' not found"))
+    enforce_runtime_scope(&claims, &host_key)?;
+    let current = state.runtime_host.get(&host_key)?.ok_or_else(|| {
+        ControlPlaneError::not_found(format!("runtime '{host_key}' not found"))
     })?;
     if matches!(
         current.status,
-        RuntimeStatus::Stopped | RuntimeStatus::Broken
+        HostStatus::Stopped | HostStatus::Broken
     ) {
         return Err(ControlPlaneError::gone(format!(
-            "runtime '{runtime_key}' cannot heartbeat from status '{:?}'",
+            "runtime '{host_key}' cannot heartbeat from status '{:?}'",
             current.status
         )));
     }
 
-    state.runtime_host.heartbeat(&runtime_key, report)?;
-    if let Err(error) = state.heartbeat_tracker.record(&runtime_key, now_ms()).await {
-        tracing::warn!(?error, runtime_key, "record liveness after heartbeat");
+    state.runtime_host.heartbeat(&host_key, report)?;
+    if let Err(error) = state.heartbeat_tracker.record(&host_key, now_ms()).await {
+        tracing::warn!(?error, host_key, "record liveness after heartbeat");
     }
     Ok(StatusCode::OK)
 }
 
 fn enforce_runtime_scope(
     claims: &RuntimeTokenClaims,
-    runtime_key: &str,
+    host_key: &str,
 ) -> Result<(), ControlPlaneError> {
-    if claims.runtime_key != runtime_key {
+    if claims.host_key != host_key {
         return Err(ControlPlaneError::forbidden(format!(
             "token for runtime '{}' cannot access runtime '{}'",
-            claims.runtime_key, runtime_key
+            claims.host_key, host_key
         )));
     }
     Ok(())

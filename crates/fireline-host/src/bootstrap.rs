@@ -24,15 +24,15 @@ use durable_streams::{Client as DurableStreamsClient, CreateOptions, DurableStre
 use fireline_harness::{
     AcpRouteState, ComponentContext, SharedTerminal, TopologySpec, audit_stream_names,
     build_runtime_topology_registry, emit_runtime_instance_started, emit_runtime_instance_stopped,
-    emit_runtime_spec_persisted, ensure_named_streams,
+    emit_host_spec_persisted, ensure_named_streams,
 };
 use fireline_orchestration::{
     child_session_edge::ChildSessionEdgeWriter, load_coordinator::LoadCoordinatorComponent,
 };
 use fireline_resources::MountedResource;
 use fireline_session::{
-    ActiveTurnIndex, CreateRuntimeSpec, PersistedRuntimeSpec, RuntimeMaterializer,
-    RuntimeMaterializerTask, RuntimeProviderRequest, SessionIndex,
+    ActiveTurnIndex, ProvisionSpec, PersistedHostSpec, StateMaterializer,
+    StateMaterializerTask, SandboxProviderRequest, SessionIndex,
 };
 use fireline_tools::{
     DEFAULT_TENANT_ID, DeploymentDiscoveryEvent, PeerRegistry, StreamDeploymentPeerRegistry,
@@ -51,7 +51,7 @@ pub struct BootstrapConfig {
     pub host: IpAddr,
     pub port: u16,
     pub name: String,
-    pub runtime_key: String,
+    pub host_key: String,
     pub node_id: String,
     pub agent_command: Vec<String>,
     pub mounted_resources: Vec<MountedResource>,
@@ -63,18 +63,17 @@ pub struct BootstrapConfig {
 }
 
 pub struct BootstrapHandle {
-    pub runtime_id: String,
+    pub host_id: String,
     pub state_stream: String,
     pub health_url: String,
     pub acp_url: String,
     pub state_stream_url: String,
-    runtime_key: String,
-    host_id: String,
+    host_key: String,
     runtime_name: String,
     runtime_created_at: i64,
     state_producer: Producer,
     deployment_producer: Producer,
-    runtime_materializer_task: RuntimeMaterializerTask,
+    state_materializer_task: StateMaterializerTask,
     deployment_heartbeat_task: JoinHandle<()>,
     shared_terminal: SharedTerminal,
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -90,7 +89,7 @@ impl BootstrapHandle {
             &self.deployment_producer,
             &DeploymentDiscoveryEvent::RuntimeStopped {
                 host_id: self.host_id.clone(),
-                runtime_key: self.runtime_key.clone(),
+                host_key: self.host_key.clone(),
                 stopped_at_ms: chrono_like_now_ms(),
             },
         )
@@ -110,14 +109,14 @@ impl BootstrapHandle {
 
         emit_runtime_instance_stopped(
             &self.state_producer,
-            &self.runtime_id,
+            &self.host_id,
             &self.runtime_name,
             self.runtime_created_at,
         )
         .await
         .context("flush runtime_instance_stopped on shutdown")?;
 
-        self.runtime_materializer_task.abort();
+        self.state_materializer_task.abort();
 
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
@@ -134,9 +133,8 @@ impl BootstrapHandle {
 
 pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     let runtime_uuid = Uuid::new_v4();
-    let host_id = format!("host:{}", Uuid::new_v4());
-    let runtime_key = config.runtime_key;
-    let runtime_id = format!("fireline:{}:{runtime_uuid}", config.name);
+    let host_key = config.host_key;
+    let host_id = format!("fireline:{}:{runtime_uuid}", config.name);
     let runtime_created_at = chrono_like_now_ms();
     let state_stream = config
         .state_stream
@@ -170,12 +168,12 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     let node_id = config.node_id;
     let session_index = SessionIndex::new();
     let active_turn_index = ActiveTurnIndex::new();
-    let runtime_materializer = RuntimeMaterializer::new(vec![
+    let state_materializer = StateMaterializer::new(vec![
         std::sync::Arc::new(session_index.clone()),
         std::sync::Arc::new(active_turn_index.clone()),
     ]);
     // Keep a clone of the agent command around so we can thread it into
-    // the `runtime_spec` envelope further down — SharedTerminal::spawn
+    // the `host_spec` envelope further down — SharedTerminal::spawn
     // consumes the original.
     let agent_command_for_spec = config.agent_command.clone();
     let shared_terminal = SharedTerminal::spawn(config.agent_command).await?;
@@ -186,8 +184,8 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         StreamDeploymentPeerRegistry::new(stream_base_url.clone(), DEFAULT_TENANT_ID),
     );
     let topology_registry = build_runtime_topology_registry(ComponentContext {
-        runtime_key: runtime_key.clone(),
-        runtime_id: runtime_id.clone(),
+        host_key: host_key.clone(),
+        host_id: host_id.clone(),
         node_id: node_id.clone(),
         stream_base_url: stream_base_url.clone(),
         state_stream_url: state_stream_url.clone(),
@@ -202,9 +200,9 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
 
     let app_state = AcpRouteState {
         conductor_name: runtime_name.clone(),
-        runtime_key: runtime_key.clone(),
+        host_key: host_key.clone(),
         node_id: node_id.clone(),
-        runtime_id: runtime_id.clone(),
+        host_id: host_id.clone(),
         state_producer: state_producer.clone(),
         shared_terminal: shared_terminal.clone(),
         topology_registry,
@@ -233,14 +231,14 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
             .map_err(anyhow::Error::from)
     });
 
-    let runtime_materializer_task = runtime_materializer.connect(state_stream_url.clone());
-    runtime_materializer_task.preload().await?;
+    let state_materializer_task = state_materializer.connect(state_stream_url.clone());
+    state_materializer_task.preload().await?;
 
-    // Direct-host bootstraps emit the same `runtime_spec_persisted`
+    // Direct-host bootstraps emit the same `host_spec_persisted`
     // envelope that control-plane-managed runtimes emit through the
     // sandbox host create path. Without this, direct-host
     // bootstraps are invisible to stream-derived projections
-    // like `crate::runtime_index::RuntimeIndex` — the `runtime_instance`
+    // like `crate::host_index::HostIndex` — the `runtime_instance`
     // row lands on the stream but nothing describes what the runtime
     // was asked to be. Closing this gap is a prerequisite for replacing
     // the in-memory `RuntimeRegistry` with a pure stream projection.
@@ -251,13 +249,13 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     // their host/port/topology/agent_command but not their resource
     // launch spec. Promotion to a full round-trip spec is follow-up
     // work when a caller actually needs it.
-    let persisted_spec = PersistedRuntimeSpec::new(
-        runtime_key.clone(),
+    let persisted_spec = PersistedHostSpec::new(
+        host_key.clone(),
         node_id.clone(),
-        CreateRuntimeSpec {
-            runtime_key: Some(runtime_key.clone()),
+        ProvisionSpec {
+            host_key: Some(host_key.clone()),
             node_id: Some(node_id.clone()),
-            provider: RuntimeProviderRequest::Local,
+            provider: SandboxProviderRequest::Local,
             host: config.host,
             port: local_addr.port(),
             name: runtime_name.clone(),
@@ -270,13 +268,13 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
             topology: config.topology.clone(),
         },
     );
-    emit_runtime_spec_persisted(&state_stream_url, &persisted_spec)
+    emit_host_spec_persisted(&state_stream_url, &persisted_spec)
         .await
-        .context("emit runtime_spec_persisted from direct-host bootstrap")?;
+        .context("emit host_spec_persisted from direct-host bootstrap")?;
 
     emit_runtime_instance_started(
         &state_producer,
-        &runtime_id,
+        &host_id,
         &runtime_name,
         runtime_created_at,
     );
@@ -297,7 +295,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         &deployment_producer,
         &DeploymentDiscoveryEvent::RuntimeProvisioned {
             host_id: host_id.clone(),
-            runtime_key: runtime_key.clone(),
+            host_key: host_key.clone(),
             acp_url: acp_url.clone(),
             agent_name: runtime_name.clone(),
             provisioned_at_ms: runtime_created_at,
@@ -311,18 +309,17 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     ));
 
     Ok(BootstrapHandle {
-        runtime_id,
+        host_id,
         state_stream,
         health_url,
         acp_url,
         state_stream_url,
-        runtime_key,
-        host_id,
+        host_key,
         runtime_name,
         runtime_created_at,
         state_producer,
         deployment_producer,
-        runtime_materializer_task,
+        state_materializer_task,
         deployment_heartbeat_task,
         shared_terminal,
         shutdown_tx: Some(shutdown_tx),

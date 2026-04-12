@@ -1,7 +1,7 @@
 use durable_streams::Client as DurableStreamsClient;
 use serde::Serialize;
 
-use crate::{PersistedRuntimeSpec, RuntimeDescriptor};
+use crate::{PersistedHostSpec, HostDescriptor};
 
 #[derive(Debug, Clone, Serialize)]
 struct StateHeaders {
@@ -17,9 +17,9 @@ struct StateEnvelope<T> {
     value: T,
 }
 
-pub async fn emit_runtime_spec_persisted(
+pub async fn emit_host_spec_persisted(
     state_stream_url: &str,
-    spec: &PersistedRuntimeSpec,
+    spec: &PersistedHostSpec,
 ) -> anyhow::Result<()> {
     if state_stream_url.is_empty() {
         return Ok(());
@@ -29,12 +29,12 @@ pub async fn emit_runtime_spec_persisted(
     let mut stream = client.stream(state_stream_url);
     stream.set_content_type("application/json");
     let producer = stream
-        .producer(format!("runtime-spec-{}", spec.runtime_key))
+        .producer(format!("runtime-spec-{}", spec.host_key))
         .content_type("application/json")
         .build();
     producer.append_json(&StateEnvelope {
         entity_type: "runtime_spec",
-        key: spec.runtime_key.clone(),
+        key: spec.host_key.clone(),
         headers: StateHeaders {
             operation: "insert",
         },
@@ -44,9 +44,9 @@ pub async fn emit_runtime_spec_persisted(
     Ok(())
 }
 
-pub async fn emit_runtime_endpoints_persisted(
+pub async fn emit_host_endpoints_persisted(
     state_stream_url: &str,
-    descriptor: &RuntimeDescriptor,
+    descriptor: &HostDescriptor,
 ) -> anyhow::Result<()> {
     if state_stream_url.is_empty() {
         return Ok(());
@@ -58,14 +58,14 @@ pub async fn emit_runtime_endpoints_persisted(
     let producer = stream
         .producer(format!(
             "runtime-endpoints-{}-{}",
-            descriptor.runtime_key,
+            descriptor.host_key,
             uuid::Uuid::new_v4()
         ))
         .content_type("application/json")
         .build();
     producer.append_json(&StateEnvelope {
         entity_type: "runtime_endpoints",
-        key: descriptor.runtime_key.clone(),
+        key: descriptor.host_key.clone(),
         headers: StateHeaders {
             operation: "update",
         },

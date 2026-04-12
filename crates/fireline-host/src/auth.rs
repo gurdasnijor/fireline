@@ -12,14 +12,14 @@ use crate::router::ControlPlaneError;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeTokenClaims {
-    pub runtime_key: String,
+    pub host_key: String,
     pub expires_at_ms: i64,
 }
 
 #[derive(Clone, Debug)]
 pub struct IssuedRuntimeToken {
     pub token: String,
-    pub runtime_key: String,
+    pub host_key: String,
     pub expires_at_ms: i64,
 }
 
@@ -29,10 +29,10 @@ pub struct RuntimeTokenStore {
 }
 
 impl RuntimeTokenStore {
-    pub fn issue(&self, runtime_key: &str, ttl: Duration) -> IssuedRuntimeToken {
+    pub fn issue(&self, host_key: &str, ttl: Duration) -> IssuedRuntimeToken {
         let issued = IssuedRuntimeToken {
             token: Uuid::new_v4().to_string(),
-            runtime_key: runtime_key.to_string(),
+            host_key: host_key.to_string(),
             expires_at_ms: now_ms() + ttl.as_millis() as i64,
         };
         self.inner
@@ -50,7 +50,7 @@ impl RuntimeTokenStore {
             return None;
         }
         Some(RuntimeTokenClaims {
-            runtime_key: issued.runtime_key,
+            host_key: issued.host_key,
             expires_at_ms: issued.expires_at_ms,
         })
     }
@@ -115,7 +115,7 @@ mod tests {
         assert_eq!(
             claims,
             RuntimeTokenClaims {
-                runtime_key: "runtime:test".to_string(),
+                host_key: "runtime:test".to_string(),
                 expires_at_ms: issued.expires_at_ms,
             }
         );
@@ -162,7 +162,7 @@ mod tests {
                     "/protected",
                     get(
                         |Extension(claims): Extension<RuntimeTokenClaims>| async move {
-                            claims.runtime_key
+                            claims.host_key
                         },
                     ),
                 )

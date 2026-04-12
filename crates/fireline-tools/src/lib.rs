@@ -108,7 +108,7 @@ pub struct ToolDescriptor {
 pub enum TransportRef {
     /// Resolve the tool through another Fireline runtime identified by
     /// its runtime key. Used for cross-runtime peering over ACP.
-    PeerRuntime { runtime_key: String },
+    PeerRuntime { host_key: String },
     /// Resolve the tool through a Smithery catalog entry by namespace
     /// and tool name.
     Smithery { catalog: String, tool: String },
@@ -291,7 +291,7 @@ mod tests {
         // if a future refactor drops `rename_all_fields` and the inner
         // fields revert to snake_case.
         let peer = TransportRef::PeerRuntime {
-            runtime_key: "rt-1".to_string(),
+            host_key: "rt-1".to_string(),
         };
         let value = serde_json::to_value(&peer).unwrap();
         assert_eq!(
@@ -314,7 +314,7 @@ mod tests {
     fn transport_ref_variants_round_trip() {
         assert_round_trip(
             &TransportRef::PeerRuntime {
-                runtime_key: "rt-1".to_string(),
+                host_key: "rt-1".to_string(),
             },
             "peerRuntime",
         );

@@ -80,18 +80,21 @@ async fn tools_schema_only_contract() -> Result<()> {
             .await
             .context("create session to trigger peer_mcp tool_descriptor emission")?;
 
-        let envelopes =
-            wait_for_event_count(runtime.state_stream_url(), "tool_descriptor", 1, DEFAULT_TIMEOUT)
-                .await
-                .context(
-                    "INVARIANT (Tools): at least one tool_descriptor envelope must be visible on \
+        let envelopes = wait_for_event_count(
+            runtime.state_stream_url(),
+            "tool_descriptor",
+            1,
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .context(
+            "INVARIANT (Tools): at least one tool_descriptor envelope must be visible on \
                      the durable state stream after the conductor wires peer_mcp — no envelopes \
                      means the emission wiring in src/topology.rs did not fire",
-                )?;
+        )?;
 
-        let required_keys: HashSet<&str> = ["name", "description", "inputSchema"]
-            .into_iter()
-            .collect();
+        let required_keys: HashSet<&str> =
+            ["name", "description", "inputSchema"].into_iter().collect();
         let forbidden_keys: HashSet<&str> =
             ["transport", "credential", "host", "runtimeKey", "nodeId"]
                 .into_iter()
@@ -177,7 +180,8 @@ async fn tools_schema_only_contract() -> Result<()> {
         // assert against the set rather than the count to keep the
         // failure message descriptive.
         let witnessed: HashSet<&str> = witnessed_names.iter().map(String::as_str).collect();
-        let expected_peer_tools: HashSet<&str> = ["list_peers", "prompt_peer"].into_iter().collect();
+        let expected_peer_tools: HashSet<&str> =
+            ["list_peers", "prompt_peer"].into_iter().collect();
         assert!(
             expected_peer_tools.is_subset(&witnessed),
             "INVARIANT (Tools): peer_mcp must emit tool_descriptor envelopes for every tool \
@@ -274,14 +278,18 @@ async fn tools_transport_agnostic_registration() -> Result<()> {
             .await
             .context("create session to trigger attach_tool emission")?;
 
-        let envelopes =
-            wait_for_event_count(runtime.state_stream_url(), "tool_descriptor", 2, DEFAULT_TIMEOUT)
-                .await
-                .context(
-                    "INVARIANT (Tools): attach_tool must emit one tool_descriptor envelope \
+        let envelopes = wait_for_event_count(
+            runtime.state_stream_url(),
+            "tool_descriptor",
+            2,
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .context(
+            "INVARIANT (Tools): attach_tool must emit one tool_descriptor envelope \
                      per CapabilityRef on conductor wire-up, regardless of the capability's \
                      transport variant",
-                )?;
+        )?;
 
         let required_keys: HashSet<&str> =
             ["name", "description", "inputSchema"].into_iter().collect();
@@ -321,9 +329,9 @@ async fn tools_transport_agnostic_registration() -> Result<()> {
             let value = envelope
                 .value()
                 .context("tool_descriptor envelope missing value")?;
-            let obj = value.as_object().context(
-                "INVARIANT (Tools): tool_descriptor value must be a JSON object",
-            )?;
+            let obj = value
+                .as_object()
+                .context("INVARIANT (Tools): tool_descriptor value must be a JSON object")?;
             let present_keys: HashSet<&str> = obj.keys().map(String::as_str).collect();
             assert_eq!(
                 present_keys, required_keys,
@@ -418,8 +426,8 @@ async fn tools_first_attach_wins_on_name_collision() -> Result<()> {
             })),
         }],
     };
-    let spec = ManagedAgentHarnessSpec::new("tools-first-attach-wins-collision")
-        .with_topology(topology);
+    let spec =
+        ManagedAgentHarnessSpec::new("tools-first-attach-wins-collision").with_topology(topology);
     let runtime = LocalRuntimeHarness::spawn_with(spec).await?;
 
     let result = async {

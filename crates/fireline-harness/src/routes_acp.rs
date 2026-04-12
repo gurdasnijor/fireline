@@ -37,9 +37,9 @@ pub type BaseComponentsFactory = Arc<dyn Fn() -> Vec<DynConnectTo<Conductor>> + 
 #[derive(Clone)]
 pub struct AcpRouteState {
     pub conductor_name: String,
-    pub runtime_key: String,
+    pub host_key: String,
     pub node_id: String,
-    pub runtime_id: String,
+    pub host_id: String,
     pub state_producer: Producer,
     pub shared_terminal: SharedTerminal,
     pub topology_registry: TopologyRegistry,
@@ -82,8 +82,8 @@ async fn acp_websocket_handler(
         let mut trace_writers = Vec::with_capacity(1 + resolved_topology.trace_writers.len());
         trace_writers.push(Box::new(DurableStreamTracer::new_with_runtime_context(
             app.state_producer.clone(),
-            app.runtime_key.clone(),
-            app.runtime_id.clone(),
+            app.host_key.clone(),
+            app.host_id.clone(),
             app.node_id.clone(),
             logical_connection_id,
         )) as BoxedTraceWriter);

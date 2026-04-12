@@ -37,7 +37,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use fireline_harness::{TopologyComponentSpec, TopologySpec};
-use fireline_session::RuntimeStatus;
+use fireline_session::HostStatus;
 use managed_agent_suite::{
     ControlPlaneHarness, DEFAULT_TIMEOUT, LocalRuntimeHarness, ManagedAgentHarnessSpec,
     append_approval_resolved, count_events, create_session, load_session_then_prompt,
@@ -374,10 +374,10 @@ async fn harness_durable_suspend_resume_round_trip() -> Result<()> {
                 "INVARIANT (Harness): approval gate must emit permission_request before runtime death",
             )?;
 
-        let stopped = control_plane.stop_runtime(&runtime.runtime_key).await?;
+        let stopped = control_plane.stop_runtime(&runtime.host_key).await?;
         assert_eq!(
             stopped.status,
-            RuntimeStatus::Stopped,
+            HostStatus::Stopped,
             "INVARIANT (Harness): stop_runtime must transition the original runtime to Stopped"
         );
 
@@ -412,11 +412,11 @@ async fn harness_durable_suspend_resume_round_trip() -> Result<()> {
         .await
         .context("resume suspended session after runtime death")?;
         assert_eq!(
-            resumed.runtime_key, runtime.runtime_key,
+            resumed.host_key, runtime.host_key,
             "INVARIANT (Harness): resume must recreate the same logical runtime"
         );
         assert_ne!(
-            resumed.runtime_id, runtime.runtime_id,
+            resumed.host_id, runtime.host_id,
             "INVARIANT (Harness): resume after stop must cold-start a fresh runtime process"
         );
 

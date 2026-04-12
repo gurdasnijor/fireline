@@ -98,7 +98,7 @@ async fn session_load_returns_explicit_non_resumable_error_with_durable_record()
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
         name: "session-load-live".to_string(),
-        runtime_key: format!("runtime:{}", Uuid::new_v4()),
+        host_key: format!("runtime:{}", Uuid::new_v4()),
         node_id: "node:test-session-load".to_string(),
         agent_command: vec![testy_bin()],
         mounted_resources: Vec::new(),
@@ -158,7 +158,7 @@ async fn session_load_returns_explicit_non_resumable_error_with_durable_record()
 #[tokio::test]
 async fn session_load_replays_catalog_after_restart_and_returns_same_durable_record() -> Result<()>
 {
-    let runtime_key = format!("runtime:{}", Uuid::new_v4());
+    let host_key = format!("runtime:{}", Uuid::new_v4());
     let state_stream = format!("fireline-session-load-{}", Uuid::new_v4());
     let peer_directory_path = temp_peer_directory();
     let cwd = repo_root();
@@ -168,7 +168,7 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
         name: "session-load-restart".to_string(),
-        runtime_key: runtime_key.clone(),
+        host_key: host_key.clone(),
         node_id: "node:test-session-load".to_string(),
         agent_command: vec![testy_bin()],
         mounted_resources: Vec::new(),
@@ -188,7 +188,7 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
         name: "session-load-restart".to_string(),
-        runtime_key: runtime_key.clone(),
+        host_key: host_key.clone(),
         node_id: "node:test-session-load".to_string(),
         agent_command: vec![testy_bin()],
         mounted_resources: Vec::new(),
@@ -223,7 +223,7 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
             .get("sessionRecord")
             .and_then(|record| record.get("runtimeKey"))
             .and_then(Value::as_str),
-        Some(runtime_key.as_str())
+        Some(host_key.as_str())
     );
 
     restarted.shutdown().await?;
@@ -239,7 +239,7 @@ async fn session_load_reattaches_against_runtime_owned_terminal_when_agent_suppo
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
         name: "session-load-resumable".to_string(),
-        runtime_key: format!("runtime:{}", Uuid::new_v4()),
+        host_key: format!("runtime:{}", Uuid::new_v4()),
         node_id: "node:test-session-load".to_string(),
         agent_command: vec![resumable_testy_bin()],
         mounted_resources: Vec::new(),
@@ -276,7 +276,7 @@ async fn session_load_reattaches_against_runtime_owned_terminal_when_agent_suppo
 #[tokio::test]
 async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not_found()
 -> Result<()> {
-    let runtime_key = format!("runtime:{}", Uuid::new_v4());
+    let host_key = format!("runtime:{}", Uuid::new_v4());
     let state_stream = format!("fireline-session-load-resumable-{}", Uuid::new_v4());
     let peer_directory_path = temp_peer_directory();
     let cwd = repo_root();
@@ -286,7 +286,7 @@ async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
         name: "session-load-resumable-restart".to_string(),
-        runtime_key: runtime_key.clone(),
+        host_key: host_key.clone(),
         node_id: "node:test-session-load".to_string(),
         agent_command: vec![resumable_testy_bin()],
         mounted_resources: Vec::new(),
@@ -306,7 +306,7 @@ async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not
         host: "127.0.0.1".parse::<IpAddr>()?,
         port: 0,
         name: "session-load-resumable-restart".to_string(),
-        runtime_key,
+        host_key,
         node_id: "node:test-session-load".to_string(),
         agent_command: vec![resumable_testy_bin()],
         mounted_resources: Vec::new(),

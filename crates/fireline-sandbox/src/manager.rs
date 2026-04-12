@@ -4,18 +4,18 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 
 use crate::provider::{
-    CreateRuntimeSpec, RuntimeLaunch, RuntimeProvider, RuntimeProviderKind, RuntimeProviderRequest,
+    ProvisionSpec, RuntimeLaunch, RuntimeProvider, SandboxProviderKind, SandboxProviderRequest,
 };
 
 #[derive(Clone)]
 pub struct RuntimeManager {
-    providers: HashMap<RuntimeProviderKind, Arc<dyn RuntimeProvider>>,
+    providers: HashMap<SandboxProviderKind, Arc<dyn RuntimeProvider>>,
 }
 
 impl RuntimeManager {
     pub fn new(local: Arc<dyn RuntimeProvider>) -> Self {
         let mut providers = HashMap::new();
-        providers.insert(RuntimeProviderKind::Local, local);
+        providers.insert(SandboxProviderKind::Local, local);
         Self { providers }
     }
 
@@ -26,30 +26,30 @@ impl RuntimeManager {
 
     pub async fn start(
         &self,
-        spec: CreateRuntimeSpec,
-        runtime_key: String,
+        spec: ProvisionSpec,
+        host_key: String,
         node_id: String,
-    ) -> Result<(RuntimeProviderKind, RuntimeLaunch)> {
+    ) -> Result<(SandboxProviderKind, RuntimeLaunch)> {
         let provider = self.resolve(spec.provider)?;
         let kind = provider.kind();
-        let launch = provider.start(spec, runtime_key, node_id).await?;
+        let launch = provider.start(spec, host_key, node_id).await?;
         Ok((kind, launch))
     }
 
-    pub fn resolve_kind(&self, request: RuntimeProviderRequest) -> Result<RuntimeProviderKind> {
+    pub fn resolve_kind(&self, request: SandboxProviderRequest) -> Result<SandboxProviderKind> {
         self.resolve(request).map(|provider| provider.kind())
     }
 
-    fn resolve(&self, request: RuntimeProviderRequest) -> Result<Arc<dyn RuntimeProvider>> {
+    fn resolve(&self, request: SandboxProviderRequest) -> Result<Arc<dyn RuntimeProvider>> {
         match request {
-            RuntimeProviderRequest::Auto | RuntimeProviderRequest::Local => self
+            SandboxProviderRequest::Auto | SandboxProviderRequest::Local => self
                 .providers
-                .get(&RuntimeProviderKind::Local)
+                .get(&SandboxProviderKind::Local)
                 .cloned()
                 .ok_or_else(|| anyhow!("local runtime provider is not configured")),
-            RuntimeProviderRequest::Docker => self
+            SandboxProviderRequest::Docker => self
                 .providers
-                .get(&RuntimeProviderKind::Docker)
+                .get(&SandboxProviderKind::Docker)
                 .cloned()
                 .ok_or_else(|| anyhow!("docker runtime provider is not configured")),
         }

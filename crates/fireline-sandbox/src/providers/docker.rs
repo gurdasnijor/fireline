@@ -24,13 +24,13 @@ use walkdir::WalkDir;
 use fireline_resources::{LocalPathMounter, ResourceMounter, prepare_resources};
 
 use crate::provider::{
-    CreateRuntimeSpec, Endpoint, ManagedRuntime, RuntimeLaunch, RuntimeProvider,
-    RuntimeProviderKind, RuntimeTokenIssuer,
+    ProvisionSpec, Endpoint, ManagedRuntime, RuntimeLaunch, RuntimeProvider,
+    SandboxProviderKind, RuntimeTokenIssuer,
 };
 
 const CONTAINER_PORT: u16 = 4437;
 const TOKEN_TTL: Duration = Duration::from_secs(60 * 60 * 24);
-const LABEL_RUNTIME_KEY: &str = "fireline.runtime_key";
+const LABEL_RUNTIME_KEY: &str = "fireline.host_key";
 const LABEL_PROVIDER: &str = "fireline.provider";
 
 #[derive(Debug, Clone)]
@@ -101,41 +101,41 @@ impl DockerProvider {
         Ok(())
     }
 
-    fn state_stream_name(spec: &CreateRuntimeSpec, runtime_key: &str) -> String {
+    fn state_stream_name(spec: &ProvisionSpec, host_key: &str) -> String {
         spec.state_stream
             .clone()
-            .unwrap_or_else(|| format!("fireline-state-{}", sanitize_name(runtime_key)))
+            .unwrap_or_else(|| format!("fireline-state-{}", sanitize_name(host_key)))
     }
 }
 
 #[async_trait]
 impl RuntimeProvider for DockerProvider {
-    fn kind(&self) -> RuntimeProviderKind {
-        RuntimeProviderKind::Docker
+    fn kind(&self) -> SandboxProviderKind {
+        SandboxProviderKind::Docker
     }
 
     async fn start(
         &self,
-        spec: CreateRuntimeSpec,
-        runtime_key: String,
+        spec: ProvisionSpec,
+        host_key: String,
         node_id: String,
     ) -> Result<RuntimeLaunch> {
         self.ensure_image_ready().await?;
         let mounted_resources =
-            prepare_resources(&spec.resources, &self.mounters, &runtime_key).await?;
+            prepare_resources(&spec.resources, &self.mounters, &host_key).await?;
 
         let control_plane_url = rewrite_loopback_for_container(&self.config.control_plane_url)?;
-        let container_name = format!("fireline-{}", sanitize_name(&runtime_key));
+        let container_name = format!("fireline-{}", sanitize_name(&host_key));
         let provider_instance_id = container_name.clone();
         let published_port = reserve_host_port()?;
-        let state_stream_name = Self::state_stream_name(&spec, &runtime_key);
+        let state_stream_name = Self::state_stream_name(&spec, &host_key);
         let advertised_acp_url = format!("ws://127.0.0.1:{published_port}/acp");
         let advertised_state_stream_url =
             join_stream_url(&spec.durable_streams_url, &state_stream_name);
         let connect_durable_streams_url =
             rewrite_loopback_for_container(&spec.durable_streams_url)?;
 
-        let runtime_token = self.token_issuer.issue(&runtime_key, TOKEN_TTL);
+        let runtime_token = self.token_issuer.issue(&host_key, TOKEN_TTL);
         let agent_command = rewrite_agent_command_for_image(&spec.agent_command)?;
         let bind_mounts = mounted_resources
             .iter()
@@ -189,7 +189,7 @@ impl RuntimeProvider for DockerProvider {
             cmd: Some(cmd),
             env: Some(
                 [
-                    format!("FIRELINE_RUNTIME_KEY={runtime_key}"),
+                    format!("FIRELINE_RUNTIME_KEY={host_key}"),
                     format!("FIRELINE_NODE_ID={node_id}"),
                     format!("FIRELINE_CONTROL_PLANE_URL={control_plane_url}"),
                     format!("FIRELINE_CONTROL_PLANE_TOKEN={runtime_token}"),
@@ -206,7 +206,7 @@ impl RuntimeProvider for DockerProvider {
                 HashMap::new(),
             )])),
             labels: Some(HashMap::from([
-                (LABEL_RUNTIME_KEY.to_string(), runtime_key.clone()),
+                (LABEL_RUNTIME_KEY.to_string(), host_key.clone()),
                 (LABEL_PROVIDER.to_string(), "docker".to_string()),
             ])),
             host_config: Some(HostConfig {
@@ -239,7 +239,7 @@ impl RuntimeProvider for DockerProvider {
             .with_context(|| format!("start docker runtime container {container_name}"))?;
 
         Ok(RuntimeLaunch {
-            runtime_id: String::new(),
+            host_id: String::new(),
             provider_instance_id,
             acp: Endpoint::new(advertised_acp_url),
             state: Endpoint::new(advertised_state_stream_url),

@@ -52,10 +52,10 @@ use managed_agent_suite::{
 /// lives at
 /// `tests/managed_agent_primitives_suite.rs::managed_agent_orchestration_acceptance_contract`.
 /// That test spawns a `ControlPlaneHarness`, creates a runtime via
-/// `create_runtime_with_agent`, asserts `reconstruct_runtime_spec_from_log`
+/// `create_runtime_with_agent`, asserts `reconstruct_host_spec_from_log`
 /// sees the persisted spec, creates a session, prompts, stops the runtime,
 /// calls `src/orchestration.rs::resume`, and asserts the resumed runtime is
-/// Ready with a new runtime_id under the same runtime_key.
+/// Ready with a new host_id under the same host_key.
 ///
 /// That's the load-bearing Orchestration cycle test. It's being actively
 /// debugged by codex DAR — their fix for the register/ready race is in
@@ -72,7 +72,7 @@ use managed_agent_suite::{
 /// Action: call `resume(sessionId)` against the live runtime.
 ///
 /// Observable evidence: the call returns the same runtime descriptor
-/// (same runtime_key, same runtime_id, status Ready) without spinning up a
+/// (same host_key, same host_id, status Ready) without spinning up a
 /// new runtime — the resume helper's short-circuit path is taken.
 ///
 /// Invariant proven: **Orchestration idempotent on live runtimes** — calling
@@ -119,15 +119,15 @@ async fn orchestration_resume_on_live_runtime_is_noop() -> Result<()> {
         .context("second resume against live runtime must succeed")?;
 
         assert_eq!(
-            resumed_once.runtime_key, runtime.runtime_key,
-            "INVARIANT (Orchestration): resume on live runtime returns the same runtime_key"
+            resumed_once.host_key, runtime.host_key,
+            "INVARIANT (Orchestration): resume on live runtime returns the same host_key"
         );
         assert_eq!(
-            resumed_once.runtime_id, runtime.runtime_id,
+            resumed_once.host_id, runtime.host_id,
             "INVARIANT (Orchestration): resume on live runtime does not spawn a new process"
         );
         assert_eq!(
-            resumed_twice.runtime_id, runtime.runtime_id,
+            resumed_twice.host_id, runtime.host_id,
             "INVARIANT (Orchestration): repeated resume remains a no-op on the same runtime"
         );
 
@@ -148,7 +148,7 @@ async fn orchestration_resume_on_live_runtime_is_noop() -> Result<()> {
 /// creating a second process.
 ///
 /// Observable evidence: both `resume` calls return descriptors with
-/// the **same** `runtime_key` AND the **same** `runtime_id`, proving
+/// the **same** `host_key` AND the **same** `host_id`, proving
 /// no second runtime process was instantiated.
 ///
 /// Invariant proven: **Orchestration concurrent-resume idempotency** —
@@ -196,23 +196,23 @@ async fn orchestration_concurrent_resume_creates_single_runtime() -> Result<()> 
         let second = second.context("second concurrent resume must succeed")?;
 
         assert_eq!(
-            first.runtime_key, runtime.runtime_key,
-            "INVARIANT (Orchestration): concurrent resume A returns the same runtime_key"
+            first.host_key, runtime.host_key,
+            "INVARIANT (Orchestration): concurrent resume A returns the same host_key"
         );
         assert_eq!(
-            second.runtime_key, runtime.runtime_key,
-            "INVARIANT (Orchestration): concurrent resume B returns the same runtime_key"
+            second.host_key, runtime.host_key,
+            "INVARIANT (Orchestration): concurrent resume B returns the same host_key"
         );
         assert_eq!(
-            first.runtime_id, runtime.runtime_id,
+            first.host_id, runtime.host_id,
             "INVARIANT (Orchestration): concurrent resume A does not spawn a new runtime process"
         );
         assert_eq!(
-            second.runtime_id, runtime.runtime_id,
+            second.host_id, runtime.host_id,
             "INVARIANT (Orchestration): concurrent resume B does not spawn a new runtime process"
         );
         assert_eq!(
-            first.runtime_id, second.runtime_id,
+            first.host_id, second.host_id,
             "INVARIANT (Orchestration): both concurrent resumes observe the same runtime identity"
         );
 
@@ -262,7 +262,8 @@ async fn orchestration_subscriber_loop_drives_pause_release_cycle() -> Result<()
             })),
         }],
     };
-    let spec = ManagedAgentHarnessSpec::new("orchestration-subscriber-loop").with_topology(topology);
+    let spec =
+        ManagedAgentHarnessSpec::new("orchestration-subscriber-loop").with_topology(topology);
     let runtime = LocalRuntimeHarness::spawn_with(spec).await?;
 
     let result = async {
@@ -314,16 +315,13 @@ async fn orchestration_subscriber_loop_drives_pause_release_cycle() -> Result<()
                  and append an approval_resolved response",
             )?;
 
-        let prompt_outcome =
-            tokio::time::timeout(std::time::Duration::from_secs(15), prompt_task)
-                .await
-                .context("prompt task did not complete within the post-approval window")?;
-        prompt_outcome
-            .context("prompt task panicked")?
-            .context(
-                "INVARIANT (Orchestration): blocked prompt must succeed once the subscriber \
+        let prompt_outcome = tokio::time::timeout(std::time::Duration::from_secs(15), prompt_task)
+            .await
+            .context("prompt task did not complete within the post-approval window")?;
+        prompt_outcome.context("prompt task panicked")?.context(
+            "INVARIANT (Orchestration): blocked prompt must succeed once the subscriber \
                  loop resolves the approval",
-            )?;
+        )?;
 
         let permission_envelopes = count_events(&state_url, "permission").await?;
         assert!(

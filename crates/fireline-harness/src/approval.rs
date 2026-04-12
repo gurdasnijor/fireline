@@ -184,7 +184,9 @@ impl ApprovalGateComponent {
             .read()
             .offset(durable_streams::Offset::Beginning)
             .build()
-            .map_err(|error| sacp::util::internal_error(format!("approval log rebuild: {error}")))?;
+            .map_err(|error| {
+                sacp::util::internal_error(format!("approval log rebuild: {error}"))
+            })?;
 
         let mut pending_reason = None;
         let mut approved = false;
@@ -200,8 +202,9 @@ impl ApprovalGateComponent {
                 continue;
             }
 
-            let events: Vec<Value> = serde_json::from_slice(&chunk.data)
-                .map_err(|error| sacp::util::internal_error(format!("approval log parse: {error}")))?;
+            let events: Vec<Value> = serde_json::from_slice(&chunk.data).map_err(|error| {
+                sacp::util::internal_error(format!("approval log parse: {error}"))
+            })?;
             for event in events {
                 let Some(value) = event.get("value") else {
                     continue;
@@ -349,10 +352,7 @@ impl ApprovalGateComponent {
                         if value.get("requestId").and_then(Value::as_str) != Some(request_id) {
                             continue;
                         }
-                        let allow = value
-                            .get("allow")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false);
+                        let allow = value.get("allow").and_then(Value::as_bool).unwrap_or(false);
                         return Ok(allow);
                     }
                 }
@@ -456,9 +456,8 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                                     .insert(session_id.clone(), reason.clone());
                                 this.emit_permission_request(&session_id, &request_id, &reason)
                                     .await?;
-                                let allowed = this
-                                    .wait_for_approval(&session_id, &request_id)
-                                    .await?;
+                                let allowed =
+                                    this.wait_for_approval(&session_id, &request_id).await?;
                                 this.pending_sessions
                                     .lock()
                                     .expect("approval state poisoned")
@@ -485,7 +484,8 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                 {
                     let this = this.clone();
                     async move |request: sacp::schema::LoadSessionRequest, responder, cx| {
-                        this.rebuild_from_log(&request.session_id.to_string()).await?;
+                        this.rebuild_from_log(&request.session_id.to_string())
+                            .await?;
                         cx.send_request_to(Agent, request)
                             .forward_response_to(responder)
                     }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use fireline_session::{HeartbeatMetrics, HeartbeatReport, RuntimeRegistration};
+use fireline_session::{HeartbeatMetrics, HeartbeatReport, HostRegistration};
 use reqwest::{Client as HttpClient, StatusCode};
 use tokio::task::JoinHandle;
 
@@ -11,14 +11,14 @@ pub struct ControlPlaneClient {
     http: HttpClient,
     base_url: String,
     token: String,
-    runtime_key: String,
+    host_key: String,
 }
 
 impl ControlPlaneClient {
     pub fn new(
         base_url: impl Into<String>,
         token: impl Into<String>,
-        runtime_key: impl Into<String>,
+        host_key: impl Into<String>,
     ) -> Result<Self> {
         Ok(Self {
             http: HttpClient::builder()
@@ -27,15 +27,15 @@ impl ControlPlaneClient {
                 .context("build control-plane http client")?,
             base_url: base_url.into(),
             token: token.into(),
-            runtime_key: runtime_key.into(),
+            host_key: host_key.into(),
         })
     }
 
-    pub async fn register(&self, registration: RuntimeRegistration) -> Result<()> {
+    pub async fn register(&self, registration: HostRegistration) -> Result<()> {
         let url = format!(
             "{}/v1/runtimes/{}/register",
             self.base_url.trim_end_matches('/'),
-            self.runtime_key
+            self.host_key
         );
         let mut backoff = Duration::from_millis(250);
         for attempt in 0..3 {
@@ -52,14 +52,14 @@ impl ControlPlaneClient {
                 Ok(response) if response.status() == StatusCode::CONFLICT => {
                     return Err(anyhow!(
                         "control plane rejected registration for runtime '{}' with 409",
-                        self.runtime_key
+                        self.host_key
                     ));
                 }
                 Ok(response) => {
                     tracing::warn!(
                         attempt,
                         status = %response.status(),
-                        runtime_key = %self.runtime_key,
+                        host_key = %self.host_key,
                         "control-plane registration attempt failed"
                     );
                 }
@@ -67,7 +67,7 @@ impl ControlPlaneClient {
                     tracing::warn!(
                         attempt,
                         ?error,
-                        runtime_key = %self.runtime_key,
+                        host_key = %self.host_key,
                         "control-plane registration transport error"
                     );
                 }
@@ -79,7 +79,7 @@ impl ControlPlaneClient {
 
         Err(anyhow!(
             "control plane registration failed for runtime '{}' after 3 attempts",
-            self.runtime_key
+            self.host_key
         ))
     }
 
@@ -92,7 +92,7 @@ impl ControlPlaneClient {
             let url = format!(
                 "{}/v1/runtimes/{}/heartbeat",
                 client.base_url.trim_end_matches('/'),
-                client.runtime_key
+                client.host_key
             );
             loop {
                 let report = HeartbeatReport {
@@ -109,7 +109,7 @@ impl ControlPlaneClient {
                 if let Err(error) = result.and_then(|response| response.error_for_status()) {
                     tracing::warn!(
                         ?error,
-                        runtime_key = %client.runtime_key,
+                        host_key = %client.host_key,
                         "control-plane heartbeat failed"
                     );
                 }

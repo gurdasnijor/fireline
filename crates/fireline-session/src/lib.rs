@@ -1,21 +1,21 @@
 #![forbid(unsafe_code)]
 
 pub mod active_turn_index;
-pub mod runtime_identity;
-pub mod runtime_index;
-pub mod runtime_materializer;
+pub mod host_identity;
+pub mod host_index;
+pub mod state_materializer;
 pub mod session_index;
 pub mod stream_host;
 
 pub use active_turn_index::{ActiveTurnIndex, ActiveTurnRecord};
-pub use runtime_identity::{
-    CreateRuntimeSpec, Endpoint, HeartbeatMetrics, HeartbeatReport, PersistedRuntimeSpec,
-    RuntimeDescriptor, RuntimeProviderKind, RuntimeProviderRequest, RuntimeRegistration,
-    RuntimeStatus, TopologyComponentSpec, TopologySpec,
+pub use host_identity::{
+    ProvisionSpec, Endpoint, HeartbeatMetrics, HeartbeatReport, PersistedHostSpec,
+    HostDescriptor, SandboxProviderKind, SandboxProviderRequest, HostRegistration,
+    HostStatus, TopologyComponentSpec, TopologySpec,
 };
-pub use runtime_index::{RuntimeIndex, RuntimeInstanceRecord, RuntimeInstanceStatus};
-pub use runtime_materializer::{
-    RawStateEnvelope, RawStateHeaders, RuntimeMaterializer, RuntimeMaterializerTask,
+pub use host_index::{HostIndex, HostInstanceRecord, HostInstanceStatus};
+pub use state_materializer::{
+    RawStateEnvelope, RawStateHeaders, StateMaterializer, StateMaterializerTask,
     StateProjection,
 };
 pub use session_index::SessionIndex;
@@ -35,8 +35,10 @@ pub enum SessionStatus {
 #[serde(rename_all = "camelCase")]
 pub struct SessionRecord {
     pub session_id: String,
-    pub runtime_key: String,
-    pub runtime_id: String,
+    #[serde(rename = "runtimeKey")]
+    pub host_key: String,
+    #[serde(rename = "runtimeId")]
+    pub host_id: String,
     pub node_id: String,
     pub logical_connection_id: String,
     pub state: SessionStatus,

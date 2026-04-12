@@ -21,7 +21,7 @@ pub trait ResourceMounter: Send + Sync {
     async fn mount(
         &self,
         resource: &ResourceRef,
-        runtime_key: &str,
+        host_key: &str,
     ) -> Result<Option<MountedResource>>;
 }
 
@@ -50,7 +50,7 @@ impl ResourceMounter for LocalPathMounter {
     async fn mount(
         &self,
         resource: &ResourceRef,
-        _runtime_key: &str,
+        _host_key: &str,
     ) -> Result<Option<MountedResource>> {
         let ResourceSourceRef::LocalPath { path, .. } = &resource.source_ref else {
             return Ok(None);
@@ -79,7 +79,7 @@ impl ResourceMounter for DurableStreamMounter {
     async fn mount(
         &self,
         resource: &ResourceRef,
-        runtime_key: &str,
+        host_key: &str,
     ) -> Result<Option<MountedResource>> {
         let ResourceSourceRef::DurableStreamBlob { stream, key } = &resource.source_ref else {
             return Ok(None);
@@ -93,7 +93,7 @@ impl ResourceMounter for DurableStreamMounter {
             ));
         }
 
-        let host_path = materialized_blob_path(runtime_key, stream, key)?;
+        let host_path = materialized_blob_path(host_key, stream, key)?;
         if let Some(parent) = host_path.parent() {
             tokio::fs::create_dir_all(parent).await.with_context(|| {
                 format!("create durable stream blob parent {}", parent.display())
@@ -118,13 +118,13 @@ impl ResourceMounter for DurableStreamMounter {
 pub async fn prepare_resources(
     resources: &[ResourceRef],
     mounters: &[Arc<dyn ResourceMounter>],
-    runtime_key: &str,
+    host_key: &str,
 ) -> Result<Vec<MountedResource>> {
     let mut mounted = Vec::with_capacity(resources.len());
     for resource in resources {
         let mut prepared = None;
         for mounter in mounters {
-            if let Some(candidate) = mounter.mount(resource, runtime_key).await? {
+            if let Some(candidate) = mounter.mount(resource, host_key).await? {
                 prepared = Some(candidate);
                 break;
             }
@@ -180,9 +180,9 @@ async fn read_blob_bytes(client: &DurableStreamsClient, stream_url: &str) -> Res
     Ok(bytes)
 }
 
-fn materialized_blob_path(runtime_key: &str, stream: &str, key: &str) -> Result<PathBuf> {
+fn materialized_blob_path(host_key: &str, stream: &str, key: &str) -> Result<PathBuf> {
     Ok(Path::new("/tmp/fireline-mounts")
-        .join(sanitize_path_component(runtime_key))
+        .join(sanitize_path_component(host_key))
         .join(sanitize_path_component(stream))
         .join(normalize_blob_key(key)?))
 }

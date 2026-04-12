@@ -28,8 +28,8 @@ use crate::topology::{TopologyRegistry, TopologySpec, TraceWriterInstance};
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct ComponentContext {
-    pub runtime_key: String,
-    pub runtime_id: String,
+    pub host_key: String,
+    pub host_id: String,
     pub node_id: String,
     pub stream_base_url: String,
     pub state_stream_url: String,
@@ -187,7 +187,7 @@ pub fn build_runtime_topology_registry(context: ComponentContext) -> TopologyReg
                     context.peer_registry.clone(),
                     context.active_turn_lookup.clone(),
                     context.child_session_edge_sink.clone(),
-                    context.runtime_id.clone(),
+                    context.host_id.clone(),
                 )))
             }
         })

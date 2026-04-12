@@ -187,8 +187,8 @@ enum TraceEndpoint {
 }
 
 pub struct StateProjector {
-    runtime_key: String,
-    runtime_id: String,
+    host_key: String,
+    host_id: String,
     node_id: String,
     logical_connection_id: String,
     connection: ConnectionRow,
@@ -199,13 +199,13 @@ pub struct StateProjector {
 
 impl StateProjector {
     pub fn new(
-        runtime_key: impl Into<String>,
-        runtime_id: impl Into<String>,
+        host_key: impl Into<String>,
+        host_id: impl Into<String>,
         node_id: impl Into<String>,
         logical_connection_id: impl Into<String>,
     ) -> Self {
-        let runtime_key = runtime_key.into();
-        let runtime_id = runtime_id.into();
+        let host_key = host_key.into();
+        let host_id = host_id.into();
         let node_id = node_id.into();
         let logical_connection_id = logical_connection_id.into();
         let now = now_ms();
@@ -220,8 +220,8 @@ impl StateProjector {
         };
 
         Self {
-            runtime_key,
-            runtime_id,
+            host_key,
+            host_id,
             node_id,
             logical_connection_id,
             connection,
@@ -399,8 +399,8 @@ impl StateProjector {
                     let now = now_ms();
                     let session = SessionRecord {
                         session_id: session_id.to_string(),
-                        runtime_key: self.runtime_key.clone(),
-                        runtime_id: self.runtime_id.clone(),
+                        host_key: self.host_key.clone(),
+                        host_id: self.host_id.clone(),
                         node_id: self.node_id.clone(),
                         logical_connection_id: self.logical_connection_id.clone(),
                         state: SessionStatus::Active,
@@ -568,39 +568,39 @@ impl StateProjector {
         self.correlation.turn_counter += 1;
         format!(
             "{}:{}:{}",
-            self.runtime_id, self.logical_connection_id, self.correlation.turn_counter
+            self.host_id, self.logical_connection_id, self.correlation.turn_counter
         )
     }
 }
 
 pub fn runtime_instance_started(
-    runtime_id: &str,
+    host_id: &str,
     runtime_name: &str,
     created_at: i64,
 ) -> StateChange {
     let row = RuntimeInstanceRow {
-        instance_id: runtime_id.to_string(),
+        instance_id: host_id.to_string(),
         runtime_name: runtime_name.to_string(),
         status: RuntimeInstanceState::Running,
         created_at,
         updated_at: created_at,
     };
-    state_change("runtime_instance", runtime_id, "insert", Some(&row))
+    state_change("runtime_instance", host_id, "insert", Some(&row))
 }
 
 pub fn runtime_instance_stopped(
-    runtime_id: &str,
+    host_id: &str,
     runtime_name: &str,
     created_at: i64,
 ) -> StateChange {
     let row = RuntimeInstanceRow {
-        instance_id: runtime_id.to_string(),
+        instance_id: host_id.to_string(),
         runtime_name: runtime_name.to_string(),
         status: RuntimeInstanceState::Stopped,
         created_at,
         updated_at: now_ms(),
     };
-    state_change("runtime_instance", runtime_id, "update", Some(&row))
+    state_change("runtime_instance", host_id, "update", Some(&row))
 }
 
 fn state_change<T: Serialize>(

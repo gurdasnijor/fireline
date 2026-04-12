@@ -201,7 +201,7 @@ async fn sandbox_stop_and_recreate_preserves_session_load() -> Result<()> {
         )
         .await?;
 
-        let _stopped = control_plane.stop_runtime(&runtime.runtime_key).await?;
+        let _stopped = control_plane.stop_runtime(&runtime.host_key).await?;
 
         let resumed = fireline_orchestration::resume(
             &control_plane.http,
@@ -215,12 +215,12 @@ async fn sandbox_stop_and_recreate_preserves_session_load() -> Result<()> {
         )?;
 
         assert_eq!(
-            resumed.runtime_key, runtime.runtime_key,
-            "INVARIANT (Sandbox): recreated runtime uses the same runtime_key"
+            resumed.host_key, runtime.host_key,
+            "INVARIANT (Sandbox): recreated runtime uses the same host_key"
         );
         assert_ne!(
-            resumed.runtime_id, runtime.runtime_id,
-            "INVARIANT (Sandbox): recreated runtime has a fresh runtime_id (new process)"
+            resumed.host_id, runtime.host_id,
+            "INVARIANT (Sandbox): recreated runtime has a fresh host_id (new process)"
         );
 
         load_session(&resumed.acp.url, &session_id).await.context(

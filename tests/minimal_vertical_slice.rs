@@ -63,7 +63,7 @@ async fn minimal_vertical_slice_prompts_and_emits_state_events() -> Result<()> {
 
     let stream_name = format!("minimal-vertical-slice-{}", uuid::Uuid::new_v4());
     let stream_url = format!("http://{addr}/v1/stream/{stream_name}");
-    let runtime_id = "minimal-vertical-slice";
+    let host_id = "minimal-vertical-slice";
 
     let client = DsClient::new();
     let stream = client.stream(&stream_url);
@@ -71,7 +71,7 @@ async fn minimal_vertical_slice_prompts_and_emits_state_events() -> Result<()> {
 
     let producer = stream.producer("state-writer").build();
     let tracer =
-        DurableStreamTracer::new(producer.clone(), runtime_id, "conn:minimal-vertical-slice");
+        DurableStreamTracer::new(producer.clone(), host_id, "conn:minimal-vertical-slice");
 
     let conductor = build_subprocess_conductor(
         "fireline-test",

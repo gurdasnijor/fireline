@@ -33,6 +33,6 @@ pub use topology::{
     audit_stream_names, build_runtime_topology_registry, ensure_named_streams,
 };
 pub use trace::{
-    BoxedTraceWriter, CompositeTraceWriter, DurableStreamTracer, emit_runtime_endpoints_persisted,
-    emit_runtime_instance_started, emit_runtime_instance_stopped, emit_runtime_spec_persisted,
+    BoxedTraceWriter, CompositeTraceWriter, DurableStreamTracer, emit_host_endpoints_persisted,
+    emit_runtime_instance_started, emit_runtime_instance_stopped, emit_host_spec_persisted,
 };

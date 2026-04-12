@@ -12,12 +12,12 @@ use fireline_host::auth::RuntimeTokenStore;
 use fireline_host::heartbeat::HeartbeatTracker;
 use fireline_host::router::{AppState, build_router};
 use fireline_sandbox::{
-    CreateRuntimeSpec, LocalProvider, LocalRuntimeLauncher, ManagedRuntime, MountedResource,
+    ProvisionSpec, LocalProvider, LocalRuntimeLauncher, ManagedRuntime, MountedResource,
     RuntimeHost, RuntimeLaunch, RuntimeManager, RuntimeRegistry,
 };
 use fireline_session::{
-    Endpoint, HeartbeatReport, RuntimeDescriptor, RuntimeProviderKind, RuntimeProviderRequest,
-    RuntimeRegistration, RuntimeStatus,
+    Endpoint, HeartbeatReport, HostDescriptor, SandboxProviderKind, SandboxProviderRequest,
+    HostRegistration, HostStatus,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -37,7 +37,7 @@ async fn register_without_authorization_header_returns_401() -> Result<()> {
 
     let response = harness
         .post_json(
-            &format!("/v1/runtimes/{}/register", runtime.runtime_key),
+            &format!("/v1/runtimes/{}/register", runtime.host_key),
             registration_for(
                 &runtime,
                 "instance:register-no-bearer",
@@ -58,11 +58,11 @@ async fn wrong_runtime_tokens_are_rejected_on_register_and_heartbeat() -> Result
     let harness = TestHarness::new()?;
     let runtime_a = harness.create_runtime("auth-runtime-a").await?;
     let runtime_b = harness.create_runtime("auth-runtime-b").await?;
-    let token_for_a = harness.issue_runtime_token(&runtime_a.runtime_key).await?;
+    let token_for_a = harness.issue_runtime_token(&runtime_a.host_key).await?;
 
     let register_response = harness
         .post_json(
-            &format!("/v1/runtimes/{}/register", runtime_b.runtime_key),
+            &format!("/v1/runtimes/{}/register", runtime_b.host_key),
             registration_for(
                 &runtime_b,
                 "instance:runtime-b",
@@ -80,7 +80,7 @@ async fn wrong_runtime_tokens_are_rejected_on_register_and_heartbeat() -> Result
 
     let heartbeat_response = harness
         .post_json(
-            &format!("/v1/runtimes/{}/heartbeat", runtime_b.runtime_key),
+            &format!("/v1/runtimes/{}/heartbeat", runtime_b.host_key),
             HeartbeatReport {
                 ts_ms: 1_000,
                 metrics: None,
@@ -100,14 +100,14 @@ async fn wrong_runtime_tokens_are_rejected_on_register_and_heartbeat() -> Result
 async fn register_on_stopped_runtime_returns_409() -> Result<()> {
     let harness = TestHarness::new()?;
     let runtime = harness.create_runtime("stopped-register").await?;
-    let token = harness.issue_runtime_token(&runtime.runtime_key).await?;
+    let token = harness.issue_runtime_token(&runtime.host_key).await?;
 
-    let stopped = harness.runtime_host.stop(&runtime.runtime_key).await?;
-    assert_eq!(stopped.status, RuntimeStatus::Stopped);
+    let stopped = harness.runtime_host.stop(&runtime.host_key).await?;
+    assert_eq!(stopped.status, HostStatus::Stopped);
 
     let response = harness
         .post_json(
-            &format!("/v1/runtimes/{}/register", runtime.runtime_key),
+            &format!("/v1/runtimes/{}/register", runtime.host_key),
             registration_for(
                 &runtime,
                 "instance:stopped-register",
@@ -127,7 +127,7 @@ async fn register_on_stopped_runtime_returns_409() -> Result<()> {
 async fn register_round_trips_provider_identity_and_advertised_endpoints() -> Result<()> {
     let harness = TestHarness::new()?;
     let runtime = harness.create_runtime("round-trip").await?;
-    let token = harness.issue_runtime_token(&runtime.runtime_key).await?;
+    let token = harness.issue_runtime_token(&runtime.host_key).await?;
 
     assert_eq!(runtime.provider_instance_id, PRELAUNCH_PROVIDER_INSTANCE_ID);
     assert_eq!(runtime.acp.url, PRELAUNCH_ACP_URL);
@@ -144,7 +144,7 @@ async fn register_round_trips_provider_identity_and_advertised_endpoints() -> Re
 
     let register_response = harness
         .post_json(
-            &format!("/v1/runtimes/{}/register", runtime.runtime_key),
+            &format!("/v1/runtimes/{}/register", runtime.host_key),
             registration_for(
                 &runtime,
                 provider_instance_id,
@@ -157,9 +157,9 @@ async fn register_round_trips_provider_identity_and_advertised_endpoints() -> Re
         .await?;
     assert_eq!(register_response.status(), StatusCode::OK);
 
-    let descriptor = harness.get_runtime(&runtime.runtime_key).await?;
-    assert_eq!(descriptor.status, RuntimeStatus::Ready);
-    assert_eq!(descriptor.runtime_id, runtime.runtime_id);
+    let descriptor = harness.get_runtime(&runtime.host_key).await?;
+    assert_eq!(descriptor.status, HostStatus::Ready);
+    assert_eq!(descriptor.host_id, runtime.host_id);
     assert_eq!(descriptor.provider_instance_id, provider_instance_id);
     assert_eq!(descriptor.acp.url, advertised_acp_url);
     assert_eq!(descriptor.state.url, advertised_state_stream_url);
@@ -199,12 +199,12 @@ impl TestHarness {
         })
     }
 
-    async fn create_runtime(&self, name: &str) -> Result<RuntimeDescriptor> {
+    async fn create_runtime(&self, name: &str) -> Result<HostDescriptor> {
         self.runtime_host
-            .provision(CreateRuntimeSpec {
-                runtime_key: None,
+            .provision(ProvisionSpec {
+                host_key: None,
                 node_id: None,
-                provider: RuntimeProviderRequest::Local,
+                provider: SandboxProviderRequest::Local,
                 host: "127.0.0.1".parse::<IpAddr>()?,
                 port: 0,
                 name: name.to_string(),
@@ -219,18 +219,18 @@ impl TestHarness {
             .await
     }
 
-    async fn issue_runtime_token(&self, runtime_key: &str) -> Result<String> {
+    async fn issue_runtime_token(&self, host_key: &str) -> Result<String> {
         Ok(self
             .token_store
-            .issue(runtime_key, Duration::from_secs(60 * 60 * 24))
+            .issue(host_key, Duration::from_secs(60 * 60 * 24))
             .token)
     }
 
-    async fn get_runtime(&self, runtime_key: &str) -> Result<RuntimeDescriptor> {
+    async fn get_runtime(&self, host_key: &str) -> Result<HostDescriptor> {
         let response = self
             .request::<Value>(
                 Method::GET,
-                &format!("/v1/runtimes/{runtime_key}"),
+                &format!("/v1/runtimes/{host_key}"),
                 None,
                 None,
             )
@@ -279,13 +279,13 @@ struct FakeRuntimeLauncher;
 impl LocalRuntimeLauncher for FakeRuntimeLauncher {
     async fn launch_local_runtime(
         &self,
-        spec: CreateRuntimeSpec,
-        _runtime_key: String,
+        spec: ProvisionSpec,
+        _host_key: String,
         _node_id: String,
         _mounted_resources: Vec<MountedResource>,
     ) -> Result<RuntimeLaunch> {
         Ok(RuntimeLaunch {
-            runtime_id: format!("fireline:{}:fake", spec.name),
+            host_id: format!("fireline:{}:fake", spec.name),
             provider_instance_id: PRELAUNCH_PROVIDER_INSTANCE_ID.to_string(),
             acp: Endpoint::new(PRELAUNCH_ACP_URL),
             state: Endpoint::new(PRELAUNCH_STATE_STREAM_URL),
@@ -305,16 +305,16 @@ impl ManagedRuntime for FakeManagedRuntime {
 }
 
 fn registration_for(
-    runtime: &RuntimeDescriptor,
+    runtime: &HostDescriptor,
     provider_instance_id: &str,
     advertised_acp_url: &str,
     advertised_state_stream_url: &str,
     helper_api_base_url: Option<&str>,
-) -> RuntimeRegistration {
-    RuntimeRegistration {
-        runtime_id: runtime.runtime_id.clone(),
+) -> HostRegistration {
+    HostRegistration {
+        host_id: runtime.host_id.clone(),
         node_id: runtime.node_id.clone(),
-        provider: RuntimeProviderKind::Local,
+        provider: SandboxProviderKind::Local,
         provider_instance_id: provider_instance_id.to_string(),
         advertised_acp_url: advertised_acp_url.to_string(),
         advertised_state_stream_url: advertised_state_stream_url.to_string(),

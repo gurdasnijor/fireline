@@ -11,13 +11,13 @@ impl HeartbeatTracker {
         Self { registry }
     }
 
-    pub async fn record(&self, runtime_key: impl Into<String>, seen_at_ms: i64) -> Result<()> {
-        self.registry.record_liveness(runtime_key, seen_at_ms);
+    pub async fn record(&self, host_key: impl Into<String>, seen_at_ms: i64) -> Result<()> {
+        self.registry.record_liveness(host_key, seen_at_ms);
         Ok(())
     }
 
-    pub async fn forget(&self, runtime_key: &str) -> Result<()> {
-        self.registry.forget_liveness(runtime_key);
+    pub async fn forget(&self, host_key: &str) -> Result<()> {
+        self.registry.forget_liveness(host_key);
         Ok(())
     }
 

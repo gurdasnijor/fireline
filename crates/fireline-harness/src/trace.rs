@@ -15,7 +15,7 @@
 use std::io;
 
 use durable_streams::{Client as DurableStreamsClient, Producer};
-use fireline_session::{PersistedRuntimeSpec, RuntimeDescriptor};
+use fireline_session::{PersistedHostSpec, HostDescriptor};
 use sacp_conductor::trace::{TraceEvent, WriteEvent};
 use serde::Serialize;
 
@@ -50,14 +50,14 @@ pub struct DurableStreamTracer {
 impl DurableStreamTracer {
     pub fn new(
         producer: Producer,
-        runtime_id: impl Into<String>,
+        host_id: impl Into<String>,
         logical_connection_id: impl Into<String>,
     ) -> Self {
-        let runtime_id = runtime_id.into();
+        let host_id = host_id.into();
         Self::new_with_runtime_context(
             producer,
-            runtime_id.clone(),
-            runtime_id,
+            host_id.clone(),
+            host_id,
             "node:unknown",
             logical_connection_id,
         )
@@ -65,13 +65,13 @@ impl DurableStreamTracer {
 
     pub fn new_with_runtime_context(
         producer: Producer,
-        runtime_key: impl Into<String>,
-        runtime_id: impl Into<String>,
+        host_key: impl Into<String>,
+        host_id: impl Into<String>,
         node_id: impl Into<String>,
         logical_connection_id: impl Into<String>,
     ) -> Self {
         let projector =
-            StateProjector::new(runtime_key, runtime_id, node_id, logical_connection_id);
+            StateProjector::new(host_key, host_id, node_id, logical_connection_id);
         for event in projector.initial_events() {
             producer.append_json(&event);
         }
@@ -107,12 +107,12 @@ struct StateEnvelope<T> {
 
 pub fn emit_runtime_instance_started(
     producer: &Producer,
-    runtime_id: &str,
+    host_id: &str,
     runtime_name: &str,
     created_at: i64,
 ) {
     producer.append_json(&runtime_instance_started(
-        runtime_id,
+        host_id,
         runtime_name,
         created_at,
     ));
@@ -120,19 +120,19 @@ pub fn emit_runtime_instance_started(
 
 pub async fn emit_runtime_instance_stopped(
     producer: &Producer,
-    runtime_id: &str,
+    host_id: &str,
     runtime_name: &str,
     created_at: i64,
 ) -> anyhow::Result<()> {
     producer.append_json(&runtime_instance_stopped(
-        runtime_id,
+        host_id,
         runtime_name,
         created_at,
     ));
     // Explicit flush is load-bearing for stream-as-truth: without it, the
     // stopped envelope can be lost when the runtime process exits before
     // the producer's buffered writes have propagated. That divergence was
-    // caught by tests/runtime_index_agreement.rs::runtime_index_observes_
+    // caught by tests/host_index_agreement.rs::host_index_observes_
     // stopped_runtimes_on_the_shared_stream, which would otherwise see a
     // control-plane-stopped runtime still advertised as Running on the
     // shared state stream.
@@ -140,9 +140,9 @@ pub async fn emit_runtime_instance_stopped(
     Ok(())
 }
 
-pub async fn emit_runtime_spec_persisted(
+pub async fn emit_host_spec_persisted(
     state_stream_url: &str,
-    spec: &PersistedRuntimeSpec,
+    spec: &PersistedHostSpec,
 ) -> anyhow::Result<()> {
     if state_stream_url.is_empty() {
         return Ok(());
@@ -152,12 +152,12 @@ pub async fn emit_runtime_spec_persisted(
     let mut stream = client.stream(state_stream_url);
     stream.set_content_type("application/json");
     let producer = stream
-        .producer(format!("runtime-spec-{}", spec.runtime_key))
+        .producer(format!("runtime-spec-{}", spec.host_key))
         .content_type("application/json")
         .build();
     producer.append_json(&StateEnvelope {
         entity_type: "runtime_spec",
-        key: spec.runtime_key.clone(),
+        key: spec.host_key.clone(),
         headers: StateHeaders {
             operation: "insert",
         },
@@ -167,9 +167,9 @@ pub async fn emit_runtime_spec_persisted(
     Ok(())
 }
 
-pub async fn emit_runtime_endpoints_persisted(
+pub async fn emit_host_endpoints_persisted(
     state_stream_url: &str,
-    descriptor: &RuntimeDescriptor,
+    descriptor: &HostDescriptor,
 ) -> anyhow::Result<()> {
     if state_stream_url.is_empty() {
         return Ok(());
@@ -181,14 +181,14 @@ pub async fn emit_runtime_endpoints_persisted(
     let producer = stream
         .producer(format!(
             "runtime-endpoints-{}-{}",
-            descriptor.runtime_key,
+            descriptor.host_key,
             uuid::Uuid::new_v4()
         ))
         .content_type("application/json")
         .build();
     producer.append_json(&StateEnvelope {
         entity_type: "runtime_endpoints",
-        key: descriptor.runtime_key.clone(),
+        key: descriptor.host_key.clone(),
         headers: StateHeaders {
             operation: "update",
         },

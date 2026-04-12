@@ -66,22 +66,22 @@ pub trait StateProjection: Send + Sync {
 }
 
 #[derive(Clone, Default)]
-pub struct RuntimeMaterializer {
+pub struct StateMaterializer {
     projections: Vec<Arc<dyn StateProjection>>,
 }
 
-pub struct RuntimeMaterializerTask {
+pub struct StateMaterializerTask {
     up_to_date: Arc<Notify>,
     is_up_to_date: Arc<AtomicBool>,
     handle: JoinHandle<()>,
 }
 
-impl RuntimeMaterializer {
+impl StateMaterializer {
     pub fn new(projections: Vec<Arc<dyn StateProjection>>) -> Self {
         Self { projections }
     }
 
-    pub fn connect(&self, state_stream_url: impl Into<String>) -> RuntimeMaterializerTask {
+    pub fn connect(&self, state_stream_url: impl Into<String>) -> StateMaterializerTask {
         let up_to_date = Arc::new(Notify::new());
         let is_up_to_date = Arc::new(AtomicBool::new(false));
         let url = state_stream_url.into();
@@ -92,7 +92,7 @@ impl RuntimeMaterializer {
             consume_state_stream(url, materializer, notify, ready).await;
         });
 
-        RuntimeMaterializerTask {
+        StateMaterializerTask {
             up_to_date,
             is_up_to_date,
             handle,
@@ -193,7 +193,7 @@ fn is_supported_operation(operation: &str) -> bool {
     matches!(operation, "insert" | "update" | "delete")
 }
 
-impl RuntimeMaterializerTask {
+impl StateMaterializerTask {
     pub async fn preload(&self) -> Result<()> {
         while !self.is_up_to_date.load(Ordering::SeqCst) {
             self.up_to_date.notified().await;
@@ -208,7 +208,7 @@ impl RuntimeMaterializerTask {
 
 async fn consume_state_stream(
     url: String,
-    materializer: RuntimeMaterializer,
+    materializer: StateMaterializer,
     up_to_date: Arc<Notify>,
     is_up_to_date: Arc<AtomicBool>,
 ) {
@@ -288,7 +288,7 @@ mod tests {
     #[tokio::test]
     async fn applies_change_events_in_order() {
         let projection = Arc::new(RecordingProjection::default());
-        let materializer = RuntimeMaterializer::new(vec![projection.clone()]);
+        let materializer = StateMaterializer::new(vec![projection.clone()]);
         let bytes = chunk(vec![
             serde_json::json!({
                 "type": "session",
@@ -310,8 +310,16 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                ("session".to_string(), "sess-1".to_string(), "insert".to_string()),
-                ("session".to_string(), "sess-1".to_string(), "update".to_string()),
+                (
+                    "session".to_string(),
+                    "sess-1".to_string(),
+                    "insert".to_string()
+                ),
+                (
+                    "session".to_string(),
+                    "sess-1".to_string(),
+                    "update".to_string()
+                ),
             ]
         );
     }
@@ -319,7 +327,7 @@ mod tests {
     #[tokio::test]
     async fn control_events_do_not_poison_neighboring_change_events() {
         let projection = Arc::new(RecordingProjection::default());
-        let materializer = RuntimeMaterializer::new(vec![projection.clone()]);
+        let materializer = StateMaterializer::new(vec![projection.clone()]);
         let bytes = chunk(vec![
             serde_json::json!({
                 "headers": {"control": "snapshot-start", "offset": "0_000"}
@@ -345,7 +353,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_change_event_does_not_drop_valid_neighbors() {
         let projection = Arc::new(RecordingProjection::default());
-        let materializer = RuntimeMaterializer::new(vec![projection.clone()]);
+        let materializer = StateMaterializer::new(vec![projection.clone()]);
         let bytes = chunk(vec![
             serde_json::json!({
                 "type": "session",
@@ -369,7 +377,7 @@ mod tests {
     #[tokio::test]
     async fn reset_control_triggers_projection_reset() {
         let projection = Arc::new(RecordingProjection::default());
-        let materializer = RuntimeMaterializer::new(vec![projection.clone()]);
+        let materializer = StateMaterializer::new(vec![projection.clone()]);
         let bytes = chunk(vec![
             serde_json::json!({
                 "type": "session",
@@ -391,7 +399,7 @@ mod tests {
     #[tokio::test]
     async fn unsupported_operation_is_skipped() {
         let projection = Arc::new(RecordingProjection::default());
-        let materializer = RuntimeMaterializer::new(vec![projection.clone()]);
+        let materializer = StateMaterializer::new(vec![projection.clone()]);
         let bytes = chunk(vec![
             serde_json::json!({
                 "type": "fs_op",

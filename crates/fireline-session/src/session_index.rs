@@ -12,13 +12,13 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use crate::runtime_materializer::{RawStateEnvelope, StateProjection};
-use crate::{PersistedRuntimeSpec, SessionRecord};
+use crate::state_materializer::{RawStateEnvelope, StateProjection};
+use crate::{PersistedHostSpec, SessionRecord};
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionIndex {
     sessions: Arc<RwLock<HashMap<String, SessionRecord>>>,
-    runtime_specs: Arc<RwLock<HashMap<String, PersistedRuntimeSpec>>>,
+    host_specs: Arc<RwLock<HashMap<String, PersistedHostSpec>>>,
 }
 
 impl SessionIndex {
@@ -34,29 +34,29 @@ impl SessionIndex {
         self.sessions.read().await.values().cloned().collect()
     }
 
-    pub async fn runtime_spec(&self, runtime_key: &str) -> Option<PersistedRuntimeSpec> {
-        self.runtime_specs.read().await.get(runtime_key).cloned()
+    pub async fn host_spec(&self, host_key: &str) -> Option<PersistedHostSpec> {
+        self.host_specs.read().await.get(host_key).cloned()
     }
 
-    pub async fn runtime_spec_for_session(&self, session_id: &str) -> Option<PersistedRuntimeSpec> {
-        let runtime_key = self
+    pub async fn host_spec_for_session(&self, session_id: &str) -> Option<PersistedHostSpec> {
+        let host_key = self
             .sessions
             .read()
             .await
             .get(session_id)
-            .map(|record| record.runtime_key.clone())?;
-        self.runtime_spec(&runtime_key).await
+            .map(|record| record.host_key.clone())?;
+        self.host_spec(&host_key).await
     }
 
-    pub async fn runtime_keys(&self) -> Vec<String> {
+    pub async fn host_keys(&self) -> Vec<String> {
         let mut keys = self
             .sessions
             .read()
             .await
             .values()
-            .map(|record| record.runtime_key.clone())
+            .map(|record| record.host_key.clone())
             .collect::<Vec<_>>();
-        keys.extend(self.runtime_specs.read().await.keys().cloned());
+        keys.extend(self.host_specs.read().await.keys().cloned());
         keys.sort();
         keys.dedup();
         keys
@@ -85,17 +85,17 @@ impl SessionIndex {
                     let Some(value) = envelope.value.as_ref() else {
                         return Ok(());
                     };
-                    let spec: PersistedRuntimeSpec = serde_json::from_value(value.clone())?;
-                    self.runtime_specs
+                    let spec: PersistedHostSpec = serde_json::from_value(value.clone())?;
+                    self.host_specs
                         .write()
                         .await
-                        .insert(spec.runtime_key.clone(), spec);
+                        .insert(spec.host_key.clone(), spec);
                 }
                 "delete" => {
-                    self.runtime_specs.write().await.remove(&envelope.key);
+                    self.host_specs.write().await.remove(&envelope.key);
                 }
                 _ => {}
-            }
+            },
             _ => {}
         }
 
@@ -111,7 +111,7 @@ impl StateProjection for SessionIndex {
 
     async fn reset(&self) -> Result<()> {
         self.sessions.write().await.clear();
-        self.runtime_specs.write().await.clear();
+        self.host_specs.write().await.clear();
         Ok(())
     }
 }
@@ -119,7 +119,7 @@ impl StateProjection for SessionIndex {
 #[cfg(test)]
 mod tests {
     use super::SessionIndex;
-    use crate::{PersistedRuntimeSpec, runtime_materializer::RawStateEnvelope};
+    use crate::{PersistedHostSpec, state_materializer::RawStateEnvelope};
 
     #[tokio::test]
     async fn materializes_session_rows_from_state_events() {
@@ -148,14 +148,14 @@ mod tests {
         index.apply_envelope(&envelope).await.unwrap();
 
         let session = index.get("sess-1").await.expect("session indexed");
-        assert_eq!(session.runtime_key, "runtime:1");
+        assert_eq!(session.host_key, "runtime:1");
         assert!(session.supports_load_session);
     }
 
     #[tokio::test]
-    async fn materializes_runtime_spec_rows_and_joins_through_session_records() {
+    async fn materializes_host_spec_rows_and_joins_through_session_records() {
         let index = SessionIndex::new();
-        let runtime_spec = PersistedRuntimeSpec::new(
+        let host_spec = PersistedHostSpec::new(
             "runtime:1",
             "node:test",
             serde_json::json!({
@@ -171,14 +171,14 @@ mod tests {
                 "topology": { "components": [] }
             }),
         );
-        let runtime_envelope: RawStateEnvelope = serde_json::from_value(serde_json::json!({
+        let host_spec_envelope: RawStateEnvelope = serde_json::from_value(serde_json::json!({
             "type":"runtime_spec",
             "key":"runtime:1",
             "headers":{"operation":"insert"},
-            "value": runtime_spec,
+            "value": host_spec,
         }))
         .unwrap();
-        index.apply_envelope(&runtime_envelope).await.unwrap();
+        index.apply_envelope(&host_spec_envelope).await.unwrap();
 
         let session_envelope: RawStateEnvelope = serde_json::from_value(serde_json::json!({
             "type":"session",
@@ -203,10 +203,10 @@ mod tests {
         index.apply_envelope(&session_envelope).await.unwrap();
 
         let spec = index
-            .runtime_spec_for_session("sess-1")
+            .host_spec_for_session("sess-1")
             .await
-            .expect("runtime spec indexed");
-        assert_eq!(spec.runtime_key, "runtime:1");
-        assert_eq!(index.runtime_keys().await, vec!["runtime:1".to_string()]);
+            .expect("host spec indexed");
+        assert_eq!(spec.host_key, "runtime:1");
+        assert_eq!(index.host_keys().await, vec!["runtime:1".to_string()]);
     }
 }

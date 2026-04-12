@@ -42,14 +42,14 @@ pub enum DeploymentDiscoveryEvent {
     },
     RuntimeProvisioned {
         host_id: String,
-        runtime_key: String,
+        host_key: String,
         acp_url: String,
         agent_name: String,
         provisioned_at_ms: i64,
     },
     RuntimeStopped {
         host_id: String,
-        runtime_key: String,
+        host_key: String,
         stopped_at_ms: i64,
     },
 }
@@ -70,7 +70,7 @@ pub struct HostEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeEntry {
-    pub runtime_key: String,
+    pub host_key: String,
     pub host_id: String,
     pub acp_url: String,
     pub agent_name: String,
@@ -152,7 +152,7 @@ impl DeploymentIndex {
             }
             DeploymentDiscoveryEvent::RuntimeProvisioned {
                 host_id,
-                runtime_key,
+                host_key,
                 acp_url,
                 agent_name,
                 provisioned_at_ms,
@@ -161,9 +161,9 @@ impl DeploymentIndex {
                     return;
                 }
                 self.runtimes.insert(
-                    runtime_key.clone(),
+                    host_key.clone(),
                     RuntimeEntry {
-                        runtime_key,
+                        host_key,
                         host_id,
                         acp_url,
                         agent_name,
@@ -173,14 +173,14 @@ impl DeploymentIndex {
             }
             DeploymentDiscoveryEvent::RuntimeStopped {
                 host_id,
-                runtime_key,
+                host_key,
                 ..
             } => {
-                let Some(runtime) = self.runtimes.get(&runtime_key) else {
+                let Some(runtime) = self.runtimes.get(&host_key) else {
                     return;
                 };
                 if runtime.host_id == host_id {
-                    self.runtimes.remove(&runtime_key);
+                    self.runtimes.remove(&host_key);
                 }
             }
         }
@@ -190,8 +190,8 @@ impl DeploymentIndex {
         self.hosts.get(host_id)
     }
 
-    pub fn runtime(&self, runtime_key: &str) -> Option<&RuntimeEntry> {
-        self.runtimes.get(runtime_key)
+    pub fn runtime(&self, host_key: &str) -> Option<&RuntimeEntry> {
+        self.runtimes.get(host_key)
     }
 
     pub fn host_is_fresh(&self, host_id: &str, now_ms: i64) -> bool {
@@ -212,7 +212,7 @@ impl DeploymentIndex {
         peers.sort_by(|left, right| {
             left.agent_name
                 .cmp(&right.agent_name)
-                .then_with(|| left.runtime_id.cmp(&right.runtime_id))
+                .then_with(|| left.host_id.cmp(&right.host_id))
         });
         peers
     }
@@ -226,7 +226,7 @@ impl DeploymentIndex {
     fn peer_for_runtime(&self, runtime: &RuntimeEntry) -> Option<Peer> {
         let host = self.hosts.get(&runtime.host_id)?;
         Some(Peer {
-            runtime_id: runtime.runtime_key.clone(),
+            host_id: runtime.host_key.clone(),
             agent_name: runtime.agent_name.clone(),
             acp_url: runtime.acp_url.clone(),
             state_stream_url: Some(host.state_stream_url.clone()),
@@ -454,7 +454,7 @@ mod tests {
         });
         index.apply(DeploymentDiscoveryEvent::RuntimeProvisioned {
             host_id: "host:a".to_string(),
-            runtime_key: "runtime:alpha".to_string(),
+            host_key: "runtime:alpha".to_string(),
             acp_url: "ws://host-a/acp".to_string(),
             agent_name: "alpha".to_string(),
             provisioned_at_ms: 120,
@@ -462,7 +462,7 @@ mod tests {
 
         let peers = index.list_fresh_runtime_peers(130);
         assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].runtime_id, "runtime:alpha");
+        assert_eq!(peers[0].host_id, "runtime:alpha");
         assert_eq!(peers[0].agent_name, "alpha");
         assert_eq!(
             peers[0].state_stream_url.as_deref(),
@@ -483,7 +483,7 @@ mod tests {
         });
         index.apply(DeploymentDiscoveryEvent::RuntimeProvisioned {
             host_id: "host:a".to_string(),
-            runtime_key: "runtime:alpha".to_string(),
+            host_key: "runtime:alpha".to_string(),
             acp_url: "ws://host-a/acp".to_string(),
             agent_name: "alpha".to_string(),
             provisioned_at_ms: 120,
@@ -518,21 +518,21 @@ mod tests {
         });
         index.apply(DeploymentDiscoveryEvent::RuntimeProvisioned {
             host_id: "host:a".to_string(),
-            runtime_key: "runtime:alpha".to_string(),
+            host_key: "runtime:alpha".to_string(),
             acp_url: "ws://host-a/acp".to_string(),
             agent_name: "alpha".to_string(),
             provisioned_at_ms: 120,
         });
         index.apply(DeploymentDiscoveryEvent::RuntimeProvisioned {
             host_id: "host:b".to_string(),
-            runtime_key: "runtime:alpha".to_string(),
+            host_key: "runtime:alpha".to_string(),
             acp_url: "ws://host-b/acp".to_string(),
             agent_name: "alpha".to_string(),
             provisioned_at_ms: 140,
         });
         index.apply(DeploymentDiscoveryEvent::RuntimeStopped {
             host_id: "host:a".to_string(),
-            runtime_key: "runtime:alpha".to_string(),
+            host_key: "runtime:alpha".to_string(),
             stopped_at_ms: 150,
         });
 
@@ -555,7 +555,7 @@ mod tests {
         });
         index.apply(DeploymentDiscoveryEvent::RuntimeProvisioned {
             host_id: "host:a".to_string(),
-            runtime_key: "runtime:alpha".to_string(),
+            host_key: "runtime:alpha".to_string(),
             acp_url: "ws://host-a/acp".to_string(),
             agent_name: "alpha".to_string(),
             provisioned_at_ms: 101,

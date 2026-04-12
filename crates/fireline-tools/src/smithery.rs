@@ -121,9 +121,7 @@ impl SmitheryComponent {
     pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         vec![ToolDescriptor {
             name: "smithery_call".to_string(),
-            description:
-                "Call a tool on a configured Smithery-hosted MCP server."
-                    .to_string(),
+            description: "Call a tool on a configured Smithery-hosted MCP server.".to_string(),
             input_schema: schemars::schema_for!(SmitheryCallInput).to_value(),
         }]
     }
