@@ -46,6 +46,18 @@ test('parseArgs returns build-specific help topic', () => {
   assert.equal(args.helpFor, 'build')
 })
 
+test('parseArgs returns agents-specific help topic', () => {
+  const args = parseArgs(['agents', '--help'])
+  assert.equal(args.command, 'help')
+  assert.equal(args.helpFor, 'agents')
+})
+
+test('parseArgs preserves agents passthrough arguments', () => {
+  const args = parseArgs(['agents', 'add', 'pi-acp'])
+  assert.equal(args.command, 'agents')
+  assert.deepEqual(args.passthroughArgs, ['add', 'pi-acp'])
+})
+
 test('createDockerBuildPlan wires embedded spec build arg', () => {
   const plan = createDockerBuildPlan({
     buildContext: '/repo',

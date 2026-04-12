@@ -4,8 +4,11 @@ The `@fireline/cli` package (see [`packages/fireline/`](../../packages/fireline/
 runs declarative agent specs. `npx fireline agent.ts` boots a
 durable-streams server, a Fireline control plane, and provisions the
 sandbox defined by the spec's default export. Any ACP client can then
-connect to the printed URL. It also supports `npx fireline build
-agent.ts --target <platform>` for Tier A hosted-image packaging.
+connect to the printed URL. The currently shipped verb surface is:
+
+- `run` — boot a spec locally
+- `build` — build a hosted image from a spec
+- `agents` — install ACP agents from the public registry
 
 Package source:
 [`packages/fireline/src/cli.ts`](../../packages/fireline/src/cli.ts),
@@ -25,6 +28,9 @@ npx fireline build agent.ts
 
 # Build and scaffold a target-native deploy descriptor.
 npx fireline build agent.ts --target fly
+
+# Install an ACP agent by registry id.
+npx fireline agents add pi-acp
 
 # Override the control-plane and durable-streams ports.
 npx fireline run agent.ts --port 4440 --streams-port 7474
@@ -98,6 +104,23 @@ export default compose(
 `build` does not call a Fireline-owned deploy API. Deployment remains
 target-native and sits in a later CLI phase.
 
+### `fireline agents`
+
+`agents` forwards to the shipped `fireline-agents` companion binary.
+Current surface:
+
+```bash
+npx fireline agents add <id>
+npx fireline agents --help
+```
+
+Today the only shipped subcommand is:
+
+1. `add <id>` — install an ACP agent by public registry id, for example `pi-acp`
+
+This surface is registry-install only. It does not change how `run` or
+`build` behave.
+
 ## Output
 
 ```
@@ -140,6 +163,7 @@ Connect any ACP client to the printed `ACP:` URL to prompt the agent.
 
 - `FIRELINE_BIN` — absolute path to the `fireline` binary
 - `FIRELINE_STREAMS_BIN` — absolute path to `fireline-streams`
+- `FIRELINE_AGENTS_BIN` — absolute path to the `fireline-agents` binary
 
 ## Binary resolution
 

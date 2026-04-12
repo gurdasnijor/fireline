@@ -9,9 +9,10 @@ import { resolveBinary } from './resolve-binary.js'
 export type BuildTarget = 'cloudflare' | 'docker' | 'fly' | 'k8s'
 
 export interface ParsedArgs {
-  readonly command: 'run' | 'build' | 'help'
-  readonly helpFor: 'general' | 'run' | 'build'
+  readonly command: 'run' | 'build' | 'agents' | 'help'
+  readonly helpFor: 'general' | 'run' | 'build' | 'agents'
   readonly file: string | null
+  readonly passthroughArgs: readonly string[]
   readonly port: number
   readonly streamsPort: number
   readonly stateStream: string | null
@@ -38,11 +39,13 @@ export interface TargetScaffoldPlan {
 }
 
 const GENERAL_HELP = `
-fireline — run specs locally or build hosted images
+fireline — run specs locally, build hosted images, or install ACP agents
 
 Usage:
-  fireline [run] <file.ts>           Boot conductor + streams, provision agent locally
-  fireline build <file.ts>           Build hosted Fireline OCI image
+  fireline run <file.ts> [flags]     Boot conductor + streams, provision agent locally
+  fireline <file.ts> [flags]         Shorthand for run
+  fireline build <file.ts> [flags]   Build hosted Fireline OCI image
+  fireline agents <command> [args]   Install ACP agents from the public registry
   fireline --help                    Show this help
 
 Run flags:
@@ -62,17 +65,20 @@ Build flags:
 Env:
   FIRELINE_BIN          Override path to fireline binary
   FIRELINE_STREAMS_BIN  Override path to fireline-streams binary
+  FIRELINE_AGENTS_BIN   Override path to fireline-agents binary
 
 Example:
-  fireline run examples/code-review-agent/index.ts
+  fireline run packages/fireline/test-fixtures/minimal-spec.ts
   fireline build agent.ts --target fly
+  fireline agents add pi-acp
 `.trim()
 
 const RUN_HELP = `
 fireline run — boot Fireline locally and provision a spec
 
 Usage:
-  fireline [run] <file.ts> [flags]
+  fireline run <file.ts> [flags]
+  fireline <file.ts> [flags]
 
 Flags:
   --port <n>           ACP control-plane port (default: 4440)
@@ -98,17 +104,36 @@ Flags:
   --help               Show this help
 `.trim()
 
+const AGENTS_HELP = `
+fireline agents — install ACP agents from the public registry
+
+Usage:
+  fireline agents add <id>
+  fireline agents --help
+
+Commands:
+  add <id>             Install an ACP agent by registry id
+
+Env:
+  FIRELINE_AGENTS_BIN  Override path to fireline-agents binary
+
+Example:
+  fireline agents add pi-acp
+`.trim()
+
 export async function main(argv: readonly string[]): Promise<void> {
   let exitCode = 0
   try {
     const args = parseArgs(argv)
-    if (args.command === 'help' || !args.file) {
+    if (args.command === 'help' || (args.command !== 'agents' && !args.file)) {
       console.log(helpText(args.helpFor))
       return
     }
     exitCode = args.command === 'build'
       ? await build(args)
-      : await run(args)
+      : args.command === 'agents'
+        ? await runAgents(args)
+        : await run(args)
   } catch (error) {
     console.error(`fireline: ${(error as Error).message}`)
     exitCode = 1
@@ -118,9 +143,10 @@ export async function main(argv: readonly string[]): Promise<void> {
 
 export function parseArgs(argv: readonly string[]): ParsedArgs {
   const out = {
-    command: 'run' as 'run' | 'build' | 'help',
-    helpFor: 'run' as 'general' | 'run' | 'build',
+    command: 'run' as 'run' | 'build' | 'agents' | 'help',
+    helpFor: 'run' as 'general' | 'run' | 'build' | 'agents',
     file: null as string | null,
+    passthroughArgs: [] as string[],
     port: 4440,
     streamsPort: 7474,
     stateStream: null as string | null,
@@ -136,7 +162,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     target: false,
   }
   let i = 0
-  if (argv[0] === 'run' || argv[0] === 'build') {
+  if (argv[0] === 'run' || argv[0] === 'build' || argv[0] === 'agents') {
     out.command = argv[0]
     out.helpFor = argv[0]
     i++
@@ -147,6 +173,13 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
 
   for (; i < argv.length; i++) {
     const arg = argv[i]
+    if (out.command === 'agents') {
+      if (arg === '--help' || arg === '-h') {
+        return { ...out, command: 'help', helpFor: 'agents' }
+      }
+      out.passthroughArgs = [...out.passthroughArgs, arg]
+      continue
+    }
     switch (arg) {
       case '--help':
       case '-h':
@@ -205,9 +238,16 @@ function helpText(topic: ParsedArgs['helpFor']): string {
       return RUN_HELP
     case 'build':
       return BUILD_HELP
+    case 'agents':
+      return AGENTS_HELP
     case 'general':
       return GENERAL_HELP
   }
+}
+
+async function runAgents(args: ParsedArgs): Promise<number> {
+  const agentsBin = resolveBinary({ name: 'fireline-agents', envVar: 'FIRELINE_AGENTS_BIN' })
+  return await runChild(agentsBin, args.passthroughArgs)
 }
 
 function parseIntArg(value: string | undefined, flag: string): number {
