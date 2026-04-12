@@ -49,7 +49,7 @@ When ambiguity arises:
 | w10 | **Opus 2 (PM)** | onboarded — owns planning surface |
 | w20 | **Opus 3 (Architect)** | onboarded — has posted Phase 1 review |
 | w12 | Opus 2 → codex | **LANDED** — #4 at `bb01ce8`. Recycling for examples/ README refresh. |
-| w13 | Opus 2 → codex | **LANDED** — #5 at `045fbba`. Recycling for demo refresh. |
+| w13 | Opus 1 → codex | **returned to Opus 1 14:30** after landing #5 (`045fbba`) + B6 (`ad8ab78`). Now on Opus 1 orphan cleanup + Phase 1.5 prep. |
 | w17 | Opus 2 → codex | **LANDED** — #7 at `1f3c610`. Recycling for proposal-index.md refresh with resolved-status updates. |
 | w15 | Opus 2 → codex | **LANDED** — #6 at `57c144e` (webhook merge + SUPERSEDED banner). Recycling for doc/guide refresh. |
 | w18 | Opus 2 → codex | **LANDED** — #2 at `3fa956e` (canonical ACP ids + plane-separated `fireline.db()`). Recycling for README staleness. |
