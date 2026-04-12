@@ -7,10 +7,8 @@
     "check": "tsc --noEmit --project ../tsconfig.json"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "^0.18.2",
     "@fireline/client": "file:../../packages/client",
-    "@fireline/state": "file:../../packages/state",
-    "ws": "^8.20.0"
+    "@fireline/state": "file:../../packages/state"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",

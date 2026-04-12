@@ -1,3 +1,4 @@
+import type { FirelineAgent } from './agent.js'
 import type { ResourceRef } from './resources.js'
 
 export interface TopologyComponentSpec {
@@ -54,25 +55,55 @@ export interface AgentConfig {
 }
 
 /**
+ * Provider-specific sandbox selection and launch config.
+ *
+ * This mirrors the provider names Fireline's Rust host understands today while
+ * keeping provider-only fields scoped to the matching variant.
+ *
+ * @remarks Anthropic primitive: Sandbox.
+ */
+export type SandboxProviderConfig =
+  | {
+      /** Default local child-process provider. Omit entirely to use the host default. */
+      readonly provider?: 'local'
+    }
+  | {
+      /** Docker-backed sandbox provider. */
+      readonly provider: 'docker'
+      /** Optional OCI image hint forwarded to the host. */
+      readonly image?: string
+    }
+  | {
+      /** Microsandbox-backed provider. */
+      readonly provider: 'microsandbox'
+    }
+  | {
+      /** Anthropic managed-agents provider. */
+      readonly provider: 'anthropic'
+      /** Optional Anthropic model hint forwarded to the host. */
+      readonly model?: string
+    }
+
+type SandboxDefinitionBase = {
+  /** Resources mounted into the sandbox before the agent starts. */
+  readonly resources?: readonly ResourceRef[]
+  /** Environment variables that the provider may inject into the sandbox. */
+  readonly envVars?: Readonly<Record<string, string>>
+  /** Labels used for lookup, routing, or fleet bookkeeping. */
+  readonly labels?: Readonly<Record<string, string>>
+}
+
+/**
  * Serializable sandbox recipe that describes the execution environment.
  *
  * @example `const cfg: SandboxDefinition = { kind: 'sandbox', resources: [] }`
  *
  * @remarks Anthropic primitive: Sandbox.
  */
-export interface SandboxDefinition {
+export type SandboxDefinition = SandboxDefinitionBase &
+  SandboxProviderConfig & {
   /** Stable discriminator for serialized sandbox definitions. */
   readonly kind: 'sandbox'
-  /** Resources mounted into the sandbox before the agent starts. */
-  readonly resources?: readonly ResourceRef[]
-  /** Environment variables that the provider may inject into the sandbox. */
-  readonly envVars?: Readonly<Record<string, string>>
-  /** Optional provider-specific image identifier. */
-  readonly image?: string
-  /** Optional provider hint such as `local` or `docker`. */
-  readonly provider?: string
-  /** Labels used for lookup, routing, or fleet bookkeeping. */
-  readonly labels?: Readonly<Record<string, string>>
 }
 
 /**
@@ -310,8 +341,8 @@ export interface HarnessHandle<Name extends string = string> extends SandboxHand
 export interface Harness<Name extends string = string> extends HarnessSpec<Name> {
   /** Returns a renamed harness while preserving sandbox, middleware, and agent config. */
   as<NextName extends string>(name: NextName): Harness<NextName>
-  /** Provisions the harness and returns ACP/state endpoints. */
-  start(options: StartOptions): Promise<HarnessHandle<Name>>
+  /** Provisions the harness and returns a live Fireline agent object. */
+  start(options: StartOptions): Promise<FirelineAgent<Name>>
 }
 
 /**

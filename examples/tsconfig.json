@@ -10,6 +10,7 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "types": ["node", "ws"],
+    "typeRoots": ["../packages/client/node_modules/@types"],
     "baseUrl": ".",
     "paths": {
       "@fireline/client": ["../packages/client/src/index.ts"],

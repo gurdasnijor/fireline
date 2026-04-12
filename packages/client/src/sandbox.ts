@@ -1,8 +1,8 @@
+import { FirelineAgent } from './agent.js'
 import { requestControlPlane } from './control-plane.js'
 import type {
   AgentConfig,
   Harness,
-  HarnessHandle,
   HarnessSpec,
   MiddlewareChain,
   Middleware,
@@ -87,11 +87,13 @@ export function agent(command: readonly string[]): AgentConfig {
 /**
  * Creates a serializable sandbox definition for `compose()`.
  *
- * @example `const cfg = sandbox({ resources: [], provider: 'local' })`
+ * @example `const cfg = sandbox({ resources: [], provider: 'docker', image: 'node:22-slim' })`
  *
  * @remarks Anthropic primitive: Sandbox.
  */
-export function sandbox(config: Omit<SandboxDefinition, 'kind'> = {}): SandboxDefinition {
+export function sandbox(
+  config: SandboxDefinitionOptions = {},
+): SandboxDefinition {
   return {
     kind: 'sandbox',
     ...cloneDefined(config),
@@ -141,11 +143,16 @@ interface ProvisionRequest {
   readonly envVars?: Readonly<Record<string, string>>
   readonly labels?: Readonly<Record<string, string>>
   readonly provider?: string
+  readonly image?: string
+  readonly model?: string
   readonly stateStream?: string
 }
 
+type SandboxDefinitionOptions = Omit<SandboxDefinition, 'kind'>
+
 function buildProvisionRequest(config: SandboxConfig): ProvisionRequest {
   const name = config.name === 'default' ? `fireline-ts-${crypto.randomUUID()}` : config.name
+  const provider = resolveProviderConfig(config.sandbox)
   return {
     name,
     agentCommand: [...config.agent.command],
@@ -153,8 +160,31 @@ function buildProvisionRequest(config: SandboxConfig): ProvisionRequest {
     resources: [...(config.sandbox.resources ?? [])],
     envVars: config.sandbox.envVars,
     labels: config.sandbox.labels,
-    provider: config.sandbox.provider,
+    ...provider,
     stateStream: config.stateStream,
+  }
+}
+
+function resolveProviderConfig(
+  sandbox: SandboxDefinition,
+): Pick<ProvisionRequest, 'provider' | 'image' | 'model'> {
+  switch (sandbox.provider) {
+    case 'docker':
+      return cloneDefined({
+        provider: 'docker',
+        image: sandbox.image,
+      })
+    case 'microsandbox':
+      return { provider: 'microsandbox' }
+    case 'anthropic':
+      return cloneDefined({
+        provider: 'anthropic',
+        model: sandbox.model,
+      })
+    case 'local':
+      return { provider: 'local' }
+    default:
+      return {}
   }
 }
 
@@ -255,14 +285,19 @@ function createHarness<Name extends string>(spec: HarnessSpec<Name>): Harness<Na
         name,
       })
     },
-    async start(options: StartOptions): Promise<HarnessHandle<Name>> {
+    async start(options: StartOptions): Promise<FirelineAgent<Name>> {
       const name = options.name ?? spec.name
       const handle = await new Sandbox(options).provision({
         ...spec,
         name,
         stateStream: options.stateStream ?? spec.stateStream,
       })
-      return { ...handle, name: spec.name }
+      return new FirelineAgent({
+        serverUrl: options.serverUrl,
+        token: options.token,
+        name: spec.name,
+        handle,
+      })
     },
   }
 }
