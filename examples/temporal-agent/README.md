@@ -1,123 +1,156 @@
 # Temporal Agent
 
-This example is a tiny ACP agent written against raw stdio JSON-RPC. It does not use an LLM and it does not depend on anything beyond the Node standard library. The point is narrower: prove that an ACP agent can discover Fireline's temporal platform extensions and call them directly.
+The problem is simple: what happens when your agent needs to wait until tomorrow?
 
-## What It Does
+A normal JavaScript promise dies with the process. A durable wait does not. This example shows the current Fireline answer on `main`: use `ctx.awakeable(...)` to park the workflow on the state stream, then let any other process resolve the same canonical key later.
 
-The agent implements the ACP handshake and three prompt branches:
+This is the imperative surface over `DurableSubscriber::Passive`, not a second workflow engine. The stream is still the source of truth. If you want the concept and proposal background, read [Awakeables](../../docs/guide/awakeables.md) and [durable-promises.md](../../docs/proposals/durable-promises.md).
 
-1. `wait 5s` -> calls `session/wait`
-2. `schedule hello in 10s` -> calls `session/schedule`
-3. `wait for event` -> calls `session/wait_for`
-4. any other prompt -> echoes the text and ends the turn
+## What This Example Does
 
-It uses `initialize.params.serverCapabilities.platform` as the discovery surface for those temporal primitives. This is intentionally a platform extension, not a claim that `session/wait`, `session/schedule`, or `session/wait_for` are part of base ACP today.
+1. starts a durable wait keyed by `sessionCompletionKey(sessionId)`
+2. prints a JSON `waiting` record with the resume key
+3. resolves that same key from another process
+4. prints a JSON `resumed` record with the change-window payload
 
-## Discovery Contract
+The story is intentionally concrete: an agent finishes planning, then waits for an overnight change window before continuing the rollout.
 
-The example accepts this capability shape:
+## The Core Code
 
-```json
-{
-  "serverCapabilities": {
-    "platform": {
-      "temporal": {
-        "methods": [
-          "session/wait",
-          "session/schedule",
-          "session/wait_for"
-        ]
-      }
-    }
-  }
-}
+This is the whole shape:
+
+```ts
+import {
+  resolveAwakeable,
+  sessionCompletionKey,
+  workflowContext,
+} from '@fireline/client'
+
+const key = sessionCompletionKey(sessionId)
+const ctx = workflowContext({ stateStreamUrl })
+
+const wake = ctx.awakeable<{
+  note: string
+  openedBy: string
+  window: string
+}>(key)
+
+console.log(JSON.stringify({ status: 'waiting', windowKey: wake.key }))
+console.log(JSON.stringify({ status: 'resumed', resolution: await wake.promise }))
+
+await resolveAwakeable({
+  streamUrl: stateStreamUrl,
+  key,
+  value: {
+    note: 'Ops opened the nightly change window. Continue the rollout.',
+    openedBy: 'ops-oncall',
+    window: 'tonight-02:00',
+  },
+})
 ```
 
-It also tolerates boolean forms such as:
+Why this matters:
 
-```json
-{
-  "serverCapabilities": {
-    "platform": {
-      "temporal": {
-        "wait": true,
-        "schedule": true,
-        "waitFor": true
-      }
-    }
-  }
-}
+- the wait is durable because it lives on the state stream, not in process memory
+- the resolver does not need to be the original process
+- the key is the same canonical completion key the subscriber substrate already understands
+
+## Run It Against A Real Fireline Session
+
+This guide uses the current demo asset because it is the most honest local bootstrap on `main`:
+
+```ts
+agent(['npx', '-y', '@agentclientprotocol/claude-agent-acp'])
 ```
-
-If a method is not advertised, the agent falls back to an ordinary `session/update` echo instead of trying to call the extension blindly.
-
-## Extension Requests Emitted By This Example
-
-This example emits the following platform-specific requests:
-
-- `session/wait` with `{ sessionId, ms: 5000, durationMs: 5000 }`
-- `session/schedule` with `{ sessionId, delayMs: 10000, ms: 10000, prompt: [{ type: "text", text: "hello" }] }`
-- `session/wait_for` with `{ sessionId, filter: { kind: "event", name: "demo.temporal" } }`
-
-Those payloads are the concrete contract of this demo example. They are meant to exercise the Flamecast -> Restate -> session-host -> ACP-agent -> temporal-primitive path end to end, not to define a new ACP standard.
-
-## Run It
 
 From the repo root:
 
 ```bash
-node examples/temporal-agent/index.js
+pnpm install
+pnpm --filter @fireline/cli build
+cargo build --bin fireline --bin fireline-streams
+
+export FIRELINE_BIN="$PWD/target/debug/fireline"
+export FIRELINE_STREAMS_BIN="$PWD/target/debug/fireline-streams"
+export ANTHROPIC_API_KEY="..."
 ```
 
-Or from the example directory:
+In terminal 1, boot Fireline and copy the printed `state:` URL:
+
+```bash
+npx fireline run docs/demos/assets/agent.ts
+```
+
+Expected output excerpt:
+
+```text
+✓ fireline ready
+  sandbox:   runtime:...
+  ACP:       ws://127.0.0.1:...
+  state:     http://127.0.0.1:7474/v1/stream/fireline-state-runtime-...
+```
+
+In terminal 2, start the durable wait:
 
 ```bash
 cd examples/temporal-agent
-node index.js
+pnpm install --ignore-workspace --lockfile=false
+
+STATE_STREAM_URL=http://127.0.0.1:7474/v1/stream/fireline-state-runtime-demo \
+SESSION_ID=session-demo \
+pnpm start -- wait
 ```
 
-The process speaks newline-delimited JSON-RPC over stdio, so it is meant to be launched by a session host, harness, or test driver rather than typed into interactively.
+Expected output:
+
+```json
+{"question":"Can my agent pause for an overnight change window and resume cleanly tomorrow?","resumeHint":"You can stop this process and run the same wait command later. The durable wait is keyed by sessionId, not by this PID.","sessionId":"session-demo","stateStreamUrl":"http://127.0.0.1:7474/v1/stream/fireline-state-runtime-demo","status":"waiting","story":"The planning run is done. Fireline can stay parked in the durable stream until the overnight change window opens.","windowKey":{"kind":"session","sessionId":"session-demo"}}
+```
+
+In terminal 3, resolve the same session key:
+
+```bash
+cd examples/temporal-agent
+
+STATE_STREAM_URL=http://127.0.0.1:7474/v1/stream/fireline-state-runtime-demo \
+SESSION_ID=session-demo \
+OPENED_BY=release-manager \
+CHANGE_WINDOW=tonight-23:00 \
+pnpm start -- resolve
+```
+
+Expected output:
+
+```json
+{"question":"Can my agent pause for an overnight change window and resume cleanly tomorrow?","resolution":{"note":"Ops opened the nightly change window. Continue the rollout.","openedBy":"release-manager","window":"tonight-23:00"},"sessionId":"session-demo","stateStreamUrl":"http://127.0.0.1:7474/v1/stream/fireline-state-runtime-demo","status":"resolved","story":"An external process appended the durable completion. Any waiter on the same session key can continue now."}
+```
+
+The waiting terminal should immediately print:
+
+```json
+{"question":"Can my agent pause for an overnight change window and resume cleanly tomorrow?","resolution":{"note":"Ops opened the nightly change window. Continue the rollout.","openedBy":"release-manager","window":"tonight-23:00"},"sessionId":"session-demo","stateStreamUrl":"http://127.0.0.1:7474/v1/stream/fireline-state-runtime-demo","status":"resumed","story":"The same logical wait resumed from the durable stream after the change window opened."}
+```
 
 ## Smoke Test
 
+If you want the substrate proof without a live model session:
+
 ```bash
+pnpm install
 cd examples/temporal-agent
-node --test test/smoke.test.mjs
+pnpm install --ignore-workspace --lockfile=false
+pnpm test
 ```
 
-The smoke test simulates the ACP client side of:
+The smoke test boots `fireline-streams`, creates a JSON state stream, runs `wait`, runs `resolve`, and asserts that the stream contains one waiting row and one resolved row for the same session key.
 
-- `initialize`
-- `session/new`
-- `session/prompt`
-- the three temporal extension responses
+## What Could Go Wrong
 
-## Register As An Agent Template
-
-If you want to use this in the Flamecast example server's template registry, the minimal template body is:
-
-```json
-{
-  "name": "temporal-agent",
-  "spawn": {
-    "command": "node",
-    "args": ["examples/temporal-agent/index.js"]
-  },
-  "runtime": {
-    "provider": "local"
-  }
-}
-```
-
-That matches the current `AgentTemplate` shape in `examples/flamecast-client/ui/fireline-types.ts`.
-
-## Why This Exists
-
-This is an end-to-end substrate check, not a product demo. If this agent can:
-
-- receive an ACP prompt,
-- discover temporal primitives from the host,
-- call them over the same JSON-RPC channel,
-- and resume cleanly when the host responds,
-
-then the temporal chain is alive without involving an LLM or a heavyweight adapter.
+- `STATE_STREAM_URL` must point at a real Fireline state stream.
+  The waiter and resolver both operate directly on the durable stream.
+- `SESSION_ID` is the resume identity.
+  Change it between `wait` and `resolve` and the waiter will never see the completion.
+- This example is session-scoped on purpose.
+  If your real control flow needs prompt- or tool-level identity, switch to `promptCompletionKey(...)` or `toolCompletionKey(...)`.
+- Duplicate completion is explicit.
+  The resolver prints `already-resolved` if the same session key already has a terminal row.

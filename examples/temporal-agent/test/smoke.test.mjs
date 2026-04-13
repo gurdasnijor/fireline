@@ -1,205 +1,125 @@
-import test from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
+import {
+  execFileSync,
+  spawn,
+} from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import { createServer } from 'node:net'
 import path from 'node:path'
 import readline from 'node:readline'
+import test, { after, before } from 'node:test'
+import { fileURLToPath } from 'node:url'
+
+import { DurableStream } from '@durable-streams/client'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const exampleDir = path.resolve(here, '..')
+const repoRoot = path.resolve(exampleDir, '../..')
+const cargoTargetDir = path.resolve(repoRoot, process.env.CARGO_TARGET_DIR ?? 'target')
+const firelineStreamsBin = path.join(cargoTargetDir, 'debug', 'fireline-streams')
+const pnpmBin = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
 
-test('echo prompt returns an agent chunk and end_turn', async () => {
-  const harness = await startHarness()
-  try {
-    await initialize(harness, {})
-    const sessionId = await newSession(harness)
+let streamsPort = 0
+let streamsProcess
 
-    harness.send({
-      jsonrpc: '2.0',
-      id: 3,
-      method: 'session/prompt',
-      params: {
-        sessionId,
-        prompt: [{ type: 'text', text: 'hello temporal agent' }],
-      },
-    })
+before(async () => {
+  execFileSync('cargo', ['build', '--quiet', '--bin', 'fireline-streams'], {
+    cwd: repoRoot,
+    stdio: 'inherit',
+    env: process.env,
+  })
 
-    const update = await harness.read((message) => message.method === 'session/update')
-    assert.equal(update.params.sessionId, sessionId)
-    assert.equal(update.params.update.content.text, 'hello temporal agent')
-
-    const result = await harness.read((message) => message.id === 3)
-    assert.equal(result.result.stopReason, 'end_turn')
-  } finally {
-    await harness.close()
-  }
+  streamsPort = await reservePort()
+  streamsProcess = spawn(firelineStreamsBin, ['--port', String(streamsPort)], {
+    cwd: repoRoot,
+    stdio: ['ignore', 'ignore', 'inherit'],
+  })
+  await waitForHttpOk(`http://127.0.0.1:${streamsPort}/healthz`, 'fireline-streams')
 })
 
-test('wait prompt emits session/wait and completes when the client responds', async () => {
-  const harness = await startHarness()
-  try {
-    await initialize(harness, {
-      methods: ['session/wait'],
-    })
-    const sessionId = await newSession(harness)
-
-    harness.send({
-      jsonrpc: '2.0',
-      id: 4,
-      method: 'session/prompt',
-      params: {
-        sessionId,
-        prompt: [{ type: 'text', text: 'wait 5s' }],
-      },
-    })
-
-    const outgoing = await harness.read((message) => message.method === 'session/wait')
-    assert.equal(outgoing.params.sessionId, sessionId)
-    assert.equal(outgoing.params.ms, 5000)
-
-    harness.send({
-      jsonrpc: '2.0',
-      id: outgoing.id,
-      result: { ok: true },
-    })
-
-    const update = await harness.read((message) => message.method === 'session/update')
-    assert.equal(update.params.update.content.text, 'waited 5 seconds')
-
-    const result = await harness.read((message) => message.id === 4)
-    assert.equal(result.result.stopReason, 'end_turn')
-  } finally {
-    await harness.close()
-  }
+after(async () => {
+  await stopChild(streamsProcess)
 })
 
-test('schedule prompt emits session/schedule', async () => {
-  const harness = await startHarness()
-  try {
-    await initialize(harness, {
-      methods: ['session/schedule'],
-    })
-    const sessionId = await newSession(harness)
+test(
+  'wait resumes after another process resolves the same session-scoped awakeable',
+  async () => {
+    const streamUrl = await createJsonStateStream(`temporal-agent-${randomUUID()}`)
+    const sessionId = `session-${randomUUID()}`
+    const resolution = {
+      note: 'Nightly window is open. Resume the rollout.',
+      openedBy: 'release-manager',
+      window: 'tonight-23:00',
+    }
 
-    harness.send({
-      jsonrpc: '2.0',
-      id: 5,
-      method: 'session/prompt',
-      params: {
-        sessionId,
-        prompt: [{ type: 'text', text: 'schedule hello in 10s' }],
+    const waiter = startExampleProcess('wait', {
+      SESSION_ID: sessionId,
+      STATE_STREAM_URL: streamUrl,
+    })
+
+    const waiting = await waiter.read(
+      (message) => message.status === 'waiting',
+      'waiter did not publish the waiting record',
+    )
+    assert.equal(waiting.sessionId, sessionId)
+    assert.equal(waiting.windowKey?.kind, 'session')
+    assert.equal(waiting.windowKey?.sessionId, sessionId)
+
+    const resolver = startExampleProcess('resolve', {
+      CHANGE_WINDOW: resolution.window,
+      OPENED_BY: resolution.openedBy,
+      RESOLUTION_NOTE: resolution.note,
+      SESSION_ID: sessionId,
+      STATE_STREAM_URL: streamUrl,
+    })
+
+    const resolved = await resolver.read(
+      (message) => message.status === 'resolved',
+      'resolver did not publish the resolved record',
+    )
+    assert.deepEqual(resolved.resolution, resolution)
+    await resolver.waitForExit()
+
+    const resumed = await waiter.read(
+      (message) => message.status === 'resumed',
+      'waiter did not resume after the durable completion',
+    )
+    assert.deepEqual(resumed.resolution, resolution)
+    await waiter.waitForExit()
+
+    const rows = await readRows(streamUrl)
+    assert.equal(countRows(rows, `session:${sessionId}:waiting`, 'awakeable_waiting'), 1)
+    assert.equal(countRows(rows, `session:${sessionId}:resolved`, 'awakeable_resolved'), 1)
+  },
+  { timeout: 30_000 },
+)
+
+function startExampleProcess(command, env) {
+  const child = spawn(
+    pnpmBin,
+    ['exec', 'tsx', '--tsconfig', './tsconfig.json', 'index.ts', command],
+    {
+      cwd: exampleDir,
+      env: {
+        ...process.env,
+        ...env,
       },
-    })
-
-    const outgoing = await harness.read((message) => message.method === 'session/schedule')
-    assert.equal(outgoing.params.sessionId, sessionId)
-    assert.equal(outgoing.params.delayMs, 10000)
-    assert.deepEqual(outgoing.params.prompt, [{ type: 'text', text: 'hello' }])
-
-    harness.send({
-      jsonrpc: '2.0',
-      id: outgoing.id,
-      result: { scheduled: true },
-    })
-
-    const update = await harness.read((message) => message.method === 'session/update')
-    assert.equal(update.params.update.content.text, 'scheduled "hello" in 10 seconds')
-
-    const result = await harness.read((message) => message.id === 5)
-    assert.equal(result.result.stopReason, 'end_turn')
-  } finally {
-    await harness.close()
-  }
-})
-
-test('wait_for prompt emits session/wait_for', async () => {
-  const harness = await startHarness()
-  try {
-    await initialize(harness, {
-      methods: ['session/wait_for'],
-    })
-    const sessionId = await newSession(harness)
-
-    harness.send({
-      jsonrpc: '2.0',
-      id: 6,
-      method: 'session/prompt',
-      params: {
-        sessionId,
-        prompt: [{ type: 'text', text: 'wait for event' }],
-      },
-    })
-
-    const outgoing = await harness.read((message) => message.method === 'session/wait_for')
-    assert.equal(outgoing.params.sessionId, sessionId)
-    assert.deepEqual(outgoing.params.filter, { kind: 'event', name: 'demo.temporal' })
-
-    harness.send({
-      jsonrpc: '2.0',
-      id: outgoing.id,
-      result: { matched: true },
-    })
-
-    const update = await harness.read((message) => message.method === 'session/update')
-    assert.equal(update.params.update.content.text, 'wait_for resolved for demo.temporal')
-
-    const result = await harness.read((message) => message.id === 6)
-    assert.equal(result.result.stopReason, 'end_turn')
-  } finally {
-    await harness.close()
-  }
-})
-
-async function initialize(harness, temporal) {
-  harness.send({
-    jsonrpc: '2.0',
-    id: 1,
-    method: 'initialize',
-    params: {
-      protocolVersion: 1,
-      clientCapabilities: {},
-      serverCapabilities: {
-        platform: temporal ? { temporal } : {},
-      },
-      clientInfo: {
-        name: 'temporal-agent-smoke',
-        version: '0.0.1',
-      },
+      stdio: ['ignore', 'pipe', 'pipe'],
     },
-  })
-  const message = await harness.read((candidate) => candidate.id === 1)
-  assert.equal(message.result.protocolVersion, 1)
-}
-
-async function newSession(harness) {
-  harness.send({
-    jsonrpc: '2.0',
-    id: 2,
-    method: 'session/new',
-    params: {
-      cwd: '/workspace',
-      mcpServers: [],
-    },
-  })
-  const message = await harness.read((candidate) => candidate.id === 2)
-  assert.equal(typeof message.result.sessionId, 'string')
-  return message.result.sessionId
-}
-
-async function startHarness() {
-  const child = spawn(process.execPath, ['index.js'], {
-    cwd: exampleDir,
-    stdio: ['pipe', 'pipe', 'inherit'],
-  })
+  )
 
   const queue = []
   const waiters = []
-  const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity })
+  const stderr = []
 
-  rl.on('line', (line) => {
+  readline.createInterface({
+    input: child.stdout,
+    crlfDelay: Infinity,
+  }).on('line', (line) => {
     if (!line.trim()) {
       return
     }
+
     const message = JSON.parse(line)
     const waiterIndex = waiters.findIndex((waiter) => waiter.predicate(message))
     if (waiterIndex >= 0) {
@@ -211,11 +131,37 @@ async function startHarness() {
     queue.push(message)
   })
 
+  readline.createInterface({
+    input: child.stderr,
+    crlfDelay: Infinity,
+  }).on('line', (line) => {
+    if (line.trim()) {
+      stderr.push(line)
+    }
+  })
+
+  const waitForExit = async () => {
+    if (child.exitCode !== null) {
+      assert.equal(
+        child.exitCode,
+        0,
+        `example process exited with code ${String(child.exitCode)}\n${stderr.join('\n')}`,
+      )
+      return
+    }
+
+    const code = await new Promise((resolve) => {
+      child.once('exit', resolve)
+    })
+    assert.equal(
+      code,
+      0,
+      `example process exited with code ${String(code)}\n${stderr.join('\n')}`,
+    )
+  }
+
   return {
-    send(message) {
-      child.stdin.write(`${JSON.stringify(message)}\n`)
-    },
-    read(predicate, timeoutMs = 2000) {
+    read(predicate, failureLabel, timeoutMs = 10_000) {
       const queuedIndex = queue.findIndex(predicate)
       if (queuedIndex >= 0) {
         return Promise.resolve(queue.splice(queuedIndex, 1)[0])
@@ -227,16 +173,97 @@ async function startHarness() {
           if (index >= 0) {
             waiters.splice(index, 1)
           }
-          reject(new Error('timed out waiting for agent message'))
+          reject(new Error(`${failureLabel}\n${stderr.join('\n')}`))
         }, timeoutMs)
-
         waiters.push({ predicate, resolve, reject, timeout })
       })
     },
-    async close() {
-      child.kill('SIGTERM')
-      await new Promise((resolve) => child.once('exit', () => resolve()))
-      rl.close()
-    },
+    waitForExit,
   }
+}
+
+async function createJsonStateStream(label) {
+  const streamUrl = `http://127.0.0.1:${streamsPort}/v1/stream/${label}`
+  const stream = new DurableStream({
+    url: streamUrl,
+    contentType: 'application/json',
+  })
+  await stream.create({
+    contentType: 'application/json',
+  })
+  return streamUrl
+}
+
+async function readRows(streamUrl) {
+  const url = new URL(streamUrl)
+  url.searchParams.set('offset', '-1')
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`failed to read stream ${streamUrl}: ${response.status} ${response.statusText}`)
+  }
+  return await response.json()
+}
+
+function countRows(rows, key, kind) {
+  return rows.filter(
+    (row) => row.type === 'awakeable' && row.key === key && row.value?.kind === kind,
+  ).length
+}
+
+async function reservePort() {
+  return await new Promise((resolvePort, reject) => {
+    const server = createServer()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      if (!address || typeof address === 'string') {
+        reject(new Error('failed to reserve local port'))
+        return
+      }
+      server.close((error) => {
+        if (error) {
+          reject(error)
+          return
+        }
+        resolvePort(address.port)
+      })
+    })
+  })
+}
+
+async function waitForHttpOk(url, label, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(url)
+      if (response.ok) {
+        return
+      }
+    } catch {
+      // keep polling
+    }
+    await sleep(100)
+  }
+  throw new Error(`timed out waiting for ${label} at ${url}`)
+}
+
+async function stopChild(
+  child,
+) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) {
+    return
+  }
+  child.kill('SIGTERM')
+  await Promise.race([
+    new Promise((resolve) => {
+      child.once('exit', () => resolve())
+    }),
+    sleep(5_000),
+  ])
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
 }
