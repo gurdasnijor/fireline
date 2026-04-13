@@ -1,6 +1,7 @@
-use crate::approval::approval_resolution_envelope;
+use crate::approval::approval_resolution_envelope_with_trace;
 use crate::durable_subscriber::{
     ActiveSubscriber, CompletionKey, DurableSubscriber, HandlerOutcome, StreamEnvelope,
+    TraceContext,
 };
 use async_trait::async_trait;
 use durable_streams::{Client as DurableStreamsClient, LiveMode, Offset, Producer};
@@ -109,11 +110,12 @@ impl AutoApproveSubscriberComponent {
         &self,
         completion: &ApprovalResolvedCompletion,
     ) -> anyhow::Result<StreamEnvelope> {
-        let envelope = approval_resolution_envelope(
+        let envelope = approval_resolution_envelope_with_trace(
             completion.session_id.clone(),
             completion.request_id.clone(),
             completion.allow,
             completion.resolved_by.clone(),
+            completion.meta.clone(),
         )?;
         self.state_producer.append_json(&envelope);
         self.state_producer.flush().await?;
@@ -146,6 +148,8 @@ pub struct PermissionRequestEvent {
     request_id: RequestId,
     #[serde(default)]
     reason: Option<String>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    meta: Option<TraceContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -154,6 +158,8 @@ pub struct ApprovalResolvedCompletion {
     request_id: RequestId,
     allow: bool,
     resolved_by: String,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    meta: Option<TraceContext>,
 }
 
 impl DurableSubscriber for AutoApproveSubscriber {
@@ -206,6 +212,7 @@ impl ActiveSubscriber for AutoApproveSubscriber {
             request_id: event.request_id,
             allow: true,
             resolved_by: self.resolved_by.clone(),
+            meta: event.meta,
         })
     }
 }
@@ -233,7 +240,7 @@ mod tests {
         let event = subscriber
             .matches(&permission_request)
             .expect("permission_request should match auto-approve");
-        let manual_resolution = approval_resolution_envelope(
+        let manual_resolution = crate::approval::approval_resolution_envelope(
             SessionId::from("session-1"),
             RequestId::from("request-1".to_string()),
             true,

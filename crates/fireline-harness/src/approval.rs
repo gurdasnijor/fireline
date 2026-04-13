@@ -48,6 +48,7 @@ use serde_json::{Map, Value};
 use crate::{
     CompletionKey, DurableSubscriber, DurableSubscriberDriver, PassiveSubscriber,
     PassiveWaitPolicy, StreamEnvelope,
+    TraceContext,
 };
 
 #[derive(Clone, Default)]
@@ -459,6 +460,8 @@ struct PermissionEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
     created_at_ms: i64,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    meta: Option<TraceContext>,
 }
 
 pub fn permission_request_envelope(
@@ -480,6 +483,7 @@ pub fn permission_request_envelope(
             resolved_by: None,
             reason: Some(reason),
             created_at_ms: now_ms(),
+            meta: None,
         })?),
     })
 }
@@ -489,6 +493,16 @@ pub fn approval_resolution_envelope(
     request_id: RequestId,
     allow: bool,
     resolved_by: String,
+) -> AnyhowResult<StreamEnvelope> {
+    approval_resolution_envelope_with_trace(session_id, request_id, allow, resolved_by, None)
+}
+
+pub fn approval_resolution_envelope_with_trace(
+    session_id: SessionId,
+    request_id: RequestId,
+    allow: bool,
+    resolved_by: String,
+    meta: Option<TraceContext>,
 ) -> AnyhowResult<StreamEnvelope> {
     Ok(StreamEnvelope {
         entity_type: "permission".to_string(),
@@ -504,6 +518,7 @@ pub fn approval_resolution_envelope(
             resolved_by: Some(resolved_by),
             reason: None,
             created_at_ms: now_ms(),
+            meta,
         })?),
     })
 }

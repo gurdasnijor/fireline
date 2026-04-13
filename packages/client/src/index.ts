@@ -91,6 +91,7 @@ export type {
   HarnessSpec,
   Middleware,
   MiddlewareChain,
+  PeerRoutingMiddleware,
   SandboxConfig,
   SandboxDefinition,
   SandboxDescriptor,
@@ -104,5 +105,6 @@ export type {
   ToolAttachment,
   ToolDescriptor,
   TransportRef,
+  WakeDeploymentMiddleware,
   WebhookMiddleware,
 } from './types.js'
