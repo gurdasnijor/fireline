@@ -155,6 +155,8 @@ function buildDirectHostArgs(spec: LoweredProvisionRequest): string[] {
   if (!durableStreamsUrl) {
     throw new Error('FIRELINE_DURABLE_STREAMS_URL must be set for embedded-spec boot')
   }
+  const advertisedStateStreamUrl = process.env.FIRELINE_ADVERTISED_STATE_STREAM_URL
+    ?? (spec.stateStream ? `${durableStreamsUrl.replace(/\/+$/, '')}/${spec.stateStream}` : null)
 
   const args = [
     '--host', host,
@@ -165,6 +167,10 @@ function buildDirectHostArgs(spec: LoweredProvisionRequest): string[] {
 
   if (spec.stateStream) {
     args.push('--state-stream', spec.stateStream)
+  }
+
+  if (advertisedStateStreamUrl) {
+    args.push('--advertised-state-stream-url', advertisedStateStreamUrl)
   }
 
   if (hasTopologyComponents(spec.topology)) {

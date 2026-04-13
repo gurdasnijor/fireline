@@ -57,8 +57,16 @@ if [[ "$streams_ready" -ne 1 ]]; then
 fi
 
 if [[ -n "${FIRELINE_EMBEDDED_SPEC_PATH:-}" ]]; then
-  FIRELINE_DURABLE_STREAMS_URL="http://127.0.0.1:${FIRELINE_STREAMS_INTERNAL_PORT}/v1/stream" \
-    /opt/fireline-bootstrap/node_modules/.bin/tsx \
+  export FIRELINE_DURABLE_STREAMS_URL="http://127.0.0.1:${FIRELINE_STREAMS_INTERNAL_PORT}/v1/stream"
+
+  if [[ -z "${FIRELINE_ADVERTISED_STATE_STREAM_URL:-}" ]]; then
+    embedded_state_stream="$(node -e "const fs=require('fs'); const p=process.env.FIRELINE_EMBEDDED_SPEC_PATH; try { const raw=fs.readFileSync(p, 'utf8'); const parsed=JSON.parse(raw); process.stdout.write(typeof parsed.stateStream === 'string' ? parsed.stateStream : ''); } catch { process.stdout.write(''); }")"
+    if [[ -n "$embedded_state_stream" ]]; then
+      export FIRELINE_ADVERTISED_STATE_STREAM_URL="${FIRELINE_DURABLE_STREAMS_URL}/${embedded_state_stream}"
+    fi
+  fi
+
+  /opt/fireline-bootstrap/node_modules/.bin/tsx \
     /opt/fireline-bootstrap/docker/bin/fireline-embedded-spec-bootstrap.ts &
   host_pid=$!
   wait -n "$streams_pid" "$proxy_pid" "$host_pid"
