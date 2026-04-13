@@ -74,7 +74,7 @@ export interface CliRuntime {
 }
 
 const defaultCliRuntime: CliRuntime = {
-  cwd: () => process.cwd(),
+  cwd: () => invocationCwd(),
   loadSpec,
   runChild,
   writeTargetScaffold,
@@ -480,7 +480,7 @@ function parseDeployTarget(value: string | undefined): DeployTarget {
 }
 
 async function run(args: ParsedArgs): Promise<number> {
-  const specPath = resolvePath(process.cwd(), args.file!)
+  const specPath = resolvePath(invocationCwd(), args.file!)
   const spec = await loadSpec(specPath)
 
   const { firelineBin, streamsBin } = resolveRunBinaries()
@@ -763,6 +763,10 @@ async function runChild(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolveWait) => setTimeout(resolveWait, ms))
+}
+
+function invocationCwd(): string {
+  return process.env.PWD || process.cwd()
 }
 
 function resolveRunBinaries(): {

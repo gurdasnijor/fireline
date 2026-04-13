@@ -114,7 +114,7 @@ export async function runRepl(options: ReplOptions = {}): Promise<number> {
   const input = options.input ?? process.stdin
   const output = options.output ?? process.stdout
   const error = options.error ?? process.stderr
-  const cwd = options.cwd ?? process.cwd()
+  const cwd = options.cwd ?? invocationCwd()
   const serverUrl = options.serverUrl ?? DEFAULT_SERVER_URL
   const acpUrl = options.acpUrl ?? resolveAcpUrl(serverUrl)
   let activeSessionId = options.sessionId ?? null
@@ -396,6 +396,10 @@ function decodeRawData(data: RawData): string {
   }
 
   return Buffer.concat(data).toString('utf8')
+}
+
+function invocationCwd(): string {
+  return process.env.PWD || process.cwd()
 }
 
 export class ReplController implements ReplViewModel {
