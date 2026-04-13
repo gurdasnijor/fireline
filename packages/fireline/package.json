@@ -5,8 +5,7 @@
   "type": "module",
   "bin": {
     "fireline": "./bin/fireline.js",
-    "fireline-agents": "./bin/fireline-agents.js",
-    "fireline-pastel": "./bin/fireline-pastel.js"
+    "fireline-agents": "./bin/fireline-agents.js"
   },
   "files": [
     "bin",
@@ -16,7 +15,7 @@
     "build:workspace-deps": "pnpm --filter @fireline/state build && pnpm --filter @fireline/client build",
     "build": "pnpm run build:workspace-deps && tsc",
     "lint": "pnpm run build:workspace-deps && tsc --noEmit",
-    "test": "pnpm run build && node --test dist/cli.test.js dist/hosted-config.test.js dist/repl.test.js dist/repl-pane-conversation.test.js dist/repl-pane-events.test.js dist/host-probe.test.js dist/pastel/tui-preview.test.js"
+    "test": "pnpm run build && node --test dist/cli.test.js dist/hosted-config.test.js dist/repl.test.js dist/repl-pane-conversation.test.js dist/repl-pane-events.test.js dist/host-probe.test.js dist/pastel/argv.test.js"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.18.2",

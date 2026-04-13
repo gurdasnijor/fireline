@@ -418,7 +418,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   return out
 }
 
-function helpText(topic: ParsedArgs['helpFor']): string {
+export function helpText(topic: ParsedArgs['helpFor']): string {
   switch (topic) {
     case 'run':
       return RUN_HELP
@@ -452,7 +452,7 @@ export async function runReplCommand(
   }
 }
 
-async function runAgents(args: ParsedArgs): Promise<number> {
+export async function runAgents(args: ParsedArgs): Promise<number> {
   const agentsBin = resolveBinary({ name: 'fireline-agents', envVar: 'FIRELINE_AGENTS_BIN' })
   return await runChild(agentsBin.path, args.passthroughArgs)
 }
@@ -490,7 +490,18 @@ function parseBuildTarget(value: string | undefined): BuildTarget {
   }
 }
 
-async function run(args: ParsedArgs): Promise<number> {
+export async function run(args: ParsedArgs): Promise<number> {
+  if (args.repl) {
+    const started = await startHostedRunSession(args)
+    try {
+      return await runHostedRepl(started.handle, args, runRepl, console, {
+        sessionId: started.sessionId,
+      })
+    } finally {
+      await started.close()
+    }
+  }
+
   const specPath = resolvePath(invocationCwd(), args.file!)
   const spec = await loadSpec(specPath)
 
@@ -533,32 +544,7 @@ async function run(args: ParsedArgs): Promise<number> {
 
     const hostHealthz = `http://127.0.0.1:${args.port}/healthz`
     if (await isHealthy(hostHealthz)) {
-      if (!args.repl) {
-        throw new Error(`Port ${args.port} already in use; stop the other process or pass --port <n>`)
-      }
-
-      const existingHost = await probeExistingHostForRepl(`http://127.0.0.1:${args.port}`)
-      switch (existingHost.kind) {
-        case 'attachable':
-          console.log(`fireline: reusing fireline host at :${args.port}`)
-          return await runHostedRepl(
-            printedHandleFromExistingHost(existingHost.handle),
-            args,
-            runRepl,
-            console,
-            { sessionId: existingHost.latestSessionId },
-          )
-        case 'multiple-live-sandboxes':
-          throw new Error(
-            `Port ${args.port} already hosts Fireline with ${existingHost.count} live sandboxes; auto-attach is ambiguous. Use 'fireline repl <session-id>' or pass --port <n>.`,
-          )
-        case 'no-live-sandboxes':
-          throw new Error(
-            `Port ${args.port} already hosts Fireline, but no live sandboxes are available to attach. Stop the other process or pass --port <n>.`,
-          )
-        case 'not-fireline':
-          throw new Error(`Port ${args.port} already in use; stop the other process or pass --port <n>`)
-      }
+      throw new Error(`Port ${args.port} already in use; stop the other process or pass --port <n>`)
     }
     const controlPlaneArgs = [
       '--control-plane',
@@ -585,18 +571,113 @@ async function run(args: ParsedArgs): Promise<number> {
     const agentHandle = await effectiveSpec.start(startOptions)
     teardown.push(() => destroySandbox(agentHandle.id, args.port))
 
-    if (args.repl) {
-      const exitCode = await runHostedRepl(agentHandle, args)
-      await runTeardown()
-      return exitCode
-    }
-
     printReady(agentHandle, args)
     printInteractionHint(args.file!)
 
     const signalCode = await waitForShutdown
     await runTeardown()
     return signalCode
+  } catch (error) {
+    await runTeardown()
+    throw error
+  }
+}
+
+export interface StartedHostedRunSession {
+  readonly handle: PrintedHandle
+  readonly sessionId: string | null
+  close(): Promise<void>
+}
+
+export async function startHostedRunSession(
+  args: ParsedArgs,
+): Promise<StartedHostedRunSession> {
+  const specPath = resolvePath(invocationCwd(), args.file!)
+  const spec = await loadSpec(specPath)
+
+  const { firelineBin, streamsBin } = resolveRunBinaries()
+  maybeLogBinaryMismatch(firelineBin, streamsBin)
+
+  const teardown: Array<() => Promise<void> | void> = []
+
+  async function runTeardown(): Promise<void> {
+    for (const fn of teardown.reverse()) {
+      try {
+        await fn()
+      } catch (error) {
+        console.error(`fireline: teardown error: ${(error as Error).message}`)
+      }
+    }
+  }
+
+  try {
+    const streamsHealthz = `http://127.0.0.1:${args.streamsPort}/healthz`
+    const reusingStreams = await isHealthy(streamsHealthz)
+    if (reusingStreams) {
+      console.log(`fireline: reusing fireline-streams at :${args.streamsPort}`)
+    } else {
+      const streamsProc = spawn(streamsBin.path, [], {
+        stdio: ['ignore', 'inherit', 'inherit'],
+        env: { ...process.env, PORT: String(args.streamsPort) },
+      })
+      teardown.push(() => stopChild(streamsProc))
+      await waitForHttp(streamsHealthz, 10_000, 'fireline-streams')
+    }
+
+    const hostHealthz = `http://127.0.0.1:${args.port}/healthz`
+    if (await isHealthy(hostHealthz)) {
+      const existingHost = await probeExistingHostForRepl(`http://127.0.0.1:${args.port}`)
+      switch (existingHost.kind) {
+        case 'attachable':
+          console.log(`fireline: reusing fireline host at :${args.port}`)
+          return {
+            handle: printedHandleFromExistingHost(existingHost.handle),
+            sessionId: existingHost.latestSessionId ?? null,
+            close: runTeardown,
+          }
+        case 'multiple-live-sandboxes':
+          throw new Error(
+            `Port ${args.port} already hosts Fireline with ${existingHost.count} live sandboxes; auto-attach is ambiguous. Use 'fireline repl <session-id>' or pass --port <n>.`,
+          )
+        case 'no-live-sandboxes':
+          throw new Error(
+            `Port ${args.port} already hosts Fireline, but no live sandboxes are available to attach. Stop the other process or pass --port <n>.`,
+          )
+        case 'not-fireline':
+          throw new Error(`Port ${args.port} already in use; stop the other process or pass --port <n>`)
+      }
+    }
+
+    const controlPlaneArgs = [
+      '--control-plane',
+      '--port', String(args.port),
+      '--durable-streams-url', `http://127.0.0.1:${args.streamsPort}/v1/stream`,
+    ]
+    const firelineProc = spawn(firelineBin.path, controlPlaneArgs, {
+      stdio: ['ignore', 'inherit', 'inherit'],
+      env: { ...process.env },
+    })
+    teardown.push(() => stopChild(firelineProc))
+    await waitForHttp(hostHealthz, 15_000, 'fireline')
+
+    const startOptions: Record<string, unknown> = {
+      serverUrl: `http://127.0.0.1:${args.port}`,
+    }
+    if (args.stateStream) startOptions.stateStream = args.stateStream
+    if (args.name) startOptions.name = args.name
+
+    const effectiveSpec = args.providerOverride
+      ? { ...spec, sandbox: { ...spec.sandbox, provider: args.providerOverride } }
+      : spec
+
+    const agentHandle = await effectiveSpec.start(startOptions)
+    teardown.push(() => destroySandbox(agentHandle.id, args.port))
+
+    return {
+      handle: agentHandle,
+      sessionId: null,
+      close: runTeardown,
+    }
   } catch (error) {
     await runTeardown()
     throw error
@@ -1063,11 +1144,11 @@ function printInteractionHint(file: string, logger: ReadyLogger = console): void
   logger.log('')
 }
 
-function looksLikeSpecPath(value: string): boolean {
+export function looksLikeSpecPath(value: string): boolean {
   return /\.[cm]?[jt]sx?$/i.test(value)
 }
 
-function decorateStandaloneReplError(error: unknown): Error {
+export function decorateStandaloneReplError(error: unknown): Error {
   const failure = error instanceof Error ? error : new Error(String(error))
   if (!isLikelyMissingReplHost(failure.message)) {
     return failure

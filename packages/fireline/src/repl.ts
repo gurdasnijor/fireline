@@ -129,10 +129,33 @@ export interface ReplOptions {
   readonly stateStreamUrl?: string | null
 }
 
+export interface AttachedReplSession {
+  readonly controller: ReplController
+  readonly sessionId: string
+  close(): Promise<void>
+}
+
 export async function runRepl(options: ReplOptions = {}): Promise<number> {
   const input = options.input ?? process.stdin
   const output = options.output ?? process.stdout
   const error = options.error ?? process.stderr
+  const attachment = await attachRepl(options)
+  try {
+    return await runInkRepl({
+      alternateScreen: options.alternateScreen ?? true,
+      controller: attachment.controller,
+      error: error as NodeJS.WriteStream,
+      input: input as NodeJS.ReadStream,
+      output: output as NodeJS.WriteStream,
+    })
+  } finally {
+    await attachment.close()
+  }
+}
+
+export async function attachRepl(
+  options: ReplOptions = {},
+): Promise<AttachedReplSession> {
   const cwd = options.cwd ?? invocationCwd()
   const serverUrl = options.serverUrl ?? DEFAULT_SERVER_URL
   const acpUrl = options.acpUrl ?? resolveAcpUrl(serverUrl)
@@ -144,6 +167,7 @@ export async function runRepl(options: ReplOptions = {}): Promise<number> {
     sessionId: options.sessionId ?? null,
     stateStreamUrl,
   })
+
   let activeSessionId = options.sessionId ?? null
   let controller: ReplController | null = null
   let approvalWatcher: ApprovalWatcher | null = null
@@ -156,6 +180,7 @@ export async function runRepl(options: ReplOptions = {}): Promise<number> {
       controller?.receiveNotification(notification)
     },
   })
+
   controller = new ReplController({
     acpUrl,
     runtimeId: options.runtimeId ?? null,
@@ -194,16 +219,19 @@ export async function runRepl(options: ReplOptions = {}): Promise<number> {
         controller?.setPendingApproval(approval)
       })
     }
-    return await runInkRepl({
-      alternateScreen: options.alternateScreen ?? true,
+
+    return {
       controller,
-      error: error as NodeJS.WriteStream,
-      input: input as NodeJS.ReadStream,
-      output: output as NodeJS.WriteStream,
-    })
-  } finally {
+      sessionId: activeSessionId,
+      close: async () => {
+        await approvalWatcher?.close()
+        await repl.close()
+      },
+    }
+  } catch (error) {
     await approvalWatcher?.close()
     await repl.close()
+    throw error
   }
 }
 
