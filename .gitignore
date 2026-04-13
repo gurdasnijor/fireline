@@ -22,9 +22,9 @@ dist/
 deploy/observability/betterstack.env
 deploy/observability/*.env
 !deploy/observability/*.env.example
-deploy/discord/bridge.env
-deploy/discord/*.env
-!deploy/discord/*.env.example
+deploy/telegram/bridge.env
+deploy/telegram/*.env
+!deploy/telegram/*.env.example
 
 # TLC model-checker output
 states/
