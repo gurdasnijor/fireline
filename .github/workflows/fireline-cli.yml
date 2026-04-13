@@ -137,6 +137,17 @@ jobs:
         with:
           node-version: 20
 
+      - name: Shorten Cargo paths on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path 'D:\c', 'D:\r', 'D:\t' | Out-Null
+          git config --global core.longpaths true
+          "CARGO_HOME=D:\c" >> $env:GITHUB_ENV
+          "RUSTUP_HOME=D:\r" >> $env:GITHUB_ENV
+          "CARGO_TARGET_DIR=D:\t" >> $env:GITHUB_ENV
+          "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> $env:GITHUB_ENV
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
