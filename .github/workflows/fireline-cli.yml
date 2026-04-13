@@ -180,7 +180,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/npm
-          npm pack "${{ matrix.package_dir }}" --pack-destination dist/npm
+          npm pack "./${{ matrix.package_dir }}" --pack-destination dist/npm
 
       - name: Upload platform tarball
         uses: actions/upload-artifact@v4
