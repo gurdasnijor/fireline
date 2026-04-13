@@ -2,6 +2,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use fireline_harness::resolve_spawn_env_vars;
 use fireline_resources::ResourceRef;
 use fireline_sandbox::{ProviderDispatcher, SandboxConfig, SandboxDescriptor, SandboxHandle};
 use fireline_session::TopologySpec;
@@ -68,9 +69,10 @@ async fn get_sandbox(
     Path(sandbox_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<Json<SandboxDescriptor>, ControlPlaneError> {
-    let sandbox = state.dispatcher.get(&sandbox_id).await?.ok_or_else(|| {
-        ControlPlaneError::not_found(format!("sandbox '{sandbox_id}' not found"))
-    })?;
+    let sandbox =
+        state.dispatcher.get(&sandbox_id).await?.ok_or_else(|| {
+            ControlPlaneError::not_found(format!("sandbox '{sandbox_id}' not found"))
+        })?;
     Ok(Json(sandbox))
 }
 
@@ -78,6 +80,8 @@ async fn provision_sandbox(
     State(state): State<AppState>,
     Json(request): Json<ProvisionRequest>,
 ) -> Result<(StatusCode, Json<SandboxHandle>), ControlPlaneError> {
+    let mut env_vars = request.env_vars;
+    env_vars.extend(resolve_spawn_env_vars(&request.topology)?);
     let config = SandboxConfig {
         name: request.name,
         agent_command: request.agent_command,
@@ -85,7 +89,7 @@ async fn provision_sandbox(
         resources: request.resources,
         durable_streams_url: state.infra.durable_streams_url.clone(),
         state_stream: request.state_stream,
-        env_vars: request.env_vars,
+        env_vars,
         labels: request.labels,
         provider: request.provider,
     };
@@ -97,9 +101,10 @@ async fn stop_sandbox(
     Path(sandbox_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<Json<SandboxDescriptor>, ControlPlaneError> {
-    let sandbox = state.dispatcher.stop(&sandbox_id).await?.ok_or_else(|| {
-        ControlPlaneError::not_found(format!("sandbox '{sandbox_id}' not found"))
-    })?;
+    let sandbox =
+        state.dispatcher.stop(&sandbox_id).await?.ok_or_else(|| {
+            ControlPlaneError::not_found(format!("sandbox '{sandbox_id}' not found"))
+        })?;
     Ok(Json(sandbox))
 }
 
@@ -107,9 +112,10 @@ async fn delete_sandbox(
     Path(sandbox_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<Json<SandboxDescriptor>, ControlPlaneError> {
-    let sandbox = state.dispatcher.stop(&sandbox_id).await?.ok_or_else(|| {
-        ControlPlaneError::not_found(format!("sandbox '{sandbox_id}' not found"))
-    })?;
+    let sandbox =
+        state.dispatcher.stop(&sandbox_id).await?.ok_or_else(|| {
+            ControlPlaneError::not_found(format!("sandbox '{sandbox_id}' not found"))
+        })?;
     Ok(Json(sandbox))
 }
 

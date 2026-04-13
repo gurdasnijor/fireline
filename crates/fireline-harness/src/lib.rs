@@ -69,7 +69,7 @@ pub use telegram_subscriber::{
 pub use topology::{
     ComponentContext, ProxyComponentInstance, ResolvedTopology, TopologyComponentSpec,
     TopologyRegistry, TopologyRegistryBuilder, TopologySpec, TraceWriterInstance,
-    audit_stream_names, build_host_topology_registry, ensure_named_streams,
+    audit_stream_names, build_host_topology_registry, ensure_named_streams, resolve_spawn_env_vars,
 };
 pub use trace::{
     BoxedTraceWriter, CompositeTraceWriter, DurableStreamTracer, emit_host_endpoints_persisted,

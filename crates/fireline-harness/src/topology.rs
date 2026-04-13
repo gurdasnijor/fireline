@@ -9,6 +9,7 @@ use serde_json::Value;
 
 pub use crate::host_topology::{
     ComponentContext, audit_stream_names, build_host_topology_registry, ensure_named_streams,
+    resolve_spawn_env_vars,
 };
 
 pub type ProxyComponentInstance = DynConnectTo<Conductor>;

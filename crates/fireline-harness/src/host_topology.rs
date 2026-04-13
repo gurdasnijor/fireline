@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -84,7 +85,7 @@ pub struct AutoApproveComponentConfig {
     pub resolved_by: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretsInjectionConfig {
     #[serde(default)]
@@ -180,6 +181,58 @@ pub async fn ensure_named_streams(stream_base_url: &str, stream_names: &[String]
         ensure_stream_exists(&stream).await?;
     }
     Ok(())
+}
+
+pub fn resolve_spawn_env_vars(topology: &TopologySpec) -> Result<HashMap<String, String>> {
+    resolve_spawn_env_vars_with(topology, |var| std::env::var(var).ok())
+}
+
+fn resolve_spawn_env_vars_with<F>(
+    topology: &TopologySpec,
+    mut lookup_env: F,
+) -> Result<HashMap<String, String>>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut env_vars = HashMap::new();
+
+    for component in &topology.components {
+        if component.name != "secrets_injection" {
+            continue;
+        }
+
+        let parsed = component
+            .config
+            .clone()
+            .map(serde_json::from_value::<SecretsInjectionConfig>)
+            .transpose()
+            .context("parse secrets injection config")?
+            .unwrap_or_default();
+
+        for binding in parsed.bindings {
+            let credential_ref = parse_credential_ref(&binding.credential_ref)?;
+            let fireline_tools::CredentialRef::Env { var } = credential_ref else {
+                continue;
+            };
+
+            let value = lookup_env(&var).ok_or_else(|| {
+                anyhow!(
+                    "secrets_injection binding '{}' could not resolve parent env var '{}'",
+                    binding.name,
+                    var
+                )
+            })?;
+
+            if env_vars.insert(binding.name.clone(), value).is_some() {
+                return Err(anyhow!(
+                    "duplicate secrets_injection env target '{}'",
+                    binding.name
+                ));
+            }
+        }
+    }
+
+    Ok(env_vars)
 }
 
 pub fn build_host_topology_registry(context: ComponentContext) -> TopologyRegistry {
@@ -526,5 +579,62 @@ struct NoopTraceWriter;
 impl sacp_conductor::trace::WriteEvent for NoopTraceWriter {
     fn write_event(&mut self, _event: &sacp_conductor::trace::TraceEvent) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_spawn_env_vars_with;
+    use fireline_session::{TopologyComponentSpec, TopologySpec};
+    use serde_json::json;
+
+    #[test]
+    fn resolve_spawn_env_vars_maps_env_refs_to_binding_names() {
+        let topology = TopologySpec {
+            components: vec![TopologyComponentSpec {
+                name: "secrets_injection".to_string(),
+                config: Some(json!({
+                    "bindings": [
+                        { "name": "ANTHROPIC_API_KEY", "ref": "env:PARENT_ANTHROPIC_API_KEY" },
+                        { "name": "IGNORED_SECRET", "ref": "secret:anthropic-key" }
+                    ]
+                })),
+            }],
+        };
+
+        let resolved = resolve_spawn_env_vars_with(&topology, |name| match name {
+            "PARENT_ANTHROPIC_API_KEY" => Some("test-anthropic-key".to_string()),
+            _ => None,
+        })
+        .expect("resolve spawn env vars");
+
+        assert_eq!(
+            resolved.get("ANTHROPIC_API_KEY").map(String::as_str),
+            Some("test-anthropic-key")
+        );
+        assert!(!resolved.contains_key("IGNORED_SECRET"));
+    }
+
+    #[test]
+    fn resolve_spawn_env_vars_errors_when_parent_env_is_missing() {
+        let topology = TopologySpec {
+            components: vec![TopologyComponentSpec {
+                name: "secrets_injection".to_string(),
+                config: Some(json!({
+                    "bindings": [
+                        { "name": "ANTHROPIC_API_KEY", "ref": "env:PARENT_ANTHROPIC_API_KEY" }
+                    ]
+                })),
+            }],
+        };
+
+        let error = resolve_spawn_env_vars_with(&topology, |_| None)
+            .expect_err("missing parent env should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("could not resolve parent env var 'PARENT_ANTHROPIC_API_KEY'")
+        );
     }
 }
