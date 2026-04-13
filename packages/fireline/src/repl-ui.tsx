@@ -27,7 +27,7 @@ export function FirelineReplApp(props: {
   readonly onFailure: (error: Error) => void
 }) {
   const state = useSyncExternalStore(
-    (listener) => props.controller.subscribe(listener),
+    (listener: () => void) => props.controller.subscribe(listener),
     () => props.controller.getSnapshot(),
   )
   const { exit } = useApp()
@@ -58,13 +58,13 @@ export function FirelineReplApp(props: {
       setInput('')
       void props.controller
         .submit(currentInput)
-        .then((result) => {
+        .then((result: 'ignored' | 'quit' | 'sent') => {
           if (result === 'quit') {
             props.onExitRequest(0)
             exit()
           }
         })
-        .catch((error) => {
+        .catch((error: unknown) => {
           props.onFailure(error instanceof Error ? error : new Error(String(error)))
           exit()
         })
@@ -72,7 +72,7 @@ export function FirelineReplApp(props: {
     }
 
     if (key.backspace || key.delete) {
-      setInput((current) => current.slice(0, -1))
+      setInput((current: string) => current.slice(0, -1))
       return
     }
 
@@ -85,7 +85,7 @@ export function FirelineReplApp(props: {
       return
     }
 
-    setInput((current) => `${current}${value}`)
+    setInput((current: string) => `${current}${value}`)
   })
 
   return (
@@ -95,7 +95,9 @@ export function FirelineReplApp(props: {
         {visibleEntries.length === 0 ? (
           <EmptyState />
         ) : (
-          visibleEntries.map((entry) => <EntryView entry={entry} key={entry.id} />)
+          visibleEntries.map((entry: TranscriptEntry) => (
+            <EntryView entry={entry} key={entry.id} />
+          ))
         )}
       </Box>
       <Composer busy={state.busy} input={input} spinner={spinner} />
@@ -210,7 +212,7 @@ function PlanView(props: { readonly entry: PlanEntry }) {
       <Text bold color="blue">
         plan
       </Text>
-      {props.entry.items.map((item, index) => (
+      {props.entry.items.map((item: string, index: number) => (
         <Text color="gray" key={`${props.entry.id}:${index}`}>
           - {item}
         </Text>

@@ -30,8 +30,10 @@ test('repl controller submits prompts and renders streamed output', async () => 
   const output = renderToString(
     React.createElement(FirelineReplApp, {
       controller,
-      onExitRequest: () => {},
-      onFailure: () => {},
+      onExitRequest: (_code: number) => {},
+      onFailure: (error: Error) => {
+        throw error
+      },
     }),
     { columns: 80 },
   )
