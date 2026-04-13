@@ -1,5 +1,7 @@
-import { readFile } from 'node:fs/promises'
+import { readFile, realpath } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
+import { dirname, isAbsolute, resolve as resolvePath } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { compose } from '../../packages/client/src/sandbox.ts'
 
@@ -18,13 +20,28 @@ type LoweredProvisionRequest = {
   readonly name: string
   readonly agentCommand: readonly string[]
   readonly topology: unknown
-  readonly resources?: readonly unknown[]
+  readonly resources?: readonly EmbeddedResourceRef[]
   readonly envVars?: Readonly<Record<string, string>>
   readonly labels?: Readonly<Record<string, string>>
   readonly provider?: string
   readonly image?: string
   readonly model?: string
   readonly stateStream?: string
+}
+
+type EmbeddedResourceRef = {
+  readonly source_ref?: {
+    readonly kind?: string
+    readonly path?: string
+  }
+  readonly mount_path?: string
+  readonly read_only?: boolean
+}
+
+type MountedResource = {
+  readonly host_path: string
+  readonly mount_path: string
+  readonly read_only: boolean
 }
 
 const SPEC_ENV = 'FIRELINE_EMBEDDED_SPEC_PATH'
@@ -38,9 +55,10 @@ async function main(): Promise<void> {
 
   const spec = parseSpec(await readFile(specPath, 'utf8'))
   const lowered = await lowerSpec(spec)
+  const mountedResources = await prepareMountedResources(lowered, specPath)
   validateLoweredSpec(lowered)
 
-  const args = buildDirectHostArgs(lowered)
+  const args = buildDirectHostArgs(lowered, mountedResources)
   console.log(
     `fireline: booting embedded spec '${lowered.name}' from ${specPath} via existing compose()->start lowering`,
   )
@@ -134,9 +152,6 @@ function validateLoweredSpec(spec: LoweredProvisionRequest): void {
   if (spec.model) {
     throw new Error('embedded-spec boot does not support anthropic model lowering')
   }
-  if ((spec.resources?.length ?? 0) > 0) {
-    throw new Error('embedded-spec boot does not support resource mounts')
-  }
   if (spec.envVars && Object.keys(spec.envVars).length > 0) {
     throw new Error('embedded-spec boot does not support sandbox env vars')
   }
@@ -148,7 +163,59 @@ function validateLoweredSpec(spec: LoweredProvisionRequest): void {
   }
 }
 
-function buildDirectHostArgs(spec: LoweredProvisionRequest): string[] {
+export async function prepareMountedResources(
+  spec: LoweredProvisionRequest,
+  specPath: string,
+): Promise<MountedResource[]> {
+  const mountedResources: MountedResource[] = []
+  for (const resource of spec.resources ?? []) {
+    mountedResources.push(await prepareMountedResource(resource, specPath))
+  }
+  return mountedResources
+}
+
+async function prepareMountedResource(
+  resource: EmbeddedResourceRef,
+  specPath: string,
+): Promise<MountedResource> {
+  const sourceRef = resource.source_ref
+  if (!sourceRef?.kind) {
+    throw new Error('embedded-spec boot received a malformed resource ref')
+  }
+  if (typeof resource.mount_path !== 'string' || !resource.mount_path.startsWith('/')) {
+    throw new Error('embedded-spec boot requires absolute mount paths')
+  }
+
+  switch (sourceRef.kind) {
+    case 'localPath': {
+      if (typeof sourceRef.path !== 'string' || sourceRef.path.length === 0) {
+        throw new Error('embedded-spec boot requires localPath resources to include a path')
+      }
+      const hostPath = await resolveEmbeddedLocalPath(specPath, sourceRef.path)
+      return {
+        host_path: hostPath,
+        mount_path: resource.mount_path,
+        read_only: resource.read_only ?? false,
+      }
+    }
+    default:
+      throw new Error(
+        `embedded-spec boot does not support resource kind '${sourceRef.kind}'`,
+      )
+  }
+}
+
+async function resolveEmbeddedLocalPath(specPath: string, resourcePath: string): Promise<string> {
+  const candidate = isAbsolute(resourcePath)
+    ? resourcePath
+    : resolvePath(dirname(specPath), resourcePath)
+  return await realpath(candidate)
+}
+
+export function buildDirectHostArgs(
+  spec: LoweredProvisionRequest,
+  mountedResources: readonly MountedResource[] = [],
+): string[] {
   const host = process.env.FIRELINE_HOST ?? '0.0.0.0'
   const port = process.env.FIRELINE_PORT ?? '4440'
   const durableStreamsUrl = process.env.FIRELINE_DURABLE_STREAMS_URL
@@ -177,6 +244,10 @@ function buildDirectHostArgs(spec: LoweredProvisionRequest): string[] {
     args.push('--topology-json', JSON.stringify(spec.topology))
   }
 
+  if (mountedResources.length > 0) {
+    args.push('--mounted-resources-json', JSON.stringify(mountedResources))
+  }
+
   args.push('--', ...spec.agentCommand)
   return args
 }
@@ -189,7 +260,10 @@ function hasTopologyComponents(topology: unknown): boolean {
   return Array.isArray(components) && components.length > 0
 }
 
-main().catch((error) => {
-  console.error(`fireline: embedded-spec bootstrap failed: ${(error as Error).message}`)
-  process.exit(1)
-})
+const invokedPath = process.argv[1] ? resolvePath(process.argv[1]) : null
+if (invokedPath && pathToFileURL(invokedPath).href === import.meta.url) {
+  main().catch((error) => {
+    console.error(`fireline: embedded-spec bootstrap failed: ${(error as Error).message}`)
+    process.exit(1)
+  })
+}
