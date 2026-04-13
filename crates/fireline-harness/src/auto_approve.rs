@@ -213,6 +213,7 @@ impl ActiveSubscriber for AutoApproveSubscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::durable_subscriber::{DurableSubscriberDriver, SubscriberMode, SubscriberRegistration};
 
     #[test]
     fn auto_approve_uses_same_completion_spine_as_manual_resolution() {
@@ -246,11 +247,61 @@ mod tests {
             manual_resolution
                 .completion_key()
                 .expect("completion key from manual resolution"),
-            "INVARIANT (AutoApprove): auto and manual approval paths must key completion on the same canonical (session_id, request_id) tuple",
+            "DSV-01 CompletionKeyUnique: auto and manual approval paths must key completion on the same canonical (session_id, request_id) tuple",
         );
         assert!(
             subscriber.is_completed(&event, &[manual_resolution]),
-            "INVARIANT (AutoApprove): an existing manual approval_resolved envelope must suppress auto-approve for the same completion key",
+            "DSV-02 ReplayIdempotent: an existing manual approval_resolved envelope must suppress auto-approve for the same completion key during replay",
+        );
+    }
+
+    #[test]
+    fn auto_approve_replay_skips_duplicate_completion_when_manual_resolution_exists() {
+        let subscriber = AutoApproveSubscriber::new(AutoApproveConfig::default());
+        let mut driver = DurableSubscriberDriver::new();
+        driver.register_active(subscriber.clone());
+        assert_eq!(
+            driver.registrations(),
+            vec![SubscriberRegistration {
+                name: "auto_approve".to_string(),
+                mode: SubscriberMode::Active,
+            }],
+            "DSV-02 ReplayIdempotent: a fresh driver must register the same auto_approve profile before replay suppression is evaluated",
+        );
+
+        let permission_request = StreamEnvelope::from_json(serde_json::json!({
+            "type": "permission",
+            "key": "session-1:request-1",
+            "headers": { "operation": "insert" },
+            "value": {
+                "kind": "permission_request",
+                "sessionId": "session-1",
+                "requestId": "request-1",
+                "reason": "test policy"
+            }
+        }))
+        .expect("decode permission_request envelope");
+        let manual_resolution = approval_resolution_envelope(
+            SessionId::from("session-1"),
+            RequestId::from("request-1".to_string()),
+            true,
+            "manual-approver".to_string(),
+        )
+        .expect("build manual completion envelope");
+
+        let event = subscriber
+            .matches(&permission_request)
+            .expect("DSV-02 ReplayIdempotent: permission_request should still match on replay");
+        let replay_log = vec![manual_resolution];
+
+        assert!(
+            subscriber.is_completed(&event, &replay_log),
+            "DSV-02 ReplayIdempotent: replay with a preexisting approval_resolved completion must mark the auto_approve event complete",
+        );
+        let should_emit = !subscriber.is_completed(&event, &replay_log);
+        assert!(
+            !should_emit,
+            "DSV-02 ReplayIdempotent: replay should skip a second auto_approve emission rather than minting a duplicate approval_resolved envelope",
         );
     }
 }

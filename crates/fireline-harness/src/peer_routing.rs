@@ -187,6 +187,8 @@ fn prompt_peer_input(tool_call: &ToolCall) -> Option<PromptPeerInput> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
 
     struct SuccessDispatcher;
@@ -194,6 +196,30 @@ mod tests {
     #[async_trait]
     impl PeerRoutingDispatcher for SuccessDispatcher {
         async fn dispatch(&self, event: &PeerRoutingEvent) -> HandlerOutcome<PeerDispatchSuccess> {
+            HandlerOutcome::Completed(PeerDispatchSuccess {
+                peer_host_id: "host-b".to_string(),
+                peer_agent_name: event.peer_agent_name.clone(),
+                response_text: format!("echo: {}", event.prompt),
+                stop_reason: "end_turn".to_string(),
+            })
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingDispatcher {
+        calls: Arc<Mutex<Vec<PeerRoutingEvent>>>,
+    }
+
+    impl RecordingDispatcher {
+        fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait]
+    impl PeerRoutingDispatcher for RecordingDispatcher {
+        async fn dispatch(&self, event: &PeerRoutingEvent) -> HandlerOutcome<PeerDispatchSuccess> {
+            self.calls.lock().unwrap().push(event.clone());
             HandlerOutcome::Completed(PeerDispatchSuccess {
                 peer_host_id: "host-b".to_string(),
                 peer_agent_name: event.peer_agent_name.clone(),
@@ -272,7 +298,7 @@ mod tests {
 
         assert!(
             match_peer_routing_event(&envelope).is_none(),
-            "non-prompt_peer tool calls must not match the peer-routing subscriber"
+            "DSV-12 ConcurrentResolutionIsolatedByKey: non-prompt_peer tool calls must not match the peer-routing subscriber"
         );
     }
 
@@ -300,7 +326,7 @@ mod tests {
         };
 
         let HandlerOutcome::Completed(completion) = subscriber.handle(event.clone()).await else {
-            panic!("peer routing should complete successfully");
+            panic!("DSV-05 TraceContextPropagated: peer routing should complete successfully with caller-local trace context");
         };
 
         assert_eq!(completion.session_id, event.session_id);
@@ -310,7 +336,7 @@ mod tests {
         assert_eq!(completion.response_text, "echo: hello");
         assert!(
             !completion.meta.contains_key("extra"),
-            "completion metadata must carry only trace lineage, not ad hoc cross-session fields"
+            "DSV-05 TraceContextPropagated: completion metadata must carry only trace lineage, not ad hoc cross-session fields"
         );
         assert_eq!(
             completion.meta.get("traceparent").and_then(Value::as_str),
@@ -365,11 +391,71 @@ mod tests {
 
         assert!(
             subscriber.is_completed(&event, &[remote.clone(), matching.clone()]),
-            "matching caller-local completion must satisfy the subscriber"
+            "DSV-01 CompletionKeyUnique: matching caller-local completion must satisfy the subscriber exactly once"
         );
         assert!(
             !subscriber.is_completed(&event, &[remote]),
-            "remote child session ids must not satisfy caller-local completion"
+            "DSV-02 ReplayIdempotent: replaying a remote child-session ack must not satisfy the caller-local completion key"
+        );
+    }
+
+    #[test]
+    fn replay_skips_duplicate_peer_dispatch_when_ack_already_exists() {
+        let dispatcher = RecordingDispatcher::default();
+        let subscriber = PeerRoutingSubscriber::new(Arc::new(dispatcher.clone()));
+        let mut driver = crate::DurableSubscriberDriver::new();
+        driver.register_active(subscriber.clone());
+        assert_eq!(
+            driver.registrations(),
+            vec![crate::SubscriberRegistration {
+                name: "peer_routing".to_string(),
+                mode: crate::SubscriberMode::Active,
+            }],
+            "DSV-02 ReplayIdempotent: a fresh driver must register the peer_routing profile before replay suppresses duplicate dispatch",
+        );
+
+        let event_envelope = prompt_peer_envelope(
+            serde_json::json!({
+                "server": "fireline-peer",
+                "tool": "prompt_peer",
+                "params": {
+                    "agentName": "agent-b",
+                    "prompt": "hello across mesh"
+                }
+            }),
+            Map::new(),
+        );
+        let event = subscriber
+            .matches(&event_envelope)
+            .expect("DSV-02 ReplayIdempotent: prompt_peer envelope should still match during replay");
+        let replay_log = vec![StreamEnvelope::from_json(serde_json::json!({
+            "type": "peer_delivery_acknowledged",
+            "key": "session-a:tool-1",
+            "headers": { "operation": "insert" },
+            "value": {
+                "sessionId": "session-a",
+                "toolCallId": "tool-1",
+                "peerHostId": "host-b",
+                "peerAgentName": "agent-b",
+                "responseText": "ok",
+                "stopReason": "end_turn"
+            }
+        }))
+        .expect("valid peer completion envelope")];
+
+        assert!(
+            subscriber.is_completed(&event, &replay_log),
+            "DSV-02 ReplayIdempotent: replay with a preexisting peer_delivery_acknowledged completion must mark the peer event complete",
+        );
+        let should_dispatch = !subscriber.is_completed(&event, &replay_log);
+        assert!(
+            !should_dispatch,
+            "DSV-02 ReplayIdempotent: replay must skip a duplicate peer dispatch when the caller-local ack already exists",
+        );
+        assert_eq!(
+            dispatcher.call_count(),
+            0,
+            "DSV-02 ReplayIdempotent: replay suppression must keep peer dispatch side effects at zero",
         );
     }
 }

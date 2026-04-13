@@ -1053,7 +1053,7 @@ mod tests {
         assert!(WebhookEventSelector::Kind("permission".to_string()).matches(&event));
         assert!(
             !WebhookEventSelector::Kind("tool_call".to_string()).matches(&event),
-            "selector should only fall back to the envelope type when the kind does not match"
+            "DSV-12 ConcurrentResolutionIsolatedByKey: selector fallback must not match unrelated event kinds"
         );
         assert!(
             WebhookEventSelector::Exact {
@@ -1072,7 +1072,7 @@ mod tests {
         let outcome = subscriber.handle(prompt_event()).await;
         let completion = match outcome {
             HandlerOutcome::Completed(completion) => completion,
-            other => panic!("expected completed webhook delivery, got {other:?}"),
+            other => panic!("DSV-05 TraceContextPropagated: expected completed webhook delivery, got {other:?}"),
         };
 
         let captured = server.captured().await;
@@ -1083,7 +1083,8 @@ mod tests {
                 .headers
                 .get("traceparent")
                 .and_then(|value| value.to_str().ok()),
-            Some("00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01")
+            Some("00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"),
+            "DSV-05 TraceContextPropagated: webhook POST must carry traceparent from the source event"
         );
         assert_eq!(
             request
@@ -1132,7 +1133,8 @@ mod tests {
             Some(CompletionKey::prompt(
                 SessionId::from("session-1"),
                 RequestId::from("req-1".to_string())
-            ))
+            )),
+            "DSV-01 CompletionKeyUnique: webhook completion must stay on the canonical prompt key"
         );
         assert_eq!(
             completion
@@ -1162,7 +1164,7 @@ mod tests {
             .await?;
         let outcome = match result {
             WebhookDispatchResult::Delivered(outcome) => outcome,
-            other => panic!("expected delivered webhook dispatch, got {other:?}"),
+            other => panic!("DSV-03 RetryBounded: expected delivered webhook dispatch, got {other:?}"),
         };
         assert_eq!(outcome.attempts, 2);
         assert_eq!(server.captured().await.len(), 2);
@@ -1187,7 +1189,7 @@ mod tests {
             .await?;
         let record = match result {
             WebhookDispatchResult::DeadLettered(record) => record,
-            other => panic!("expected dead-lettered webhook dispatch, got {other:?}"),
+            other => panic!("DSV-04 DeadLetterTerminal: expected dead-lettered webhook dispatch, got {other:?}"),
         };
         assert_eq!(record.attempts, 3);
         assert_eq!(failure_server.captured().await.len(), 3);
@@ -1267,6 +1269,53 @@ mod tests {
         );
 
         stream_server.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replay_skips_duplicate_webhook_post_when_completion_already_exists() -> Result<()> {
+        let server = TestWebhookServer::spawn(VecDeque::from([StatusCode::OK])).await?;
+        let subscriber = WebhookSubscriber::new(subscriber_config(server.url.clone()));
+        let mut driver = crate::DurableSubscriberDriver::new();
+        driver.register_active(subscriber.clone());
+        assert_eq!(
+            driver.registrations(),
+            vec![crate::SubscriberRegistration {
+                name: "webhook_subscriber".to_string(),
+                mode: crate::SubscriberMode::Active,
+            }],
+            "DSV-02 ReplayIdempotent: a fresh driver must register the webhook_subscriber profile before replay suppression is evaluated",
+        );
+
+        let event = prompt_event();
+        let matched = subscriber
+            .matches(&event)
+            .expect("DSV-02 ReplayIdempotent: webhook should still match the replayed permission_request");
+        let completion = WebhookDelivered::from_event("slack-approvals", &event, 200)?;
+        let replay_log = vec![StreamEnvelope::from_json(serde_json::json!({
+            "type": WEBHOOK_COMPLETION_TYPE,
+            "key": "slack-approvals:prompt:session-1:req-1:delivered",
+            "headers": { "operation": "insert" },
+            "value": completion,
+        }))
+        .expect("decode webhook completion envelope")];
+
+        assert!(
+            subscriber.is_completed(&matched, &replay_log),
+            "DSV-02 ReplayIdempotent: replay with a preexisting webhook_delivered completion must mark the event complete",
+        );
+        let should_dispatch = !subscriber.is_completed(&matched, &replay_log);
+        assert!(
+            !should_dispatch,
+            "DSV-02 ReplayIdempotent: replay must skip a duplicate webhook POST when webhook_delivered already exists",
+        );
+        assert_eq!(
+            server.captured().await.len(),
+            0,
+            "DSV-02 ReplayIdempotent: replay suppression must keep webhook side effects at zero",
+        );
+
+        server.shutdown().await;
         Ok(())
     }
 
