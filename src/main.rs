@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use durable_streams::{Client as DurableStreamsClient, CreateOptions};
-use fireline_harness::TopologySpec;
+use fireline_harness::{TopologySpec, emit_host_endpoints_persisted};
 use fireline_host::bootstrap::{self, BootstrapConfig};
 use fireline_host::control_plane::{self, HostConfig, ProviderMode};
 use fireline_resources::{
@@ -151,6 +151,10 @@ struct Cli {
     /// Optional externally reachable state stream URL to register instead of the bind URL.
     #[arg(long, env = "FIRELINE_ADVERTISED_STATE_STREAM_URL", hide = true)]
     advertised_state_stream_url: Option<String>,
+
+    /// Optional control-plane base URL for hosted boot primitives.
+    #[arg(long, env = "FIRELINE_CONTROL_PLANE_URL", hide = true)]
+    control_plane_url: Option<String>,
 
     /// Optional host topology JSON payload.
     #[arg(long)]
@@ -377,6 +381,9 @@ async fn run_direct_host(
     };
 
     log_runtime_started(&descriptor);
+    emit_host_endpoints_persisted(&descriptor.state.url, &descriptor)
+        .await
+        .context("persist runtime_endpoints for direct host")?;
     tokio::signal::ctrl_c().await.ok();
     handle.shutdown().await
 }
@@ -430,7 +437,7 @@ async fn run_managed_runtime(
         state_stream: cli.state_stream,
         durable_streams_url,
         peer_directory_path,
-        control_plane_url: None,
+        control_plane_url: cli.control_plane_url.clone(),
         topology,
     })
     .await?;
@@ -458,6 +465,25 @@ async fn run_managed_runtime(
 
     println!("FIRELINE_READY\t{}", serde_json::to_string(&descriptor)?);
     log_managed_runtime_started(&host_key, &descriptor);
+    let host_descriptor = HostDescriptor {
+        host_key,
+        host_id: handle.host_id.clone(),
+        node_id,
+        provider: sandbox_provider_kind_from_name(&descriptor.provider),
+        provider_instance_id: cli
+            .provider_instance_id
+            .clone()
+            .unwrap_or_else(|| handle.host_id.clone()),
+        status: HostStatus::Ready,
+        acp: descriptor.acp.clone(),
+        state: descriptor.state.clone(),
+        helper_api_base_url: None,
+        created_at_ms: started_at_ms,
+        updated_at_ms: started_at_ms,
+    };
+    emit_host_endpoints_persisted(&host_descriptor.state.url, &host_descriptor)
+        .await
+        .context("persist runtime_endpoints for managed runtime")?;
     tokio::signal::ctrl_c().await.ok();
     handle.shutdown().await
 }
@@ -526,6 +552,13 @@ fn parse_provider_name(value: Option<&str>) -> Result<String> {
         Some(other) => Err(anyhow::anyhow!(
             "unsupported runtime provider kind '{other}'"
         )),
+    }
+}
+
+fn sandbox_provider_kind_from_name(value: &str) -> SandboxProviderKind {
+    match value {
+        "docker" => SandboxProviderKind::Docker,
+        _ => SandboxProviderKind::Local,
     }
 }
 

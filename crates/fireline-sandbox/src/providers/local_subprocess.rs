@@ -150,6 +150,10 @@ impl LocalSubprocessProvider {
                 .arg(peer_directory_path);
         }
 
+        if let Some(control_plane_url) = config.control_plane_url.as_ref() {
+            command.env("FIRELINE_CONTROL_PLANE_URL", control_plane_url);
+        }
+
         if !config.topology.components.is_empty() {
             command
                 .arg("--topology-json")
@@ -180,28 +184,30 @@ impl LocalSubprocessProvider {
             )
         })?;
 
-        let (descriptor, stdout_drain_task) =
-            match self.wait_for_ready_descriptor(sandbox_id, &mut child).await {
-                Ok(ready) => ready,
-                Err(error) => {
-                    let mut sandbox = SpawnedSandbox {
-                        child,
-                        stop_timeout: self.config.stop_timeout,
-                        stdout_drain_task: None,
-                    };
-                    if let Err(shutdown_error) = sandbox.try_shutdown().await {
-                        tracing::warn!(
-                            sandbox_id,
-                            error = %shutdown_error,
-                            "cleanup child sandbox after startup failure failed"
-                        );
-                        return Err(error.context(format!(
+        let (descriptor, stdout_drain_task) = match self
+            .wait_for_ready_descriptor(sandbox_id, &mut child)
+            .await
+        {
+            Ok(ready) => ready,
+            Err(error) => {
+                let mut sandbox = SpawnedSandbox {
+                    child,
+                    stop_timeout: self.config.stop_timeout,
+                    stdout_drain_task: None,
+                };
+                if let Err(shutdown_error) = sandbox.try_shutdown().await {
+                    tracing::warn!(
+                        sandbox_id,
+                        error = %shutdown_error,
+                        "cleanup child sandbox after startup failure failed"
+                    );
+                    return Err(error.context(format!(
                             "cleanup child sandbox after startup failure also failed: {shutdown_error:#}"
                         )));
-                    }
-                    return Err(error);
                 }
-            };
+                return Err(error);
+            }
+        };
 
         Ok(LocalSandboxRecord {
             descriptor,
@@ -368,9 +374,11 @@ fn labels_match(
         return true;
     };
 
-    expected
-        .iter()
-        .all(|(key, value)| actual.get(key).is_some_and(|actual_value| actual_value == value))
+    expected.iter().all(|(key, value)| {
+        actual
+            .get(key)
+            .is_some_and(|actual_value| actual_value == value)
+    })
 }
 
 fn now_ms() -> i64 {
