@@ -168,7 +168,7 @@ Hosted Fireline keeps deploy transport out of its runtime contract. Tier A boots
    - equivalent platform-native deploy commands
 7. The target platform pulls the image and starts the hosted Fireline service.
 8. On boot, the host reads the embedded spec, initializes or attaches durable-streams, and registers itself in infra-plane discovery state.
-9. If the embedded spec declares `alwaysOn`, `AlwaysOnDeploymentSubscriber` ensures the Anthropic-backed sandbox is provisioned when policy requires it.
+9. Hosted deploys stay warm by default via the `AlwaysOnDeploymentSubscriber` substrate. Cold-start opt-out is not in scope for the initial ship.
 
 ### 4.2 Tier C boot path: spec stream subscription (deferred)
 
@@ -176,7 +176,7 @@ Hosted Fireline keeps deploy transport out of its runtime contract. Tier A boots
 2. A spec resource is appended to a tenant-scoped durable stream such as `specs:tenant-{id}`.
 3. `DeploymentSpecSubscriber` materializes or updates the deployment intent from that stream.
 4. The host reconciles that intent against provider state using the same sandbox inventory and discovery streams as Tier A.
-5. If the streamed spec declares `alwaysOn`, `AlwaysOnDeploymentSubscriber` drives the wake path.
+5. Hosted deploys stay warm by default via the `AlwaysOnDeploymentSubscriber` substrate. Cold-start opt-out is not in scope for the initial ship.
 
 Tier C is intentionally deferred until the durable-subscriber profile is landed and replay-safe. Phase 1 does not depend on it.
 
