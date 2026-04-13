@@ -1,10 +1,15 @@
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, LiveMode, Offset, Producer};
 use fireline_harness::{
-    AWAKEABLE_REJECTED_KIND, AWAKEABLE_RESOLVED_KIND, AwakeableResolver, CompletionKey,
-    ResolveError, StreamEnvelope, TraceContext, WorkflowContext,
+    AWAKEABLE_RESOLVED_KIND, AwakeableResolved, AwakeableResolver, AwakeableSubscriber,
+    AWAKEABLE_REJECTED_KIND, CompletionKey, DurableSubscriberDriver, ResolveError,
+    StreamEnvelope, TraceContext, WorkflowContext,
 };
 use sacp::schema::{RequestId, SessionId, ToolCallId};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -338,6 +343,59 @@ async fn resolve_and_reject_concurrently_converge_to_first_wins() -> Result<()> 
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RaceResolution {
+    winner: String,
+}
+
+#[tokio::test]
+async fn resolve_awakeable_cross_process_duplicates_are_semantic_noop_on_replay() -> Result<()> {
+    let stream_server = stream_server::TestStreamServer::spawn().await?;
+    let key = CompletionKey::prompt(
+        SessionId::from("session-race".to_string()),
+        RequestId::from("request-race".to_string()),
+    );
+
+    let observed = race_until_duplicate_resolutions(&stream_server, &key, 16).await?;
+
+    assert_eq!(
+        observed.rows.len(),
+        2,
+        "DSV-01 regression: the stream-level race must preserve both completion envelopes once the duplicate case is hit"
+    );
+    assert_eq!(
+        observed.waiter_value, observed.first_value,
+        "DSV-01 FirstResolutionWins: live waiter must resolve to the first appended completion",
+    );
+    assert_ne!(
+        observed.waiter_value, observed.second_value,
+        "DSV-01 FirstResolutionWins: waiter must not observe the later duplicate payload",
+    );
+
+    let replayed = tokio::time::timeout(
+        Duration::from_millis(250),
+        awakeable_context(observed.stream_url.clone()).awakeable::<RaceResolution>(key.clone()),
+    )
+    .await
+    .context("timed out replaying already-resolved awakeable after duplicate race")??;
+
+    assert_eq!(
+        replayed, observed.first_value,
+        "DSV-01 + DSV-02: replay must converge to the same first resolution even when a second duplicate append exists in the log",
+    );
+
+    stream_server.shutdown().await;
+    Ok(())
+}
+
+struct DuplicateResolutionObservation {
+    stream_url: String,
+    rows: Vec<Value>,
+    first_value: RaceResolution,
+    second_value: RaceResolution,
+    waiter_value: RaceResolution,
+}
 async fn ensure_json_stream_exists(stream_url: &str) -> Result<()> {
     let client = DurableStreamsClient::new();
     let stream = client.stream(stream_url);
@@ -360,6 +418,116 @@ fn json_producer(stream_url: &str, producer_name: &str) -> Producer {
         .producer(format!("{producer_name}-{}", Uuid::new_v4()))
         .content_type("application/json")
         .build()
+}
+
+fn awakeable_context(stream_url: String) -> WorkflowContext {
+    let mut subscriber_driver = DurableSubscriberDriver::new();
+    subscriber_driver.register_passive(AwakeableSubscriber::new());
+    WorkflowContext::with_subscriber_driver(stream_url, Arc::new(subscriber_driver))
+}
+
+async fn race_until_duplicate_resolutions(
+    stream_server: &stream_server::TestStreamServer,
+    key: &CompletionKey,
+    max_attempts: usize,
+) -> Result<DuplicateResolutionObservation> {
+    for attempt in 1..=max_attempts {
+        let stream_url = stream_server.stream_url(&format!("awakeable-race-{}-{attempt}", Uuid::new_v4()));
+        ensure_json_stream_exists(&stream_url).await?;
+
+        let resolver_a =
+            AwakeableResolver::new(stream_url.clone(), json_producer(&stream_url, "awakeable-race-a"));
+        let resolver_b =
+            AwakeableResolver::new(stream_url.clone(), json_producer(&stream_url, "awakeable-race-b"));
+
+        let context = awakeable_context(stream_url.clone());
+        let waiter = tokio::spawn({
+            let key = key.clone();
+            async move { context.awakeable::<RaceResolution>(key).await }
+        });
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let value_a = RaceResolution {
+            winner: "resolver-a".to_string(),
+        };
+        let value_b = RaceResolution {
+            winner: "resolver-b".to_string(),
+        };
+
+        let resolve_a = tokio::spawn({
+            let barrier = Arc::clone(&barrier);
+            let resolver = resolver_a.clone();
+            let key = key.clone();
+            let value = value_a.clone();
+            async move {
+                barrier.wait().await;
+                resolver.resolve_awakeable(key, value, None).await
+            }
+        });
+        let resolve_b = tokio::spawn({
+            let barrier = Arc::clone(&barrier);
+            let resolver = resolver_b.clone();
+            let key = key.clone();
+            let value = value_b.clone();
+            async move {
+                barrier.wait().await;
+                resolver.resolve_awakeable(key, value, None).await
+            }
+        });
+
+        barrier.wait().await;
+        let (result_a, result_b) = tokio::join!(resolve_a, resolve_b);
+        let result_a = result_a.context("resolver A panicked")?;
+        let result_b = result_b.context("resolver B panicked")?;
+        let waiter_value = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .with_context(|| format!("timed out waiting for awakeable race completion on attempt {attempt}"))?
+            .context("awakeable race waiter panicked")??;
+
+        let rows = read_all_rows(&stream_url).await?;
+        let matching = parse_resolution_values(&rows, key)?;
+        if matching.len() == 2 {
+            assert!(
+                matches!(
+                    (&result_a, &result_b),
+                    (Ok(()), Ok(()))
+                        | (Ok(()), Err(ResolveError::AlreadyResolved(_)))
+                        | (Err(ResolveError::AlreadyResolved(_)), Ok(()))
+                ),
+                "duplicate race attempt should resolve or observe an existing completion without transport errors"
+            );
+
+            return Ok(DuplicateResolutionObservation {
+                stream_url,
+                rows,
+                first_value: matching[0].clone(),
+                second_value: matching[1].clone(),
+                waiter_value,
+            });
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "did not observe duplicate awakeable_resolved appends after {max_attempts} attempts"
+    ))
+}
+
+fn parse_resolution_values(rows: &[Value], key: &CompletionKey) -> Result<Vec<RaceResolution>> {
+    rows.iter()
+        .map(|row| StreamEnvelope::from_json(row.clone()).context("decode awakeable race envelope"))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|envelope| {
+            envelope.kind() == Some(AWAKEABLE_RESOLVED_KIND)
+                && envelope.completion_key().as_ref() == Some(key)
+        })
+        .map(|envelope| {
+            envelope
+                .value_as::<AwakeableResolved<RaceResolution>>()
+                .map(|resolved| resolved.value)
+                .ok_or_else(|| anyhow::anyhow!("decode duplicate awakeable_resolved payload"))
+        })
+        .collect()
 }
 
 async fn read_all_rows(stream_url: &str) -> Result<Vec<Value>> {
