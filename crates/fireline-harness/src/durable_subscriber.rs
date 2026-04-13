@@ -1,7 +1,7 @@
 //! Durable subscriber substrate and profile implementations.
 //!
-//! Phase 1 landed the trait surface and registration contract. Later phases add
-//! concrete profiles without replacing the underlying substrate.
+//! Concrete profiles build on the same substrate and canonical completion-key
+//! contract.
 
 use std::fmt;
 use std::sync::Arc;
@@ -268,7 +268,7 @@ impl StreamEnvelope {
     }
 }
 
-/// Registration mode for the inert Phase 1 driver.
+/// Registration mode for a durable subscriber.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscriberMode {
     Passive,
@@ -340,7 +340,7 @@ pub enum HandlerOutcome<C> {
     Failed(anyhow::Error),
 }
 
-/// Passive wait knobs. Phase 2 ports approval timeout behavior onto this.
+/// Passive wait knobs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PassiveWaitPolicy {
     pub timeout: Option<Duration>,
@@ -801,10 +801,7 @@ impl ActiveSubscriber for AlwaysOnDeploymentSubscriber {
     }
 }
 
-/// Durable subscriber driver.
-///
-/// The driver now retains passive replay/wait helpers and subscriber
-/// registration. Later active profiles hang off the same surface.
+/// Registration, replay, and delivery driver for durable subscribers.
 #[derive(Default)]
 pub struct DurableSubscriberDriver {
     registrations: Vec<Box<dyn ErasedRegistration>>,
