@@ -744,7 +744,7 @@ function sessionTurns(sessionId: string): PromptTurnRow[] {
   if (!stateDb) {
     return [];
   }
-  return [...stateDb.promptTurns.toArray]
+  return [...stateDb.promptRequests.toArray]
     .filter((turn) => turn.sessionId === sessionId)
     .sort((left, right) => left.startedAt - right.startedAt);
 }

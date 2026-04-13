@@ -5,10 +5,11 @@ export type {
   RequestId,
   ToolCallId,
   SessionUpdate,
+  StopReason,
   PromptRequestRef,
   ToolInvocationRef,
 } from './acp-types.js'
-export { requestIdCollectionKey } from './acp-types.js'
+export { requestIdCollectionKey, promptRequestCollectionKey } from './acp-types.js'
 
 export {
   createFirelineDB,
@@ -19,13 +20,12 @@ export {
 
 export type {
   ConnectionRow,
+  PromptRequestRow,
   PromptTurnRow,
-  PendingRequestRow,
   PermissionRow,
   TerminalRow,
   RuntimeInstanceRow,
   SessionRow,
-  ChildSessionEdgeRow,
   ChunkRow,
   ConnectionStatus,
 } from './schema.js'
@@ -34,12 +34,14 @@ export {
   createQueuedTurnsCollection,
   createActiveTurnsCollection,
   createPendingPermissionsCollection,
+  createSessionPromptRequestsCollection,
   createSessionTurnsCollection,
-  createConnectionTurnsCollection,
+  createRequestChunksCollection,
   createTurnChunksCollection,
   createSessionPermissionsCollection,
+  type SessionPromptRequestsOptions,
   type SessionTurnsOptions,
-  type ConnectionTurnsOptions,
+  type RequestChunksOptions,
   type TurnChunksOptions,
   type SessionPermissionsOptions,
 } from './collections/index.js'

@@ -51,7 +51,7 @@ export function buildSessionLogs(
       logs.push({
         timestamp: new Date(turn.completedAt ?? turn.startedAt).toISOString(),
         type: "prompt_completed",
-        data: { promptTurnId: turn.promptTurnId, stopReason: turn.stopReason },
+        data: { requestId: turn.requestId, stopReason: turn.stopReason },
       });
     }
   }

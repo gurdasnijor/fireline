@@ -5,23 +5,21 @@ import { firelineState } from '../src/schema.js'
 describe('firelineState schema', () => {
   it('defines the expected collections', () => {
     expect(Object.keys(firelineState).sort()).toEqual([
-      'childSessionEdges',
       'chunks',
       'connections',
-      'pendingRequests',
       'permissions',
-      'promptTurns',
+      'promptRequests',
       'runtimeInstances',
       'sessions',
       'terminals',
     ])
   })
 
-  it('creates a valid prompt turn insert event', () => {
-    const event = firelineState.promptTurns.insert({
+  it('creates a valid prompt_request insert event', () => {
+    const event = firelineState.promptRequests.insert({
+      key: 'session-1:req-1',
       value: {
-        promptTurnId: 'turn-1',
-        logicalConnectionId: 'conn-1',
+        promptRequestKey: 'session-1:req-1',
         sessionId: 'session-1',
         requestId: 'req-1',
         text: 'hello',
@@ -30,12 +28,50 @@ describe('firelineState schema', () => {
       },
     })
 
-    expect(event.type).toBe('prompt_turn')
-    expect(event.key).toBe('turn-1')
+    expect(event.type).toBe('prompt_request')
+    expect(event.key).toBe('session-1:req-1')
     expect(event.headers.operation).toBe('insert')
   })
 
-  it('creates a valid canonical chunk insert event', () => {
+  it('creates a valid permission insert event', () => {
+    const event = firelineState.permissions.insert({
+      key: 'session-1:req-1',
+      value: {
+        permissionEventKey: 'session-1:req-1',
+        kind: 'permission_request',
+        sessionId: 'session-1',
+        requestId: 'req-1',
+        reason: 'approval required',
+        createdAtMs: 1,
+      },
+    })
+
+    expect(event.type).toBe('permission')
+    expect(event.key).toBe('session-1:req-1')
+    expect(event.headers.operation).toBe('insert')
+  })
+
+  it('creates a valid session_v2 insert event', () => {
+    const event = firelineState.sessions.insert({
+      value: {
+        sessionId: 'session-1',
+        runtimeKey: 'runtime:host-1',
+        runtimeId: 'fireline:test-host',
+        nodeId: 'node:test',
+        state: 'active',
+        supportsLoadSession: true,
+        createdAt: 1,
+        updatedAt: 1,
+        lastSeenAt: 1,
+      },
+    })
+
+    expect(event.type).toBe('session_v2')
+    expect(event.key).toBe('session-1')
+    expect(event.headers.operation).toBe('insert')
+  })
+
+  it('creates a valid chunk_v2 insert event', () => {
     const event = firelineState.chunks.insert({
       value: {
         chunkKey: 'chunk:sess-1:req-1:0',
@@ -51,25 +87,6 @@ describe('firelineState schema', () => {
 
     expect(event.type).toBe('chunk_v2')
     expect(event.key).toBe('chunk:sess-1:req-1:0')
-    expect(event.headers.operation).toBe('insert')
-  })
-
-  it('creates a valid child-session edge insert event', () => {
-    const event = firelineState.childSessionEdges.insert({
-      value: {
-        edgeId: 'edge-1',
-        traceId: 'trace-1',
-        parentRuntimeId: 'runtime-a',
-        parentSessionId: 'session-a',
-        parentPromptTurnId: 'turn-a',
-        childRuntimeId: 'runtime-b',
-        childSessionId: 'session-b',
-        createdAt: 1,
-      },
-    })
-
-    expect(event.type).toBe('child_session_edge')
-    expect(event.key).toBe('edge-1')
     expect(event.headers.operation).toBe('insert')
   })
 })

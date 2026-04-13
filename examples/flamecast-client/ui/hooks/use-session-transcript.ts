@@ -17,7 +17,7 @@ export function useSessionTranscript(sessionId: string) {
   const sessionTurnsCollection = useMemo(
     () =>
       createSessionTurnsCollection({
-        promptTurns: db.promptTurns,
+        promptRequests: db.promptRequests,
         sessionId,
       }),
     [db, sessionId],
@@ -42,6 +42,7 @@ export function useSessionTranscript(sessionId: string) {
     const chunkCollections = turnRows.map((turn) =>
       createTurnChunksCollection({
         chunks: db.chunks,
+        sessionId: turn.sessionId,
         requestId: turn.requestId,
       }),
     );

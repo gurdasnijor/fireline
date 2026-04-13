@@ -15,7 +15,7 @@ export function useSession(id: string) {
     [db, id],
   );
   const liveTurns = useLiveQuery(
-    (q) => q.from({ t: db.promptTurns }).where(({ t }) => eq(t.sessionId, id)),
+    (q) => q.from({ t: db.promptRequests }).where(({ t }) => eq(t.sessionId, id)),
     [db, id],
   );
   const livePermissions = useLiveQuery(
@@ -82,7 +82,7 @@ function mergeSession(
         items: [],
         size: 0,
       },
-      runtime: row.runtimeKey,
+      runtime: undefined,
       title,
     } satisfies Session);
 

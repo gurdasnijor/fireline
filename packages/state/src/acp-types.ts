@@ -2,6 +2,7 @@ import type {
   RequestId,
   SessionId,
   SessionUpdate,
+  StopReason,
   ToolCallId,
 } from '@agentclientprotocol/sdk'
 
@@ -17,7 +18,7 @@ import type {
 // The ACP SDK currently exposes these as structural string/JSON-RPC aliases,
 // not nominal brands. Phase 1 intentionally does not add local branding.
 
-export type { SessionId, RequestId, ToolCallId, SessionUpdate }
+export type { SessionId, RequestId, ToolCallId, SessionUpdate, StopReason }
 
 export interface PromptRequestRef {
   readonly sessionId: import('@agentclientprotocol/sdk').SessionId
@@ -31,4 +32,11 @@ export interface ToolInvocationRef {
 
 export function requestIdCollectionKey(requestId: RequestId): string | number {
   return requestId === null ? 'null' : requestId
+}
+
+export function promptRequestCollectionKey(
+  sessionId: SessionId,
+  requestId: RequestId,
+): string {
+  return `${sessionId}:${requestIdCollectionKey(requestId)}`
 }

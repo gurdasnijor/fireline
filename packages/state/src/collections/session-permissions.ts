@@ -1,12 +1,12 @@
 import { createLiveQueryCollection } from '@tanstack/db'
 import type { Collection } from '@tanstack/db'
 
-import { requestIdCollectionKey } from '../acp-types.js'
-import type { PermissionRow } from '../schema.js'
+import type { SessionId } from '../acp-types.js'
+import { permissionRowKey, type PermissionRow } from '../schema.js'
 
 export interface SessionPermissionsOptions {
-  permissions: Collection<PermissionRow>
-  sessionId: string
+  permissions: Collection<PermissionRow, string>
+  sessionId: SessionId
 }
 
 /**
@@ -16,7 +16,7 @@ export interface SessionPermissionsOptions {
  */
 export function createSessionPermissionsCollection(
   opts: SessionPermissionsOptions,
-): Collection<PermissionRow> {
+): Collection<PermissionRow, string> {
   const { sessionId } = opts
   return createLiveQueryCollection({
     query: (q: any) =>
@@ -24,6 +24,6 @@ export function createSessionPermissionsCollection(
         .from({ p: opts.permissions })
         .orderBy(({ p }: { p: PermissionRow }) => p.createdAt, 'asc')
         .fn.where(({ p }: { p: PermissionRow }) => p.sessionId === sessionId),
-    getKey: (row: PermissionRow) => requestIdCollectionKey(row.requestId),
-  }) as unknown as Collection<PermissionRow>
+    getKey: (row: PermissionRow) => permissionRowKey(row),
+  }) as unknown as Collection<PermissionRow, string>
 }

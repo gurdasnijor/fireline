@@ -10,7 +10,7 @@ export function useSessions() {
   const db = useFirelineDb();
 
   const liveSessions = useLiveQuery((q) => q.from({ s: db.sessions }), [db]);
-  const liveTurns = useLiveQuery((q) => q.from({ t: db.promptTurns }), [db]);
+  const liveTurns = useLiveQuery((q) => q.from({ t: db.promptRequests }), [db]);
   const livePermissions = useLiveQuery((q) => q.from({ p: db.permissions }), [db]);
   const metadata = useQuery({
     queryKey: ["session-cache"],
@@ -95,7 +95,7 @@ function mergeSessions(
         pendingPermission: null,
         fileSystem: null,
         promptQueue: null,
-        runtime: row.runtimeKey,
+        runtime: undefined,
         title: titleBySession.get(row.sessionId) ?? row.sessionId,
       } satisfies Session);
 

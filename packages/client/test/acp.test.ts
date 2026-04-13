@@ -97,7 +97,7 @@ describe('client.acp.connect', () => {
 
         const promptTurn = await waitFor(
           () =>
-            db.collections.promptTurns.toArray.find(
+            db.collections.promptRequests.toArray.find(
               (turn) => turn.sessionId === session.sessionId && turn.state === 'completed',
             ),
           5_000,
@@ -110,13 +110,17 @@ describe('client.acp.connect', () => {
           () =>
             db.collections.chunks.toArray.find(
               (entry) =>
-                entry.promptTurnId === promptTurn?.promptTurnId && entry.content.includes('Hello'),
+                entry.sessionId === promptTurn?.sessionId &&
+                entry.requestId === promptTurn?.requestId &&
+                entry.update.sessionUpdate === 'agent_message_chunk' &&
+                entry.update.content.type === 'text' &&
+                entry.update.content.text.includes('Hello'),
             ),
           5_000,
         )
 
         expect(chunk).toBeDefined()
-        expect(chunk?.type).toBe('text')
+        expect(chunk?.update.sessionUpdate).toBe('agent_message_chunk')
       } finally {
         await acp.close()
         db.close()

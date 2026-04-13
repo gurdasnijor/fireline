@@ -1,17 +1,33 @@
 import { createLiveQueryCollection } from '@tanstack/db'
 import type { Collection } from '@tanstack/db'
 
-import type { PromptTurnRow } from '../schema.js'
+import { promptRequestRowKey, type PromptRequestRow } from '../schema.js'
+
+interface PromptRequestSourceOptions {
+  promptRequests?: Collection<PromptRequestRow, string>
+  promptTurns?: Collection<PromptRequestRow, string>
+}
 
 export function createQueuedTurnsCollection(
-  opts: { promptTurns: Collection<PromptTurnRow> },
-): Collection<PromptTurnRow> {
+  opts: PromptRequestSourceOptions,
+): Collection<PromptRequestRow, string> {
+  const promptRequests = resolvePromptRequests(opts)
   return createLiveQueryCollection({
     query: (q: any) =>
       q
-        .from({ t: opts.promptTurns })
-        .orderBy(({ t }: { t: PromptTurnRow }) => t.position ?? 0, 'asc')
-        .fn.where(({ t }: { t: PromptTurnRow }) => t.state === 'queued'),
-    getKey: (row: PromptTurnRow) => row.promptTurnId,
-  }) as unknown as Collection<PromptTurnRow>
+        .from({ t: promptRequests })
+        .orderBy(({ t }: { t: PromptRequestRow }) => t.position ?? 0, 'asc')
+        .fn.where(({ t }: { t: PromptRequestRow }) => t.state === 'queued'),
+    getKey: (row: PromptRequestRow) => promptRequestRowKey(row),
+  }) as unknown as Collection<PromptRequestRow, string>
+}
+
+function resolvePromptRequests(
+  opts: PromptRequestSourceOptions,
+): Collection<PromptRequestRow, string> {
+  const promptRequests = opts.promptRequests ?? opts.promptTurns
+  if (!promptRequests) {
+    throw new Error('createQueuedTurnsCollection requires promptRequests')
+  }
+  return promptRequests
 }

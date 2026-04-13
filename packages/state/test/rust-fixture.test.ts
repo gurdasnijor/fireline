@@ -6,13 +6,18 @@ import { z } from 'zod'
 import {
   chunkSchema,
   connectionSchema,
-  pendingRequestSchema,
-  promptTurnSchema,
   runtimeInstanceSchema,
   sessionSchema,
 } from '../src/schema.js'
 
 const requestIdSchema = z.union([z.null(), z.string(), z.number().int()])
+const stopReasonSchema = z.enum([
+  'end_turn',
+  'max_tokens',
+  'max_turn_requests',
+  'refusal',
+  'cancelled',
+])
 
 const stateHeadersSchema = z
   .object({
@@ -40,40 +45,104 @@ const legacyChunkSchema = z
     seq: z.number(),
     createdAt: z.number(),
   })
+  .passthrough()
+
+const legacyPromptTurnSchema = z
+  .object({
+    promptTurnId: z.string(),
+    logicalConnectionId: z.string(),
+    sessionId: z.string(),
+    requestId: requestIdSchema,
+    text: z.string().optional(),
+    state: z.enum([
+      'queued',
+      'active',
+      'completed',
+      'cancel_requested',
+      'cancelled',
+      'broken',
+      'timed_out',
+    ]),
+    position: z.number().optional(),
+    stopReason: stopReasonSchema.optional(),
+    startedAt: z.number(),
+    completedAt: z.number().optional(),
+  })
+  .passthrough()
+
+const legacySessionSchema = z
+  .object({
+    sessionId: z.string(),
+    runtimeKey: z.string(),
+    runtimeId: z.string(),
+    nodeId: z.string(),
+    logicalConnectionId: z.string(),
+    state: z.enum(['active', 'broken', 'closed']),
+    supportsLoadSession: z.boolean(),
+    createdAt: z.number(),
+    updatedAt: z.number(),
+    lastSeenAt: z.number(),
+  })
+  .passthrough()
+
+const promptRequestEventValueSchema = z
+  .object({
+    sessionId: z.string(),
+    requestId: requestIdSchema,
+    text: z.string().optional(),
+    state: z.enum([
+      'queued',
+      'active',
+      'completed',
+      'cancel_requested',
+      'cancelled',
+      'broken',
+      'timed_out',
+    ]),
+    position: z.number().optional(),
+    stopReason: stopReasonSchema.optional(),
+    startedAt: z.number(),
+    completedAt: z.number().optional(),
+  })
+  .strict()
+
+const permissionEventValueSchema = z
+  .object({
+    kind: z.enum(['permission_request', 'approval_resolved']),
+    sessionId: z.string(),
+    requestId: requestIdSchema.optional(),
+    toolCallId: z.string().optional(),
+    allow: z.boolean().optional(),
+    resolvedBy: z.string().optional(),
+    reason: z.string().optional(),
+    createdAtMs: z.number(),
+  })
+  .strict()
+
+const sessionEventValueSchema = sessionSchema
+  .extend({
+    runtimeKey: z.string(),
+    runtimeId: z.string(),
+    nodeId: z.string(),
+  })
+  .strict()
+
+const chunkEventValueSchema = chunkSchema
+  .extend({
+    chunkKey: z.string(),
+  })
   .strict()
 
 const strictValueSchemas = {
   chunk: legacyChunkSchema,
-  chunk_v2: chunkSchema.strict(),
+  chunk_v2: chunkEventValueSchema,
   connection: connectionSchema.strict(),
-  pending_request: pendingRequestSchema.strict(),
-  prompt_request: z
-    .object({
-      sessionId: z.string(),
-      requestId: requestIdSchema,
-      text: z.string().optional(),
-      state: z.enum(['active', 'completed', 'broken']),
-      stopReason: z.string().optional(),
-      startedAt: z.number(),
-      completedAt: z.number().optional(),
-    })
-    .strict(),
-  prompt_turn: promptTurnSchema.strict(),
+  permission: permissionEventValueSchema,
+  prompt_request: promptRequestEventValueSchema,
+  prompt_turn: legacyPromptTurnSchema,
   runtime_instance: runtimeInstanceSchema.strict(),
-  session: sessionSchema.strict(),
-  session_v2: z
-    .object({
-      sessionId: z.string(),
-      runtimeKey: z.string(),
-      runtimeId: z.string(),
-      nodeId: z.string(),
-      state: z.enum(['active', 'broken', 'closed']),
-      supportsLoadSession: z.boolean(),
-      createdAt: z.number(),
-      updatedAt: z.number(),
-      lastSeenAt: z.number(),
-    })
-    .strict(),
+  session: legacySessionSchema,
+  session_v2: sessionEventValueSchema,
 } as const
 
 describe('Rust producer fixture', () => {
@@ -92,12 +161,7 @@ describe('Rust producer fixture', () => {
 
     for (const line of lines) {
       const parsed = baseEnvelopeSchema.parse(JSON.parse(line))
-
-      // ACP canonical-identifiers Phase 3 deletes the child_session_edge writer
-      // before the fixture is regenerated.
-      if (parsed.type === 'child_session_edge') {
-        continue
-      }
+      expect(parsed.type).not.toBe('child_session_edge')
 
       const valueSchema = strictValueSchemas[parsed.type as keyof typeof strictValueSchemas]
 
