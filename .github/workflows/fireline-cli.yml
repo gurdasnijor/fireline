@@ -103,16 +103,20 @@ jobs:
       - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build @fireline/cli
+      - name: Build workspace JS packages for CLI smoke
         run: pnpm --filter @fireline/cli build
 
-      - name: Pack @fireline/cli
+      - name: Pack workspace JS tarballs
         run: |
           mkdir -p dist/npm
-          cd packages/fireline
+          cd packages/state
+          pnpm pack --pack-destination ../../dist/npm
+          cd ../client
+          pnpm pack --pack-destination ../../dist/npm
+          cd ../fireline
           pnpm pack --pack-destination ../../dist/npm
 
-      - name: Upload @fireline/cli tarball
+      - name: Upload workspace JS tarballs
         uses: actions/upload-artifact@v4
         with:
           name: fireline-cli-main
@@ -221,14 +225,18 @@ jobs:
         shell: bash
         run: |
           mkdir -p smoke
-          MAIN_TGZ=$(find dist/npm/main -name '*.tgz' | head -n 1)
+          MAIN_TGZ=$(find dist/npm/main -name 'fireline-cli-*.tgz' | head -n 1)
+          CLIENT_TGZ=$(find dist/npm/main -name 'fireline-client-*.tgz' | head -n 1)
+          STATE_TGZ=$(find dist/npm/main -name 'fireline-state-*.tgz' | head -n 1)
           PLATFORM_TGZ=$(find dist/npm/platform -name '*.tgz' | head -n 1)
           cat > smoke/package.json <<EOF
           {
             "name": "fireline-cli-smoke",
             "private": true,
             "dependencies": {
+              "@fireline/client": "file:../${CLIENT_TGZ}",
               "@fireline/cli": "file:../${MAIN_TGZ}",
+              "@fireline/state": "file:../${STATE_TGZ}",
               "${{ matrix.package }}": "file:../${PLATFORM_TGZ}"
             }
           }
