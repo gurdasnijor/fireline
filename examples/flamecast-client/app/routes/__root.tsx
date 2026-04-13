@@ -93,7 +93,7 @@ function Breadcrumbs({
     return (
       <>
         <BreadcrumbSeparator />
-        <span className="font-medium">Agents</span>
+        <span className="font-medium">Templates</span>
       </>
     );
   }

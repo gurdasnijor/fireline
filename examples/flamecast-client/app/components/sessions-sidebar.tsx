@@ -143,6 +143,9 @@ export function SessionsSidebar() {
                 </div>
                 <div className="grid flex-1 text-left text-sm leading-tight">
                   <span className="truncate font-semibold">Flamecast</span>
+                  <span className="truncate text-[11px] text-muted-foreground">
+                    on Fireline
+                  </span>
                 </div>
               </Link>
             </SidebarMenuButton>
@@ -165,7 +168,7 @@ export function SessionsSidebar() {
                 <SidebarMenuButton asChild>
                   <Link to="/agents">
                     <TerminalIcon className="size-4" />
-                    Agents
+                    Templates
                   </Link>
                 </SidebarMenuButton>
               </SidebarMenuItem>

@@ -7,6 +7,7 @@ import {
   useStartRuntime,
   useRuntimeFileSystem,
   useFlamecastClient,
+  useMessageQueue,
 } from "@flamecast/ui";
 import { useDefaultAgentConfig } from "@/lib/default-agent-config-context";
 import { Button } from "@/components/ui/button";
@@ -42,6 +43,7 @@ function DeveloperHomePage() {
   const { config } = useDefaultAgentConfig();
   const { data: runtimes, isLoading: runtimesLoading } = useRuntimes();
   const { data: templates, isLoading: templatesLoading } = useAgentTemplates();
+  const { data: queue = [] } = useMessageQueue();
 
   // --- Runtime type selection (default: first) ---
   const defaultRuntime = runtimes?.[0]?.typeName ?? "";
@@ -110,6 +112,11 @@ function DeveloperHomePage() {
   });
 
   const isReady = !runtimesLoading && !templatesLoading && runtimes && runtimes.length > 0;
+  const runtimeCount =
+    runtimes?.flatMap((runtime) => runtime.instances).filter((instance) => instance.status === "running")
+      .length ?? 0;
+  const templateCount = templates?.length ?? 0;
+  const queuedCount = queue.filter((item) => item.status === "pending").length;
 
   // Fetch slash commands for the selected directory
   const fetchCommands = useCallback(
@@ -166,18 +173,43 @@ function DeveloperHomePage() {
   const isBusy = startRuntimeMutation.isPending || createMutation.isPending;
 
   return (
-    <div className="mx-auto flex min-h-0 w-full max-w-2xl flex-1 flex-col items-center justify-center gap-8 px-1">
+    <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col items-center justify-center gap-8 px-1">
       <div className="text-center">
+        <div className="mx-auto mb-4 inline-flex items-center rounded-full border border-primary/20 bg-primary/8 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.24em] text-primary">
+          Reference Dashboard
+        </div>
         <img
           src={flamecastMascots}
           alt="Flamecast mascots"
           className="mx-auto mb-6 w-full max-w-md"
         />
-        <h1 className="text-3xl font-bold tracking-tight">Flamecast</h1>
-        <p className="mt-2 text-sm text-muted-foreground">What would you like to work on?</p>
+        <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">Flamecast on Fireline</h1>
+        <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground sm:text-base">
+          Run the operator desk from one screen: start a runtime, open a session, queue the next
+          customer follow-up, inspect the workspace, and resolve approvals without stitching
+          together a custom admin panel.
+        </p>
       </div>
 
-      <div className="flex w-full flex-col gap-3">
+      <div className="grid w-full gap-3 sm:grid-cols-3">
+        <MetricCard
+          label="Running runtimes"
+          value={runtimeCount}
+          detail="Live Fireline sandboxes ready for new sessions."
+        />
+        <MetricCard
+          label="Agent templates"
+          value={templateCount}
+          detail="Reusable spawn profiles for the support floor."
+        />
+        <MetricCard
+          label="Queued follow-ups"
+          value={queuedCount}
+          detail="Messages parked until the target session is ready."
+        />
+      </div>
+
+      <div className="flex w-full flex-col gap-4 rounded-[28px] border border-border/70 bg-card/85 p-4 shadow-[0_24px_80px_-40px_rgba(97,54,21,0.45)] backdrop-blur sm:p-6">
         <SlashCommandInput
           fetchCommands={fetchCommands}
           onSend={handleSend}
@@ -195,7 +227,7 @@ function DeveloperHomePage() {
         {createMutation.isPending && (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <LoaderCircleIcon className="size-4 animate-spin" />
-            <span>Creating session and sending message…</span>
+            <span>Provisioning the session and queuing the first operator message…</span>
           </div>
         )}
 
@@ -368,6 +400,26 @@ function DeveloperHomePage() {
           ) : null}
         </div>
       </div>
+    </div>
+  );
+}
+
+function MetricCard({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: number;
+  detail: string;
+}) {
+  return (
+    <div className="rounded-[24px] border border-border/70 bg-background/80 px-4 py-4 text-left shadow-[0_12px_48px_-36px_rgba(97,54,21,0.4)]">
+      <div className="text-[11px] font-medium uppercase tracking-[0.22em] text-muted-foreground">
+        {label}
+      </div>
+      <div className="mt-2 text-3xl font-semibold tracking-tight text-foreground">{value}</div>
+      <div className="mt-1 text-sm leading-5 text-muted-foreground">{detail}</div>
     </div>
   );
 }

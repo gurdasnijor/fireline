@@ -15,7 +15,7 @@ import {
   type FirelineDB,
 } from "@fireline/client";
 import { SandboxAdmin } from "@fireline/client/admin";
-import { approve, secretsProxy, trace } from "@fireline/client/middleware";
+import { approve, trace } from "@fireline/client/middleware";
 import { localPath } from "@fireline/client/resources";
 import { type ChunkRow, type PermissionRow, type PromptRequestRow } from "@fireline/state";
 import type {
@@ -68,10 +68,10 @@ const serverPort = Number(process.env.PORT ?? 3001);
 const defaultRuntimeType: ProviderName = "local";
 const defaultRuntimeInstance = process.env.FLAMECAST_DEFAULT_RUNTIME ?? "workspace";
 const defaultSpawn = parseCommand(
-  process.env.AGENT_COMMAND ?? "npx -y @anthropic-ai/claude-code-acp",
+  process.env.AGENT_COMMAND ?? "npx -y @agentclientprotocol/claude-agent-acp",
 );
-const sharedSecrets = process.env.ANTHROPIC_API_KEY
-  ? { ANTHROPIC_API_KEY: { ref: "env:ANTHROPIC_API_KEY" } }
+const sharedAgentEnv = process.env.ANTHROPIC_API_KEY
+  ? { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY }
   : undefined;
 
 const admin = new SandboxAdmin({ serverUrl: firelineUrl });
@@ -639,9 +639,6 @@ async function provisionSandbox(options: {
   const resources =
     options.provider === "local" ? [localPath(workspaceRoot, workspaceRoot, false)] : [];
   const middlewareChain: Middleware[] = [trace(), approve({ scope: "tool_calls" })];
-  if (sharedSecrets) {
-    middlewareChain.push(secretsProxy(sharedSecrets));
-  }
 
   return compose(
     buildSandboxConfig({
@@ -649,7 +646,7 @@ async function provisionSandbox(options: {
       image: options.image,
       model: options.model,
       resources,
-      envVars: options.envVars,
+      envVars: mergeEnvVars(options.envVars, sharedAgentEnv),
       labels: options.labels,
     }),
     middleware(middlewareChain),
@@ -921,12 +918,25 @@ async function serveStatic(res: ServerResponse, pathname: string) {
 
 function seedTemplates() {
   const template: AgentTemplate = {
-    id: "claude-code-local",
-    name: "Claude Code",
+    id: "claude-agent-acp-local",
+    name: "Claude Agent ACP",
     spawn: defaultSpawn,
     runtime: { provider: defaultRuntimeType },
   };
   templates.set(template.id, template);
+}
+
+function mergeEnvVars(
+  sessionEnv: Record<string, string> | undefined,
+  sharedEnv: Record<string, string> | undefined,
+) {
+  if (!sessionEnv && !sharedEnv) {
+    return undefined;
+  }
+  return {
+    ...(sharedEnv ?? {}),
+    ...(sessionEnv ?? {}),
+  };
 }
 
 function sanitizeCwd(value: string): string {

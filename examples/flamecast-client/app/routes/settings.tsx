@@ -43,7 +43,8 @@ function SettingsPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Configure your Flamecast environment and default agent settings.
+            Point the dashboard at a Fireline host, choose the default operator template, and set
+            the approval posture for the demo.
           </p>
         </div>
 
@@ -67,9 +68,9 @@ function BackendUrlSection() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Backend URL</CardTitle>
+        <CardTitle className="text-base">Fireline Backend</CardTitle>
         <CardDescription>
-          The server URL that Flamecast connects to. Default: {defaultUrl}
+          The control-plane URL this dashboard talks to. Default: {defaultUrl}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -139,7 +140,8 @@ function PermissionsSection() {
       <CardHeader>
         <CardTitle className="text-base">Permissions</CardTitle>
         <CardDescription>
-          Control how agent permission requests are handled server-side.
+          Control how the reference dashboard resolves approval requests while the example is
+          running.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -153,7 +155,7 @@ function PermissionsSection() {
             </div>
             <p className="text-xs text-muted-foreground">
               Automatically approve all agent permission requests (file edits, command execution,
-              etc.) without prompting. Use with caution.
+              etc.) without prompting. Use with caution during shared demos.
             </p>
           </div>
           <Switch
@@ -207,7 +209,7 @@ function DefaultAgentConfigSection() {
       <CardHeader>
         <CardTitle className="text-base">New Agent Default Configuration</CardTitle>
         <CardDescription>
-          Defaults used when spawning agents via email, Slack, or other integrations.
+          Defaults used when the home screen starts a new Fireline-backed operator session.
         </CardDescription>
       </CardHeader>
       <CardContent>
