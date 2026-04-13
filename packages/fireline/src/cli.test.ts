@@ -175,6 +175,10 @@ test('parseArgs parses deploy target and native passthrough args', () => {
     'agent.ts',
     '--to',
     'fly',
+    '--target',
+    'production',
+    '--token',
+    'shh',
     '--name',
     'reviewer',
     '--state-stream',
@@ -187,23 +191,18 @@ test('parseArgs parses deploy target and native passthrough args', () => {
   assert.equal(args.helpFor, 'deploy')
   assert.equal(args.file, 'agent.ts')
   assert.equal(args.to, 'fly')
+  assert.equal(args.targetName, 'production')
+  assert.equal(args.token, 'shh')
   assert.equal(args.name, 'reviewer')
   assert.equal(args.stateStream, 'session-1')
   assert.deepEqual(args.passthroughArgs, ['--remote-only'])
 })
 
-test('parseArgs rejects build-only flags with deploy', () => {
-  assert.throws(
-    () => parseArgs(['deploy', 'agent.ts', '--to', 'fly', '--target', 'k8s']),
-    /--target is only valid with build/,
-  )
-})
-
-test('parseArgs requires --to for deploy', () => {
-  assert.throws(
-    () => parseArgs(['deploy', 'agent.ts']),
-    /deploy requires --to <platform>/,
-  )
+test('parseArgs allows deploy without --to so hosted config can resolve the target later', () => {
+  const args = parseArgs(['deploy', 'agent.ts'])
+  assert.equal(args.command, 'deploy')
+  assert.equal(args.file, 'agent.ts')
+  assert.equal(args.to, null)
 })
 
 test('unwrapDefaultExport peels nested tsImport default wrappers', () => {
@@ -372,7 +371,7 @@ test('createTargetScaffoldPlan refuses to overwrite an existing target file', as
 
 test('deploy builds first, writes a manifest, then runs the native deploy command', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'fireline-cli-deploy-'))
-  const calls: Array<{ command: string; args: readonly string[]; cwd?: string }> = []
+  const calls: Array<{ command: string; args: readonly string[]; cwd?: string; env?: NodeJS.ProcessEnv }> = []
   const writtenPaths: string[] = []
   const args = parseArgs([
     'deploy',
@@ -388,8 +387,9 @@ test('deploy builds first, writes a manifest, then runs the native deploy comman
   const exitCode = await deploy(args, {
     cwd: () => cwd,
     loadSpec: async () => fixtureSpec('reviewer'),
+    loadHostedConfig: async () => null,
     runChild: async (command, childArgs, options = {}) => {
-      calls.push({ command, args: [...childArgs], cwd: options.cwd })
+      calls.push({ command, args: [...childArgs], cwd: options.cwd, env: options.env })
       return 0
     },
     writeTargetScaffold: async (plan) => {
@@ -423,6 +423,7 @@ test('deploy adds install guidance when the native CLI is missing', async () => 
     () => deploy(args, {
       cwd: () => cwd,
       loadSpec: async () => fixtureSpec('reviewer'),
+      loadHostedConfig: async () => null,
       runChild: async () => {
         callCount += 1
         if (callCount === 1) return 0
@@ -432,6 +433,48 @@ test('deploy adds install guidance when the native CLI is missing', async () => 
     }),
     /Install flyctl and retry\.\nInstall flyctl: https:\/\/fly\.io\/docs\/flyctl\/install\//,
   )
+})
+
+test('deploy resolves provider and token from hosted config when --to is omitted', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'fireline-cli-deploy-'))
+  const calls: Array<{ command: string; args: readonly string[]; env?: NodeJS.ProcessEnv }> = []
+  const args = parseArgs(['deploy', 'agent.ts', '--target', 'production'])
+  const previousToken = process.env.FLY_API_TOKEN
+  process.env.FLY_API_TOKEN = 'env-fly-token'
+
+  try {
+    const exitCode = await deploy(args, {
+      cwd: () => cwd,
+      loadSpec: async () => fixtureSpec('reviewer'),
+      loadHostedConfig: async () => ({
+        defaultTarget: 'production',
+        targets: {
+          production: {
+            provider: 'fly',
+            authRef: 'FLY_API_TOKEN',
+            resourceNaming: { appName: 'reviewer-prod' },
+          },
+        },
+      }),
+      runChild: async (command, childArgs, options = {}) => {
+        calls.push({ command, args: [...childArgs], env: options.env })
+        return 0
+      },
+      writeTargetScaffold: async () => {},
+    })
+
+    assert.equal(exitCode, 0)
+    assert.equal(calls.length, 2)
+    assert.equal(calls[1].command, 'flyctl')
+    assert.equal(calls[1].env?.FLY_API_TOKEN, 'env-fly-token')
+    assert.match(String(calls[0].args[4]), /fireline-reviewer-prod:latest/)
+  } finally {
+    if (previousToken === undefined) {
+      delete process.env.FLY_API_TOKEN
+    } else {
+      process.env.FLY_API_TOKEN = previousToken
+    }
+  }
 })
 
 function fixtureSpec(name: string) {
