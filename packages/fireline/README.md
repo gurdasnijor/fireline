@@ -23,6 +23,12 @@ npx fireline run agent.ts --state-stream my-session
 # Override the sandbox provider from the spec
 npx fireline run agent.ts --provider docker
 
+# Connect the interactive REPL to a running Fireline host
+npx fireline repl
+
+# Resume a specific ACP session in the REPL
+npx fireline repl session-123
+
 # Build the hosted image locally
 npx fireline build agent.ts
 
@@ -68,8 +74,8 @@ be invoked with `npx tsx` directly.
   `kubectl apply -f <generated>`. It does not talk to a Fireline-owned
   deploy endpoint.
 - `fireline push` is still deferred to a later phase.
-- The `--repl` flag is still a stub. For now, connect any ACP client to
-  the printed ACP URL.
+- `fireline repl` connects directly to a running host at `$FIRELINE_URL`
+  (default `http://127.0.0.1:4440`) and renders an Ink-based ACP chat UI.
 
 ## Binary resolution
 

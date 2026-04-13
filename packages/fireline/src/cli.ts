@@ -11,21 +11,22 @@ import {
   findBinary,
   resolveBinary,
 } from './resolve-binary.js'
+import { runRepl } from './repl.js'
 
 export type BuildTarget = 'cloudflare' | 'docker' | 'docker-compose' | 'fly' | 'k8s'
 export type DeployTarget = 'cloudflare-containers' | 'docker-compose' | 'fly' | 'k8s'
 
 export interface ParsedArgs {
-  readonly command: 'run' | 'build' | 'deploy' | 'agents' | 'help'
-  readonly helpFor: 'general' | 'run' | 'build' | 'deploy' | 'agents'
+  readonly command: 'run' | 'build' | 'deploy' | 'agents' | 'repl' | 'help'
+  readonly helpFor: 'general' | 'run' | 'build' | 'deploy' | 'agents' | 'repl'
   readonly file: string | null
   readonly passthroughArgs: readonly string[]
   readonly port: number
   readonly streamsPort: number
   readonly stateStream: string | null
   readonly name: string | null
-  readonly repl: boolean
   readonly providerOverride: string | null
+  readonly sessionId: string | null
   readonly target: BuildTarget | null
   readonly to: DeployTarget | null
 }
@@ -91,6 +92,7 @@ Usage:
   fireline <file.ts> [flags]         Shorthand for run
   fireline build <file.ts> [flags]   Build hosted Fireline OCI image
   fireline deploy <file.ts> --to <platform> [-- <native-flags...>]
+  fireline repl [session-id]         Connect to a running Fireline ACP host
   fireline agents <command> [args]   Install ACP agents from the public registry
   fireline --help                    Show this help
 
@@ -100,7 +102,6 @@ Run flags:
   --state-stream <s>   Explicit durable state stream name (enables resume)
   --name <s>           Logical agent name     (default: from spec or 'default')
   --provider <p>       Override sandbox.provider from spec
-  --repl               Print ACP URL and wait (TODO: interactive REPL)
 
 Build flags:
   --target <platform>  Scaffold target config: cloudflare | docker | docker-compose | fly | k8s
@@ -140,7 +141,6 @@ Flags:
   --state-stream <s>   Explicit durable state stream name (enables resume)
   --name <s>           Logical agent name     (default: from spec or 'default')
   --provider <p>       Override sandbox.provider from spec
-  --repl               Print ACP URL and wait (TODO: interactive REPL)
   --help               Show this help
 `.trim()
 
@@ -198,11 +198,30 @@ Example:
   fireline agents add pi-acp
 `.trim()
 
+const REPL_HELP = `
+fireline repl — interactive ACP client for a running Fireline host
+
+Usage:
+  fireline repl
+  fireline repl <session-id>
+
+Env:
+  FIRELINE_URL          Fireline host URL (default: http://127.0.0.1:4440)
+
+Examples:
+  fireline repl
+  fireline repl session-123
+`.trim()
+
 export async function main(argv: readonly string[]): Promise<void> {
   let exitCode = 0
   try {
     const args = parseArgs(argv)
-    if (args.command === 'help' || (args.command !== 'agents' && !args.file)) {
+    if (
+      args.command === 'help' ||
+      ((args.command === 'run' || args.command === 'build' || args.command === 'deploy') &&
+        !args.file)
+    ) {
       console.log(helpText(args.helpFor))
       return
     }
@@ -210,9 +229,11 @@ export async function main(argv: readonly string[]): Promise<void> {
       ? await build(args)
       : args.command === 'deploy'
         ? await deploy(args)
-      : args.command === 'agents'
-        ? await runAgents(args)
-        : await run(args)
+        : args.command === 'repl'
+          ? await runReplCommand(args)
+        : args.command === 'agents'
+          ? await runAgents(args)
+          : await run(args)
   } catch (error) {
     console.error(`fireline: ${(error as Error).message}`)
     exitCode = 1
@@ -222,28 +243,33 @@ export async function main(argv: readonly string[]): Promise<void> {
 
 export function parseArgs(argv: readonly string[]): ParsedArgs {
   const out = {
-    command: 'run' as 'run' | 'build' | 'deploy' | 'agents' | 'help',
-    helpFor: 'run' as 'general' | 'run' | 'build' | 'deploy' | 'agents',
+    command: 'run' as 'run' | 'build' | 'deploy' | 'agents' | 'repl' | 'help',
+    helpFor: 'run' as 'general' | 'run' | 'build' | 'deploy' | 'agents' | 'repl',
     file: null as string | null,
     passthroughArgs: [] as string[],
     port: 4440,
     streamsPort: 7474,
     stateStream: null as string | null,
     name: null as string | null,
-    repl: false,
     providerOverride: null as string | null,
+    sessionId: null as string | null,
     target: null as BuildTarget | null,
     to: null as DeployTarget | null,
   }
   const seen = {
     port: false,
     streamsPort: false,
-    repl: false,
     target: false,
     to: false,
   }
   let i = 0
-  if (argv[0] === 'run' || argv[0] === 'build' || argv[0] === 'deploy' || argv[0] === 'agents') {
+  if (
+    argv[0] === 'run' ||
+    argv[0] === 'build' ||
+    argv[0] === 'deploy' ||
+    argv[0] === 'agents' ||
+    argv[0] === 'repl'
+  ) {
     out.command = argv[0]
     out.helpFor = argv[0]
     i++
@@ -259,6 +285,22 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         return { ...out, command: 'help', helpFor: 'agents' }
       }
       out.passthroughArgs = [...out.passthroughArgs, arg]
+      continue
+    }
+    if (out.command === 'repl') {
+      if (arg === '--help' || arg === '-h') {
+        return { ...out, command: 'help', helpFor: 'repl' }
+      }
+      if (arg === '--repl') {
+        throw new Error("--repl has been replaced by 'fireline repl [session-id]'")
+      }
+      if (arg?.startsWith('--')) {
+        throw new Error(`unknown flag: ${arg}`)
+      }
+      if (out.sessionId) {
+        throw new Error(`unexpected argument: ${arg}`)
+      }
+      out.sessionId = arg
       continue
     }
     if (out.command === 'deploy' && arg === '--') {
@@ -295,9 +337,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         out.to = parseDeployTarget(argv[++i])
         break
       case '--repl':
-        seen.repl = true
-        out.repl = true
-        break
+        throw new Error("--repl has been replaced by 'fireline repl [session-id]'")
       default:
         if (arg?.startsWith('--')) throw new Error(`unknown flag: ${arg}`)
         if (out.file) throw new Error(`unexpected argument: ${arg}`)
@@ -317,9 +357,6 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   if (out.command === 'build' && seen.streamsPort) {
     throw new Error('--streams-port is only valid with run')
   }
-  if (out.command === 'build' && seen.repl) {
-    throw new Error('--repl is only valid with run')
-  }
   if (out.command === 'build' && seen.to) {
     throw new Error('--to is only valid with deploy')
   }
@@ -331,9 +368,6 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   }
   if (out.command === 'deploy' && seen.streamsPort) {
     throw new Error('--streams-port is only valid with run')
-  }
-  if (out.command === 'deploy' && seen.repl) {
-    throw new Error('--repl is only valid with run')
   }
   if (out.command === 'deploy' && !seen.to) {
     throw new Error('deploy requires --to <platform>')
@@ -352,9 +386,15 @@ function helpText(topic: ParsedArgs['helpFor']): string {
       return DEPLOY_HELP
     case 'agents':
       return AGENTS_HELP
+    case 'repl':
+      return REPL_HELP
     case 'general':
       return GENERAL_HELP
   }
+}
+
+async function runReplCommand(args: ParsedArgs): Promise<number> {
+  return await runRepl({ sessionId: args.sessionId })
 }
 
 async function runAgents(args: ParsedArgs): Promise<number> {
@@ -486,9 +526,6 @@ async function run(args: ParsedArgs): Promise<number> {
     teardown.push(() => destroySandbox(agentHandle.id, args.port))
 
     printReady(agentHandle, args)
-    if (args.repl) {
-      console.log('\nREPL mode coming soon. Connect any ACP client to the URL above.')
-    }
 
     const signalCode = await waitForShutdown
     await runTeardown()

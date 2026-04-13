@@ -62,10 +62,22 @@ test('parseArgs returns agents-specific help topic', () => {
   assert.equal(args.helpFor, 'agents')
 })
 
+test('parseArgs returns repl-specific help topic', () => {
+  const args = parseArgs(['repl', '--help'])
+  assert.equal(args.command, 'help')
+  assert.equal(args.helpFor, 'repl')
+})
+
 test('parseArgs returns deploy-specific help topic', () => {
   const args = parseArgs(['deploy', '--help'])
   assert.equal(args.command, 'help')
   assert.equal(args.helpFor, 'deploy')
+})
+
+test('parseArgs captures an optional repl session id', () => {
+  const args = parseArgs(['repl', 'session-123'])
+  assert.equal(args.command, 'repl')
+  assert.equal(args.sessionId, 'session-123')
 })
 
 test('parseArgs preserves agents passthrough arguments', () => {
