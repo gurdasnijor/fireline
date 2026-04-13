@@ -1,11 +1,11 @@
 import type { ToolCallStatus } from '@agentclientprotocol/sdk'
 import {
   Box,
+  Static,
   Spacer,
   Text,
   useApp,
   useInput,
-  useWindowSize,
 } from 'ink'
 import React, {
   useEffect,
@@ -31,10 +31,9 @@ export function FirelineReplApp(props: {
     () => props.controller.getSnapshot(),
   )
   const { exit } = useApp()
-  const { rows } = useWindowSize()
   const [input, setInput] = useState('')
   const spinner = useSpinner(state.busy || state.pendingTools > 0)
-  const visibleEntries = state.entries.slice(-visibleEntryCount(rows))
+  const { committedEntries, liveEntries } = partitionTranscriptEntries(state)
 
   useInput((value, key) => {
     if (key.ctrl && value === 'c') {
@@ -108,31 +107,36 @@ export function FirelineReplApp(props: {
   })
 
   return (
-    <Box flexDirection="column" paddingX={1}>
-      <Header state={state} spinner={spinner} />
-      {state.pendingApproval ? (
-        <ApprovalPrompt
-          pending={state.pendingApproval}
-          resolving={state.resolvingApproval}
+    <>
+      <Static items={[...committedEntries]}>
+        {(entry: TranscriptEntry) => <EntryView entry={entry} key={entry.id} />}
+      </Static>
+      <Box flexDirection="column" paddingX={1}>
+        <Header state={state} spinner={spinner} />
+        {state.pendingApproval ? (
+          <ApprovalPrompt
+            pending={state.pendingApproval}
+            resolving={state.resolvingApproval}
+          />
+        ) : null}
+        <Box flexDirection="column" marginTop={1}>
+          {committedEntries.length === 0 && liveEntries.length === 0 ? (
+            <EmptyState />
+          ) : (
+            liveEntries.map((entry: TranscriptEntry) => (
+              <EntryView entry={entry} key={entry.id} />
+            ))
+          )}
+        </Box>
+        <Composer
+          busy={state.busy}
+          input={input}
+          pendingApproval={state.pendingApproval}
+          resolvingApproval={state.resolvingApproval}
+          spinner={spinner}
         />
-      ) : null}
-      <Box flexDirection="column" marginTop={1}>
-        {visibleEntries.length === 0 ? (
-          <EmptyState />
-        ) : (
-          visibleEntries.map((entry: TranscriptEntry) => (
-            <EntryView entry={entry} key={entry.id} />
-          ))
-        )}
       </Box>
-      <Composer
-        busy={state.busy}
-        input={input}
-        pendingApproval={state.pendingApproval}
-        resolvingApproval={state.resolvingApproval}
-        spinner={spinner}
-      />
-    </Box>
+    </>
   )
 }
 
@@ -357,6 +361,40 @@ function useSpinner(active: boolean): string {
   return active ? frames[index] : 'o'
 }
 
-function visibleEntryCount(rows: number): number {
-  return Math.max(4, rows - 10)
+export function partitionTranscriptEntries(state: ReplViewState): {
+  readonly committedEntries: readonly TranscriptEntry[]
+  readonly liveEntries: readonly TranscriptEntry[]
+} {
+  if (!hasActiveTurn(state)) {
+    return {
+      committedEntries: state.entries,
+      liveEntries: [],
+    }
+  }
+
+  const liveStartIndex = findLiveTurnStart(state.entries)
+  return {
+    committedEntries: state.entries.slice(0, liveStartIndex),
+    liveEntries: state.entries.slice(liveStartIndex),
+  }
+}
+
+function hasActiveTurn(state: ReplViewState): boolean {
+  return (
+    state.busy ||
+    state.pendingTools > 0 ||
+    state.pendingApproval !== null ||
+    state.resolvingApproval
+  )
+}
+
+function findLiveTurnStart(entries: readonly TranscriptEntry[]): number {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index]
+    if (entry.kind === 'message' && entry.role === 'user') {
+      return index
+    }
+  }
+
+  return entries.length
 }

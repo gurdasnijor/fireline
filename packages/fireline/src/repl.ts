@@ -442,7 +442,7 @@ async function watchApprovals(
   const restoreConsole = suppressStreamDbConsole()
   try {
     const db = await fireline.db({ stateStreamUrl })
-    const subscription = db.permissions.subscribe((rows) => {
+    const subscription = db.permissions.subscribe((rows: PendingApprovalRow[]) => {
       onPendingApproval(selectPendingApproval(rows, sessionId))
     })
 
