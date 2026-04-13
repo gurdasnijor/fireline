@@ -1,8 +1,11 @@
 export {
   AwakeableAlreadyResolvedError,
+  awakeableRejectionEnvelope,
   awakeableResolutionEnvelope,
+  rejectAwakeable,
   resolveAwakeable,
   type ResolveAwakeableOptions,
+  type RejectAwakeableOptions,
 } from './resolve-awakeable.js'
 export {
   WorkflowContext,
