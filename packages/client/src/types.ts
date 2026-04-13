@@ -1,5 +1,7 @@
 import type { FirelineAgent } from './agent.js'
+import type { ConnectedAcp } from './connect.js'
 import type { ResourceRef } from './resources.js'
+import type { Stream } from '@agentclientprotocol/sdk'
 
 export interface TopologyComponentSpec {
   readonly name: string
@@ -549,11 +551,114 @@ export interface MiddlewareChain {
 }
 
 /**
+ * Hosted Fireline transport that provisions a runtime before attaching ACP.
+ *
+ * @example `await conductor.connect_to({ kind: 'hosted', url: 'http://127.0.0.1:4440' })`
+ *
+ * @remarks Anthropic primitive: Conductor.
+ */
+export interface HostedTransport {
+  /** Stable discriminator for hosted Fireline provisioning. */
+  readonly kind: 'hosted'
+  /** Base URL for the Fireline control plane. */
+  readonly url: string
+  /** Optional bearer token forwarded to provisioning requests. */
+  readonly token?: string
+  /** Optional runtime name override for this launch. */
+  readonly name?: string
+  /** Optional durable state stream name shared across launches. */
+  readonly stateStream?: string
+  /** Optional ACP client name used during initialize. */
+  readonly clientName?: string
+}
+
+/**
+ * Direct websocket transport terminating onto an already-running ACP endpoint.
+ *
+ * @example `await conductor.connect_to({ kind: 'websocket', url: handle.acp.url })`
+ *
+ * @remarks Anthropic primitive: Conductor.
+ */
+export interface WebSocketTransport {
+  /** Stable discriminator for ACP websocket transport. */
+  readonly kind: 'websocket'
+  /** Absolute websocket URL for the ACP endpoint. */
+  readonly url: string
+  /** Optional static headers required when opening the websocket. */
+  readonly headers?: Readonly<Record<string, string>>
+  /** Optional ACP client name used during initialize. */
+  readonly clientName?: string
+}
+
+/**
+ * Native stdio transport that boots a Fireline child process and speaks ACP over stdin/stdout.
+ *
+ * @example `await conductor.connect_to({ kind: 'stdio', durableStreamsUrl: 'http://127.0.0.1:8787/v1/stream' })`
+ *
+ * @remarks Anthropic primitive: Conductor.
+ */
+export interface StdioTransport {
+  /** Stable discriminator for native ACP stdio. */
+  readonly kind: 'stdio'
+  /** Optional explicit `fireline` binary path. Defaults to `process.env.FIRELINE_BIN ?? 'fireline'`. */
+  readonly firelineBin?: string
+  /** Durable-streams base URL required by the stdio child runtime. */
+  readonly durableStreamsUrl?: string
+  /** Optional bind host for the child runtime. Defaults to `127.0.0.1`. */
+  readonly host?: string
+  /** Optional bind port for the child runtime. Defaults to `0`. */
+  readonly port?: number
+  /** Optional runtime name override for this launch. */
+  readonly name?: string
+  /** Optional durable state stream name shared across launches. */
+  readonly stateStream?: string
+  /** Optional explicit peer-directory path forwarded to the child runtime. */
+  readonly peerDirectoryPath?: string
+  /** Optional child-process working directory. */
+  readonly cwd?: string
+  /** Optional environment variables merged into the child process env. */
+  readonly env?: Readonly<Record<string, string>>
+  /** Optional ACP client name used during initialize. */
+  readonly clientName?: string
+}
+
+/**
+ * Preconstructed ACP stream transport.
+ *
+ * @example `await conductor.connect_to({ kind: 'stream', stream })`
+ *
+ * @remarks Anthropic primitive: Conductor.
+ */
+export interface StreamTransport {
+  /** Stable discriminator for an already-open ACP stream. */
+  readonly kind: 'stream'
+  /** ACP stream implementation consumed by the SDK connection constructor. */
+  readonly stream: Stream
+  /** Optional ACP client name used during initialize. */
+  readonly clientName?: string
+}
+
+type ClientConductorTransport =
+  | HostedTransport
+  | WebSocketTransport
+  | StdioTransport
+  | StreamTransport
+
+/**
+ * Transport union accepted by `Conductor.connect_to(...)`.
+ *
+ * @remarks Anthropic primitive: Conductor.
+ */
+export type ConductorTransport<
+  Role extends 'client' | 'agent' = 'client',
+> = Role extends 'client' ? ClientConductorTransport : never
+
+/**
  * Options accepted by `Harness.start()` and topology `start()` helpers.
  *
  * @example `await harness.start({ serverUrl: 'http://127.0.0.1:4440', name: 'demo' })`
  *
- * @remarks Anthropic primitive: Harness.
+ * @remarks Anthropic primitive: Conductor.
  */
 export interface StartOptions {
   /** Base URL for the Fireline host or control plane. */
@@ -569,16 +674,14 @@ export interface StartOptions {
 }
 
 /**
- * Runnable harness specification produced by `compose()`.
+ * Runnable conductor specification produced by `compose()`.
  *
- * @example `const spec: HarnessSpec<'default'> = compose(sandbox(), middleware([]), agent(['node', 'agent.mjs'])).spec`
+ * @example `const spec: ConductorSpec<'default'> = compose(sandbox(), middleware([]), agent(['node', 'agent.mjs']))`
  *
- * @remarks Anthropic primitive: Harness.
+ * @remarks Anthropic primitive: Conductor.
  */
-export interface HarnessSpec<Name extends string = string> {
-  /** Stable discriminator for serialized harness configs. */
-  readonly kind: 'harness'
-  /** Logical harness name used in stream names and future topologies. */
+interface ConductorSpecBase<Name extends string = string> {
+  /** Logical conductor name used in stream names and future topologies. */
   readonly name: Name
   /** Sandbox definition used to provision the execution environment. */
   readonly sandbox: SandboxDefinition
@@ -590,21 +693,42 @@ export interface HarnessSpec<Name extends string = string> {
   readonly stateStream?: string
 }
 
-/**
- * Public alias for the config accepted by `Sandbox.provision()`.
- *
- * @example `const config: SandboxConfig = compose(sandbox(), middleware([trace()]), agent(['node', 'agent.mjs'])).spec`
- *
- * @remarks Anthropic primitive: Harness.
- */
-export type SandboxConfig<Name extends string = string> = HarnessSpec<Name>
+export interface ConductorSpec<Name extends string = string> extends ConductorSpecBase<Name> {
+  /** Stable discriminator for serialized conductor configs. */
+  readonly kind: 'conductor'
+}
 
 /**
  * Backwards-compatible alias for serialized harness specs.
  *
- * @remarks Anthropic primitive: Harness.
+ * @deprecated Use `ConductorSpec` instead.
+ *
+ * @remarks Anthropic primitive: Conductor.
  */
-export type HarnessConfig<Name extends string = string> = HarnessSpec<Name>
+export interface HarnessSpec<Name extends string = string> extends ConductorSpecBase<Name> {
+  /** Stable discriminator retained for the migration window. */
+  readonly kind: 'harness'
+}
+
+/**
+ * Public alias for the config accepted by `Sandbox.provision()`.
+ *
+ * @example `const config: SandboxConfig = compose(sandbox(), middleware([trace()]), agent(['node', 'agent.mjs']))`
+ *
+ * @remarks Anthropic primitive: Conductor.
+ */
+export type SandboxConfig<Name extends string = string> =
+  | ConductorSpec<Name>
+  | HarnessSpec<Name>
+
+/**
+ * Backwards-compatible alias for serialized harness specs.
+ *
+ * @deprecated Use `ConductorSpec` instead.
+ *
+ * @remarks Anthropic primitive: Conductor.
+ */
+export type HarnessConfig<Name extends string = string> = SandboxConfig<Name>
 
 /**
  * Minimal handle returned after provisioning succeeds.
@@ -625,30 +749,54 @@ export interface SandboxHandle {
 }
 
 /**
- * Harness-scoped handle returned by `Harness.start()`.
+ * Conductor-scoped handle returned by `Conductor.start()`.
  *
- * @example `const handle = await harness.start({ serverUrl })`
+ * @example `const handle = await conductor.start({ serverUrl })`
  *
- * @remarks Anthropic primitive: Harness.
+ * @remarks Anthropic primitive: Conductor.
  */
 export interface HarnessHandle<Name extends string = string> extends SandboxHandle {
-  /** Logical harness name used when the handle was launched. */
+  /** Logical conductor name used when the handle was launched. */
   readonly name: Name
 }
 
 /**
- * Runnable harness value created by `compose()`.
+ * Runnable conductor value created by `compose()`.
  *
  * @example `const reviewer = compose(sandbox(), middleware([trace()]), agent(['agent'])).as('reviewer')`
  *
- * @remarks Anthropic primitive: Harness.
+ * @remarks Anthropic primitive: Conductor.
  */
-export interface Harness<Name extends string = string> extends HarnessSpec<Name> {
-  /** Returns a renamed harness while preserving sandbox, middleware, and agent config. */
-  as<NextName extends string>(name: NextName): Harness<NextName>
-  /** Provisions the harness and returns a live Fireline agent object. */
+export interface Conductor<
+  Name extends string = string,
+  Role extends 'client' | 'agent' = 'client',
+> extends ConductorSpec<Name> {
+  /** Role-direction marker reserved for future agent-facing proxy compositions. */
+  readonly role: Role
+  /** Returns a renamed conductor while preserving sandbox, middleware, and agent config. */
+  as<NextName extends string>(name: NextName): Conductor<NextName, Role>
+  /** Returns a role-cast conductor for forward-compatible proxy-chain typing. */
+  asRole<NextRole extends 'client' | 'agent'>(
+    role: NextRole,
+  ): Conductor<Name, NextRole>
+  /** Terminates the conductor onto the supplied transport and returns a live ACP connection. */
+  connect_to(transport: ConductorTransport<Role>): Promise<Role extends 'client' ? ConnectedAcp : never>
+  /**
+   * Provisions the conductor and returns a live Fireline agent handle.
+   *
+   * @deprecated Prefer `connect_to({ kind: 'hosted', ... })` for the one-call transport shape.
+   */
   start(options: StartOptions): Promise<FirelineAgent<Name>>
 }
+
+/**
+ * Backwards-compatible alias for the old Fireline-local harness name.
+ *
+ * @deprecated Use `Conductor` instead.
+ *
+ * @remarks Anthropic primitive: Conductor.
+ */
+export type Harness<Name extends string = string> = Conductor<Name, 'client'>
 
 /**
  * Rich sandbox record returned by admin reads.

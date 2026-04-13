@@ -1,12 +1,20 @@
 import { FirelineAgent } from './agent.js'
+import {
+  connectSpawnedStdio,
+  connectStream,
+  connectWebSocket,
+  type ConnectedAcp,
+} from './connect.js'
 import { requestControlPlane } from './control-plane.js'
 import type {
   AgentConfig,
   CapabilityRef,
+  Conductor,
+  ConductorSpec,
+  ConductorTransport,
   CredentialRef,
-  Harness,
-  HarnessSpec,
   DurableSubscriberEventSelector,
+  HostedTransport,
   MiddlewareChain,
   Middleware,
   SandboxConfig,
@@ -120,19 +128,19 @@ export function middleware(chain: readonly Middleware[]): MiddlewareChain {
 }
 
 /**
- * Composes sandbox, middleware, and agent specs into a runnable harness value.
+ * Composes sandbox, middleware, and agent specs into a runnable conductor value.
  *
- * @example `const harness = compose(sandbox(), middleware([trace()]), agent(['node', 'agent.mjs']))`
+ * @example `const conductor = compose(sandbox(), middleware([trace()]), agent(['node', 'agent.mjs']))`
  *
- * @remarks Anthropic primitive: Harness.
+ * @remarks Anthropic primitive: Conductor.
  */
 export function compose(
   sandboxConfig: SandboxDefinition,
   middlewareConfig: MiddlewareChain,
   agentConfig: AgentConfig,
-): Harness<'default'> {
-  return createHarness({
-    kind: 'harness',
+): Conductor<'default'> {
+  return createConductor({
+    kind: 'conductor',
     name: 'default',
     sandbox: sandboxConfig,
     middleware: middlewareConfig,
@@ -629,15 +637,61 @@ function cloneDefined<T extends object>(value: T): T {
 
 export type { SandboxConfig, SandboxHandle }
 
-function createHarness<Name extends string>(spec: HarnessSpec<Name>): Harness<Name> {
+function createConductor<
+  Name extends string,
+  Role extends 'client' | 'agent' = 'client',
+>(spec: ConductorSpec<Name>, role: Role = 'client' as Role): Conductor<Name, Role> {
   return {
     ...spec,
-    as<NextName extends string>(name: NextName): Harness<NextName> {
-      return createHarness({
+    role,
+    as<NextName extends string>(name: NextName): Conductor<NextName, Role> {
+      return createConductor({
         ...spec,
         name,
-      })
+      }, role)
     },
+    asRole<NextRole extends 'client' | 'agent'>(
+      nextRole: NextRole,
+    ): Conductor<Name, NextRole> {
+      return createConductor({
+        ...spec,
+      }, nextRole)
+    },
+    async connect_to(
+      transport: ConductorTransport<Role>,
+    ): Promise<Role extends 'client' ? ConnectedAcp : never> {
+      if (role !== 'client') {
+        throw new Error(
+          'agent-facing TypeScript conductors are reserved for a future proxy-chain rollout; connect_to currently supports client-facing conductors only',
+        )
+      }
+
+      switch ((transport as ConductorTransport<'client'>).kind) {
+        case 'hosted':
+          return connectHostedConductor(
+            spec,
+            transport as Extract<ConductorTransport<'client'>, { readonly kind: 'hosted' }>,
+          ) as Promise<Role extends 'client' ? ConnectedAcp : never>
+        case 'websocket':
+          return connectWebSocket(
+            transport as Extract<ConductorTransport<'client'>, { readonly kind: 'websocket' }>,
+            (transport as Extract<ConductorTransport<'client'>, { readonly kind: 'websocket' }>).clientName,
+          ) as Promise<Role extends 'client' ? ConnectedAcp : never>
+        case 'stream':
+          return connectStream(
+            (transport as Extract<ConductorTransport<'client'>, { readonly kind: 'stream' }>).stream,
+            (transport as Extract<ConductorTransport<'client'>, { readonly kind: 'stream' }>).clientName,
+          ) as Promise<Role extends 'client' ? ConnectedAcp : never>
+        case 'stdio':
+          return connectStdioConductor(
+            spec,
+            transport as Extract<ConductorTransport<'client'>, { readonly kind: 'stdio' }>,
+          ) as Promise<Role extends 'client' ? ConnectedAcp : never>
+      }
+    },
+    /**
+     * @deprecated Prefer `connect_to({ kind: 'hosted', ... })`.
+     */
     async start(options: StartOptions): Promise<FirelineAgent<Name>> {
       const name = options.name ?? spec.name
       const handle = await new Sandbox(options).provision({
@@ -648,9 +702,142 @@ function createHarness<Name extends string>(spec: HarnessSpec<Name>): Harness<Na
       return new FirelineAgent({
         serverUrl: options.serverUrl,
         token: options.token,
-        name: spec.name,
+        name: name as Name,
         handle,
       })
     },
+  }
+}
+
+async function connectHostedConductor<Name extends string>(
+  spec: ConductorSpec<Name>,
+  transport: HostedTransport,
+): Promise<ConnectedAcp> {
+  const name = transport.name ?? spec.name
+  const handle = await new Sandbox({
+    serverUrl: transport.url,
+    token: transport.token,
+  }).provision({
+    ...spec,
+    name,
+    stateStream: transport.stateStream ?? spec.stateStream,
+  })
+  const agentHandle = new FirelineAgent({
+    serverUrl: transport.url,
+    token: transport.token,
+    name,
+    handle,
+  })
+  const connection = await agentHandle.connect(transport.clientName)
+  const close = connection.close.bind(connection)
+
+  return Object.assign(connection, {
+    async close() {
+      const errors: unknown[] = []
+      try {
+        await close()
+      } catch (error) {
+        errors.push(error)
+      }
+      try {
+        await agentHandle.stop()
+      } catch (error) {
+        errors.push(error)
+      }
+      if (errors.length > 0) {
+        throw errors[0]
+      }
+    },
+  })
+}
+
+async function connectStdioConductor<Name extends string>(
+  spec: ConductorSpec<Name>,
+  transport: Extract<ConductorTransport<'client'>, { readonly kind: 'stdio' }>,
+): Promise<ConnectedAcp> {
+  const durableStreamsUrl =
+    transport.durableStreamsUrl ?? process.env.FIRELINE_DURABLE_STREAMS_URL
+  if (!durableStreamsUrl) {
+    throw new Error(
+      'stdio conductor transport requires durableStreamsUrl (or FIRELINE_DURABLE_STREAMS_URL)',
+    )
+  }
+
+  const firelineBin = transport.firelineBin ?? process.env.FIRELINE_BIN ?? 'fireline'
+  const args = [
+    '--acp-stdio',
+    '--host',
+    transport.host ?? '127.0.0.1',
+    '--port',
+    String(transport.port ?? 0),
+    '--name',
+    transport.name ?? spec.name,
+    '--durable-streams-url',
+    durableStreamsUrl,
+    '--topology-json',
+    JSON.stringify(
+      buildTopology(
+        spec.middleware.chain,
+        transport.name ?? spec.name,
+        spec.sandbox.fsBackend,
+      ),
+    ),
+  ]
+
+  const mountedResources = await lowerMountedResources(spec.sandbox.resources)
+  if (mountedResources.length > 0) {
+    args.push('--mounted-resources-json', JSON.stringify(mountedResources))
+  }
+  const stateStream = transport.stateStream ?? spec.stateStream
+  if (stateStream) {
+    args.push('--state-stream', stateStream)
+  }
+  if (transport.peerDirectoryPath) {
+    args.push('--peer-directory-path', transport.peerDirectoryPath)
+  }
+  args.push('--', ...spec.agent.command)
+
+  return connectSpawnedStdio(
+    {
+      command: firelineBin,
+      args,
+      cwd: transport.cwd,
+      env: transport.env,
+    },
+    transport.clientName,
+  )
+}
+
+interface MountedResourceArg {
+  readonly hostPath: string
+  readonly mountPath: string
+  readonly readOnly: boolean
+}
+
+function lowerMountedResources(
+  resources: SandboxDefinition['resources'],
+): Promise<MountedResourceArg[]> {
+  return Promise.all((resources ?? []).map(async (resource) => {
+    if (resource.source_ref.kind !== 'localPath') {
+      throw new Error(
+        `stdio conductor transport currently supports only localPath resources; received ${resource.source_ref.kind}`,
+      )
+    }
+
+    return {
+      hostPath: await resolveLocalResourcePath(resource.source_ref.path),
+      mountPath: resource.mount_path,
+      readOnly: resource.read_only ?? false,
+    }
+  }))
+}
+
+async function resolveLocalResourcePath(path: string): Promise<string> {
+  const { realpath } = await import('node:fs/promises')
+  const { resolve } = await import('node:path')
+  try {
+    return await realpath(path)
+  } catch {
+    return resolve(path)
   }
 }

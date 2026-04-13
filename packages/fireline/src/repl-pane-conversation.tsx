@@ -175,19 +175,29 @@ function ApprovalCard(props: {
         Tool Approval
       </Text>
       <Text bold>{card.toolName}</Text>
-      <Text color={REPL_PALETTE.subdued}>
-        request {String(props.pending.requestId)}
-        {props.pending.toolCallId ? `  tool ${props.pending.toolCallId}` : ''}
-      </Text>
+      <Box flexDirection="column" marginTop={1}>
+        <Text color={REPL_PALETTE.subdued}>canonical ids</Text>
+        <Text color={REPL_PALETTE.subdued}>  session {props.pending.sessionId}</Text>
+        <Text color={REPL_PALETTE.subdued}>  request {String(props.pending.requestId)}</Text>
+        <Text color={REPL_PALETTE.subdued}>
+          {'  '}
+          tool {props.pending.toolCallId ?? 'n/a'}
+        </Text>
+        <Text color={REPL_PALETTE.subdued}>
+          {'  '}
+          created {formatTimestamp(props.pending.createdAt)}
+        </Text>
+      </Box>
       <Box flexDirection="column" marginTop={1}>
         <Text color={REPL_PALETTE.subdued}>arguments</Text>
         {card.argumentLines.map((line: string, index: number) => (
           <Text key={`approval-arg:${index}`}>  {line}</Text>
         ))}
       </Box>
-      <Text color={REPL_PALETTE.subdued} italic>
-        reason: {card.reason}
-      </Text>
+      <Box flexDirection="column" marginTop={1}>
+        <Text color={REPL_PALETTE.subdued}>reason</Text>
+        <Text>{card.reason}</Text>
+      </Box>
       <Box marginTop={1}>
         <ApprovalActionButton
           focused={props.focusedAction === 'allow'}
@@ -529,6 +539,10 @@ function shortStreamLabel(stateStreamUrl: string | null): string {
   } catch {
     return truncateMiddle(stateStreamUrl, 36)
   }
+}
+
+function formatTimestamp(value: number): string {
+  return new Date(value).toISOString()
 }
 
 function truncateMiddle(value: string, maxLength: number): string {

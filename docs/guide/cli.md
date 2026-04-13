@@ -39,6 +39,12 @@ npx fireline build agent.ts --target fly
 # Build, scaffold, and invoke the native deploy tool.
 npx fireline deploy agent.ts --to fly
 
+# Resolve a named hosted target from ~/.fireline/hosted.json.
+npx fireline deploy agent.ts --target production
+
+# Use the configured default target when one is declared.
+npx fireline deploy agent.ts
+
 # Pass extra args through to the native deploy tool.
 npx fireline deploy agent.ts --to k8s -- --namespace fireline
 
@@ -224,8 +230,13 @@ Flags:
 Notes:
 
 - `build` shells out to `docker build`
+- hosted deploy scaffolds now build the quickstart image so the generated manifests
+  have bundled durable-streams boot behavior instead of a host-only container
 - scaffold target names are build-time names; for Cloudflare deploys,
   the deploy verb uses `cloudflare-containers`
+- the Cloudflare scaffold writes `wrangler.toml` and, when no remote deploy image
+  is configured, a `Dockerfile.fireline` wrapper so `wrangler deploy` can publish
+  the built image
 
 ## `fireline deploy`
 
@@ -236,14 +247,16 @@ call a Fireline-owned deploy API.
 Usage:
 
 ```bash
-fireline deploy <file.ts> --to <platform> [flags] [-- <native-flags...>]
+fireline deploy <file.ts> [--to <platform> | --target <name>] [flags] [-- <native-flags...>]
 ```
 
 Flags:
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--to <platform>` | required | Native deploy target: `fly`, `cloudflare-containers`, `docker-compose`, or `k8s` |
+| `--to <platform>` | from hosted target or required | Native deploy target: `fly`, `cloudflare-containers`, `docker-compose`, or `k8s` |
+| `--target <name>` | from `defaultTarget` | Hosted target lookup from `~/.fireline/hosted.json` |
+| `--token <value>` | none | Override the auth token injected into the native deploy CLI |
 | `--state-stream <s>` | from spec | Override the baked-in durable state stream name |
 | `--name <s>` | from spec | Override the baked-in deployment name |
 | `--provider <p>` | from spec | Override the baked-in `sandbox.provider` |
@@ -252,18 +265,59 @@ Flags:
 
 Current native CLI mapping:
 
-| `--to` value | Native command |
+| `--to` value | Native command | Wrapper behavior |
 | --- | --- |
-| `fly` | `flyctl deploy` |
-| `cloudflare-containers` | `wrangler deploy` |
-| `docker-compose` | `docker compose up -d` |
-| `k8s` | `kubectl apply -f <generated>` |
+| `fly` | `flyctl deploy` | `flyctl auth docker`, `docker tag`, `docker push`, then `flyctl deploy --image <registry.fly.io/...>` |
+| `cloudflare-containers` | `wrangler deploy` | writes `wrangler.toml` plus `Dockerfile.fireline` when needed so Wrangler can publish the built image |
+| `docker-compose` | `docker compose up -d` | writes a durable single-service quickstart manifest with `/var/lib/fireline` volume + healthcheck |
+| `k8s` | `kubectl apply -f <generated>` | requires a pullable image ref, writes PVC-backed quickstart manifest, then `docker push` + `kubectl apply` |
 
 Example:
 
 ```bash
+fireline deploy agent.ts --target production
 fireline deploy agent.ts --to fly -- --remote-only
 ```
+
+### Hosted target config
+
+`deploy` can resolve a named hosted target from:
+
+```text
+~/.fireline/hosted.json
+```
+
+Example:
+
+```json
+{
+  "defaultTarget": "production",
+  "targets": {
+    "production": {
+      "provider": "fly",
+      "region": "lax",
+      "resourceNaming": {
+        "appName": "reviewer-prod"
+      },
+      "authRef": "FLY_API_TOKEN"
+    },
+    "edge": {
+      "provider": "cloudflare-containers",
+      "authRef": "CLOUDFLARE_API_TOKEN"
+    }
+  }
+}
+```
+
+Resolution rules:
+
+1. `--token <value>` wins if provided.
+2. `--target <name>` selects a named target from the hosted config.
+3. If `--target` is omitted, `defaultTarget` is used when present.
+4. Token lookup falls back to `authRef`, then `FIRELINE_<TARGET>_TOKEN`, then provider defaults such as `FLY_API_TOKEN` or `CLOUDFLARE_API_TOKEN`, then `FIRELINE_TOKEN`.
+5. Interactive prompting is deferred; there is no prompt path yet.
+
+If both `--target` and `--to` are provided, the configured target provider and explicit `--to` must agree.
 
 ## `fireline agents`
 
@@ -290,6 +344,17 @@ the registry install surface.
 | `FIRELINE_BIN` | Override the path to the `fireline` binary |
 | `FIRELINE_STREAMS_BIN` | Override the path to the `fireline-streams` binary |
 | `FIRELINE_AGENTS_BIN` | Override the path to the `fireline-agents` binary |
+| `FIRELINE_<TARGET>_TOKEN` | Named hosted-target auth token fallback for `deploy` |
+| `FLY_API_TOKEN` | Fly deploy auth token |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare Containers deploy auth token |
+| `FIRELINE_TOKEN` | Generic deploy auth fallback when no target-specific env is present |
+| `FIRELINE_DEPLOY_IMAGE` | Fully qualified image ref to tag/push before `deploy` |
+| `FIRELINE_DEPLOY_REGISTRY` | Registry prefix used to synthesize `fireline-<app>:latest` deploy refs |
+| `FIRELINE_FLY_PRIMARY_REGION` | Override the generated Fly `primary_region` |
+| `FIRELINE_FLY_VOLUME` | Add a Fly mount at `/var/lib/fireline` in the scaffolded `fly.toml` |
+| `FIRELINE_K8S_IMAGE_PULL_SECRET` | Add `imagePullSecrets` to the scaffolded Kubernetes Deployment |
+| `FIRELINE_K8S_STORAGE_CLASS` | Set the scaffolded Kubernetes PVC `storageClassName` |
+| `FIRELINE_K8S_STORAGE_SIZE` | Override the scaffolded Kubernetes PVC size (default `5Gi`) |
 
 ## Binary Resolution
 

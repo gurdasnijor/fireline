@@ -110,7 +110,7 @@ Two practical notes:
 | Goal | `fireline build --target` | Scaffold file | `fireline deploy --to` | Native tool |
 | --- | --- | --- | --- | --- |
 | Fly.io | `fly` | `fly.toml` | `fly` | `flyctl deploy` |
-| Cloudflare Containers | `cloudflare` | `wrangler.toml` | `cloudflare-containers` | `wrangler deploy` |
+| Cloudflare Containers | `cloudflare` | `wrangler.toml` (+ `Dockerfile.fireline` when publishing the local image) | `cloudflare-containers` | `wrangler deploy` |
 | Kubernetes | `k8s` | `k8s.yaml` | `k8s` | `kubectl apply -f` |
 | Docker Compose | `docker-compose` | `docker-compose.yml` | `docker-compose` | `docker compose up -d` |
 | Raw Dockerfile scaffold only | `docker` | `Dockerfile` | n/a | run your own Docker workflow |
@@ -127,7 +127,10 @@ Manual path if you want to inspect the generated manifest:
 
 ```bash
 npx fireline build agent.ts --target fly
-flyctl deploy --config fly.toml --image fireline-agent:latest --remote-only
+flyctl auth docker
+docker tag fireline-agent:latest registry.fly.io/fireline-agent:latest
+docker push registry.fly.io/fireline-agent:latest
+flyctl deploy --config fly.toml --image registry.fly.io/fireline-agent:latest --remote-only
 ```
 
 Shortcut if you do not already have `fly.toml` in this directory:
@@ -140,7 +143,9 @@ What the wrapper does:
 
 - rebuilds the hosted image
 - writes `fly.toml`
-- runs `flyctl deploy --config <path> --image fireline-agent:latest --remote-only`
+- runs `flyctl auth docker`
+- tags and pushes the built image to `registry.fly.io/<app>:latest`
+- runs `flyctl deploy --config <path> --image registry.fly.io/<app>:latest --remote-only`
 
 Expected success excerpt:
 
@@ -173,7 +178,7 @@ npx fireline deploy agent.ts --to cloudflare-containers
 What the wrapper does:
 
 - rebuilds the hosted image
-- writes `wrangler.toml`
+- writes `wrangler.toml` and, when you have not preconfigured a remote image ref, `Dockerfile.fireline`
 - runs `wrangler deploy --config <path>`
 
 Important honesty note:
@@ -189,6 +194,7 @@ Manual path if you want to inspect the generated manifest:
 
 ```bash
 npx fireline build agent.ts --target k8s
+FIRELINE_DEPLOY_IMAGE=ghcr.io/acme/fireline-agent:latest \
 kubectl apply -f k8s.yaml --namespace fireline
 ```
 
@@ -201,13 +207,15 @@ npx fireline deploy agent.ts --to k8s -- --namespace fireline
 What the wrapper does:
 
 - rebuilds the hosted image
+- pushes the built image to `FIRELINE_DEPLOY_IMAGE` or the registry implied by `FIRELINE_DEPLOY_REGISTRY`
 - writes `k8s.yaml`
 - runs `kubectl apply -f <path> --namespace fireline`
 
-The generated manifest is intentionally small:
+The generated manifest is intentionally small but now includes:
 
-- one `Deployment`
+- one PVC-backed `Deployment`
 - one `Service`
+- a durable mount at `/var/lib/fireline`
 - `/healthz` readiness and liveness probes
 
 Treat it as a starting scaffold, not a complete production chart.
