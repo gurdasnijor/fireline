@@ -146,8 +146,10 @@ export default compose(
 budget, secrets proxy. No glue code. No deploy pipeline yet — this is local."
 
 **Fallback:** if the local bin shims are stale, the operator has a
-prewarmed terminal (Pane B backup) and can rerun the same verified
-command: `npx fireline docs/demos/assets/agent.ts`.
+prewarmed terminal (Pane B backup) and can rerun the same surfaced CLI
+pack documented in [docs/demos/fqa-cli-demo-capture.md](./fqa-cli-demo-capture.md):
+[`./docs/demos/scripts/replay-fqa-cli.sh`](./scripts/replay-fqa-cli.sh)
+or the pre-staged recording `docs/demos/assets/recordings/fqa-1-cli.mp4`.
 
 ---
 
@@ -171,7 +173,9 @@ stream is the source of truth; everything on the dashboard is a projection of it
 
 **Fallback:** if the model stalls or the tool call fails, operator has a
 pre-recorded transcript loaded in Pane B backup; narration pivots to "here's
-what a clean run looks like" without breaking.
+what a clean run looks like" without breaking. The same surfaced CLI
+fallback pack from [docs/demos/fqa-cli-demo-capture.md](./fqa-cli-demo-capture.md)
+is the operator reference.
 
 ---
 
@@ -261,7 +265,12 @@ pre-flight P10 flips green.
 1. If the `telegram()` middleware is buggy post-`mono-axr.11` landing →
    downgrade narration to Step 4-only mode (approval card renders on
    Telegram via the same profile, but the initial prompt runs via a local
-   ACP client in Pane B). Narration stays Telegram-forward.
+   ACP client in Pane B). Narration stays Telegram-forward. Step 4's
+   surfaced fallback pack is
+   [docs/demos/fqa-approval-demo-capture.md](./fqa-approval-demo-capture.md)
+   with `docs/demos/scripts/fqa-approval-harness.ts`,
+   [`./docs/demos/scripts/replay-fqa-approval.mjs`](./scripts/replay-fqa-approval.mjs),
+   and `docs/demos/assets/recordings/fqa-4-approval.mp4`.
 2. If `mono-axr.11` hasn't landed in time → swap `telegram()` for
    `webhook({ url, scope: 'tool_calls' })` and demo the same DS profile
    pattern against a locally-hosted webhook receiver (`mono-axr.3`
@@ -272,7 +281,7 @@ pre-flight P10 flips green.
 
 ### Step 4 — Approval card on Telegram (Demo 2 via DS profile)
 
-**Class: LIVE via `mono-axr.11` TelegramSubscriber approval profile; local-CLI fallback otherwise**
+**Class: LIVE via `mono-axr.11` TelegramSubscriber approval profile; public-client approval harness fallback otherwise**
 
 Continuing inside the same Telegram chat from Step 3, operator DMs a
 prompt that triggers the approval policy:
@@ -310,11 +319,16 @@ AutoApproveSubscriber. Inline keyboard callback writes
 rebuild-from-log unblocks the paused tool call.
 
 **Fallback:** if TelegramSubscriber misbehaves or `mono-axr.11` slips,
-operator falls back to the local CLI approver (`fireline approve
---session <id> --request-id <id>`). Same durable-streams write path —
-agent resume is identical; narration pivots to: "The approver is a CLI
-in this path. The chat is one of many profiles; the substrate is the
-same."
+operator falls back to the surfaced approval harness in
+[docs/demos/fqa-approval-demo-capture.md](./fqa-approval-demo-capture.md):
+boot with `node packages/fireline/dist/cli.js run docs/demos/scripts/fqa-approval-harness.ts --port 4540 --streams-port 7574 --state-stream fqa-approval-public`,
+then drive allow/deny with
+`node docs/demos/scripts/replay-fqa-approval.mjs driver-only --acp-url <ws-url> --state-url http://127.0.0.1:7574/v1/stream/fqa-approval-public`
+([`./docs/demos/scripts/replay-fqa-approval.mjs`](./scripts/replay-fqa-approval.mjs)).
+Same durable-streams approval write path; narration pivots to: "The
+approver is the public client API in this path. The chat is one of many
+profiles; the substrate is the same." Pre-staged recording:
+`docs/demos/assets/recordings/fqa-4-approval.mp4`.
 
 ---
 
@@ -353,9 +367,12 @@ profile running in two places. That's what OpenClaw-style products mean
 when they say 'agent fleet': a bunch of composed specs, not a bunch of
 integrated systems."
 
-**Fallback:** play the `d543eac` peer-to-peer replay off-stage +
-pre-staged Telegram chat screenshot. Script + recording = deterministic
-fallback if `mono-axr.11` parallelism isn't up by rehearsal.
+**Fallback:** play the FQA-5 peer reference pack off-stage plus the
+pre-staged Telegram chat screenshot:
+[docs/demos/peer-to-peer-demo-capture.md](./peer-to-peer-demo-capture.md)
+with [`./docs/demos/scripts/replay-peer-to-peer.sh`](./scripts/replay-peer-to-peer.sh)
+(`d543eac`). This stays the deterministic peer fallback if
+`mono-axr.11` parallelism isn't up by rehearsal.
 
 ---
 
@@ -411,7 +428,7 @@ Skip if running over time.
 | 1 | LIVE | pi-acp binary resident | none |
 | 2 | LIVE | none | none |
 | 3 | LIVE **signature** (contingent on `mono-axr.11` TelegramSubscriber profile + `mono-thnc.2.3` fix merged) | Telegram bot authed via @BotFather, env loaded, `docs/demos/assets/agent.ts` has `telegram()` middleware composed in | Host-restart as PRE-STAGED recording if 2.3 fix slips; `webhook()` swap as DS-profile narrative fallback if `.11` slips |
-| 4 | LIVE via TelegramSubscriber inline keyboard (`mono-axr.11` approval profile) | bot authed, callback write path through DS trait | Approve/Deny render as recording if profile flakes; local CLI approver as last-resort |
+| 4 | LIVE via TelegramSubscriber inline keyboard (`mono-axr.11` approval profile) | bot authed, callback write path through DS trait | Approve/Deny render as recording if profile flakes; public-client approval harness as last-resort |
 | 5 | LIVE via `telegram()` in `reviewer.ts` too (`mono-axr.11`) | reviewer spec committed alongside agent.ts, both running against same bot | FQA-5 `d543eac` peer replay + Telegram chat screenshot |
 | 6 | LIVE (Betterstack dashboard w/ saved view) | saved-view URL bookmarked in projector browser, session-id variable auto-bound | none |
 | 7 | LIVE (split-screen show-and-tell) | `docs/demos/assets/agent.ts` pre-opened in editor for quick display | none |
@@ -427,7 +444,8 @@ to Rehearsal 2 drill.
       and ready to play
 - [ ] Step 3 (unkillable agent) either LIVE (post-`mono-thnc.2.3` fix) or
       cleanly PRE-STAGED per P10 outcome
-- [ ] Step 4 (approval gate) either Chat SDK LIVE or local-CLI fallback
+- [ ] Step 4 (approval gate) either TelegramSubscriber LIVE or the
+      public-client fallback from `docs/demos/fqa-approval-demo-capture.md`
       exercised
 - [ ] Step 6 (peer fleet) replay script runs end-to-end against current main
 
@@ -437,10 +455,16 @@ to Rehearsal 2 drill.
 - [ ] No step hung >10s beyond expected response
 
 ### Fallback captures
+- [ ] `docs/demos/assets/recordings/fqa-1-cli.mp4` exists; surfaced CLI
+      fallback is documented in `docs/demos/fqa-cli-demo-capture.md` and
+      driven by `./docs/demos/scripts/replay-fqa-cli.sh`
 - [ ] `docs/demos/assets/recordings/step-3-resume.mp4` exists (even if the
       LIVE path works, the capture is the Rehearsal 2 fail drill's reference)
-- [ ] `docs/demos/assets/recordings/step-4-approval.mp4` exists with both
-      Chat-SDK-LIVE and local-CLI-fallback branches captured
+- [ ] `docs/demos/assets/recordings/fqa-4-approval.mp4` exists; public
+      approval fallback is documented in
+      `docs/demos/fqa-approval-demo-capture.md` and driven by
+      `docs/demos/scripts/fqa-approval-harness.ts` +
+      `./docs/demos/scripts/replay-fqa-approval.mjs`
 - [ ] `docs/demos/assets/recordings/step-5-docker-deploy.mp4` exists
 - [ ] `docs/demos/assets/recordings/step-6-peer-fleet.mp4` exists (replay
       driver at `d543eac`)
@@ -481,7 +505,7 @@ Fail in any bucket → Rehearsal 2 drill targets that specific gap.
 - [ ] Pre-flight checklist dry-run (P1–P10) — `mono-thnc.6.4`
 - [ ] Rehearsal 1 — full-live attempt + fallback capture — `mono-thnc.7` (blocked on T2/T3/T4/T5/.6)
 - [ ] Rehearsal 2 — deliberate-fail drill — `mono-thnc.8` (blocked on Rehearsal 1)
-- [ ] FQA-1/4/5 screencast captures — `mono-thnc.9` (FQA-5 driver already landed at `d543eac`; FQA-1 + FQA-4 captures queued)
+- [x] FQA-1/4/5 screencast captures — `mono-thnc.9` CLOSED: FQA-1 + FQA-4 landed at `da521ba`; FQA-5 reference remains `d543eac`
 - [ ] Betterstack saved-view URL bake-in — `mono-thnc.5.2` (blocked on T4.1 emitting)
 - [ ] Rotate Betterstack token post-demo — `mono-thnc.10`
 
