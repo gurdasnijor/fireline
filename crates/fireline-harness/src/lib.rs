@@ -20,6 +20,7 @@ pub mod state_projector;
 pub mod telegram_subscriber;
 pub mod topology;
 pub mod trace;
+pub mod wake_timer;
 pub mod webhook_subscriber;
 pub mod workflow_context;
 
@@ -48,9 +49,7 @@ pub use durable_subscriber::{
     DeploymentWakeHandler, DeploymentWakeRequested, DurableSubscriber, DurableSubscriberDriver,
     HandlerOutcome, PassiveSubscriber, PassiveWaitPolicy, ProvisionedRuntime,
     ResumeDeploymentWakeHandler, RetryPolicy, SANDBOX_PROVISIONED_KIND, SandboxProvisioned,
-    StreamEnvelope, SubscriberMode, SubscriberRegistration, SystemWakeTimerRuntime,
-    TIMER_FIRED_KIND, TimerFired, TraceContext, WAKE_TIMER_REQUESTED_KIND, WakeTimerRequest,
-    WakeTimerRuntime, WakeTimerSubscriber,
+    StreamEnvelope, SubscriberMode, SubscriberRegistration, TraceContext,
 };
 pub use peer_routing::{
     PEER_DELIVERY_ACK_ENTITY_TYPE, PeerDeliveryAcknowledged, PeerDispatchSuccess,
@@ -75,6 +74,11 @@ pub use topology::{
 pub use trace::{
     BoxedTraceWriter, CompositeTraceWriter, DurableStreamTracer, emit_host_endpoints_persisted,
     emit_host_instance_started, emit_host_instance_stopped, emit_host_spec_persisted,
+};
+pub use wake_timer::{
+    SystemWakeTimerRuntime, TIMER_FIRED_KIND, TimerFired, WAKE_TIMER_REQUESTED_KIND,
+    WakeTimerCancelError, WakeTimerHandleError, WakeTimerRequest, WakeTimerRuntime,
+    WakeTimerSubscriber, timer_fired_envelope, wake_timer_request_envelope,
 };
 pub use webhook_subscriber::{
     DurableWebhookCursorStore, DurableWebhookDeadLetterSink, WebhookCursorRecord,
