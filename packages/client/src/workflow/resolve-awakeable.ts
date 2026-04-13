@@ -40,8 +40,11 @@ class ResolveGuard {
   }
 }
 
-// Process-local coordination only; the durable stream remains the source of
-// truth via `hasTerminalCompletion(...)`.
+// Process-local coordination only. This map serializes same-process
+// resolve/reject races for a single completion key, but it is not durable
+// replay state and it does not coordinate across processes or restarts.
+// `hasTerminalCompletion(...)` remains the authoritative durable check before
+// any terminal append.
 const resolveGuards = new Map<string, ResolveGuard>()
 
 /**
@@ -269,6 +272,8 @@ async function withResolveGuard<T>(
   key: CompletionKey,
   operation: () => Promise<T>,
 ): Promise<T> {
+  // This is intentionally only an in-process critical section. Replay safety
+  // still comes from the durable pre-append read in `hasTerminalCompletion(...)`.
   const guardKey = `${streamUrl}::${completionKeyStorageKey(key)}`
   let guard = resolveGuards.get(guardKey)
   if (!guard) {
