@@ -169,6 +169,29 @@ test('runHostedRepl attaches to the started host and prints the new session id',
   assert.match(lines.join('\n'), /session:\s+session-123/)
 })
 
+test('runHostedRepl forwards an existing session id when auto-attaching', async () => {
+  const args = parseArgs(['run', 'docs/demos/assets/agent.ts', '--repl'])
+  let sessionId: string | null | undefined
+
+  const exitCode = await runHostedRepl(
+    {
+      acp: { url: 'ws://127.0.0.1:4440/acp' },
+      id: 'sandbox-123',
+      state: { url: 'http://127.0.0.1:4440/state' },
+    },
+    args,
+    async (options = {}) => {
+      sessionId = options.sessionId
+      return 0
+    },
+    console,
+    { sessionId: 'session-existing' },
+  )
+
+  assert.equal(exitCode, 0)
+  assert.equal(sessionId, 'session-existing')
+})
+
 test('parseArgs parses deploy target and native passthrough args', () => {
   const args = parseArgs([
     'deploy',
