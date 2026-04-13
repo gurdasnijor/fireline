@@ -313,21 +313,8 @@ function middlewareToComponents(middleware: Middleware, name: string): TopologyC
     case 'telegram':
       return [
         {
-          name: 'telegram_subscriber',
-          config: cloneDefined({
-            name: middleware.name,
-            target: middleware.target,
-            token:
-              typeof middleware.token === 'string'
-                ? middleware.token
-                : middleware.token
-                  ? { ...middleware.token }
-                  : undefined,
-            chatId: middleware.chatId,
-            events: middleware.events?.map(cloneSubscriberEventSelector),
-            keyBy: middleware.keyBy,
-            retry: middleware.retry ? { ...middleware.retry } : undefined,
-          }),
+          name: 'telegram',
+          config: buildTelegramSubscriberConfig(middleware),
         },
       ]
     case 'autoApprove':
@@ -370,6 +357,30 @@ function buildWebhookSubscriberConfig(middleware: Extract<Middleware, { kind: 'w
   }
 }
 
+// Minimum-correct for the current Rust TelegramSubscriber surface. Full
+// DurableSubscriber parity for keyBy/cursorStream/deadLetterStream/retry is
+// pending mono-axr.11 follow-ups that close DSV-03/04/05 on the Rust side.
+function buildTelegramSubscriberConfig(
+  middleware: Extract<Middleware, { kind: 'telegram' }>,
+) {
+  return cloneDefined({
+    botToken:
+      typeof middleware.token === 'string'
+        ? middleware.token
+        : middleware.token?.ref,
+    apiBaseUrl: middleware.apiBaseUrl ?? 'https://api.telegram.org',
+    chatId: middleware.chatId,
+    allowedUserIds: middleware.allowedUserIds
+      ? [...middleware.allowedUserIds]
+      : [],
+    approvalTimeoutMs: middleware.approvalTimeoutMs,
+    pollIntervalMs: middleware.pollIntervalMs ?? 1_000,
+    pollTimeoutMs: middleware.pollTimeoutMs ?? 30_000,
+    parseMode: normalizeTelegramParseMode(middleware.parseMode ?? 'html'),
+    scope: normalizeTelegramScope(middleware.scope ?? 'tool_calls'),
+  })
+}
+
 function normalizeWebhookEventSelector(
   selector: DurableSubscriberEventSelector,
 ) {
@@ -407,6 +418,22 @@ function deriveWebhookTarget(url: string | undefined): string {
 
 function slugWebhookTarget(target: string): string {
   return target.replace(/[^a-zA-Z0-9._-]+/g, '-')
+}
+
+function normalizeTelegramParseMode(parseMode: 'html' | 'markdown_v2') {
+  switch (parseMode) {
+    case 'html':
+      return 'html'
+    case 'markdown_v2':
+      return 'markdown_v2'
+  }
+}
+
+function normalizeTelegramScope(scope: 'tool_calls') {
+  switch (scope) {
+    case 'tool_calls':
+      return 'tool_calls'
+  }
 }
 
 function normalizeCapabilityRef(
