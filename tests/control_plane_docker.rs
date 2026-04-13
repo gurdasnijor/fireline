@@ -536,7 +536,7 @@ fn find_prompt_request(body: &str, predicate: impl Fn(&str) -> bool) -> Option<P
 
 fn has_session_record(body: &str, session_id: &str) -> bool {
     parse_state_events(body).into_iter().any(|event| {
-        event.get("type").and_then(Value::as_str) == Some("session")
+        event.get("type").and_then(Value::as_str) == Some("session_v2")
             && event
                 .get("value")
                 .and_then(|value| value.get("sessionId"))

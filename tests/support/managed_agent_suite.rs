@@ -1607,8 +1607,8 @@ fn sandbox_provider_kind_from_name(name: &str) -> SandboxProviderKind {
 // The original `wait_for_stream_rows` helper polls for substring presence and
 // returns as soon as every required needle appears ONCE. That's adequate for a
 // smoke check but wrong for count-based assertions: a test that wants to see
-// three `prompt_turn` events will call wait_for_stream_rows("prompt_turn"),
-// receive the body after the first prompt_turn appears, then count only one
+// three `prompt_request` events will call wait_for_stream_rows("prompt_request"),
+// receive the body after the first prompt_request appears, then count only one
 // and fail non-deterministically.
 //
 // The helpers below parse the stream body into structured envelopes and

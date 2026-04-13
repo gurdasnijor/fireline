@@ -39,7 +39,7 @@ function App() {
 
 function MonitoringView({ db }: { db: FirelineDB }) {
   const sessions = useLiveQuery((q) => q.from({ s: db.sessions }), [db])
-  const turns = useLiveQuery((q) => q.from({ t: db.promptTurns }), [db])
+  const turns = useLiveQuery((q) => q.from({ t: db.promptRequests }), [db])
   const approvals = useLiveQuery((q) => q.from({ p: db.permissions }), [db])
   const chunks = useLiveQuery((q) => q.from({ c: db.chunks }), [db])
   const acp = useAcpClient({ wsUrl: acpUrl, autoConnect: true, initialSessionId: sessions.data?.[0]?.sessionId ?? null, sessionParams: { cwd: '/workspace', mcpServers: [] } })

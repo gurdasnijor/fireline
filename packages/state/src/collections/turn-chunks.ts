@@ -10,8 +10,6 @@ export interface RequestChunksOptions {
   requestId: RequestId
 }
 
-export type TurnChunksOptions = RequestChunksOptions
-
 /**
  * Reactive view over all canonical chunks emitted for one ACP request.
  * The durable stream append order is the source of truth; createdAt is the
@@ -34,5 +32,3 @@ export function createRequestChunksCollection(
     getKey: (row: ChunkRow) => chunkRowKey(row),
   }) as unknown as Collection<ChunkRow, string>
 }
-
-export const createTurnChunksCollection = createRequestChunksCollection

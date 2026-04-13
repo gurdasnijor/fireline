@@ -4,7 +4,7 @@ import { secretsProxy, trace } from '@fireline/client/middleware'
 const stateStreamUrl = process.env.TASK_STREAM_URL
 if (stateStreamUrl) {
   const db = await fireline.db({ stateStreamUrl })
-  console.log(JSON.stringify({ question: 'Can I fire off an agent and check on it later?', sessions: db.sessions.toArray.map((row) => row.sessionId), turns: db.promptTurns.toArray.length, latestText: db.promptTurns.toArray.at(-1)?.text }, null, 2))
+  console.log(JSON.stringify({ question: 'Can I fire off an agent and check on it later?', sessions: db.sessions.toArray.map((row) => row.sessionId), turns: db.promptRequests.toArray.length, latestText: db.promptRequests.toArray.at(-1)?.text }, null, 2))
   db.close(); process.exit(0)
 }
 

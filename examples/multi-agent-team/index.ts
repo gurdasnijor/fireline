@@ -15,7 +15,7 @@ const writer = await handles.writer.connect('team-writer')
 const research = await researcher.newSession({ cwd: '/workspace', mcpServers: [] })
 await researcher.prompt({ sessionId: research.sessionId, prompt: [{ type: 'text', text: 'Find the three biggest risks in this repo.' }] })
 const researchTurns = await waitForRows(
-  db.promptTurns,
+  db.promptRequests,
   (rows) => rows.some((row) => row.sessionId === research.sessionId && row.state === 'completed'),
   10_000,
 )
@@ -27,7 +27,7 @@ const researchText = db.chunks.toArray
 const write = await writer.newSession({ cwd: '/workspace', mcpServers: [] })
 await writer.prompt({ sessionId: write.sessionId, prompt: [{ type: 'text', text: `Turn this research into a one-page brief:\n${researchText}` }] })
 const writerTurns = await waitForRows(
-  db.promptTurns,
+  db.promptRequests,
   (rows) => rows.some((row) => row.sessionId === write.sessionId && row.state === 'completed'),
   10_000,
 )

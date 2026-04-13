@@ -19,14 +19,11 @@ export {
 } from './collection.js'
 
 export type {
-  ConnectionRow,
   PromptRequestRow,
-  PromptTurnRow,
   PermissionRow,
-  TerminalRow,
   SessionRow,
   ChunkRow,
-  ConnectionStatus,
+  RuntimeInstanceRow,
 } from './schema.js'
 
 export {
@@ -34,14 +31,10 @@ export {
   createActiveTurnsCollection,
   createPendingPermissionsCollection,
   createSessionPromptRequestsCollection,
-  createSessionTurnsCollection,
   createRequestChunksCollection,
-  createTurnChunksCollection,
   createSessionPermissionsCollection,
   type SessionPromptRequestsOptions,
-  type SessionTurnsOptions,
   type RequestChunksOptions,
-  type TurnChunksOptions,
   type SessionPermissionsOptions,
 } from './collections/index.js'
 

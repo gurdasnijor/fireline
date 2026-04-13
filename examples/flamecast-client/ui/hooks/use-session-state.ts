@@ -4,8 +4,8 @@ import { useAcpClient } from "use-acp";
 import {
   type ChunkRow,
   createSessionPermissionsCollection,
-  createSessionTurnsCollection,
-  createTurnChunksCollection,
+  createSessionPromptRequestsCollection,
+  createRequestChunksCollection,
 } from "@fireline/state";
 import type { PendingPermission, PermissionResponseBody } from "../fireline-types.js";
 import { buildSessionLogs } from "../lib/build-session-logs.js";
@@ -26,7 +26,7 @@ export function useSessionState(sessionId: string, _ws: RuntimeWebSocketHandle) 
 
   const sessionTurnsCollection = useMemo(
     () =>
-      createSessionTurnsCollection({
+      createSessionPromptRequestsCollection({
         promptRequests: db.promptRequests,
         sessionId,
       }),
@@ -65,7 +65,7 @@ export function useSessionState(sessionId: string, _ws: RuntimeWebSocketHandle) 
   useEffect(() => {
     const turnRows = turns.data ?? [];
     const chunkCollections = turnRows.map((turn) =>
-      createTurnChunksCollection({
+      createRequestChunksCollection({
         chunks: db.chunks,
         sessionId: turn.sessionId,
         requestId: turn.requestId,

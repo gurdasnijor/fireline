@@ -17,7 +17,7 @@ const acp2 = await second.connect('crash-proof-rescue')
 await acp2.loadSession({ sessionId, cwd: '/workspace', mcpServers: [] })
 await acp2.prompt({ sessionId, prompt: [{ type: 'text', text: 'Turn two: finish the audit without repeating yourself.' }] })
 const turns = await waitForRows(
-  db.promptTurns,
+  db.promptRequests,
   (rows) => rows.filter((row) => row.sessionId === sessionId && row.state === 'completed').length >= 2,
   10_000,
 )

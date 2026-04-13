@@ -14,7 +14,7 @@ This demo shows the Fireline version of the story. The dashboard does not poll a
 
 ```tsx
 const sessions = useLiveQuery((q) => q.from({ s: db.sessions }), [db])
-const turns = useLiveQuery((q) => q.from({ t: db.promptTurns }), [db])
+const turns = useLiveQuery((q) => q.from({ t: db.promptRequests }), [db])
 const approvals = useLiveQuery((q) => q.from({ p: db.permissions }), [db])
 const toolCalls = useLiveQuery((q) => q.from({ c: db.chunks }), [db])
 ```

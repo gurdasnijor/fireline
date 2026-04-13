@@ -17,7 +17,7 @@ import {
 import { SandboxAdmin } from "@fireline/client/admin";
 import { approve, secretsProxy, trace } from "@fireline/client/middleware";
 import { localPath } from "@fireline/client/resources";
-import { type ChunkRow, type PermissionRow, type PromptTurnRow } from "@fireline/state";
+import { type ChunkRow, type PermissionRow, type PromptRequestRow } from "@fireline/state";
 import type {
   AgentSpawn,
   AgentTemplate,
@@ -740,7 +740,7 @@ function toRuntimeInstance(runtime: RuntimeRecord): RuntimeInstance {
   };
 }
 
-function sessionTurns(sessionId: string): PromptTurnRow[] {
+function sessionTurns(sessionId: string): PromptRequestRow[] {
   if (!stateDb) {
     return [];
   }
@@ -758,7 +758,7 @@ function sessionPermissions(sessionId: string): PermissionRow[] {
     .sort((left, right) => left.createdAt - right.createdAt);
 }
 
-function sessionChunks(turns: PromptTurnRow[]): ChunkRow[] {
+function sessionChunks(turns: PromptRequestRow[]): ChunkRow[] {
   if (!stateDb) {
     return [];
   }

@@ -1,22 +1,17 @@
 import { createStreamDB, type StreamDB, type StreamDBMethods } from '@durable-streams/state'
 import { createCollection, localOnlyCollectionOptions, type Collection } from '@tanstack/db'
 
-import { promptRequestCollectionKey } from './acp-types.js'
+import { promptRequestCollectionKey, type SessionUpdate } from './acp-types.js'
 import { firelineStreamState } from './schema.js'
 import type {
   ChunkEventRow,
   ChunkRow,
-  ConnectionRow,
-  LegacyChunkEventRow,
-  LegacyPromptTurnEventRow,
-  LegacySessionEventRow,
   PermissionEventRow,
   PermissionRow,
   PromptRequestEventRow,
   PromptRequestRow,
   SessionEventRow,
   SessionRow,
-  TerminalRow,
 } from './schema.js'
 import {
   chunkRowKey,
@@ -30,10 +25,8 @@ export type ObservableCollection<T extends object> = Collection<T, string> & {
 }
 
 export interface FirelineCollections {
-  connections: ObservableCollection<ConnectionRow>
   promptRequests: ObservableCollection<PromptRequestRow>
   permissions: ObservableCollection<PermissionRow>
-  terminals: ObservableCollection<TerminalRow>
   sessions: ObservableCollection<SessionRow>
   chunks: ObservableCollection<ChunkRow>
 }
@@ -64,24 +57,17 @@ export function createFirelineDB(config: FirelineDBConfig): FirelineDB {
   })
 
   const collections: FirelineCollections = {
-    connections: createObservableLocalCollection((row) => row.logicalConnectionId),
     promptRequests: createObservableLocalCollection((row) => promptRequestRowKey(row)),
     permissions: createObservableLocalCollection((row) => permissionRowKey(row)),
-    terminals: createObservableLocalCollection((row) => row.terminalId),
     sessions: createObservableLocalCollection((row) => row.sessionId),
     chunks: createObservableLocalCollection((row) => chunkRowKey(row)),
   }
 
   const syncAll = () => {
     reconcileCollection(
-      collections.connections,
-      rawDb.collections.connections.toArray.map(cloneConnectionRow),
-    )
-    reconcileCollection(
       collections.promptRequests,
-      projectPromptRequests(
-        rawDb.collections.promptRequests.toArray as PromptRequestEventRow[],
-        rawDb.collections.legacyPromptTurns.toArray as LegacyPromptTurnEventRow[],
+      (rawDb.collections.promptRequests.toArray as PromptRequestEventRow[]).map(
+        clonePromptRequestRow,
       ),
     )
     reconcileCollection(
@@ -89,37 +75,20 @@ export function createFirelineDB(config: FirelineDBConfig): FirelineDB {
       projectPermissions(rawDb.collections.permissions.toArray as PermissionEventRow[]),
     )
     reconcileCollection(
-      collections.terminals,
-      rawDb.collections.terminals.toArray.map(cloneTerminalRow),
-    )
-    reconcileCollection(
       collections.sessions,
-      projectSessions(
-        rawDb.collections.sessions.toArray as SessionEventRow[],
-        rawDb.collections.legacySessions.toArray as LegacySessionEventRow[],
-      ),
+      (rawDb.collections.sessions.toArray as SessionEventRow[]).map(cloneSessionRow),
     )
     reconcileCollection(
       collections.chunks,
-      projectChunks(
-        rawDb.collections.chunks.toArray as ChunkEventRow[],
-        rawDb.collections.legacyChunks.toArray as LegacyChunkEventRow[],
-        rawDb.collections.promptRequests.toArray as PromptRequestEventRow[],
-        rawDb.collections.legacyPromptTurns.toArray as LegacyPromptTurnEventRow[],
-      ),
+      (rawDb.collections.chunks.toArray as ChunkEventRow[]).map(cloneChunkRow),
     )
   }
 
   const unsubscribers = [
-    rawDb.collections.connections.subscribeChanges(syncAll),
     rawDb.collections.promptRequests.subscribeChanges(syncAll),
     rawDb.collections.permissions.subscribeChanges(syncAll),
-    rawDb.collections.terminals.subscribeChanges(syncAll),
     rawDb.collections.sessions.subscribeChanges(syncAll),
     rawDb.collections.chunks.subscribeChanges(syncAll),
-    rawDb.collections.legacyPromptTurns.subscribeChanges(syncAll),
-    rawDb.collections.legacySessions.subscribeChanges(syncAll),
-    rawDb.collections.legacyChunks.subscribeChanges(syncAll),
   ]
 
   return {
@@ -180,80 +149,20 @@ function reconcileCollection<T extends object>(
   }
 }
 
-function cloneConnectionRow(row: ConnectionRow): ConnectionRow {
-  return {
-    logicalConnectionId: row.logicalConnectionId,
-    state: row.state,
-    latestSessionId: row.latestSessionId,
-    lastError: row.lastError,
-    queuePaused: row.queuePaused,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-  }
-}
-
-function cloneTerminalRow(row: TerminalRow): TerminalRow {
-  return {
-    terminalId: row.terminalId,
-    logicalConnectionId: row.logicalConnectionId,
-    sessionId: row.sessionId,
-    promptTurnId: row.promptTurnId,
-    state: row.state,
-    command: row.command,
-    exitCode: row.exitCode,
-    signal: row.signal,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-  }
-}
-
-function projectPromptRequests(
-  canonicalRows: PromptRequestEventRow[],
-  legacyRows: LegacyPromptTurnEventRow[],
-): PromptRequestRow[] {
-  const projected = new Map<string, PromptRequestRow>()
-
-  for (const row of legacyRows) {
-    const key = promptRequestCollectionKey(row.sessionId, row.requestId)
-    projected.set(
-      key,
-      withCollectionKey(
-        {
-          sessionId: row.sessionId,
-          requestId: row.requestId,
-          text: row.text,
-          state: row.state,
-          position: row.position,
-          stopReason: row.stopReason,
-          startedAt: row.startedAt,
-          completedAt: row.completedAt,
-        },
-        key,
-      ),
-    )
-  }
-
-  for (const row of canonicalRows) {
-    const key = promptRequestCollectionKey(row.sessionId, row.requestId)
-    projected.set(
-      key,
-      withCollectionKey(
-        {
-          sessionId: row.sessionId,
-          requestId: row.requestId,
-          text: row.text,
-          state: row.state,
-          position: row.position,
-          stopReason: row.stopReason,
-          startedAt: row.startedAt,
-          completedAt: row.completedAt,
-        },
-        key,
-      ),
-    )
-  }
-
-  return [...projected.values()]
+function clonePromptRequestRow(row: PromptRequestEventRow): PromptRequestRow {
+  return withCollectionKey(
+    {
+      sessionId: row.sessionId,
+      requestId: row.requestId,
+      text: row.text,
+      state: row.state,
+      position: row.position,
+      stopReason: row.stopReason,
+      startedAt: row.startedAt,
+      completedAt: row.completedAt,
+    },
+    row.promptRequestKey,
+  )
 }
 
 function projectPermissions(events: PermissionEventRow[]): PermissionRow[] {
@@ -314,148 +223,28 @@ function projectPermissions(events: PermissionEventRow[]): PermissionRow[] {
   })
 }
 
-function projectSessions(
-  canonicalRows: SessionEventRow[],
-  legacyRows: LegacySessionEventRow[],
-): SessionRow[] {
-  const projected = new Map<string, SessionRow>()
-
-  for (const row of legacyRows) {
-    projected.set(row.sessionId, {
-      sessionId: row.sessionId,
-      state: row.state,
-      supportsLoadSession: row.supportsLoadSession,
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt,
-      lastSeenAt: row.lastSeenAt,
-    })
+function cloneSessionRow(row: SessionEventRow): SessionRow {
+  return {
+    sessionId: row.sessionId,
+    state: row.state,
+    supportsLoadSession: row.supportsLoadSession,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    lastSeenAt: row.lastSeenAt,
   }
-
-  for (const row of canonicalRows) {
-    projected.set(row.sessionId, {
-      sessionId: row.sessionId,
-      state: row.state,
-      supportsLoadSession: row.supportsLoadSession,
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt,
-      lastSeenAt: row.lastSeenAt,
-    })
-  }
-
-  return [...projected.values()]
 }
 
-function projectChunks(
-  canonicalRows: ChunkEventRow[],
-  legacyRows: LegacyChunkEventRow[],
-  canonicalPrompts: PromptRequestEventRow[],
-  legacyPrompts: LegacyPromptTurnEventRow[],
-): ChunkRow[] {
-  const projected = new Map<string, ChunkRow>()
-  const promptRefsByLegacyKey = new Map<
-    string,
+function cloneChunkRow(row: ChunkEventRow): ChunkRow {
+  return withCollectionKey(
     {
-      sessionId: ChunkRow['sessionId']
-      requestId: ChunkRow['requestId']
-    }
-  >()
-  const canonicalPromptKeysWithChunks = new Set<string>()
-
-  for (const row of legacyPrompts) {
-    promptRefsByLegacyKey.set(row.promptTurnId, {
       sessionId: row.sessionId,
       requestId: row.requestId,
-    })
-  }
-
-  for (const row of canonicalPrompts) {
-    promptRefsByLegacyKey.set(row.promptRequestKey, {
-      sessionId: row.sessionId,
-      requestId: row.requestId,
-    })
-  }
-
-  for (const row of canonicalRows) {
-    const promptKey = promptRequestCollectionKey(row.sessionId, row.requestId)
-    canonicalPromptKeysWithChunks.add(promptKey)
-    projected.set(
-      row.chunkKey,
-      withCollectionKey(
-        {
-          sessionId: row.sessionId,
-          requestId: row.requestId,
-          toolCallId: row.toolCallId,
-          update: row.update,
-          createdAt: row.createdAt,
-        },
-        row.chunkKey,
-      ),
-    )
-  }
-
-  for (const row of legacyRows) {
-    const promptRef = promptRefsByLegacyKey.get(row.promptTurnId)
-    if (!promptRef) {
-      continue
-    }
-
-    const promptKey = promptRequestCollectionKey(promptRef.sessionId, promptRef.requestId)
-    if (canonicalPromptKeysWithChunks.has(promptKey)) {
-      continue
-    }
-
-    projected.set(
-      row.chunkId,
-      withCollectionKey(
-        {
-          sessionId: promptRef.sessionId,
-          requestId: promptRef.requestId,
-          toolCallId: undefined,
-          update: legacyChunkToSessionUpdate(row),
-          createdAt: row.createdAt,
-        },
-        row.chunkId,
-      ),
-    )
-  }
-
-  return [...projected.values()]
-}
-
-function legacyChunkToSessionUpdate(row: LegacyChunkEventRow): ChunkRow['update'] {
-  const text = row.content
-
-  switch (row.type) {
-    case 'thinking':
-      return {
-        sessionUpdate: 'agent_thought_chunk',
-        content: { type: 'text', text },
-      } as ChunkRow['update']
-
-    case 'tool_call':
-      return {
-        sessionUpdate: 'tool_call',
-        toolCallId: `legacy:${row.chunkId}`,
-        title: text,
-        status: 'completed',
-      } as ChunkRow['update']
-
-    case 'tool_result':
-      return {
-        sessionUpdate: 'tool_call_update',
-        toolCallId: `legacy:${row.chunkId}`,
-        status: 'completed',
-      } as ChunkRow['update']
-
-    case 'error':
-    case 'stop':
-    case 'text':
-    default:
-      return {
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text },
-      } as ChunkRow['update']
-  }
+      toolCallId: row.toolCallId,
+      update: row.update as SessionUpdate,
+      createdAt: row.createdAt,
+    },
+    row.chunkKey,
+  )
 }
 
 function attachSubscribe<T extends object>(collection: ObservableCollection<T>): void {

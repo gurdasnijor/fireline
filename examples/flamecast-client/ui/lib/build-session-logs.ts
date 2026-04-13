@@ -2,12 +2,12 @@ import {
   sessionUpdateKind,
   type ChunkRow,
   type PermissionRow,
-  type PromptTurnRow,
+  type PromptRequestRow,
 } from "@fireline/state";
 import type { SessionLog } from "../fireline-types.js";
 
 export function buildSessionLogs(
-  turns: PromptTurnRow[],
+  turns: PromptRequestRow[],
   chunks: ChunkRow[],
   permissions: PermissionRow[],
 ): SessionLog[] {

@@ -482,7 +482,7 @@ async fn wait_for_session_row(state_stream_url: &str, session_id: &str) -> Resul
             }
         }
 
-        if body.contains("\"type\":\"session\"") && body.contains(session_id) {
+        if body.contains("\"type\":\"session_v2\"") && body.contains(session_id) {
             return Ok(());
         }
 

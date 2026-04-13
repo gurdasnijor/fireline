@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import type { ChunkRow, PermissionRow, PromptTurnRow } from '../src/schema.js'
+import type { ChunkRow, PermissionRow, PromptRequestRow } from '../src/schema.js'
 import { buildSessionLogs } from '../../../examples/flamecast-client/ui/lib/build-session-logs.js'
 
-function promptTurn(
-  overrides: Partial<PromptTurnRow> & Pick<PromptTurnRow, 'requestId'>,
-): PromptTurnRow {
+function promptRequest(
+  overrides: Partial<PromptRequestRow> & Pick<PromptRequestRow, 'requestId'>,
+): PromptRequestRow {
   return {
     sessionId: overrides.sessionId ?? 'session-1',
     requestId: overrides.requestId,
@@ -32,8 +32,8 @@ function chunk(
 
 describe('Flamecast buildSessionLogs', () => {
   it('preserves tool call transcript updates for canonical SessionUpdate chunks', () => {
-    const turns: PromptTurnRow[] = [
-      promptTurn({
+    const turns: PromptRequestRow[] = [
+      promptRequest({
         requestId: 'req-1',
         text: 'Inspect README',
       }),

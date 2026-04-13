@@ -1,11 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use sacp::schema::{ContentBlock, SessionUpdate, StopReason};
+use sacp::schema::{SessionUpdate, StopReason};
 use sacp_conductor::trace::{NotificationEvent, RequestEvent, ResponseEvent, TraceEvent};
 use serde::Serialize;
 use serde_json::Value;
-use uuid::Uuid;
-
 use fireline_acp_ids::{PromptRequestRef, RequestId, SessionId, ToolCallId};
 use fireline_session::{SessionRecord, SessionStatus};
 
@@ -38,39 +36,6 @@ struct PromptRequestRow {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LegacyPromptTurnRow {
-    #[serde(rename = "promptTurnId")]
-    row_id: String,
-    #[serde(rename = "logicalConnectionId")]
-    connection_id: String,
-    session_id: SessionId,
-    request_id: RequestId,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<String>,
-    state: PromptRequestState,
-    #[serde(rename = "stopReason", skip_serializing_if = "Option::is_none")]
-    stop_reason: Option<StopReason>,
-    started_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    completed_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LegacySessionRow {
-    #[serde(flatten)]
-    session: SessionRecord,
-    #[serde(rename = "runtimeKey")]
-    host_key: String,
-    #[serde(rename = "runtimeId")]
-    host_id: String,
-    node_id: String,
-    #[serde(rename = "logicalConnectionId")]
-    connection_id: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct ChunkRowV2 {
     #[serde(rename = "chunkKey")]
     chunk_key: String,
@@ -79,23 +44,6 @@ struct ChunkRowV2 {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<ToolCallId>,
     update: SessionUpdate,
-    created_at: i64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LegacyChunkRow {
-    #[serde(rename = "chunkId")]
-    row_id: String,
-    session_id: SessionId,
-    #[serde(rename = "promptTurnId")]
-    prompt_request_key: String,
-    #[serde(rename = "logicalConnectionId")]
-    connection_id: String,
-    #[serde(rename = "type")]
-    chunk_type: &'static str,
-    content: String,
-    seq: i64,
     created_at: i64,
 }
 
@@ -121,30 +69,17 @@ struct TraceCorrelationState {
     prompts_by_request: HashMap<String, PromptRequestRef>,
     prompt_rows: HashMap<String, PromptRequestRow>,
     active_prompts_by_session: HashMap<String, PromptRequestRef>,
-    legacy_chunk_order: HashMap<String, i64>,
+    chunk_ordinals: HashMap<String, i64>,
 }
 
 pub struct StateProjector {
-    host_key: String,
-    host_id: String,
-    node_id: String,
-    connection_id: String,
     correlation: TraceCorrelationState,
     supports_load_session: bool,
 }
 
 impl StateProjector {
-    pub fn new(
-        host_key: impl Into<String>,
-        host_id: impl Into<String>,
-        node_id: impl Into<String>,
-        connection_id: impl Into<String>,
-    ) -> Self {
+    pub fn new() -> Self {
         Self {
-            host_key: host_key.into(),
-            host_id: host_id.into(),
-            node_id: node_id.into(),
-            connection_id: connection_id.into(),
             correlation: TraceCorrelationState::default(),
             supports_load_session: false,
         }
@@ -229,16 +164,6 @@ impl StateProjector {
 
                 vec![
                     state_change("prompt_request", &prompt_key, "insert", Some(&prompt_row)),
-                    state_change(
-                        "prompt_turn",
-                        &prompt_key,
-                        "insert",
-                        Some(&legacy_prompt_turn_row(
-                            &prompt_row,
-                            &prompt_key,
-                            &self.connection_id,
-                        )),
-                    ),
                 ]
             }
             _ => Vec::new(),
@@ -286,18 +211,6 @@ impl StateProjector {
 
             return vec![
                 state_change("session_v2", &session_id.to_string(), "insert", Some(&session)),
-                state_change(
-                    "session",
-                    &session_id.to_string(),
-                    "insert",
-                    Some(&LegacySessionRow {
-                        session,
-                        host_key: self.host_key.clone(),
-                        host_id: self.host_id.clone(),
-                        node_id: self.node_id.clone(),
-                        connection_id: self.connection_id.clone(),
-                    }),
-                ),
             ];
         }
 
@@ -327,20 +240,10 @@ impl StateProjector {
         self.correlation
             .active_prompts_by_session
             .remove(&session_key);
-        self.correlation.legacy_chunk_order.remove(&prompt_key);
+        self.correlation.chunk_ordinals.remove(&prompt_key);
 
         vec![
             state_change("prompt_request", &prompt_key, "update", Some(&prompt_row)),
-            state_change(
-                "prompt_turn",
-                &prompt_key,
-                "update",
-                Some(&legacy_prompt_turn_row(
-                    &prompt_row,
-                    &prompt_key,
-                    &self.connection_id,
-                )),
-            ),
         ]
     }
 
@@ -375,7 +278,7 @@ impl StateProjector {
         let prompt_key = prompt_request_key(&prompt_ref);
         let order = self
             .correlation
-            .legacy_chunk_order
+            .chunk_ordinals
             .entry(prompt_key.clone())
             .or_insert(0);
         let current_order = *order;
@@ -391,36 +294,7 @@ impl StateProjector {
             update: update.clone(),
             created_at,
         };
-        let mut changes = vec![state_change("chunk_v2", &chunk_key, "insert", Some(&chunk_v2))];
-        if let Some(legacy_chunk) = legacy_chunk_row(
-            &prompt_ref,
-            &prompt_key,
-            &self.connection_id,
-            current_order,
-            created_at,
-            &update,
-        ) {
-            changes.push(state_change("chunk", &legacy_chunk.row_id, "insert", Some(&legacy_chunk)));
-        }
-        changes
-    }
-}
-
-fn legacy_prompt_turn_row(
-    row: &PromptRequestRow,
-    prompt_key: &str,
-    connection_id: &str,
-) -> LegacyPromptTurnRow {
-    LegacyPromptTurnRow {
-        row_id: prompt_key.to_string(),
-        connection_id: connection_id.to_string(),
-        session_id: row.session_id.clone(),
-        request_id: row.request_id.clone(),
-        text: row.text.clone(),
-        state: row.state.clone(),
-        stop_reason: row.stop_reason.clone(),
-        started_at: row.started_at,
-        completed_at: row.completed_at,
+        vec![state_change("chunk_v2", &chunk_key, "insert", Some(&chunk_v2))]
     }
 }
 
@@ -524,54 +398,6 @@ fn tool_call_id_from_session_update(update: &SessionUpdate) -> Option<ToolCallId
         SessionUpdate::ToolCall(tool_call) => Some(tool_call.tool_call_id.clone()),
         SessionUpdate::ToolCallUpdate(tool_call_update) => Some(tool_call_update.tool_call_id.clone()),
         _ => None,
-    }
-}
-
-fn legacy_chunk_row(
-    prompt_ref: &PromptRequestRef,
-    prompt_key: &str,
-    connection_id: &str,
-    seq: i64,
-    created_at: i64,
-    update: &SessionUpdate,
-) -> Option<LegacyChunkRow> {
-    let (chunk_type, content) = legacy_chunk_payload(update)?;
-    Some(LegacyChunkRow {
-        row_id: Uuid::new_v4().to_string(),
-        session_id: prompt_ref.session_id.clone(),
-        prompt_request_key: prompt_key.to_string(),
-        connection_id: connection_id.to_string(),
-        chunk_type,
-        content,
-        seq,
-        created_at,
-    })
-}
-
-fn legacy_chunk_payload(update: &SessionUpdate) -> Option<(&'static str, String)> {
-    match update {
-        SessionUpdate::UserMessageChunk(chunk) | SessionUpdate::AgentMessageChunk(chunk) => {
-            Some(("text", content_block_preview(&chunk.content)))
-        }
-        SessionUpdate::AgentThoughtChunk(chunk) => {
-            Some(("thinking", content_block_preview(&chunk.content)))
-        }
-        SessionUpdate::ToolCall(tool_call) => Some((
-            "tool_call",
-            serde_json::to_string(tool_call).unwrap_or_default(),
-        )),
-        SessionUpdate::ToolCallUpdate(tool_call_update) => Some((
-            "tool_result",
-            serde_json::to_string(tool_call_update).unwrap_or_default(),
-        )),
-        _ => None,
-    }
-}
-
-fn content_block_preview(content: &ContentBlock) -> String {
-    match content {
-        ContentBlock::Text(text) => text.text.clone(),
-        other => serde_json::to_string(other).unwrap_or_default(),
     }
 }
 

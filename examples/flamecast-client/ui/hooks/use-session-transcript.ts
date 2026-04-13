@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useLiveQuery } from "@tanstack/react-db";
 import {
   createSessionPermissionsCollection,
-  createSessionTurnsCollection,
-  createTurnChunksCollection,
+  createSessionPromptRequestsCollection,
+  createRequestChunksCollection,
   type ChunkRow,
 } from "@fireline/state";
 import { buildSessionLogs } from "../lib/build-session-logs.js";
@@ -16,7 +16,7 @@ export function useSessionTranscript(sessionId: string) {
 
   const sessionTurnsCollection = useMemo(
     () =>
-      createSessionTurnsCollection({
+      createSessionPromptRequestsCollection({
         promptRequests: db.promptRequests,
         sessionId,
       }),
@@ -40,7 +40,7 @@ export function useSessionTranscript(sessionId: string) {
   useEffect(() => {
     const turnRows = turns.data ?? [];
     const chunkCollections = turnRows.map((turn) =>
-      createTurnChunksCollection({
+      createRequestChunksCollection({
         chunks: db.chunks,
         sessionId: turn.sessionId,
         requestId: turn.requestId,

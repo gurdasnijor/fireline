@@ -3,12 +3,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 
-import {
-  chunkSchema,
-  connectionSchema,
-  runtimeInstanceSchema,
-  sessionSchema,
-} from '../src/schema.js'
+import { chunkSchema, runtimeInstanceSchema, sessionSchema } from '../src/schema.js'
 
 const requestIdSchema = z.union([z.null(), z.string(), z.number().int()])
 const stopReasonSchema = z.enum([
@@ -33,57 +28,6 @@ const baseEnvelopeSchema = z
     value: z.unknown().optional(),
   })
   .strict()
-
-const legacyChunkSchema = z
-  .object({
-    chunkId: z.string(),
-    sessionId: z.string(),
-    promptTurnId: z.string(),
-    logicalConnectionId: z.string(),
-    type: z.enum(['text', 'tool_call', 'thinking', 'tool_result', 'error', 'stop']),
-    content: z.string(),
-    seq: z.number(),
-    createdAt: z.number(),
-  })
-  .passthrough()
-
-const legacyPromptTurnSchema = z
-  .object({
-    promptTurnId: z.string(),
-    logicalConnectionId: z.string(),
-    sessionId: z.string(),
-    requestId: requestIdSchema,
-    text: z.string().optional(),
-    state: z.enum([
-      'queued',
-      'active',
-      'completed',
-      'cancel_requested',
-      'cancelled',
-      'broken',
-      'timed_out',
-    ]),
-    position: z.number().optional(),
-    stopReason: stopReasonSchema.optional(),
-    startedAt: z.number(),
-    completedAt: z.number().optional(),
-  })
-  .passthrough()
-
-const legacySessionSchema = z
-  .object({
-    sessionId: z.string(),
-    runtimeKey: z.string(),
-    runtimeId: z.string(),
-    nodeId: z.string(),
-    logicalConnectionId: z.string(),
-    state: z.enum(['active', 'broken', 'closed']),
-    supportsLoadSession: z.boolean(),
-    createdAt: z.number(),
-    updatedAt: z.number(),
-    lastSeenAt: z.number(),
-  })
-  .passthrough()
 
 const promptRequestEventValueSchema = z
   .object({
@@ -129,14 +73,10 @@ const chunkEventValueSchema = chunkSchema
   .strict()
 
 const strictValueSchemas = {
-  chunk: legacyChunkSchema,
   chunk_v2: chunkEventValueSchema,
-  connection: connectionSchema.strict(),
   permission: permissionEventValueSchema,
   prompt_request: promptRequestEventValueSchema,
-  prompt_turn: legacyPromptTurnSchema,
   runtime_instance: runtimeInstanceSchema.strict(),
-  session: legacySessionSchema,
   session_v2: sessionEventValueSchema,
 } as const
 
@@ -156,7 +96,6 @@ describe('Rust producer fixture', () => {
 
     for (const line of lines) {
       const parsed = baseEnvelopeSchema.parse(JSON.parse(line))
-      expect(parsed.type).not.toBe('child_session_edge')
 
       const valueSchema = strictValueSchemas[parsed.type as keyof typeof strictValueSchemas]
 

@@ -109,9 +109,9 @@ async fn managed_agent_baseline_smoke_validates_session_harness_and_sandbox() ->
         let body = runtime
             .wait_for_state_rows(
                 &[
-                    "\"type\":\"session\"",
-                    "\"type\":\"prompt_turn\"",
-                    "\"type\":\"chunk\"",
+                    "\"type\":\"session_v2\"",
+                    "\"type\":\"prompt_request\"",
+                    "\"type\":\"chunk_v2\"",
                 ],
                 DEFAULT_TIMEOUT,
             )

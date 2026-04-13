@@ -6,11 +6,9 @@ describe('firelineState schema', () => {
   it('defines the expected collections', () => {
     expect(Object.keys(firelineState).sort()).toEqual([
       'chunks',
-      'connections',
       'permissions',
       'promptRequests',
       'sessions',
-      'terminals',
     ])
   })
 

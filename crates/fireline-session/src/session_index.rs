@@ -38,7 +38,7 @@ impl SessionIndex {
         };
 
         match envelope.entity_type() {
-            Some("session") | Some("session_v2") => match operation {
+            Some("session_v2") => match operation {
                 ChangeOperation::Insert | ChangeOperation::Update => {
                     let Some(value) = envelope.value.as_ref() else {
                         return Ok(());
@@ -83,7 +83,7 @@ mod tests {
     async fn materializes_session_rows_from_state_events() {
         let index = SessionIndex::new();
         let envelope: StateEnvelope = serde_json::from_value(serde_json::json!({
-            "type":"session",
+            "type":"session_v2",
             "key":"sess-1",
             "headers":{"operation":"insert"},
             "value":{
@@ -111,9 +111,7 @@ mod tests {
             "type":"runtime_spec",
             "key":"runtime:1",
             "headers":{"operation":"insert"},
-            "value": {
-              "runtimeKey":"runtime:1"
-            },
+            "value": {},
         }))
         .unwrap();
         index.apply_envelope(&host_spec_envelope).unwrap();

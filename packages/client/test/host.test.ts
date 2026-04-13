@@ -321,7 +321,7 @@ async function waitForStreamHostBaseUrl(
 async function appendSessionEnvelope(
   sharedStateUrl: string,
   sessionId: string,
-  runtime: RuntimeDescriptor,
+  _runtime: RuntimeDescriptor,
 ): Promise<void> {
   const stream = new DurableStream({
     url: sharedStateUrl,
@@ -341,15 +341,11 @@ async function appendSessionEnvelope(
 
   const now = Date.now()
   const envelope = {
-    type: 'session',
+    type: 'session_v2',
     key: sessionId,
     headers: { operation: 'insert' },
     value: {
       sessionId,
-      runtimeKey: runtime.runtimeKey,
-      runtimeId: runtime.runtimeId,
-      nodeId: runtime.nodeId,
-      logicalConnectionId: `conn:${sessionId}`,
       state: 'active',
       supportsLoadSession: false,
       createdAt: now,

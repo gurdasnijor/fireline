@@ -272,7 +272,7 @@ mod tests {
         let materializer = StateMaterializer::new(vec![projection.clone()]);
         let bytes = chunk(vec![
             serde_json::json!({
-                "type": "session",
+                "type": "session_v2",
                 "key": "sess-1",
                 "value": {"sessionId": "sess-1"},
                 "headers": {"operation": "insert"}
@@ -328,7 +328,7 @@ mod tests {
 
         let events = projection.events.lock().unwrap().clone();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, "session");
+        assert_eq!(events[0].0, "session_v2");
     }
 
     #[tokio::test]
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn state_envelope_deserializes_protocol_optional_fields() {
         let envelope: StateEnvelope = serde_json::from_value(serde_json::json!({
-            "type": "session",
+            "type": "session_v2",
             "key": "sess-1",
             "value": {"sessionId": "sess-1"},
             "old_value": {"sessionId": "sess-0"},
@@ -418,7 +418,7 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(envelope.entity_type.as_deref(), Some("session"));
+        assert_eq!(envelope.entity_type.as_deref(), Some("session_v2"));
         assert_eq!(envelope.key.as_deref(), Some("sess-1"));
         assert_eq!(envelope.headers.operation, Some(ChangeOperation::Update));
         assert_eq!(envelope.headers.txid.as_deref(), Some("tx-1"));

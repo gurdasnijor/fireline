@@ -21,11 +21,9 @@ describe('fireline.db plane separation', () => {
 
     expect(Object.keys(actualState.firelineState).sort()).toEqual([
       'chunks',
-      'connections',
       'permissions',
       'promptRequests',
       'sessions',
-      'terminals',
     ])
 
     vi.resetModules()
@@ -33,10 +31,6 @@ describe('fireline.db plane separation', () => {
       ...actualState,
       createFirelineDB: () => ({
         collections: {
-          connections: makeCollection(
-            [{ logicalConnectionId: 'conn-1', state: 'attached', createdAt: 1, updatedAt: 1 }],
-            (row) => row.logicalConnectionId,
-          ),
           promptRequests: makeCollection(
             [{ sessionId: 'sess-1', requestId: 'req-1', state: 'active', startedAt: 1 }],
             (row) => `${row.sessionId}:${String(row.requestId)}`,
@@ -44,19 +38,6 @@ describe('fireline.db plane separation', () => {
           permissions: makeCollection(
             [{ sessionId: 'sess-1', requestId: 'req-1', state: 'pending', createdAt: 1 }],
             (row) => `${row.sessionId}:${String(row.requestId)}`,
-          ),
-          terminals: makeCollection(
-            [
-              {
-                terminalId: 'term-1',
-                logicalConnectionId: 'conn-1',
-                sessionId: 'sess-1',
-                state: 'open',
-                createdAt: 1,
-                updatedAt: 1,
-              },
-            ],
-            (row) => row.terminalId,
           ),
           sessions: makeCollection(
             [
@@ -99,11 +80,9 @@ describe('fireline.db plane separation', () => {
     expect('runtimeInstances' in firelineDb).toBe(false)
     expect(Object.keys(firelineDb.collections).sort()).toEqual([
       'chunks',
-      'connections',
       'permissions',
       'promptRequests',
       'sessions',
-      'terminals',
     ])
 
     for (const collection of Object.values(firelineDb.collections)) {

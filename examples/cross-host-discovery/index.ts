@@ -17,7 +17,7 @@ const acp = await agentB.connect('cross-host-discovery')
 const { sessionId } = await acp.newSession({ cwd: process.cwd(), mcpServers: [] })
 const readSessionText = () => {
   const requestIds = new Set(
-    db.promptTurns.toArray
+    db.promptRequests.toArray
       .filter((turn) => turn.sessionId === sessionId)
       .map((turn) => turn.requestId),
   )

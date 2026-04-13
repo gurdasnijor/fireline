@@ -36,7 +36,7 @@ use managed_agent_suite::{
 use std::collections::HashSet;
 
 /// Precondition: a local runtime has been spawned and has emitted at least the
-/// baseline `session`, `prompt_turn`, and `chunk` envelopes in response to one
+/// baseline `session_v2`, `prompt_request`, and `chunk_v2` envelopes in response to one
 /// prompt.
 ///
 /// Action: read the raw durable stream from `Offset::Beginning` to the live
@@ -60,9 +60,9 @@ async fn session_stream_is_append_only_and_replayable_from_beginning() -> Result
         let body = runtime
             .wait_for_state_rows(
                 &[
-                    "\"type\":\"session\"",
-                    "\"type\":\"prompt_turn\"",
-                    "\"type\":\"chunk\"",
+                    "\"type\":\"session_v2\"",
+                    "\"type\":\"prompt_request\"",
+                    "\"type\":\"chunk_v2\"",
                 ],
                 DEFAULT_TIMEOUT,
             )
@@ -75,22 +75,22 @@ async fn session_stream_is_append_only_and_replayable_from_beginning() -> Result
         );
 
         let session_idx = body
-            .find("\"type\":\"session\"")
+            .find("\"type\":\"session_v2\"")
             .context("session envelope must appear in replay")?;
-        let prompt_turn_idx = body
-            .find("\"type\":\"prompt_turn\"")
-            .context("prompt_turn envelope must appear in replay")?;
+        let prompt_request_idx = body
+            .find("\"type\":\"prompt_request\"")
+            .context("prompt_request envelope must appear in replay")?;
         let chunk_idx = body
-            .find("\"type\":\"chunk\"")
+            .find("\"type\":\"chunk_v2\"")
             .context("chunk envelope must appear in replay")?;
 
         assert!(
-            session_idx < prompt_turn_idx,
-            "INVARIANT (Session): session envelope appears before prompt_turn in append order"
+            session_idx < prompt_request_idx,
+            "INVARIANT (Session): session envelope appears before prompt_request in append order"
         );
         assert!(
-            prompt_turn_idx < chunk_idx,
-            "INVARIANT (Session): prompt_turn appears before chunk in append order"
+            prompt_request_idx < chunk_idx,
+            "INVARIANT (Session): prompt_request appears before chunk_v2 in append order"
         );
 
         Ok(())
@@ -148,12 +148,12 @@ async fn session_durable_stream_survives_runtime_death() -> Result<()> {
         let _record =
             wait_for_session_record(&runtime.state.url, &session_id, DEFAULT_TIMEOUT).await?;
 
-        // Also wait until at least one prompt_turn envelope is visible before
-        // shutdown. Without this, the prompt_turn write can still be in flight
+        // Also wait until at least one prompt_request envelope is visible before
+        // shutdown. Without this, the prompt_request write can still be in flight
         // when the runtime is stopped, and the post-death assertion becomes a
         // flake about timing instead of a durability check.
-        let _prompt_turns =
-            wait_for_event_count(&runtime.state.url, "prompt_turn", 1, DEFAULT_TIMEOUT).await?;
+        let _prompt_requests =
+            wait_for_event_count(&runtime.state.url, "prompt_request", 1, DEFAULT_TIMEOUT).await?;
 
         // Kill the runtime through the control plane. The runtime process
         // goes away; the stream server does not.
@@ -171,13 +171,14 @@ async fn session_durable_stream_survives_runtime_death() -> Result<()> {
             records_after_death.len()
         );
 
-        // Also verify that at least one prompt_turn envelope survived — this
+        // Also verify that at least one prompt_request envelope survived — this
         // is the "progress was recorded before death" half of the contract.
-        let prompt_turns_after_death = count_events(&runtime.state.url, "prompt_turn").await?;
+        let prompt_requests_after_death =
+            count_events(&runtime.state.url, "prompt_request").await?;
         assert!(
-            prompt_turns_after_death >= 1,
-            "INVARIANT (Session): prompt_turn envelopes must survive runtime death, \
-             saw {prompt_turns_after_death}"
+            prompt_requests_after_death >= 1,
+            "INVARIANT (Session): prompt_request envelopes must survive runtime death, \
+             saw {prompt_requests_after_death}"
         );
 
         Ok(())
@@ -212,7 +213,7 @@ async fn session_replay_from_mid_offset_is_suffix_of_full_replay() -> Result<()>
     let runtime = LocalRuntimeHarness::spawn("session-replay-mid-offset").await?;
 
     let result = async {
-        // Phase 1: seed with one prompt and wait for its prompt_turn to
+        // Phase 1: seed with one prompt and wait for its prompt_request to
         // land so we know the stream has committed events before we
         // capture the live edge.
         let _ = runtime
@@ -220,7 +221,7 @@ async fn session_replay_from_mid_offset_is_suffix_of_full_replay() -> Result<()>
             .await?;
         let _ = wait_for_event_count(
             runtime.state_stream_url(),
-            "prompt_turn",
+            "prompt_request",
             1,
             DEFAULT_TIMEOUT,
         )
@@ -272,7 +273,7 @@ async fn session_replay_from_mid_offset_is_suffix_of_full_replay() -> Result<()>
             .await?;
         let _ = wait_for_event_count(
             runtime.state_stream_url(),
-            "prompt_turn",
+            "prompt_request",
             2,
             DEFAULT_TIMEOUT,
         )

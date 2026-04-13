@@ -52,16 +52,6 @@ const promptRequestStateSchema = z.enum([
 
 const permissionStateSchema = z.enum(['pending', 'resolved', 'orphaned'])
 
-export const connectionSchema = z.object({
-  logicalConnectionId: z.string(),
-  state: z.enum(['created', 'attached', 'broken', 'closed']),
-  latestSessionId: sessionIdSchema.optional(),
-  lastError: z.string().optional(),
-  queuePaused: z.boolean().optional(),
-  createdAt: z.number(),
-  updatedAt: z.number(),
-})
-
 export const promptRequestSchema = z.object({
   sessionId: sessionIdSchema,
   requestId: requestIdSchema,
@@ -89,19 +79,6 @@ export const permissionSchema = z.object({
   outcome: z.string().optional(),
   createdAt: z.number(),
   resolvedAt: z.number().optional(),
-})
-
-export const terminalSchema = z.object({
-  terminalId: z.string(),
-  logicalConnectionId: z.string(),
-  sessionId: sessionIdSchema,
-  promptTurnId: z.string().optional(),
-  state: z.enum(['open', 'exited', 'released', 'broken']),
-  command: z.string().optional(),
-  exitCode: z.number().optional(),
-  signal: z.string().optional(),
-  createdAt: z.number(),
-  updatedAt: z.number(),
 })
 
 export const runtimeInstanceSchema = z.object({
@@ -133,7 +110,7 @@ const promptRequestEventSchema = promptRequestSchema
   .extend({
     promptRequestKey: z.string(),
   })
-  .passthrough()
+  .strict()
 
 const permissionEventSchema = z
   .object({
@@ -147,68 +124,15 @@ const permissionEventSchema = z
     reason: z.string().optional(),
     createdAtMs: z.number(),
   })
-  .passthrough()
+  .strict()
 
 const chunkEventSchema = chunkSchema
   .extend({
     chunkKey: z.string(),
   })
-  .passthrough()
-
-const legacyPromptTurnSchema = z
-  .object({
-    promptTurnId: z.string(),
-    logicalConnectionId: z.string(),
-    sessionId: sessionIdSchema,
-    requestId: requestIdSchema,
-    traceId: z.string().optional(),
-    parentPromptTurnId: z.string().optional(),
-    text: z.string().optional(),
-    state: promptRequestStateSchema,
-    position: z.number().optional(),
-    stopReason: stopReasonSchema.optional(),
-    startedAt: z.number(),
-    completedAt: z.number().optional(),
-  })
-  .passthrough()
-
-const legacySessionSchema = z
-  .object({
-    sessionId: sessionIdSchema,
-    runtimeKey: z.string(),
-    runtimeId: z.string(),
-    nodeId: z.string(),
-    logicalConnectionId: z.string(),
-    state: z.enum(['active', 'broken', 'closed']),
-    supportsLoadSession: z.boolean(),
-    traceId: z.string().optional(),
-    parentPromptTurnId: z.string().optional(),
-    createdAt: z.number(),
-    updatedAt: z.number(),
-    lastSeenAt: z.number(),
-  })
-  .passthrough()
-
-const legacyChunkSchema = z
-  .object({
-    chunkId: z.string(),
-    sessionId: sessionIdSchema,
-    promptTurnId: z.string(),
-    logicalConnectionId: z.string(),
-    type: z.enum(['text', 'tool_call', 'thinking', 'tool_result', 'error', 'stop']),
-    content: z.string(),
-    seq: z.number(),
-    createdAt: z.number(),
-  })
-  .passthrough()
+  .strict()
 
 const firelineCollectionDefinitions = {
-  connections: {
-    schema: connectionSchema,
-    type: 'connection',
-    primaryKey: 'logicalConnectionId',
-  },
-
   promptRequests: {
     schema: promptRequestEventSchema,
     type: 'prompt_request',
@@ -219,12 +143,6 @@ const firelineCollectionDefinitions = {
     schema: permissionEventSchema,
     type: 'permission',
     primaryKey: 'permissionEventKey',
-  },
-
-  terminals: {
-    schema: terminalSchema,
-    type: 'terminal',
-    primaryKey: 'terminalId',
   },
 
   sessions: {
@@ -249,24 +167,6 @@ export const firelineStreamState = createStateSchema({
     schema: runtimeInstanceSchema,
     type: 'runtime_instance',
     primaryKey: 'instanceId',
-  },
-
-  legacyPromptTurns: {
-    schema: legacyPromptTurnSchema,
-    type: 'prompt_turn',
-    primaryKey: 'promptTurnId',
-  },
-
-  legacySessions: {
-    schema: legacySessionSchema,
-    type: 'session',
-    primaryKey: 'sessionId',
-  },
-
-  legacyChunks: {
-    schema: legacyChunkSchema,
-    type: 'chunk',
-    primaryKey: 'chunkId',
   },
 })
 
@@ -309,12 +209,9 @@ export function chunkRowKey(row: ChunkRow): string {
   )
 }
 
-export type ConnectionRow = z.infer<typeof connectionSchema>
 export type PromptRequestRow = z.infer<typeof promptRequestSchema>
-export type PromptTurnRow = PromptRequestRow
 export type PermissionOptionRow = z.infer<typeof permissionOptionSchema>
 export type PermissionRow = z.infer<typeof permissionSchema>
-export type TerminalRow = z.infer<typeof terminalSchema>
 export type RuntimeInstanceRow = z.infer<typeof runtimeInstanceSchema>
 export type SessionRow = z.infer<typeof sessionSchema>
 export type ChunkRow = z.infer<typeof chunkSchema>
@@ -322,7 +219,4 @@ export type PromptRequestEventRow = z.infer<typeof promptRequestEventSchema>
 export type PermissionEventRow = z.infer<typeof permissionEventSchema>
 export type SessionEventRow = SessionRow
 export type ChunkEventRow = z.infer<typeof chunkEventSchema>
-export type LegacyPromptTurnEventRow = z.infer<typeof legacyPromptTurnSchema>
-export type LegacySessionEventRow = z.infer<typeof legacySessionSchema>
-export type LegacyChunkEventRow = z.infer<typeof legacyChunkSchema>
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error'

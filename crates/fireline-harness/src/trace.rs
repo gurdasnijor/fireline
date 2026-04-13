@@ -65,12 +65,13 @@ impl DurableStreamTracer {
 
     pub fn new_with_host_context(
         producer: Producer,
-        host_key: impl Into<String>,
-        host_id: impl Into<String>,
-        node_id: impl Into<String>,
+        _host_key: impl Into<String>,
+        _host_id: impl Into<String>,
+        _node_id: impl Into<String>,
         connection_id: impl Into<String>,
     ) -> Self {
-        let projector = StateProjector::new(host_key, host_id, node_id, connection_id);
+        let _ = connection_id.into();
+        let projector = StateProjector::new();
         for event in projector.initial_events() {
             producer.append_json(&event);
         }

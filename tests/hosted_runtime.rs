@@ -122,7 +122,7 @@ async fn hosted_runtime_serves_acp_and_emits_state_events() -> Result<()> {
             }
         }
 
-        if body.contains("\"type\":\"prompt_turn\"") {
+        if body.contains("\"type\":\"prompt_request\"") {
             break;
         }
 
@@ -138,11 +138,11 @@ async fn hosted_runtime_serves_acp_and_emits_state_events() -> Result<()> {
         "state stream should contain runtime instance rows: {body}"
     );
     assert!(
-        body.contains("\"type\":\"prompt_turn\""),
-        "state stream should contain prompt turns: {body}"
+        body.contains("\"type\":\"prompt_request\""),
+        "state stream should contain prompt requests: {body}"
     );
     assert!(
-        body.contains("\"type\":\"session\""),
+        body.contains("\"type\":\"session_v2\""),
         "state stream should contain session rows: {body}"
     );
 
