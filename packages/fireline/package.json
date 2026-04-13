@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc",
     "lint": "tsc --noEmit",
-    "test": "pnpm run build && node --test dist/cli.test.js dist/repl.test.js dist/repl-pane-events.test.js"
+    "test": "pnpm run build && node --test dist/cli.test.js dist/repl.test.js dist/repl-pane-conversation.test.js dist/repl-pane-events.test.js"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.18.2",
