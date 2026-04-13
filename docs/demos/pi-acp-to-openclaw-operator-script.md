@@ -20,7 +20,7 @@
 | T5.2 Saved dashboard view | ○ blocked | T4.1 emitting | Pane C layout prepared preemptively |
 | `.6.1` agent.ts + reviewer.ts | ✓ LANDED `dbfac8a` | — | demo assets frozen |
 | `.6.2` `--resume` CLI verify | ○ blocked | canonical-ids Phase 5 (`mono-vkpp.7`) | see Step 3 fallback |
-| `.6.3` Chat SDK approval bridge | ○ platform pending user decision | — | Step 4 goes LIVE once platform selected + bridge wired; local-CLI approver is fallback |
+| `.6.3` Discord bidirectional chat (SIGNATURE MOMENT) | ○ new sub-epic .6.3.1–.9 | user Discord app pre-stage (`.6.3.1`); PM-A w22 borrow pending | Steps 3/4/5 re-centered on Discord per user directive; local-CLI approver remains wired as fallback |
 >
 > Every step must be labeled with its honesty class:
 >
@@ -33,14 +33,31 @@
 
 ## Demo target (subject to gates)
 
-Aligned with the `DEMO-PLAN.md` priority order:
+Reframed 2026-04-12 per user directive: **Discord bidirectional chat is the
+new signature moment.** The narrative shift is "Fireline is the foundational
+substrate for OpenClaw-style systems — your users already text your agents
+from their existing chat, approvals happen there, multi-agent threads render
+in the same surface."
 
-1. **Demo 1 — Unkillable Agent** (signature story, highest confidence)
-2. **Demo 2 — Approval Gate** (depends on Chat SDK bridge + chosen-platform auth being stage-safe)
-3. **Demo 3 — Live Dashboard** (background backdrop)
+1. **Signature — Text your agent from Discord.** You type a Discord message,
+   an agent replies in the same channel with streaming, it asks for an
+   approval with a button card, you tap Approve, it finishes. No bespoke UI.
+2. **Unkillable agent, now in chat.** Same conversation, operator kills the
+   host mid-reply, restarts, user sends next message, session continues from
+   where it stopped — visible in the Discord thread.
+3. **Peer in the same thread.** `reviewer.ts` joins, its messages appear in
+   the thread, the audience sees multi-agent lineage in a user surface.
+4. **Observation surface.** Betterstack trace tree shows Discord → agent →
+   peer-agent lineage as one tree.
+5. **Substrate close.** The thing that made all of that possible fits in
+   15 lines of agent.ts + a Chat-SDK bridge.
 
-Demos 4 (Flamecast in 200 lines) and 5 (Provider Swap) are stretch and not part
-of this script.
+`DEMO-PLAN.md` Demo 1 (Unkillable Agent) + Demo 2 (Approval) + Demo 3 (Live
+Dashboard) are now woven into the Discord-centered arc instead of being
+three separate chapters.
+
+Demos 4 (Flamecast in 200 lines) and 5 (Provider Swap) remain stretch, not
+part of this script.
 
 ## Pre-flight checklist (T-60 minutes before stage)
 
@@ -57,7 +74,9 @@ Operator runs through this in the dressing room, not on stage:
 | P7 | Local Docker image present + passes smoke | `docker image ls fireline-host-quickstart:embedded-smoke` and `docker run --rm ... /healthz` | image tag present, `/healthz` returns 200 |
 | P8 | OTel backend reachable (Betterstack) | `set -a; source deploy/observability/betterstack.env; set +a` then curl smoke per `deploy/observability/README.md §Smoke-test ingestion` | HTTP 202 Accepted |
 | P9 | Backup terminal prewarmed with fallback commands | separate tmux/cmux pane with fallback scripts open | operator can switch in <3s |
-| P10 | Step 3 restart/resume gate check | Run `docs/demos/scripts/replay-peer-to-peer.sh` through to the kill-and-resume phase | session continues post-restart. **If it does not** (per `mono-thnc.2.3` open bug), Step 3 downgrades to PRE-STAGED before showtime |
+| P10 | Step 3 restart/resume gate check | Run `docs/demos/scripts/replay-peer-to-peer.sh` through to the kill-and-resume phase | session continues post-restart. **If it does not** (per `mono-thnc.2.3` open bug, w19 fix in flight at `498fff6`), Step 3 restart beat downgrades to PRE-STAGED recording before showtime |
+| P11 | Discord bridge health | `curl -fsS http://127.0.0.1:<bridge-port>/healthz` and send a test mention in the demo channel | 200 OK + bot replies within 2s. **If either fails**, Step 3/4/5 Discord paths downgrade to PRE-STAGED + local-CLI approver |
+| P12 | Discord tokens sourced in operator env | `echo $DISCORD_BOT_TOKEN \| head -c 10; echo $DISCORD_GUILD_ID; echo $DISCORD_CHANNEL_ID` | all three have values; tokens loaded from `deploy/discord/bridge.env` (gitignored) |
 
 **If any pre-flight fails, the owning step must be downgraded to PRE-STAGED or
 cut before going live.**
@@ -150,188 +169,203 @@ what a clean run looks like" without breaking.
 
 ---
 
-### Step 3 — The unkillable agent (Demo 1 signature moment)
+### Step 3 — Deploy + text your agent from Discord (SIGNATURE MOMENT)
 
-**Class: LIVE**
+**Class: LIVE if `mono-thnc.6.3.8` E2E smoke green; PRE-STAGED via rehearsal recording otherwise**
 
-**Action sequence in Pane A:**
+This is the moment that reframes the demo. Operator deploys the agent and
+the audience sees Discord become the interface.
 
-```bash
-# (In a separate pane, prompt the agent again with something that takes
-# multiple tool calls — e.g., "list files in demo/, then read the largest one,
-# then summarize")
-# Partway through the response streaming into Pane B, operator runs:
-kill -9 $(pgrep -f 'fireline .*agent.ts' | head -1)
-# (Or Ctrl-C the visible host process in Pane A.)
-
-# Then immediately:
-npx fireline docs/demos/assets/agent.ts --resume <session-id-shown-in-step-1>
-```
-
-**What the audience should see:**
-
-- Mid-sentence, Pane B freezes (old host dead)
-- Pane A shows the old process exit
-- Operator re-launches; in 1-3 seconds Pane B resumes streaming *from where the
-  sentence stopped*, not from scratch
-- Pane C shows two `fireline.session.created` spans bound to the same
-  `fireline.session_id`, second is the rehydrated host
-
-**Narration beat:** "The process is disposable. The session isn't. Everything
-the agent was doing — midsentence — resumes, because state lives in
-durable-streams, not in the host's RAM."
-
-**DEMO-RISK (mitigating):** `mono-thnc.2.3` — in local-Docker smoke,
-session/load does NOT complete after `docker stop/start` even though
-durable-stream rows persist. **Jeff root-caused at `498fff6`**: primary
-cause is missing `.live(LiveMode::Off)` on the read path; secondary is
-bootstrap not forwarding state-stream-url. Fix in flight on w19 (2–4h,
-LOW regression risk, standalone fireline-host + docker diff). If the fix
-lands before Rehearsal 1, this step goes LIVE. If not, fall back per
-below. Pre-flight P10 is the concrete go/no-go gate on the day.
-
-**Fallback:** if `--resume` or post-restart session/load doesn't complete
-(pre-flight P3 or P10), operator uses the lower-level `fireline
---load-session <id>` path (if it behaves differently), OR drops this to
-PRE-STAGED (screen capture from a rehearsal run that was captured before the
-regression). **THIS STEP IS THE SIGNATURE MOMENT — DO NOT DEMO LIVE IF
-PRE-FLIGHT P10 FAILS.** The PRE-STAGED version preserves the narrative
-without the gamble; the trade-off is a lower ceiling, not a broken demo.
-
----
-
-### Step 4 — Approval gate (Demo 2)
-
-**Class: LIVE via Chat SDK bridge (target platform TBD per `mono-thnc.6.3`); PRE-STAGED / local-CLI fallback otherwise**
-
-**Action in Pane A:**
-
-Prompt the agent (via the ACP client) with something that triggers the approval
-policy — e.g., "delete `demo/scratch.txt`".
-
-**What the audience should see:**
-
-- Pane B streams: agent proposes the `delete_file` tool call
-- Pane B pauses: `approval_requested` event emitted, no execution yet
-- A message card appears in the chosen chat platform (Slack / Discord /
-  Linear / Telegram — target is a single Chat SDK call) on the projector
-  with Approve / Deny buttons
-- Operator taps Approve
-- Pane B resumes: tool executes, agent confirms deletion
-
-**Narration beat:** "The approval is durable. If I crashed the host right now
-between the request and the tap, the approval would still be there when the
-host came back up. This isn't a modal — it's infrastructure. And the chat
-surface isn't a Fireline UI — it's your team's existing ops surface. Chat SDK
-means that's one line of config."
-
-**Implementation note (for `mono-thnc.6.3`):** the bridge is a durable-stream
-subscriber on `permission_request` events, emitting a Chat SDK card via the
-selected platform adapter. The Approve/Deny webhook appends
-`approval_resolved` back on the state stream. ~50–100 LOC TS. Reference:
-https://chat-sdk.dev/docs.
-
-**Fallback:** if the Chat SDK bridge misbehaves, operator falls back to the
-local CLI approver (`fireline approve --session <id> --request-id <id>`).
-Same durable-streams write path, so the agent resume is identical; narration
-pivots to: "The approver is a CLI in this path — the chat card is one of
-many resolvers on the same substrate."
-
----
-
-### Step 5 — Same OCI image, portable target story (Demo 5 teaser)
-
-**Class: depends on T1 + T2 state at showtime**
-
-**Framing:** The demo story here is *portability*, not a specific cloud. The
-message is: "`fireline build` produces one OCI image. That image runs locally
-under docker, and ships via target-native tooling (flyctl, wrangler, kubectl)
-to any container platform." The validated truth at demo time is local docker
-(T2); other targets are future work.
-
-**If T1 (`fireline deploy` wrapper) and T2 (local Docker smoke + embedded-spec
-entrypoint fix) are BOTH green:**
-
-**Class: LIVE**
+**Action sequence:**
 
 ```bash
-npx fireline build demo/agent.ts                             # produce OCI image
+# Pane A — build + deploy the image (local docker)
+npx fireline build docs/demos/assets/agent.ts
 docker run -d --name fireline-demo \
   -p 8087:8087 \
   -v $PWD/.fireline-streams:/var/lib/fireline/streams \
-  fireline/demo:latest                                       # run locally
-# (endpoint URL printed; client reconnects against it)
+  --env-file deploy/observability/betterstack.env \
+  --env-file deploy/discord/bridge.env \
+  fireline/demo:latest
+
+# Pane D — projector side, Discord demo channel already open
+# (pre-flight P11 verified bridge is listening)
 ```
 
-Audience sees:
-- Build log → image SHA
-- `docker run` succeeds; Pane B reconnects its ACP client to the mapped port
-- Pane C registers a `fireline.sandbox.provisioned` span with
-  `fireline.provider=docker-local`
-- Operator narrates the per-target extensions: "same image, `fireline deploy
-  --to fly` / `--to cloudflare-containers` / `--to k8s` — local validation
-  today, per-target validation on the hosted-deployment roadmap."
+**What the audience should see:**
 
-**If T1 green but T2 not green (entrypoint fix or smoke incomplete):**
+- Pane A: build log → image SHA → `docker run` starts cleanly
+- Pane B: bridge service log shows "connected to Discord gateway" and
+  "subscribed to session stream"
+- **Projector pivots to Discord** — operator types in the demo channel:
+  `@fireline-demo read README.md and summarize it in two sentences`
+- Agent replies **in the Discord thread** with streaming text (message
+  edits happening live as the agent thinks)
+- Pane C (Betterstack) shows the trace: `fireline.session.created` (bound
+  to the Discord user/channel) → `fireline.prompt.request` → `tool.call`
+  (read_file) → `prompt.request` end
 
-**Class: PRE-STAGED.** Operator shows the `fireline build` + `docker run`
-command list and plays a screen capture of a rehearsal run. Narration is
-unchanged — the portability story does not require the live proof, but the
-live proof is stronger.
-
-**If T1 not green:**
-
-**Class: MOCKED.** Show intended commands; cut to Step 6. Narration: "This is
-shipping — `fireline build` lands this week; the docker story is already
-proven; the CLI wrapper is the last mile."
-
-**CF Containers note:** CF Containers is **not** demoed. It is framed as a
-future target, deferred pending object-storage-native durable-streams
-protocol. Do not show `--to cloudflare-containers` in any LIVE step unless
-explicitly greenlit on the day.
-
----
-
-### Step 6 — Peer fleet
-
-**Class: LIVE (gated on T4.1 emitting peer span names); PRE-STAGED fallback via `d543eac` replay**
-
-FQA-5 (`047f087`) proved the peer-to-peer ACP flow works end-to-end; w25
-captured it as a replay driver at `d543eac`:
-
-- Reference doc: `docs/demos/peer-to-peer-demo-capture.md`
-- Driver script: `docs/demos/scripts/replay-peer-to-peer.sh`
-
-**LIVE path:**
+**Then the unkillable-agent beat, in Discord:**
 
 ```bash
-# Pane A — in the demo working dir:
-./docs/demos/scripts/replay-peer-to-peer.sh
+# Pane A — while user starts a second, longer prompt in Discord:
+docker kill fireline-demo
+docker start fireline-demo
 ```
 
-Pane C should render the cross-agent lineage via `fireline.peer.call.out/in`
-span parent/child (once T4.1 emits + T5.2 saved view is baked). If T4.2
-peer `_meta.traceparent` propagation is not live (canonical-ids Phase 4
-gate), the lineage renders as two adjacent traces instead of one parent
-trace — still coherent, less dramatic.
+- Discord thread: reply freezes mid-sentence
+- Discord shows "Agent reconnecting…" (bridge handles this gracefully)
+- Within 1–3 seconds the same message edit resumes; the agent finishes
+  its thought mid-sentence
+- Audience sees: the container died, the conversation did not
 
-**Fallback:** re-run the replay script end-to-end but off-stage and play
-the recording. Script + recording = deterministic fallback.
+**Narration beat:** "You're not looking at a Fireline UI. You're looking at
+Discord. The user never left their existing surface. We killed the container
+and the conversation kept going because the session lives in durable-streams,
+not in the host's RAM. Your team's ops surface is the agent's home."
+
+**DEMO-RISK (mitigating, partially resolved):** `mono-thnc.2.3` —
+session/load after container restart — Jeff root-caused at `498fff6`, fix
+in flight on w19. Pre-flight P10 is the go/no-go gate.
+
+**Fallbacks (three layers):**
+1. If `mono-thnc.6.3.8` Discord E2E is shaky → fall back to
+   `mono-thnc.6.3.6`-only mode: only approval cards render in Discord; the
+   prompt itself runs through the local ACP client in Pane B. Narration
+   stays Discord-forward.
+2. If Discord bridge is entirely down → fall back to local ACP client in
+   Pane B, approvals via CLI approver. Narration pivots to "showing the
+   same flow without the chat surface — the substrate is the same."
+3. If `mono-thnc.2.3` fix isn't in → play the PRE-STAGED Discord recording
+   of the restart beat instead of doing it live.
+
+### Step 4 — Approval card in Discord (Demo 2 reframed)
+
+**Class: LIVE via `mono-thnc.6.3.6` Discord approval card; PRE-STAGED or local-CLI fallback otherwise**
+
+Continuing inside the same Discord thread from Step 3, operator types a
+prompt that triggers the approval policy:
+
+> `@fireline-demo delete the build output with rm -rf dist`
+
+**What the audience should see:**
+
+- The agent proposes the `delete_file` tool call (or `run_command` with
+  `rm`) but does NOT execute
+- Discord renders a **message card in the thread** with the tool call
+  details + Approve / Deny buttons
+- Pane C: `fireline.approval.requested` span emitted with
+  `fireline.request_id`, `fireline.policy_id`, `fireline.reason`
+- Operator taps **Approve** on the phone/laptop
+- Discord card updates to "Approved by @operator"
+- Pane C: `fireline.approval.resolved` span with `fireline.allow=true`,
+  `fireline.resolved_by=discord:@operator`
+- Discord thread continues: tool runs, agent confirms deletion
+
+**Narration beat:** "The approval is durable. If we crashed the container
+between the request and the tap, the approval would still be there when
+the container came back up — it's a row in the stream, not an in-memory
+callback. And the Approve button isn't a Fireline UI; it's Discord. Same
+chat surface as every other conversation your team has."
+
+**Implementation reference:** `mono-thnc.6.3.6` — Discord interaction
+webhook writes `approval_resolved` on the state stream; approval gate's
+existing rebuild-from-log unblocks the paused tool call.
+
+**Fallback:** if the Discord interaction fails, operator falls back to
+the local CLI approver (`fireline approve --session <id> --request-id <id>`)
+in a side terminal. Same durable-streams write path — agent resume is
+identical; narration pivots to: "The approver is a CLI in this path. The
+Discord card is one of many resolvers on the same substrate."
 
 ---
 
-### Step 7 — Observation surface close (Demo 3 backdrop)
+### Step 5 — Peer reviewer joins the same Discord thread
 
-**Class: LIVE (Betterstack dashboard, already pre-staged in pre-flight P8)**
+**Class: LIVE via `mono-thnc.6.3.7` (peer visibility); PRE-STAGED via `d543eac` recording otherwise**
 
-Operator flips projector to Pane C full screen. Shows:
+Operator deploys the reviewer agent into the same bridge:
 
-- the trace tree for the entire demo session (steps 1-6)
-- approvals timeline
-- per-agent latency chart
+```bash
+# Pane A — in a side terminal
+npx fireline build docs/demos/assets/reviewer.ts
+docker run -d --name fireline-reviewer \
+  -p 8088:8087 \
+  -v $PWD/.fireline-streams:/var/lib/fireline/streams \
+  --env-file deploy/observability/betterstack.env \
+  --env-file deploy/discord/bridge.env \
+  fireline/demo:reviewer
+```
 
-**Narration close:** "Every line of that came out of one stream. We didn't
-write dashboard code. The dashboard is a projection."
+Operator then types in Discord:
+
+> `@fireline-demo ask @reviewer to double-check your last file change`
+
+**What the audience should see:**
+
+- Primary agent announces it's asking the reviewer
+- **Reviewer posts its own message in the same thread** (or a child thread
+  per `mono-thnc.6.3.7`'s chosen shape)
+- Pane C: trace tree shows `peer.call.out` from primary → `peer.call.in`
+  on reviewer, **joined by `_meta.traceparent`** (canonical-ids Phase 4
+  landed at `429475e` — propagation is LIVE, not adjacent-traces fallback)
+- Reviewer replies; primary continues with the reviewer's annotation
+
+**Narration beat:** "Multi-agent is the same surface. You didn't learn a
+new UI. The audience is looking at one Discord thread and one trace tree;
+behind it two agents are exchanging an ACP peer call with W3C trace
+context propagation. This is what OpenClaw-style products are built on
+top of."
+
+**Fallback:** re-run the off-stage FQA-5 replay
+(`docs/demos/scripts/replay-peer-to-peer.sh`, captured at `d543eac`) and
+play the Discord-thread recording from rehearsal. Script + recording =
+deterministic fallback.
+
+---
+
+### Step 6 — Observation surface: Discord → agent → peer lineage in one tree
+
+**Class: LIVE (Betterstack dashboard, pre-flight P8 verified)**
+
+Operator flips projector to the Betterstack dashboard with the saved view
+loaded (`mono-thnc.5.2`, session-id variable bound to the demo session).
+
+Audience sees:
+
+- **Panel 5 — Trace tree** renders one unified tree:
+  `fireline.session.created` (from Discord message intake) →
+  `fireline.prompt.request` → `fireline.tool.call` (multiple) →
+  `fireline.approval.requested` + `fireline.approval.resolved` →
+  `fireline.peer.call.out` → reviewer's `fireline.peer.call.in` →
+  reviewer's prompt/tool children
+- **Panel 4 — Approval timeline** shows the approval card response from
+  Step 4 with `fireline.resolved_by=discord:@operator`
+- **Panel 3 — Tool call heatmap** shows the operator's Discord-prompted
+  activity condensed into 60 seconds
+- **Panel 1 — Session timeline** shows one or two sessions (primary +
+  reviewer if topology uses sibling sessions)
+
+**Narration close:** "Every line of that trace tree came out of one
+durable stream. We didn't write the dashboard — it's a projection. And
+the user never left Discord. Fireline is the substrate; the surface is
+whatever your team already uses."
+
+---
+
+### Step 7 — Substrate close (optional if time permits)
+
+**Class: LIVE (show-and-tell on the `agent.ts` file)**
+
+Operator splits projector: left half `docs/demos/assets/agent.ts` (15
+lines), right half the Discord thread + trace tree.
+
+**Narration close:** "Everything you just saw — Discord bidirectional
+chat, approvals, unkillable restart, peer lineage — started from 15
+lines of agent spec plus a Chat SDK bridge. Fireline is the foundation;
+you ship whatever OpenClaw-style product you want on top."
+
+Skip if running over time.
 
 ---
 
@@ -341,11 +375,11 @@ write dashboard code. The dashboard is a projection."
 |---|---|---|---|
 | 1 | LIVE | pi-acp binary resident | none |
 | 2 | LIVE | none | none |
-| 3 | LIVE **(contingent)** | resume session id from Step 1 | if P3 fails: screen capture |
-| 4 | LIVE or PRE-STAGED | Chat SDK target platform bot authed + channel created + webhook URL | Approve/Deny card shape if bridge fails; local CLI approver if Chat SDK itself fails |
-| 5 | LIVE / PRE-STAGED / MOCKED (T1+T2 gated) | local docker image pre-built; volume dir prepared | CF Containers deploy (deferred; never LIVE at demo) |
-| 6 | PRE-STAGED (default) | second agent already deployed | lineage graph frame |
-| 7 | LIVE | dashboard layout + saved view | none |
+| 3 | LIVE **signature** (contingent on `mono-thnc.6.3.8` + `mono-thnc.2.3` fix) | Discord demo channel + bridge pre-staged, demo agent image pre-built, volume dir prepared | Docker restart as PRE-STAGED recording if 2.3 fix slips |
+| 4 | LIVE via Discord card (`mono-thnc.6.3.6`) | Discord interaction webhook registered, bot authed | Approve/Deny card shape rendered as recording if interactive webhook fails; local CLI approver as last-resort fallback |
+| 5 | LIVE via Discord thread (`mono-thnc.6.3.7`) | reviewer image pre-built, bridge routes reviewer to same thread | Discord thread screenshot + FQA-5 `d543eac` replay recording |
+| 6 | LIVE (Betterstack dashboard w/ saved view) | saved-view URL bookmarked in projector browser, session-id variable auto-bound | none |
+| 7 | LIVE (split-screen show-and-tell) | `docs/demos/assets/agent.ts` pre-opened in editor for quick display | none |
 
 ## Rehearsal 1 acceptance checklist (mirrors `mono-thnc.7`)
 
@@ -406,7 +440,7 @@ Fail in any bucket → Rehearsal 2 drill targets that specific gap.
 
 - [x] Lock `agent.ts` + `reviewer.ts` under `docs/demos/assets/` — **DONE** `dbfac8a` (`mono-thnc.6.1`)
 - [ ] `--resume` CLI flag verification or concrete working equivalent — `mono-thnc.6.2` (blocked on canonical-ids Phase 5, see `mono-thnc.2.3` for in-scope gap)
-- [ ] Chat SDK approval bridge for Step 4 — `mono-thnc.6.3` (platform selection awaiting user; implementation ~50–100 LOC TS)
+- [ ] Discord bidirectional bridge — `mono-thnc.6.3` sub-epic (9 children .6.3.1–.9); signature moment per user directive. Discord pre-stage = `mono-thnc.6.3.1` (user action), bridge build = .6.3.2 through .6.3.9 on w22 (PM-A reserve loan)
 - [ ] Pre-flight checklist dry-run (P1–P10) — `mono-thnc.6.4`
 - [ ] Rehearsal 1 — full-live attempt + fallback capture — `mono-thnc.7` (blocked on T2/T3/T4/T5/.6)
 - [ ] Rehearsal 2 — deliberate-fail drill — `mono-thnc.8` (blocked on Rehearsal 1)
