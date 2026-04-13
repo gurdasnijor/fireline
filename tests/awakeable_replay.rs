@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, Producer, StreamError};
 use fireline_harness::{
     AwakeableKey, AwakeableSubscriber, DurableSubscriberDriver, WorkflowContext,
-    awakeable_resolution_envelope,
+    awakeable_rejection_envelope, awakeable_resolution_envelope,
 };
 use sacp::schema::{RequestId, SessionId};
 use uuid::Uuid;
@@ -46,6 +46,48 @@ async fn workflow_context_rehydrates_without_rewaiting_after_completion_is_alrea
     assert!(
         resolved,
         "INVARIANT (DurablePromises): recreating the workflow context after completion exists must not re-await an already-resolved awakeable",
+    );
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn workflow_context_rehydrates_rejected_awakeable_as_error_without_rewaiting() -> Result<()> {
+    let server = stream_server::TestStreamServer::spawn().await?;
+    let stream_url = server.stream_url(&format!("awakeable-replay-{}", Uuid::new_v4()));
+    ensure_json_stream_exists(&stream_url).await?;
+    let producer = json_producer(&stream_url, "awakeable-replay");
+
+    let key = AwakeableKey::prompt(
+        SessionId::from("session-replay-reject"),
+        RequestId::from("request-replay-reject".to_string()),
+    );
+    producer.append_json(&awakeable_rejection_envelope(
+        key.clone(),
+        serde_json::json!({ "reason": "replay denied" }),
+    )?);
+    producer
+        .flush()
+        .await
+        .context("flush preexisting awakeable_rejected completion")?;
+
+    let mut subscriber_driver = DurableSubscriberDriver::new();
+    subscriber_driver.register_passive(AwakeableSubscriber::new());
+    let context =
+        WorkflowContext::with_subscriber_driver(stream_url.clone(), Arc::new(subscriber_driver));
+
+    let rejected = tokio::time::timeout(
+        Duration::from_millis(250),
+        context.awakeable::<bool>(key),
+    )
+    .await
+    .context("rehydrated rejected awakeable should resolve from replay without waiting")?
+    .expect_err("rejected awakeable should surface an error");
+
+    assert!(
+        rejected.to_string().contains("replay denied"),
+        "INVARIANT (DurablePromises): replaying a rejected awakeable must preserve the rejection payload for the waiter",
     );
 
     server.shutdown().await;

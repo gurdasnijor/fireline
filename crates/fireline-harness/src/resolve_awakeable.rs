@@ -7,7 +7,10 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::awakeable::{AWAKEABLE_RESOLVED_KIND, AwakeableKey, awakeable_resolution_envelope};
+use crate::awakeable::{
+    AWAKEABLE_REJECTED_KIND, AWAKEABLE_RESOLVED_KIND, AwakeableKey, awakeable_rejection_envelope,
+    awakeable_resolution_envelope,
+};
 use crate::durable_subscriber::{StreamEnvelope, TraceContext};
 
 /// Thin imperative resolver for passive awakeables.
@@ -78,6 +81,35 @@ impl AwakeableResolver {
         self.resolve_awakeable(key, value, trace_context).await
     }
 
+    pub async fn reject_awakeable<E>(
+        &self,
+        key: AwakeableKey,
+        error: E,
+        trace_context: Option<TraceContext>,
+    ) -> Result<(), ResolveError>
+    where
+        E: Serialize,
+    {
+        let _guard = self.resolve_guard.lock().await;
+        if self
+            .has_resolution(&key)
+            .await
+            .map_err(ResolveError::Stream)?
+        {
+            return Err(ResolveError::AlreadyResolved(key));
+        }
+
+        let envelope = rejection_envelope(key.clone(), error, trace_context)
+            .map_err(ResolveError::Serialize)?;
+        self.producer.append_json(&envelope);
+        self.producer
+            .flush()
+            .await
+            .with_context(|| format!("flush awakeable rejection '{}'", key.storage_key()))
+            .map_err(ResolveError::Stream)?;
+        Ok(())
+    }
+
     async fn has_resolution(&self, key: &AwakeableKey) -> Result<bool> {
         let client = DurableStreamsClient::new();
         let stream = client.stream(&self.state_stream_url);
@@ -108,7 +140,8 @@ impl AwakeableResolver {
                 for row in rows {
                     let envelope =
                         StreamEnvelope::from_json(row).context("decode awakeable stream envelope")?;
-                    if envelope.kind() == Some(AWAKEABLE_RESOLVED_KIND)
+                    if (envelope.kind() == Some(AWAKEABLE_RESOLVED_KIND)
+                        || envelope.kind() == Some(AWAKEABLE_REJECTED_KIND))
                         && envelope.completion_key().as_ref() == Some(key)
                     {
                         return Ok(true);
@@ -144,6 +177,31 @@ where
         .as_mut()
         .and_then(Value::as_object_mut)
         .context("awakeable resolution envelope missing JSON object payload")?;
+    value.insert("_meta".to_string(), Value::Object(trace_context.into_meta()));
+    Ok(envelope)
+}
+
+fn rejection_envelope<E>(
+    key: AwakeableKey,
+    error: E,
+    trace_context: Option<TraceContext>,
+) -> Result<StreamEnvelope>
+where
+    E: Serialize,
+{
+    let mut envelope = awakeable_rejection_envelope(key, error)?;
+    let Some(trace_context) = trace_context else {
+        return Ok(envelope);
+    };
+    if trace_context.is_empty() {
+        return Ok(envelope);
+    }
+
+    let value = envelope
+        .value
+        .as_mut()
+        .and_then(Value::as_object_mut)
+        .context("awakeable rejection envelope missing JSON object payload")?;
     value.insert("_meta".to_string(), Value::Object(trace_context.into_meta()));
     Ok(envelope)
 }

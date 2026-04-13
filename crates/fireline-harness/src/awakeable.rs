@@ -15,6 +15,7 @@ use crate::durable_subscriber::{
 
 pub const AWAKEABLE_WAITING_KIND: &str = "awakeable_waiting";
 pub const AWAKEABLE_RESOLVED_KIND: &str = "awakeable_resolved";
+pub const AWAKEABLE_REJECTED_KIND: &str = "awakeable_rejected";
 
 /// Awakeables reuse the canonical durable-subscriber completion key surface.
 /// This is an alias, not a second semantic identifier type.
@@ -120,6 +121,57 @@ impl<T> AwakeableResolved<T> {
     }
 }
 
+/// Generic awakeable rejection payload carried on the agent plane.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AwakeableRejected<T> {
+    pub kind: String,
+    pub session_id: SessionId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<ToolCallId>,
+    pub error: T,
+    pub rejected_at_ms: i64,
+    #[serde(
+        default,
+        rename = "_meta",
+        skip_serializing_if = "TraceContext::is_empty"
+    )]
+    pub trace_context: TraceContext,
+}
+
+impl<T> AwakeableRejected<T> {
+    #[must_use]
+    pub fn new(key: AwakeableKey, error: T) -> Self {
+        let parts = AwakeableKeyParts::from_key(&key);
+        Self {
+            kind: AWAKEABLE_REJECTED_KIND.to_string(),
+            session_id: parts.session_id,
+            request_id: parts.request_id,
+            tool_call_id: parts.tool_call_id,
+            error,
+            rejected_at_ms: now_ms(),
+            trace_context: TraceContext::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_trace_context(mut self, trace_context: TraceContext) -> Self {
+        self.trace_context = trace_context;
+        self
+    }
+
+    #[must_use]
+    pub fn completion_key(&self) -> AwakeableKey {
+        completion_key_from_parts(
+            self.session_id.clone(),
+            self.request_id.clone(),
+            self.tool_call_id.clone(),
+        )
+    }
+}
+
 /// Passive durable-subscriber profile backing the imperative awakeable surface.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AwakeableSubscriber;
@@ -138,13 +190,14 @@ impl AwakeableSubscriber {
     {
         log.iter()
             .find_map(|envelope| {
-                (envelope.kind() == Some(AWAKEABLE_RESOLVED_KIND)
+                ((envelope.kind() == Some(AWAKEABLE_RESOLVED_KIND)
+                    || envelope.kind() == Some(AWAKEABLE_REJECTED_KIND))
                     && envelope.completion_key().as_ref() == Some(key))
-                .then_some(envelope)
+                .then_some((envelope.kind(), envelope))
             })
             .ok_or_else(|| anyhow!("awakeable completion missing for key {}", key.storage_key()))
-            .and_then(|envelope| {
-                envelope
+            .and_then(|(kind, envelope)| match kind {
+                Some(AWAKEABLE_RESOLVED_KIND) => envelope
                     .value_as::<AwakeableResolved<T>>()
                     .map(|resolved| resolved.value)
                     .ok_or_else(|| {
@@ -152,7 +205,23 @@ impl AwakeableSubscriber {
                             "decode awakeable_resolved payload for key {}",
                             key.storage_key()
                         )
-                    })
+                    }),
+                Some(AWAKEABLE_REJECTED_KIND) => {
+                    let rejected = envelope
+                        .value_as::<AwakeableRejected<Value>>()
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "decode awakeable_rejected payload for key {}",
+                                key.storage_key()
+                            )
+                        })?;
+                    Err(anyhow!(
+                        "awakeable '{}' rejected: {}",
+                        key.storage_key(),
+                        rejected.error
+                    ))
+                }
+                _ => unreachable!("awakeable completion must be resolved or rejected"),
             })
     }
 }
@@ -176,7 +245,8 @@ impl DurableSubscriber for AwakeableSubscriber {
 
     fn is_completed(&self, event: &Self::Event, log: &[StreamEnvelope]) -> bool {
         log.iter().any(|envelope| {
-            envelope.kind() == Some(AWAKEABLE_RESOLVED_KIND)
+            (envelope.kind() == Some(AWAKEABLE_RESOLVED_KIND)
+                || envelope.kind() == Some(AWAKEABLE_REJECTED_KIND))
                 && envelope.completion_key().as_ref() == Some(&event.completion_key())
         })
     }
@@ -262,6 +332,19 @@ where
         headers: insert_headers(),
         source_offset: None,
         value: Some(serde_json::to_value(AwakeableResolved::new(key, value))?),
+    })
+}
+
+pub fn awakeable_rejection_envelope<T>(key: AwakeableKey, error: T) -> Result<StreamEnvelope>
+where
+    T: Serialize,
+{
+    Ok(StreamEnvelope {
+        entity_type: "awakeable".to_string(),
+        key: format!("{}:rejected", key.storage_key()),
+        headers: insert_headers(),
+        source_offset: None,
+        value: Some(serde_json::to_value(AwakeableRejected::new(key, error))?),
     })
 }
 

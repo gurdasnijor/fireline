@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, LiveMode, Offset, Producer};
 use fireline_harness::{
-    AWAKEABLE_RESOLVED_KIND, AwakeableResolver, CompletionKey, ResolveError, StreamEnvelope,
-    TraceContext,
+    AWAKEABLE_REJECTED_KIND, AWAKEABLE_RESOLVED_KIND, AwakeableResolver, CompletionKey,
+    ResolveError, StreamEnvelope, TraceContext, WorkflowContext,
 };
 use sacp::schema::{RequestId, SessionId, ToolCallId};
 use serde_json::{Value, json};
@@ -71,6 +71,72 @@ async fn resolve_awakeable_appends_canonical_prompt_completion_with_traceparent(
 }
 
 #[tokio::test]
+async fn reject_awakeable_appends_canonical_rejection_with_traceparent_and_wakes_waiter()
+-> Result<()> {
+    let stream_server = stream_server::TestStreamServer::spawn().await?;
+    let stream_url = stream_server.stream_url(&format!("awakeable-{}", Uuid::new_v4()));
+    ensure_json_stream_exists(&stream_url).await?;
+    let resolver =
+        AwakeableResolver::new(stream_url.clone(), json_producer(&stream_url, "awakeable"));
+    let key = CompletionKey::prompt(
+        SessionId::from("session-reject".to_string()),
+        RequestId::from("req-reject".to_string()),
+    );
+    let context = WorkflowContext::new(stream_url.clone());
+    let waiter = tokio::spawn({
+        let key = key.clone();
+        async move { context.awakeable::<bool>(key).await }
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    resolver
+        .reject_awakeable(
+            key.clone(),
+            json!({ "reason": "policy denied" }),
+            Some(TraceContext {
+                traceparent: Some(
+                    "00-cccccccccccccccccccccccccccccccc-dddddddddddddddd-01".to_string(),
+                ),
+                tracestate: None,
+                baggage: Some("tenant=ops".to_string()),
+            }),
+        )
+        .await
+        .expect("reject prompt awakeable");
+
+    let rejected = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+        .await
+        .context("timed out waiting for rejected awakeable")?
+        .context("awakeable waiter panicked")?;
+    let error = rejected.expect_err("rejected awakeable must return Err to waiter");
+    assert!(
+        error.to_string().contains("policy denied"),
+        "rejection error should include serialized rejection payload"
+    );
+
+    let rows = read_all_rows(&stream_url).await?;
+    assert_eq!(rows.len(), 1);
+
+    let envelope =
+        StreamEnvelope::from_json(rows[0].clone()).context("decode awakeable envelope")?;
+    assert_eq!(envelope.entity_type, "awakeable");
+    assert_eq!(envelope.kind(), Some(AWAKEABLE_REJECTED_KIND));
+    assert_eq!(envelope.completion_key(), Some(key));
+    assert_eq!(
+        envelope
+            .value
+            .as_ref()
+            .and_then(|value| value.get("_meta"))
+            .and_then(|meta| meta.get("traceparent"))
+            .and_then(Value::as_str),
+        Some("00-cccccccccccccccccccccccccccccccc-dddddddddddddddd-01")
+    );
+
+    stream_server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn resolve_awakeable_returns_already_resolved_without_second_append() -> Result<()> {
     let stream_server = stream_server::TestStreamServer::spawn().await?;
     let stream_url = stream_server.stream_url(&format!("awakeable-{}", Uuid::new_v4()));
@@ -97,6 +163,71 @@ async fn resolve_awakeable_returns_already_resolved_without_second_append() -> R
 
     let rows = read_all_rows(&stream_url).await?;
     assert_eq!(rows.len(), 1, "idempotent resolve should not append twice");
+
+    stream_server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolve_after_reject_returns_already_resolved_without_second_append() -> Result<()> {
+    let stream_server = stream_server::TestStreamServer::spawn().await?;
+    let stream_url = stream_server.stream_url(&format!("awakeable-{}", Uuid::new_v4()));
+    ensure_json_stream_exists(&stream_url).await?;
+    let resolver =
+        AwakeableResolver::new(stream_url.clone(), json_producer(&stream_url, "awakeable"));
+    let key = CompletionKey::tool(
+        SessionId::from("session-rar".to_string()),
+        ToolCallId::from("tool-rar".to_string()),
+    );
+
+    resolver
+        .reject_awakeable(key.clone(), json!({ "status": "denied" }), None)
+        .await
+        .expect("first reject");
+    let second = resolver
+        .resolve_awakeable(key.clone(), json!({ "status": "ok" }), None)
+        .await;
+
+    match second {
+        Err(ResolveError::AlreadyResolved(found)) => assert_eq!(found, key),
+        other => panic!("expected AlreadyResolved after reject, got {other:?}"),
+    }
+
+    let rows = read_all_rows(&stream_url).await?;
+    assert_eq!(rows.len(), 1, "reject then resolve should keep one completion row");
+    let envelope = StreamEnvelope::from_json(rows[0].clone())?;
+    assert_eq!(envelope.kind(), Some(AWAKEABLE_REJECTED_KIND));
+
+    stream_server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reject_after_resolve_returns_already_resolved_without_second_append() -> Result<()> {
+    let stream_server = stream_server::TestStreamServer::spawn().await?;
+    let stream_url = stream_server.stream_url(&format!("awakeable-{}", Uuid::new_v4()));
+    ensure_json_stream_exists(&stream_url).await?;
+    let resolver =
+        AwakeableResolver::new(stream_url.clone(), json_producer(&stream_url, "awakeable"));
+    let key = CompletionKey::session(SessionId::from("session-rar2".to_string()));
+
+    resolver
+        .resolve_awakeable(key.clone(), json!({ "winner": "resolve" }), None)
+        .await
+        .expect("first resolve");
+    let second = resolver
+        .reject_awakeable(key.clone(), json!({ "winner": "reject" }), None)
+        .await;
+
+    match second {
+        Err(ResolveError::AlreadyResolved(found)) => assert_eq!(found, key),
+        other => panic!("expected AlreadyResolved after resolve, got {other:?}"),
+    }
+
+    let rows = read_all_rows(&stream_url).await?;
+    assert_eq!(rows.len(), 1, "resolve then reject should keep one completion row");
+    let envelope = StreamEnvelope::from_json(rows[0].clone())?;
+    assert_eq!(envelope.kind(), Some(AWAKEABLE_RESOLVED_KIND));
 
     stream_server.shutdown().await;
     Ok(())
@@ -144,6 +275,64 @@ async fn resolve_awakeable_is_concurrent_safe_for_same_key() -> Result<()> {
 
     let rows = read_all_rows(&stream_url).await?;
     assert_eq!(rows.len(), 1, "concurrent resolve should persist only one row");
+
+    stream_server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolve_and_reject_concurrently_converge_to_first_wins() -> Result<()> {
+    let stream_server = stream_server::TestStreamServer::spawn().await?;
+    let stream_url = stream_server.stream_url(&format!("awakeable-{}", Uuid::new_v4()));
+    ensure_json_stream_exists(&stream_url).await?;
+    let resolver =
+        AwakeableResolver::new(stream_url.clone(), json_producer(&stream_url, "awakeable"));
+    let key = CompletionKey::prompt(
+        SessionId::from("session-race".to_string()),
+        RequestId::from("req-race".to_string()),
+    );
+
+    let resolved = {
+        let resolver = resolver.clone();
+        let key = key.clone();
+        tokio::spawn(async move {
+            resolver
+                .resolve_awakeable(key, json!({ "winner": "resolve" }), None)
+                .await
+        })
+    };
+    let rejected = {
+        let resolver = resolver.clone();
+        let key = key.clone();
+        tokio::spawn(async move {
+            resolver
+                .reject_awakeable(key, json!({ "winner": "reject" }), None)
+                .await
+        })
+    };
+
+    let resolved = resolved.await.expect("resolve task");
+    let rejected = rejected.await.expect("reject task");
+
+    assert!(
+        matches!(
+            (&resolved, &rejected),
+            (Ok(()), Err(ResolveError::AlreadyResolved(_)))
+                | (Err(ResolveError::AlreadyResolved(_)), Ok(()))
+        ),
+        "resolve/reject race should converge to one durable completion and one AlreadyResolved loser"
+    );
+
+    let rows = read_all_rows(&stream_url).await?;
+    assert_eq!(rows.len(), 1, "resolve/reject race should persist only one row");
+    let envelope = StreamEnvelope::from_json(rows[0].clone())?;
+    assert!(
+        matches!(
+            envelope.kind(),
+            Some(AWAKEABLE_RESOLVED_KIND) | Some(AWAKEABLE_REJECTED_KIND)
+        ),
+        "winner must be either the canonical resolved or rejected envelope"
+    );
 
     stream_server.shutdown().await;
     Ok(())

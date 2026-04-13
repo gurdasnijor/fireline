@@ -27,9 +27,9 @@ pub use approval::{
 pub use audit::{AuditConfig, AuditDirection, AuditRecord, AuditSink, AuditTracer};
 pub use auto_approve::{AutoApproveConfig, AutoApproveSubscriber, AutoApproveSubscriberComponent};
 pub use awakeable::{
-    AWAKEABLE_RESOLVED_KIND, AWAKEABLE_WAITING_KIND, AwakeableFuture, AwakeableKey,
-    AwakeableResolved, AwakeableSubscriber, AwakeableWaiting, awakeable_resolution_envelope,
-    awakeable_waiting_envelope,
+    AWAKEABLE_REJECTED_KIND, AWAKEABLE_RESOLVED_KIND, AWAKEABLE_WAITING_KIND, AwakeableFuture,
+    AwakeableKey, AwakeableRejected, AwakeableResolved, AwakeableSubscriber, AwakeableWaiting,
+    awakeable_rejection_envelope, awakeable_resolution_envelope, awakeable_waiting_envelope,
 };
 pub use budget::{BudgetAction, BudgetComponent, BudgetConfig};
 pub use context::{
