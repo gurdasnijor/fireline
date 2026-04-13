@@ -14,9 +14,8 @@ cd "$ROOT"
 # - 4c5b207  mono-axr.9 Phase 2 approval gate ports onto DurableSubscriber
 # - 658d6b3  mono-axr.4 Phase 5 peer-routing subscriber
 #
-# mono-axr.6 (TypeScript middleware surface) is still in progress. Once it
-# lands, extend the hard-fail list with any temporary compat names introduced by
-# that phase before closing mono-axr.8.
+# mono-axr.6 (TypeScript middleware surface) landed at 0b58305 with no
+# temporary compat names added, so the hard-fail list did not need extension.
 
 RG_COMMON_ARGS=(
   --line-number
