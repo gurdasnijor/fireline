@@ -108,6 +108,11 @@ jobs:
       - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build CLI workspace dependencies
+        run: |
+          pnpm --filter @fireline/state build
+          pnpm --filter @fireline/client build
+
       - name: Build @fireline/cli
         run: pnpm --filter @fireline/cli build
 
