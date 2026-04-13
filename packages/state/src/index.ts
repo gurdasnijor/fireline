@@ -24,7 +24,6 @@ export type {
   PromptTurnRow,
   PermissionRow,
   TerminalRow,
-  RuntimeInstanceRow,
   SessionRow,
   ChunkRow,
   ConnectionStatus,

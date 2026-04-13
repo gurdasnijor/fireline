@@ -23,13 +23,12 @@
 //! - `runtime_spec.key == host_key` (control-plane-assigned)
 //! - `runtime_instance.key == host_id` (per-process UUID)
 //!
-//! They are NOT joined on the wire today. Joining them requires an
-//! additional bridge — either by adding `host_key` to the
-//! `runtime_instance` row, or by reading `session` rows (which carry
-//! both fields via [`SessionRecord`] in the conductor crate). This
-//! index stores the raw maps and exposes them separately; the
-//! [`crate::host_index::tests::agreement_with_registry`] test in
-//! the integration suite asserts that the stream projection agrees
+//! They are NOT joined on the wire today. Agent-plane `session` rows no
+//! longer carry infrastructure identifiers, so joins must happen entirely
+//! within the infrastructure plane by combining `runtime_spec` and
+//! `runtime_endpoints` rows. This index stores the raw maps and exposes
+//! them separately; the [`crate::host_index::tests::agreement_with_registry`]
+//! test in the integration suite asserts that the stream projection agrees
 //! with `RuntimeRegistry` in all observable invariants, which is the
 //! empirical proof that the current wire shape is sufficient for a
 //! stream-as-truth refactor.

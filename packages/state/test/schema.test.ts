@@ -9,7 +9,6 @@ describe('firelineState schema', () => {
       'connections',
       'permissions',
       'promptRequests',
-      'runtimeInstances',
       'sessions',
       'terminals',
     ])
@@ -55,9 +54,6 @@ describe('firelineState schema', () => {
     const event = firelineState.sessions.insert({
       value: {
         sessionId: 'session-1',
-        runtimeKey: 'runtime:host-1',
-        runtimeId: 'fireline:test-host',
-        nodeId: 'node:test',
         state: 'active',
         supportsLoadSession: true,
         createdAt: 1,

@@ -149,20 +149,6 @@ const permissionEventSchema = z
   })
   .passthrough()
 
-const sessionEventSchema = z
-  .object({
-    sessionId: sessionIdSchema,
-    runtimeKey: z.string(),
-    runtimeId: z.string(),
-    nodeId: z.string(),
-    state: z.enum(['active', 'broken', 'closed']),
-    supportsLoadSession: z.boolean(),
-    createdAt: z.number(),
-    updatedAt: z.number(),
-    lastSeenAt: z.number(),
-  })
-  .passthrough()
-
 const chunkEventSchema = chunkSchema
   .extend({
     chunkKey: z.string(),
@@ -241,14 +227,8 @@ const firelineCollectionDefinitions = {
     primaryKey: 'terminalId',
   },
 
-  runtimeInstances: {
-    schema: runtimeInstanceSchema,
-    type: 'runtime_instance',
-    primaryKey: 'instanceId',
-  },
-
   sessions: {
-    schema: sessionEventSchema,
+    schema: sessionSchema,
     type: 'session_v2',
     primaryKey: 'sessionId',
   },
@@ -264,6 +244,12 @@ export const firelineState = createStateSchema(firelineCollectionDefinitions)
 
 export const firelineStreamState = createStateSchema({
   ...firelineCollectionDefinitions,
+
+  runtimeInstances: {
+    schema: runtimeInstanceSchema,
+    type: 'runtime_instance',
+    primaryKey: 'instanceId',
+  },
 
   legacyPromptTurns: {
     schema: legacyPromptTurnSchema,
@@ -334,7 +320,7 @@ export type SessionRow = z.infer<typeof sessionSchema>
 export type ChunkRow = z.infer<typeof chunkSchema>
 export type PromptRequestEventRow = z.infer<typeof promptRequestEventSchema>
 export type PermissionEventRow = z.infer<typeof permissionEventSchema>
-export type SessionEventRow = z.infer<typeof sessionEventSchema>
+export type SessionEventRow = SessionRow
 export type ChunkEventRow = z.infer<typeof chunkEventSchema>
 export type LegacyPromptTurnEventRow = z.infer<typeof legacyPromptTurnSchema>
 export type LegacySessionEventRow = z.infer<typeof legacySessionSchema>

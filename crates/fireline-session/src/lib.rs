@@ -35,11 +35,6 @@ pub enum SessionStatus {
 #[serde(rename_all = "camelCase")]
 pub struct SessionRecord {
     pub session_id: SessionId,
-    #[serde(rename = "runtimeKey")]
-    pub host_key: String,
-    #[serde(rename = "runtimeId")]
-    pub host_id: String,
-    pub node_id: String,
     pub state: SessionStatus,
     pub supports_load_session: bool,
     pub created_at: i64,

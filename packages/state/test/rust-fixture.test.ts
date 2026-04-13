@@ -120,11 +120,6 @@ const permissionEventValueSchema = z
   .strict()
 
 const sessionEventValueSchema = sessionSchema
-  .extend({
-    runtimeKey: z.string(),
-    runtimeId: z.string(),
-    nodeId: z.string(),
-  })
   .strict()
 
 const chunkEventValueSchema = chunkSchema

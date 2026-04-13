@@ -42,6 +42,24 @@ export interface SandboxAdmin {
   list(labels?: Readonly<Record<string, string>>): Promise<SandboxDescriptor[]>
 
   /**
+   * Lists known sandboxes through the explicit infrastructure-plane surface.
+   *
+   * @example `const sandboxes = await admin.listSandboxes()`
+   *
+   * @remarks Anthropic primitive: Sandbox.
+   */
+  listSandboxes(labels?: Readonly<Record<string, string>>): Promise<SandboxDescriptor[]>
+
+  /**
+   * Lists hosts through the infrastructure-plane admin surface.
+   *
+   * @example `const hosts = await admin.listHosts()`
+   *
+   * @remarks Anthropic primitive: Host.
+   */
+  listHosts(labels?: Readonly<Record<string, string>>): Promise<SandboxDescriptor[]>
+
+  /**
    * Destroys a sandbox by id.
    *
    * @example `await admin.destroy('sandbox-1')`
@@ -116,6 +134,28 @@ export class SandboxAdmin {
       return sandboxes
     }
     return sandboxes.filter((descriptor) => matchesLabels(descriptor.labels, labels))
+  }
+
+  /**
+   * Lists known sandboxes through the explicit infrastructure-plane surface.
+   *
+   * @example `const sandboxes = await admin.listSandboxes()`
+   *
+   * @remarks Anthropic primitive: Sandbox.
+   */
+  async listSandboxes(labels?: Readonly<Record<string, string>>): Promise<SandboxDescriptor[]> {
+    return this.list(labels)
+  }
+
+  /**
+   * Lists hosts through the infrastructure-plane admin surface.
+   *
+   * @example `const hosts = await admin.listHosts()`
+   *
+   * @remarks Anthropic primitive: Host.
+   */
+  async listHosts(labels?: Readonly<Record<string, string>>): Promise<SandboxDescriptor[]> {
+    return this.list(labels)
   }
 
   /**

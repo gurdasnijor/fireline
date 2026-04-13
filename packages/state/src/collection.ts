@@ -14,7 +14,6 @@ import type {
   PermissionRow,
   PromptRequestEventRow,
   PromptRequestRow,
-  RuntimeInstanceRow,
   SessionEventRow,
   SessionRow,
   TerminalRow,
@@ -35,7 +34,6 @@ export interface FirelineCollections {
   promptRequests: ObservableCollection<PromptRequestRow>
   permissions: ObservableCollection<PermissionRow>
   terminals: ObservableCollection<TerminalRow>
-  runtimeInstances: ObservableCollection<RuntimeInstanceRow>
   sessions: ObservableCollection<SessionRow>
   chunks: ObservableCollection<ChunkRow>
 }
@@ -70,7 +68,6 @@ export function createFirelineDB(config: FirelineDBConfig): FirelineDB {
     promptRequests: createObservableLocalCollection((row) => promptRequestRowKey(row)),
     permissions: createObservableLocalCollection((row) => permissionRowKey(row)),
     terminals: createObservableLocalCollection((row) => row.terminalId),
-    runtimeInstances: createObservableLocalCollection((row) => row.instanceId),
     sessions: createObservableLocalCollection((row) => row.sessionId),
     chunks: createObservableLocalCollection((row) => chunkRowKey(row)),
   }
@@ -96,10 +93,6 @@ export function createFirelineDB(config: FirelineDBConfig): FirelineDB {
       rawDb.collections.terminals.toArray.map(cloneTerminalRow),
     )
     reconcileCollection(
-      collections.runtimeInstances,
-      rawDb.collections.runtimeInstances.toArray.map(cloneRuntimeInstanceRow),
-    )
-    reconcileCollection(
       collections.sessions,
       projectSessions(
         rawDb.collections.sessions.toArray as SessionEventRow[],
@@ -122,7 +115,6 @@ export function createFirelineDB(config: FirelineDBConfig): FirelineDB {
     rawDb.collections.promptRequests.subscribeChanges(syncAll),
     rawDb.collections.permissions.subscribeChanges(syncAll),
     rawDb.collections.terminals.subscribeChanges(syncAll),
-    rawDb.collections.runtimeInstances.subscribeChanges(syncAll),
     rawDb.collections.sessions.subscribeChanges(syncAll),
     rawDb.collections.chunks.subscribeChanges(syncAll),
     rawDb.collections.legacyPromptTurns.subscribeChanges(syncAll),
@@ -210,16 +202,6 @@ function cloneTerminalRow(row: TerminalRow): TerminalRow {
     command: row.command,
     exitCode: row.exitCode,
     signal: row.signal,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-  }
-}
-
-function cloneRuntimeInstanceRow(row: RuntimeInstanceRow): RuntimeInstanceRow {
-  return {
-    instanceId: row.instanceId,
-    runtimeName: row.runtimeName,
-    status: row.status,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }

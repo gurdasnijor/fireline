@@ -218,12 +218,12 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
             .and_then(Value::as_str),
         Some(session_id.as_str())
     );
-    assert_eq!(
+    assert!(
         fireline
             .get("sessionRecord")
             .and_then(|record| record.get("runtimeKey"))
-            .and_then(Value::as_str),
-        Some(host_key.as_str())
+            .is_none(),
+        "session/load error metadata should keep session rows agent-plane only",
     );
 
     restarted.shutdown().await?;

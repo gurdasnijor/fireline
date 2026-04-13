@@ -60,6 +60,11 @@ struct LegacyPromptTurnRow {
 struct LegacySessionRow {
     #[serde(flatten)]
     session: SessionRecord,
+    #[serde(rename = "runtimeKey")]
+    host_key: String,
+    #[serde(rename = "runtimeId")]
+    host_id: String,
+    node_id: String,
     #[serde(rename = "logicalConnectionId")]
     connection_id: String,
 }
@@ -272,9 +277,6 @@ impl StateProjector {
             let now = now_ms();
             let session = SessionRecord {
                 session_id: session_id.clone(),
-                host_key: self.host_key.clone(),
-                host_id: self.host_id.clone(),
-                node_id: self.node_id.clone(),
                 state: SessionStatus::Active,
                 supports_load_session: self.supports_load_session,
                 created_at: now,
@@ -290,6 +292,9 @@ impl StateProjector {
                     "insert",
                     Some(&LegacySessionRow {
                         session,
+                        host_key: self.host_key.clone(),
+                        host_id: self.host_id.clone(),
+                        node_id: self.node_id.clone(),
                         connection_id: self.connection_id.clone(),
                     }),
                 ),

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use fireline_session::{
-    PersistedHostSpec, HostDescriptor, StateMaterializer, HostStatus, SessionIndex,
+    HostDescriptor, HostIndex, HostStatus, PersistedHostSpec, SessionIndex, StateMaterializer,
 };
 use reqwest::Client as HttpClient;
 use tracing::{info, instrument};
@@ -32,9 +32,10 @@ pub async fn resume(
     session_id: &str,
 ) -> Result<HostDescriptor> {
     let started = tokio::time::Instant::now();
-    let shared_index = wait_for_shared_session_index(shared_state_url, session_id).await?;
+    let (_, shared_hosts) = wait_for_shared_state_indexes(shared_state_url, session_id).await?;
     let runtime =
-        lookup_runtime_for_session(http, control_plane_url, &shared_index, session_id).await?;
+        lookup_runtime_for_session(http, control_plane_url, &shared_hosts, shared_state_url)
+            .await?;
 
     if runtime.status == HostStatus::Ready {
         info!(
@@ -46,11 +47,9 @@ pub async fn resume(
         return Ok(runtime);
     }
 
-    let persisted = shared_index
-        .host_spec_for_session(session_id)
-        .await
-        .ok_or_else(|| {
-            anyhow!("host_spec for session '{session_id}' not found in shared session index")
+    let persisted =
+        host_spec_for_state_stream(&shared_hosts, shared_state_url).await.ok_or_else(|| {
+            anyhow!("host_spec for session '{session_id}' not found in the shared host index")
         })?;
     let created = http
         .post(format!(
@@ -86,8 +85,8 @@ pub async fn reconstruct_host_spec_from_log(
     let mut attempts = 0usize;
     loop {
         attempts += 1;
-        let index = materialize_session_index(state_stream_url).await?;
-        if let Some(spec) = index.host_spec(host_key).await {
+        let (_, host_index) = materialize_state_indexes(state_stream_url).await?;
+        if let Some(spec) = host_index.spec_for(host_key).await {
             info!(
                 host_key,
                 attempts, "reconstructed host_spec from durable state"
@@ -106,37 +105,53 @@ pub async fn reconstruct_host_spec_from_log(
 }
 
 #[instrument(fields(state_stream_url))]
-pub async fn materialize_session_index(state_stream_url: &str) -> Result<SessionIndex> {
+pub async fn materialize_state_indexes(state_stream_url: &str) -> Result<(SessionIndex, HostIndex)> {
     let index = SessionIndex::new();
-    let materializer = StateMaterializer::new(vec![Arc::new(index.clone())]);
+    let host_index = HostIndex::new();
+    let materializer =
+        StateMaterializer::new(vec![Arc::new(index.clone()), Arc::new(host_index.clone())]);
     let task = materializer.connect(state_stream_url.to_string());
     task.preload().await?;
     task.abort();
-    Ok(index)
+    Ok((index, host_index))
+}
+
+pub async fn materialize_session_index(state_stream_url: &str) -> Result<SessionIndex> {
+    materialize_state_indexes(state_stream_url)
+        .await
+        .map(|(sessions, _)| sessions)
 }
 
 pub async fn materialize_shared_session_index(shared_state_url: &str) -> Result<SessionIndex> {
     materialize_session_index(shared_state_url).await
 }
 
+pub async fn materialize_shared_host_index(shared_state_url: &str) -> Result<HostIndex> {
+    materialize_state_indexes(shared_state_url)
+        .await
+        .map(|(_, hosts)| hosts)
+}
+
 #[instrument(fields(session_id, shared_state_url))]
-async fn wait_for_shared_session_index(
+async fn wait_for_shared_state_indexes(
     shared_state_url: &str,
     session_id: &str,
-) -> Result<SessionIndex> {
+) -> Result<(SessionIndex, HostIndex)> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut attempts = 0usize;
     loop {
         attempts += 1;
-        let index = materialize_shared_session_index(shared_state_url).await?;
-        if index.get(session_id).await.is_some()
-            && index.host_spec_for_session(session_id).await.is_some()
+        let (session_index, host_index) = materialize_state_indexes(shared_state_url).await?;
+        if session_index.get(session_id).await.is_some()
+            && host_spec_for_state_stream(&host_index, shared_state_url)
+                .await
+                .is_some()
         {
             info!(
                 session_id,
                 attempts, "shared session index is ready for resume"
             );
-            return Ok(index);
+            return Ok((session_index, host_index));
         }
 
         if tokio::time::Instant::now() >= deadline {
@@ -149,31 +164,52 @@ async fn wait_for_shared_session_index(
     }
 }
 
-#[instrument(skip(http, index), fields(session_id, control_plane_url))]
+#[instrument(skip(http, index), fields(control_plane_url, shared_state_url))]
 async fn lookup_runtime_for_session(
     http: &HttpClient,
     control_plane_url: &str,
-    index: &SessionIndex,
-    session_id: &str,
+    index: &HostIndex,
+    shared_state_url: &str,
 ) -> Result<HostDescriptor> {
-    let record = index
-        .get(session_id)
+    if let Some(descriptor) = index
+        .list_endpoints()
         .await
-        .ok_or_else(|| anyhow!("session '{session_id}' not found in shared session index"))?;
+        .into_iter()
+        .find(|descriptor| descriptor.state.url == shared_state_url)
+    {
+        return Ok(descriptor);
+    }
 
-    http.get(format!(
-        "{}/v1/runtimes/{}",
-        control_plane_url.trim_end_matches('/'),
-        record.host_key
-    ))
-    .send()
-    .await
-    .context("fetch runtime for session from control plane")?
-    .error_for_status()
-    .context("control plane rejected runtime lookup for session")?
-    .json::<HostDescriptor>()
-    .await
-    .context("decode control-plane runtime descriptor for session")
+    let descriptors = http
+        .get(format!("{}/v1/runtimes", control_plane_url.trim_end_matches('/')))
+        .send()
+        .await
+        .context("list runtimes for shared state stream")?
+        .error_for_status()
+        .context("control plane rejected runtime list for shared state stream")?
+        .json::<Vec<HostDescriptor>>()
+        .await
+        .context("decode control-plane runtime list for shared state stream")?;
+
+    descriptors
+        .into_iter()
+        .find(|descriptor| descriptor.state.url == shared_state_url)
+        .ok_or_else(|| anyhow!("no runtime found for shared state stream '{shared_state_url}'"))
+}
+
+async fn host_spec_for_state_stream(
+    index: &HostIndex,
+    shared_state_url: &str,
+) -> Option<PersistedHostSpec> {
+    let state_stream = shared_state_url.rsplit('/').next()?;
+    for host_key in index.known_host_keys().await {
+        if let Some(spec) = index.spec_for(&host_key).await {
+            if spec.create_spec.state_stream.as_deref() == Some(state_stream) {
+                return Some(spec);
+            }
+        }
+    }
+    None
 }
 
 #[instrument(skip(http), fields(host_key, control_plane_url))]
