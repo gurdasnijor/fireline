@@ -4,6 +4,15 @@ import { appendApprovalResolved } from './events.js'
 import { connectAcp } from './connect.js'
 import { Sandbox, agent, compose, middleware, sandbox } from './sandbox.js'
 import { fanout, peer, pipe } from './topology.js'
+import {
+  WorkflowContext,
+  completionKeyStorageKey,
+  promptCompletionKey,
+  resolveAwakeable,
+  sessionCompletionKey,
+  toolCompletionKey,
+  workflowContext,
+} from './workflow/index.js'
 
 const fireline = {
   db,
@@ -17,6 +26,13 @@ const fireline = {
   FirelineAgent,
   connectAcp,
   appendApprovalResolved,
+  WorkflowContext,
+  workflowContext,
+  resolveAwakeable,
+  promptCompletionKey,
+  toolCompletionKey,
+  sessionCompletionKey,
+  completionKeyStorageKey,
 }
 
 export default fireline
@@ -27,6 +43,16 @@ export { Sandbox, agent, compose, middleware, sandbox }
 export { fanout, peer, pipe }
 export { appendApprovalResolved } from './events.js'
 export { connectAcp } from './connect.js'
+export {
+  AwakeableAlreadyResolvedError,
+  WorkflowContext,
+  completionKeyStorageKey,
+  promptCompletionKey,
+  resolveAwakeable,
+  sessionCompletionKey,
+  toolCompletionKey,
+  workflowContext,
+} from './workflow/index.js'
 export type {
   SessionId,
   RequestId,
@@ -39,6 +65,14 @@ export type { FirelineDB, FirelineDbOptions } from './db.js'
 export type { ResolvePermissionOutcome } from './agent.js'
 export type { SandboxClientOptions } from './sandbox.js'
 export type { ConnectedAcp } from './connect.js'
+export type {
+  Awakeable,
+  AwakeableKey,
+  CompletionKey,
+  ResolveAwakeableOptions,
+  WorkflowContextOptions,
+  WorkflowTraceContext,
+} from './workflow/index.js'
 export type {
   AgentConfig,
   AutoApproveMiddleware,
