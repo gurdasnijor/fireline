@@ -37,11 +37,9 @@ Every action the agent takes — every prompt, every tool call, every response, 
 - **The code is trivial.** Ten lines replace hundreds.
 
 ```typescript
-const db = createFirelineDB({ stateStreamUrl: handle.state.url })
+const db = await fireline.db({ stateStreamUrl: handle.state.url })
 
-const turns = useLiveQuery(q =>
-  q.from({ t: db.collections.promptTurns })
-)
+const prompts = useLiveQuery((q) => q.from({ p: db.promptRequests }), [db])
 ```
 
 [DIAGRAM: A live dashboard showing agent activity — sessions listed on the left, a conversation trace in the center, pending approvals highlighted in amber. Reference: `assets/before-after.svg`]
@@ -54,18 +52,18 @@ Every interaction between your application and the agent passes through a middle
 
 - **Approval gates.** The agent wants to run a shell command? It pauses. A notification appears in your dashboard (or Slack, or email). A human reviews and approves or denies. One line of config.
 - **Budget caps.** Cap an agent at 500,000 tokens. The infrastructure enforces it — the agent can't spend more no matter what it tries. One line of config.
-- **Credential isolation.** The agent needs API keys to do useful work, but if it can see the key it can leak it. Fireline injects credentials at call time without ever exposing them to the agent. One line of config.
+- **Escalation routes.** A blocked run can page the right human where they already work — dashboard, Telegram, or another operator surface — without changing the agent code. One line of config.
 
 ```typescript
 middleware([
   trace(),
   approve({ scope: 'tool_calls' }),
   budget({ tokens: 500_000 }),
-  secretsProxy({ GITHUB_TOKEN: { ref: 'secret:gh-pat', allow: 'api.github.com' } }),
+  telegram({ chatId: '@ops-oncall' }),
 ])
 ```
 
-[DIAGRAM: The middleware pipeline — four boxes in a row (trace, approve, budget, inject), each intercepting messages between your app and the agent. Reference: `assets/middleware-pipeline.svg`]
+[DIAGRAM: The middleware pipeline — four boxes in a row (trace, approve, budget, notify), each intercepting messages between your app and the agent. Reference: `assets/middleware-pipeline.svg`]
 
 ---
 
@@ -91,19 +89,18 @@ Fireline separates agent infrastructure into three clean layers:
 | **Session** | Send prompts. Receive responses. Open conversations. | Your application code |
 | **Observation** | Subscribe to live agent activity. Query state reactively. | Your dashboard / monitoring |
 
-Each layer has its own endpoint. No tangled dependencies. No side channels.
-
-The entire setup is a single function call:
+Each layer stays separate, but the user-facing flow is still one small harness definition and one launched handle.
 
 ```typescript
-const handle = await compose(
-  sandbox({ resources: [...] }),
-  middleware([trace(), approve(), budget()]),
-  agent(['claude-code-acp']),
-).start({ serverUrl })
+const reviewer = compose(
+  sandbox({ resources: [localPath('.', '/workspace')] }),
+  middleware([trace(), approve({ scope: 'tool_calls' }), budget({ tokens: 500_000 })]),
+  agent(['claude-acp']),
+).as('reviewer')
 
-// handle.acp   → Session plane (open conversations, send prompts)
-// handle.state → Observation plane (subscribe to live activity)
+const handle = await reviewer.start({ serverUrl: 'http://localhost:4440' })
+const acp = await handle.connect('demo-ui')
+const db = await fireline.db({ stateStreamUrl: handle.state.url })
 ```
 
 [DIAGRAM: Three columns — Control (blue), Session (purple), Observation (green) — each with its package name and key API. Arrows from a central handle connecting to each. Reference: `assets/three-planes.svg`]
@@ -167,21 +164,25 @@ Fireline is open source (Apache 2.0) and actively developed. The next phase:
 
 ## Slide 10: Get Started
 
-Three lines. That's the entire setup.
+A small harness. That is the setup.
 
 ```
 npm install @fireline/client
 ```
 
 ```typescript
-import { compose, agent, sandbox, middleware } from '@fireline/client'
-import { trace, approve, budget } from '@fireline/client/middleware'
+import fireline, { agent, compose, middleware, sandbox } from '@fireline/client'
+import { approve, budget, trace } from '@fireline/client/middleware'
+import { localPath } from '@fireline/client/resources'
 
-const handle = await compose(
+const reviewer = compose(
   sandbox({ resources: [localPath('.', '/workspace')] }),
   middleware([trace(), approve({ scope: 'tool_calls' }), budget({ tokens: 500_000 })]),
-  agent(['claude-code-acp']),
-).start({ serverUrl: 'http://localhost:4440' })
+  agent(['claude-acp']),
+).as('reviewer')
+
+const handle = await reviewer.start({ serverUrl: 'http://localhost:4440' })
+const db = await fireline.db({ stateStreamUrl: handle.state.url })
 ```
 
 - **Open source.** Apache 2.0. Self-host, fork, contribute.
