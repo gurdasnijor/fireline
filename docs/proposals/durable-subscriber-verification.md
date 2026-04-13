@@ -14,7 +14,7 @@ It is intentionally redundant across layers:
 - Migration fixtures prove the approval-gate to DurableSubscriber refactor preserves the already-proven substrate behavior.
 - End-to-end tests prove approval, webhook delivery, peer routing, wake timers, auto-approve, and awakeable sugar all respect the same invariant set against the live stack.
 
-This document is the binding Phase 0 gate from [durable-subscriber-execution.md](./durable-subscriber-execution.md): no implementation phase after the docs-only prerequisite may land until this invariant register exists on `main`.
+This document is the binding Phase 0 gate from [durable-subscriber-execution.md](./durable-subscriber-execution.md) and the bundled Phase 0 gate from [durable-promises-execution.md](./durable-promises-execution.md): no implementation phase after the docs-only prerequisite may land until this invariant register exists on `main`.
 
 The design is intentionally about what must be verified, not how the Rust trait surface is coded.
 
@@ -38,6 +38,50 @@ These invariant IDs are the stable proof targets later execution phases must cit
 `DSV-10` through `DSV-13` are the carried-forward substrate obligations from [approval-gate-correctness.md](../reviews/approval-gate-correctness.md). DurableSubscriber does not get to weaken them; it generalizes them.
 
 Awakeables are not a second substrate. Prompt/tool awakeables must satisfy `DSV-01` through `DSV-05` exactly as passive subscribers do, and any future step-scoped awakeable key must satisfy the same invariants once that key variant exists.
+
+### Awakeable API invariant register
+
+These IDs are the stable proof targets for the imperative `ctx.awakeable(...)` surface from [durable-promises.md](./durable-promises.md). They are additive API obligations layered on top of the substrate invariants above, not a second correctness domain.
+
+| ID | Invariant | Meaning | Enforced by |
+|---|---|---|---|
+| `DSV-aw-01 AwakeableThinProjection` | No second wait engine | Every awakeable is a passive-subscriber registration over canonical `CompletionKey`, not bespoke promise storage or a parallel driver. | Rust API tests, Stateright, fixtures, E2E |
+| `DSV-aw-02 AwakeableKeysCanonical` | Canonical key-only surface | Prompt/tool awakeables accept only ACP-typed canonical keys; no raw strings, hashes, UUIDs, or Fireline-minted ids cross the public API boundary. | Type audits, TS build, Rust API tests |
+| `DSV-aw-03 AwakeableReplayRebuildsOutstandingWaits` | Replay reconstructs unresolved waits | Restart/rebuild reconstructs unresolved awakeables from the durable stream alone and resumes the same logical wait. | Stateright, fixtures, E2E |
+| `DSV-aw-04 AwakeableSurfacePreservesPlaneBoundary` | Imperative API stays agent-plane | Workflow-facing awakeable state stays agent-plane and infra retry/cursor bookkeeping never leaks into `fireline.db()` or workflow APIs. | Audits, integration tests, TS schema checks |
+| `DSV-aw-05 StepAwakeableUsesStreamOffset` | Step keys use durable offset | Step-scoped awakeables key their third coordinate from the durable stream offset of the wait event, never a Fireline counter, hash, or random token. | TLA+, Stateright, audits, replay tests |
+| `DSV-aw-06 ResolverUsesCanonicalCompletionEnvelope` | Resolution stays on the substrate | `resolveAwakeable()` and approval-specific helpers append the same substrate-owned completion envelope rather than inventing an awakeable-only resolution path. | Audits, fixtures, E2E |
+| `DSV-aw-07 ErgonomicSugarIsAdditive` | Sugar adds no semantics | `PromiseLike`, `race`, `all`, and other ergonomic helpers are thin wrappers over the same canonical key + completion substrate and do not hide identity or replay semantics. | TS tests, examples, E2E |
+
+## Phase Citation Map
+
+Later execution-phase beads should cite this document directly rather than inventing new `DS-TBD-*` or `DP-TBD-*` names in isolation.
+
+### DurableSubscriber phase mapping
+
+| Execution phase | Cite | Verification section |
+|---|---|---|
+| DS Phase 0 | `DSV-00 VerificationPlanExists` | `§Invariant Register` |
+| DS Phase 1 Rust Trait Surface | `DSV-01`, `DSV-02`, `DSV-05` | `§Invariant Register`, `§1.3`, `§3.1-§3.3` |
+| DS Phase 2 Approval gate refactor | `DSV-01`, `DSV-02`, `DSV-10`, `DSV-11`, `DSV-12`, `DSV-13` | `§1.3`, `§4.1-§4.3`, `§5.1` |
+| DS Phase 3 Webhook delivery subscriber | `DSV-01`, `DSV-02`, `DSV-03`, `DSV-04`, `DSV-05` | `§1.3`, `§2.2`, `§3.1-§3.3`, `§5` |
+| DS Phase 4 Auto-approve subscriber | `DSV-01`, `DSV-02`, `DSV-05`, `DSV-12` | `§1.3`, `§4.2`, `§5.1` |
+| DS Phase 5 Peer-routing subscriber | `DSV-01`, `DSV-02`, `DSV-03`, `DSV-04`, `DSV-05` | `§1.3`, `§2.2`, `§3.1-§3.3`, `§5` |
+| DS Phase 6 Wake and deployment subscribers | `DSV-01`, `DSV-02`, `DSV-05`, `DSV-10`, `DSV-11`, `DSV-13` | `§Invariant Register`, `§1.3`, `§2.2`, `§5` |
+| DS Phase 6A DeploymentSpecSubscriber | `DSV-01`, `DSV-02`, `DSV-05` | `§Invariant Register`, `§1.3`, `§5` |
+| DS Phase 7 TypeScript middleware surface | `DSV-01`, `DSV-02`, `DSV-05` | `§3.1-§3.3`, `§5` |
+| DS Phase 8 Cleanup and shim removal | all previously-landed `DSV-*` still green | whole document |
+
+### DurablePromises phase mapping
+
+| Execution phase | Cite | Verification section |
+|---|---|---|
+| DP Phase 0 | `DSV-aw-01` through `DSV-aw-07` | `§Awakeable API invariant register`, `§1.5` |
+| DP Phase 1 Rust workflow context surface | `DSV-aw-01`, `DSV-aw-02` | `§Awakeable API invariant register`, `§1.5`, `§3.1` |
+| DP Phase 2 Canonical `resolveAwakeable()` API | `DSV-aw-02`, `DSV-aw-06` | `§Awakeable API invariant register`, `§1.5`, `§3.2`, `§5` |
+| DP Phase 3 TypeScript workflow surface | `DSV-aw-02`, `DSV-aw-04`, `DSV-aw-07` | `§Awakeable API invariant register`, `§1.5`, `§5` |
+| DP Phase 4 Replay integration | `DSV-aw-03`, `DSV-aw-05` | `§Awakeable API invariant register`, `§1.5`, `§2.2`, `§4`, `§5` |
+| DP Phase 5 Optional ergonomic sugar | `DSV-aw-07` | `§Awakeable API invariant register`, `§1.5`, `§5` |
 
 ## Part 1: TLA+ Extensions
 
@@ -204,6 +248,108 @@ Update the existing verification surface so subscriber behavior composes with th
 - extend `_meta` propagation invariants so they cover subscriber-delivered HTTP/ACP side effects and subscriber-written completion envelopes, not just direct agent traffic
 - keep plane-separation invariants intact by proving retry and dead-letter bookkeeping never appears on agent-plane rows
 - ensure the TLA config used by DurableSubscriber runs only after the canonical-id baseline invariants are already green
+
+### 1.5 Awakeable API invariants
+
+The imperative surface inherits `DSV-01` through `DSV-05` automatically. The awakeable-specific burden is to prove that the API surface does not add a second wait engine, a second identifier scheme, or hidden replay state.
+
+#### `DSV-aw-01 AwakeableThinProjection`
+
+What it requires:
+
+- `ctx.awakeable(...)` lowers to passive-subscriber registration over canonical `CompletionKey`
+- the returned handle/future is a projection of substrate state, not private promise storage
+- imperative resolution joins the same completion path as passive subscribers
+
+What it forbids:
+
+- a bespoke awakeable registry
+- parallel wait queues or wake engines outside DurableSubscriber
+- examples or helpers that bypass subscriber registration for the same logical wait
+
+#### `DSV-aw-02 AwakeableKeysCanonical`
+
+What it requires:
+
+- prompt/tool awakeables use only canonical ACP identifiers
+- public Rust and TypeScript surfaces reject raw `string` identifiers where ACP schema types or branded SDK types are available
+- resolution APIs target canonical `CompletionKey` variants rather than awakeable-private ids
+
+What it forbids:
+
+- UUID, hash, counter, or concatenated-string awakeable ids
+- public APIs that downcast canonical ids to `string`
+- separate type families for prompt/tool awakeables and passive subscribers
+
+#### `DSV-aw-03 AwakeableReplayRebuildsOutstandingWaits`
+
+What it requires:
+
+- replay rebuilds unresolved awakeables from the stream alone
+- restart resumes the same logical wait rather than minting a new one
+- duplicate completion appends during rebuild remain semantic no-ops
+
+What it forbids:
+
+- hidden in-memory replay state
+- replay dropping unresolved waits
+- rebuild creating duplicate waits or duplicate resumes
+
+#### `DSV-aw-04 AwakeableSurfacePreservesPlaneBoundary`
+
+What it requires:
+
+- awakeable-facing state remains agent-plane
+- infra retry, cursor, and dead-letter bookkeeping stay infra-only
+- `fireline.db()` and workflow APIs expose completion semantics, not transport bookkeeping
+
+What it forbids:
+
+- infra delivery metadata on workflow-facing rows
+- public APIs that require subscriber-driver or host-only state
+- step helpers that leak deployment, retry, or cursor internals into app code
+
+#### `DSV-aw-05 StepAwakeableUsesStreamOffset`
+
+What it requires:
+
+- `PromptStepKey(SessionId, RequestId, StreamOffset)` derives its third coordinate from the durable wait event offset
+- that offset remains stable across replay
+- step helpers reuse the same canonical key family as prompt/tool waits
+
+What it forbids:
+
+- step ids based on counters, hashes, timestamps, or random tokens
+- replay recomputing a different step key for the same wait
+- a standalone "awakeable id" surface for step waits
+
+#### `DSV-aw-06 ResolverUsesCanonicalCompletionEnvelope`
+
+What it requires:
+
+- `resolveAwakeable()` appends the substrate-owned completion envelope
+- approval-specific resolution remains a thin specialization of generic awakeable resolution
+- external resolvers join the same completion semantics as internal resolvers
+
+What it forbids:
+
+- awakeable-only completion kinds
+- an approval resolver that bypasses the substrate completion writer
+- one resolution path for passive subscribers and another for imperative waits
+
+#### `DSV-aw-07 ErgonomicSugarIsAdditive`
+
+What it requires:
+
+- `PromiseLike`, `race`, `all`, and helper sugar remain wrappers over the same canonical-keyed waits
+- sugar layers do not obscure which completion key is being waited on
+- removing sugar leaves the same substrate-visible behavior
+
+What it forbids:
+
+- ergonomic APIs with hidden identity or replay semantics
+- helpers that batch or multiplex waits through a private promise engine
+- convenience wrappers that weaken trace, timeout, or replay guarantees
 
 ## Part 2: Stateright Bindings
 
