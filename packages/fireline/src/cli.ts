@@ -17,6 +17,7 @@ import {
   type DeployTarget,
   resolveHostedDeploy,
 } from './hosted-config.js'
+import { probeExistingHostForRepl } from './host-probe.js'
 import { runRepl } from './repl.js'
 
 export type BuildTarget = 'cloudflare' | 'docker' | 'docker-compose' | 'fly' | 'k8s'
@@ -521,7 +522,32 @@ async function run(args: ParsedArgs): Promise<number> {
 
     const hostHealthz = `http://127.0.0.1:${args.port}/healthz`
     if (await isHealthy(hostHealthz)) {
-      throw new Error(`Port ${args.port} already in use; stop the other process or pass --port <n>`)
+      if (!args.repl) {
+        throw new Error(`Port ${args.port} already in use; stop the other process or pass --port <n>`)
+      }
+
+      const existingHost = await probeExistingHostForRepl(`http://127.0.0.1:${args.port}`)
+      switch (existingHost.kind) {
+        case 'attachable':
+          console.log(`fireline: reusing fireline host at :${args.port}`)
+          return await runHostedRepl(
+            printedHandleFromExistingHost(existingHost.handle),
+            args,
+            runRepl,
+            console,
+            { sessionId: existingHost.latestSessionId },
+          )
+        case 'multiple-live-sandboxes':
+          throw new Error(
+            `Port ${args.port} already hosts Fireline with ${existingHost.count} live sandboxes; auto-attach is ambiguous. Use 'fireline repl <session-id>' or pass --port <n>.`,
+          )
+        case 'no-live-sandboxes':
+          throw new Error(
+            `Port ${args.port} already hosts Fireline, but no live sandboxes are available to attach. Stop the other process or pass --port <n>.`,
+          )
+        case 'not-fireline':
+          throw new Error(`Port ${args.port} already in use; stop the other process or pass --port <n>`)
+      }
     }
     const controlPlaneArgs = [
       '--control-plane',
@@ -1095,6 +1121,9 @@ export async function runHostedRepl(
   args: ParsedArgs,
   replRunner: typeof runRepl = runRepl,
   logger: ReadyLogger = console,
+  options: {
+    readonly sessionId?: string | null
+  } = {},
 ): Promise<number> {
   validatePrintedHandle(handle, 'run')
 
@@ -1105,8 +1134,21 @@ export async function runHostedRepl(
     },
     runtimeId: handle.id,
     serverUrl: `http://127.0.0.1:${args.port}`,
+    sessionId: options.sessionId ?? null,
     stateStreamUrl: handle.state.url,
   })
+}
+
+function printedHandleFromExistingHost(handle: {
+  readonly id: string
+  readonly acp: { readonly url: string }
+  readonly state: { readonly url: string }
+}): PrintedHandle {
+  return {
+    id: handle.id,
+    acp: handle.acp,
+    state: handle.state,
+  }
 }
 
 interface ReadyLogger {

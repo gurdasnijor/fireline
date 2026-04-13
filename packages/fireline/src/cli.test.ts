@@ -169,6 +169,29 @@ test('runHostedRepl attaches to the started host and prints the new session id',
   assert.match(lines.join('\n'), /session:\s+session-123/)
 })
 
+test('runHostedRepl forwards an existing session id when auto-attaching', async () => {
+  const args = parseArgs(['run', 'docs/demos/assets/agent.ts', '--repl'])
+  let sessionId: string | null | undefined
+
+  const exitCode = await runHostedRepl(
+    {
+      acp: { url: 'ws://127.0.0.1:4440/acp' },
+      id: 'sandbox-123',
+      state: { url: 'http://127.0.0.1:4440/state' },
+    },
+    args,
+    async (options = {}) => {
+      sessionId = options.sessionId
+      return 0
+    },
+    console,
+    { sessionId: 'session-existing' },
+  )
+
+  assert.equal(exitCode, 0)
+  assert.equal(sessionId, 'session-existing')
+})
+
 test('parseArgs parses deploy target and native passthrough args', () => {
   const args = parseArgs([
     'deploy',
@@ -213,7 +236,8 @@ test('unwrapDefaultExport peels nested tsImport default wrappers', () => {
 
 test('loadSpec accepts docs demo assets via the CLI loader', async () => {
   const spec = await loadSpec(resolve(REPO_ROOT, 'docs/demos/assets/agent.ts'))
-  assert.equal(spec.kind, 'harness')
+  // Post-mono-00d, compose() emits kind: 'conductor'; the kind discriminator
+  // is slated for removal (mono-d8x). Load-bearing contract is .start().
   assert.equal(typeof spec.start, 'function')
 })
 
