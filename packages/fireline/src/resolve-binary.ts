@@ -65,24 +65,33 @@ export function findBinary(lookup: BinaryLookup): ResolvedBinary | null {
     )
   }
 
+  const searchFrom = lookup.searchFrom ?? DEFAULT_SEARCH_FROM
+  for (const source of ['release', 'debug'] as const) {
+    const fromCwd = findTargetBinary(lookup.name, source, process.cwd())
+    if (fromCwd) {
+      return {
+        name: lookup.name,
+        path: fromCwd,
+        source,
+      }
+    }
+
+    const fromDefault = findTargetBinary(lookup.name, source, searchFrom)
+    if (fromDefault) {
+      return {
+        name: lookup.name,
+        path: fromDefault,
+        source,
+      }
+    }
+  }
+
   const packagedBinary = findPackagedBinary(lookup.name)
   if (packagedBinary) {
     return {
       name: lookup.name,
       path: packagedBinary,
       source: 'package',
-    }
-  }
-
-  const searchFrom = lookup.searchFrom ?? DEFAULT_SEARCH_FROM
-  for (const source of ['release', 'debug'] as const) {
-    const candidate = findTargetBinary(lookup.name, source, searchFrom)
-    if (candidate) {
-      return {
-        name: lookup.name,
-        path: candidate,
-        source,
-      }
     }
   }
 

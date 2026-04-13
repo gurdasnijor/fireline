@@ -109,6 +109,32 @@ test(
   },
 )
 
+test(
+  'resolveBinary prefers target binaries under process.cwd() before packaged binaries',
+  { concurrency: false },
+  async () => {
+    const workspaceRoot = await mkdirTempDir('fireline-workspace-')
+    const nestedDir = join(workspaceRoot, 'apps', 'demo')
+    const releaseDir = join(workspaceRoot, 'target', 'release')
+    const releaseBinary = join(releaseDir, 'fireline')
+    const previousCwd = process.cwd()
+
+    await mkdir(nestedDir, { recursive: true })
+    await mkdir(releaseDir, { recursive: true })
+    await writeExecutable(releaseBinary, '#!/bin/sh\nexit 0\n')
+    process.chdir(nestedDir)
+
+    try {
+      const resolved = resolveBinary({ name: 'fireline', envVar: 'FIRELINE_BIN' })
+      assert.equal(resolved.path, releaseBinary)
+      assert.equal(resolved.source, 'release')
+    } finally {
+      process.chdir(previousCwd)
+      await rm(workspaceRoot, { recursive: true, force: true })
+    }
+  },
+)
+
 async function mkdirTempDir(prefix: string): Promise<string> {
   const { mkdtemp } = await import('node:fs/promises')
   return mkdtemp(join(tmpdir(), prefix))
