@@ -47,7 +47,7 @@
   <g transform="translate(950, 100)">
     <rect width="140" height="120" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1"/>
     <text x="70" y="70" text-anchor="middle" fill="#ff6b35" font-family="Inter, sans-serif" font-size="10">Approve?</text>
-    <text x="70" y="105" text-anchor="middle" fill="#8b949e" font-family="Inter, sans-serif" font-size="12">Human Bot</text>
+    <text x="70" y="105" text-anchor="middle" fill="#8b949e" font-family="Inter, sans-serif" font-size="12">Approver</text>
     <line x1="70" y1="120" x2="70" y2="240" stroke="#ff6b35" stroke-width="1.5" stroke-dasharray="4,4"/>
   </g>
 
@@ -56,8 +56,6 @@
     <text x="80" y="45" text-anchor="middle" fill="#8b949e" font-family="Inter, sans-serif" font-size="14">Webhook</text>
     <line x1="80" y1="80" x2="80" y2="220" stroke="#ff6b35" stroke-width="1.5" stroke-dasharray="4,4"/>
   </g>
-
-  <text x="800" y="400" text-anchor="middle" fill="#ff6b35" font-family="Inter, sans-serif" font-size="18" font-weight="600" letter-spacing="2">DURABLE STATE SPINE</text>
 
   <g transform="translate(1500, 50) scale(0.6)">
     <path d="M0 50 Q0 0 25 0 Q50 0 50 50 Q50 100 25 100 Q0 100 0 50 Z" fill="url(#flameGrad)"/>

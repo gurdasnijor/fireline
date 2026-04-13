@@ -1,25 +1,39 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300">
+  <defs>
+    <linearGradient id="flameGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ff6b35;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#ff3d00;stop-opacity:1" />
+    </linearGradient>
+  </defs>
   <rect width="400" height="300" fill="#0b0b0d" rx="8"/>
-  <g transform="translate(50, 80)">
-    <!-- Timeline -->
-    <line x1="0" y1="100" x2="100" y2="100" stroke="#ff6b35" stroke-width="2"/>
-    <line x1="100" y1="100" x2="200" y2="100" stroke="#334155" stroke-width="2" stroke-dasharray="8,4"/>
-    <line x1="200" y1="100" x2="300" y2="100" stroke="#ff6b35" stroke-width="2"/>
-    
-    <circle cx="100" cy="100" r="4" fill="#ff6b35"/>
-    <circle cx="200" cy="100" r="4" fill="#ff6b35"/>
-    
-    <text x="150" y="80" text-anchor="middle" fill="#ff6b35" font-family="monospace" font-size="10">{sessionId, requestId}</text>
-    
-    <!-- External Actor -->
-    <g transform="translate(150, 20)">
-      <rect x="-20" y="0" width="40" height="20" rx="4" fill="#161b22" stroke="#ff6b35" stroke-width="1"/>
-      <text x="0" y="14" text-anchor="middle" fill="#ff6b35" font-family="Inter" font-size="8">HUMAN</text>
-      <path d="M0 20 V60" fill="none" stroke="#ff6b35" stroke-width="1" stroke-dasharray="2,2"/>
+  <g transform="translate(40, 60)">
+    <!-- Process A Lane -->
+    <g transform="translate(0, 40)">
+      <text x="0" y="-10" fill="#484f58" font-family="Inter" font-size="8">Process A (waiter)</text>
+      <line x1="0" y1="10" x2="80" y2="10" stroke="#ff6b35" stroke-width="1.5"/>
+      <line x1="80" y1="10" x2="220" y2="10" stroke="#ff6b35" stroke-width="1.5" stroke-dasharray="4,2" stroke-opacity="0.3"/>
+      <rect x="80" y="0" width="140" height="20" rx="2" fill="#ff6b35" fill-opacity="0.05" stroke="#ff6b35" stroke-width="0.5" stroke-dasharray="2,2"/>
+      <text x="150" y="13" text-anchor="middle" fill="#ff6b35" fill-opacity="0.6" font-family="Inter" font-size="7">DURABLE PAUSE</text>
+      <line x1="220" y1="10" x2="300" y2="10" stroke="#ff6b35" stroke-width="1.5"/>
+      <circle cx="80" cy="10" r="3" fill="#ff6b35"/>
+      <circle cx="220" cy="10" r="3" fill="#ff6b35"/>
     </g>
-    
-    <text x="50" y="120" text-anchor="middle" fill="#484f58" font-family="Inter" font-size="8">Running</text>
-    <text x="150" y="120" text-anchor="middle" fill="#484f58" font-family="Inter" font-size="8">Paused (Durable)</text>
-    <text x="250" y="120" text-anchor="middle" fill="#484f58" font-family="Inter" font-size="8">Resumed</text>
+
+    <!-- Process B Lane (Resolver) -->
+    <g transform="translate(0, 140)">
+      <text x="0" y="-10" fill="#484f58" font-family="Inter" font-size="8">Process B (resolver)</text>
+      <line x1="0" y1="10" x2="150" y2="10" stroke="#334155" stroke-width="1" stroke-dasharray="4,2"/>
+      <rect x="150" y="-5" width="60" height="30" rx="4" fill="#161b22" stroke="#ff6b35" stroke-width="1"/>
+      <text x="180" y="10" text-anchor="middle" fill="#ff6b35" font-family="monospace" font-size="8">resolve()</text>
+      <path d="M180 -5 Q180 -50 180 -90" fill="none" stroke="#ff6b35" stroke-width="1" stroke-dasharray="4,2" marker-end="url(#arrow)"/>
+    </g>
+
+    <!-- Connection Indicator -->
+    <text x="150" y="110" text-anchor="middle" fill="#ff6b35" font-family="monospace" font-size="9" font-weight="600">{sessionId, requestId}</text>
   </g>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#ff6b35" />
+    </marker>
+  </defs>
 </svg>
