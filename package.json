@@ -9,6 +9,7 @@
     "lint": "pnpm -r lint"
   },
   "devDependencies": {
+    "@fireline/client": "workspace:*",
     "@fireline/cli": "workspace:*",
     "typescript": "^5.6.0"
   },

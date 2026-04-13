@@ -11,6 +11,9 @@ importers:
       '@fireline/cli':
         specifier: workspace:*
         version: link:packages/fireline
+      '@fireline/client':
+        specifier: workspace:*
+        version: link:packages/client
       typescript:
         specifier: ^5.6.0
         version: 5.9.3
