@@ -102,18 +102,18 @@ Those are different questions.
 
 That is why the registry/catalog layer should not be reused as the deploy surface. The catalog names reusable agents. Hosted deploy materializes running instances. Mixing those together would make the naming layer carry mutable operational meaning it was never designed to own.
 
-## Why `alwaysOn` Belongs In Spec Metadata
+## Why Hosted Deploys Stay Warm By Default
 
-Always-on behavior is real, but it is not a separate deployment protocol.
+Hosted deploys stay warm by default via the `AlwaysOnDeploymentSubscriber` substrate. Cold-start opt-out is not in scope for the initial ship.
 
-It is deployment intent expressed as spec metadata and enforced by the right substrate for that tier:
+That default is enforced by the right substrate for each tier:
 
 - platform keepalive and replica settings in the Tier A image-driven path
 - `AlwaysOnDeploymentSubscriber` in the Tier C durable-stream path
 
 This is a good example of the general rule.
 
-The deploy story stays clean when Fireline treats operational policy as part of the spec and lets existing mechanisms consume it. It gets messy when the CLI or a control-plane endpoint invents a second lifecycle contract around the same concept.
+The deploy story stays clean when Fireline treats warm-by-default behavior as part of the hosted substrate instead of inventing a separate lifecycle contract in the CLI or a control-plane endpoint.
 
 ## Why This Keeps Control-Plane Count Low
 
