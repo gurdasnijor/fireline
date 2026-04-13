@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod agent_observability;
 pub mod approval;
 pub mod audit;
 pub mod auto_approve;
@@ -20,6 +21,7 @@ pub mod trace;
 pub mod webhook_subscriber;
 pub mod workflow_context;
 
+pub use agent_observability::AgentPlaneTracer;
 pub use approval::{
     ApprovalAction, ApprovalConfig, ApprovalGateComponent, ApprovalMatch, ApprovalPolicy,
     approval_resolution_envelope, permission_request_envelope,
