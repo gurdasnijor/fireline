@@ -323,6 +323,20 @@ function middlewareToComponents(middleware: Middleware, name: string): TopologyC
           name: 'auto_approve',
         },
       ]
+    case 'peerRouting':
+      return [
+        {
+          name: 'peer_routing',
+          ...(middleware.name ? { config: { name: middleware.name } } : {}),
+        },
+      ]
+    case 'wakeDeployment':
+      return [
+        {
+          name: 'always_on_deployment',
+          ...(middleware.name ? { config: { name: middleware.name } } : {}),
+        },
+      ]
   }
 }
 

@@ -476,6 +476,34 @@ export interface AutoApproveMiddleware {
 }
 
 /**
+ * Middleware spec for the peer-routing durable-subscriber profile.
+ *
+ * @example `const mw: PeerRoutingMiddleware = { kind: 'peerRouting' }`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export interface PeerRoutingMiddleware {
+  /** Stable discriminator for peer-routing durable-subscriber middleware. */
+  readonly kind: 'peerRouting'
+  /** Optional human-readable profile name used in logs and diagnostics. */
+  readonly name?: string
+}
+
+/**
+ * Middleware spec for the always-on deployment wake durable-subscriber profile.
+ *
+ * @example `const mw: WakeDeploymentMiddleware = { kind: 'wakeDeployment' }`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export interface WakeDeploymentMiddleware {
+  /** Stable discriminator for deployment-wake durable-subscriber middleware. */
+  readonly kind: 'wakeDeployment'
+  /** Optional human-readable profile name used in logs and diagnostics. */
+  readonly name?: string
+}
+
+/**
  * Union of declarative durable-subscriber profile configs exposed to TypeScript.
  *
  * @example `const profile: DurableSubscriberMiddleware = webhook({ target: 'slack-approvals', events: ['permission_request'] })`
@@ -486,6 +514,8 @@ export type DurableSubscriberMiddleware =
   | WebhookMiddleware
   | TelegramMiddleware
   | AutoApproveMiddleware
+  | PeerRoutingMiddleware
+  | WakeDeploymentMiddleware
 
 /**
  * Union of every serializable middleware spec accepted by `compose()`.

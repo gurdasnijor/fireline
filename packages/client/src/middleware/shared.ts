@@ -4,7 +4,9 @@ import type {
   DurableSubscriberMiddleware,
   DurableSubscriberRetryPolicy,
   DurableSubscriberSecretRef,
+  PeerRoutingMiddleware,
   TelegramMiddleware,
+  WakeDeploymentMiddleware,
   WebhookMiddleware,
 } from '../types.js'
 
@@ -88,7 +90,27 @@ export function durableSubscriber<T extends DurableSubscriberMiddleware>(profile
         kind: 'autoApprove',
         ...(profile.events ? { events: cloneEventSelectors(profile.events) } : {}),
       } as T
+    case 'peerRouting':
+      return {
+        ...cloneDefined({
+          name: profile.name,
+        }),
+        kind: 'peerRouting',
+      } as T
+    case 'wakeDeployment':
+      return {
+        ...cloneDefined({
+          name: profile.name,
+        }),
+        kind: 'wakeDeployment',
+      } as T
   }
 }
 
-export type { AutoApproveMiddleware, TelegramMiddleware, WebhookMiddleware }
+export type {
+  AutoApproveMiddleware,
+  PeerRoutingMiddleware,
+  TelegramMiddleware,
+  WakeDeploymentMiddleware,
+  WebhookMiddleware,
+}
