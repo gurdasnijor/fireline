@@ -4,9 +4,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, LiveMode, Offset, Producer};
 use fireline_harness::{
-    AWAKEABLE_RESOLVED_KIND, AwakeableResolved, AwakeableResolver, AwakeableSubscriber,
-    AWAKEABLE_REJECTED_KIND, CompletionKey, DurableSubscriberDriver, ResolveError,
-    StreamEnvelope, TraceContext, WorkflowContext,
+    AWAKEABLE_REJECTED_KIND, AWAKEABLE_RESOLVED_KIND, AWAKEABLE_WAITING_KIND,
+    AwakeableResolved, AwakeableResolver, AwakeableSubscriber, CompletionKey,
+    DurableSubscriberDriver, ResolveError, StreamEnvelope, TraceContext, WorkflowContext,
 };
 use sacp::schema::{RequestId, SessionId, ToolCallId};
 use serde::{Deserialize, Serialize};
@@ -120,10 +120,26 @@ async fn reject_awakeable_appends_canonical_rejection_with_traceparent_and_wakes
     );
 
     let rows = read_all_rows(&stream_url).await?;
-    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows.len(),
+        2,
+        "Phase 4 replay integration should durably persist the waiting row before rejection",
+    );
 
-    let envelope =
-        StreamEnvelope::from_json(rows[0].clone()).context("decode awakeable envelope")?;
+    let waiting = rows
+        .iter()
+        .cloned()
+        .filter_map(|row| StreamEnvelope::from_json(row).ok())
+        .find(|envelope| envelope.kind() == Some(AWAKEABLE_WAITING_KIND))
+        .context("awakeable waiting envelope")?;
+    assert_eq!(waiting.completion_key(), Some(key.clone()));
+
+    let envelope = rows
+        .iter()
+        .cloned()
+        .filter_map(|row| StreamEnvelope::from_json(row).ok())
+        .find(|envelope| envelope.kind() == Some(AWAKEABLE_REJECTED_KIND))
+        .context("awakeable rejection envelope")?;
     assert_eq!(envelope.entity_type, "awakeable");
     assert_eq!(envelope.kind(), Some(AWAKEABLE_REJECTED_KIND));
     assert_eq!(envelope.completion_key(), Some(key));
