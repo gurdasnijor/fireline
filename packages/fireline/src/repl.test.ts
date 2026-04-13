@@ -88,13 +88,14 @@ test('repl controller surfaces pending approvals and resolves them', async () =>
     { columns: 80 },
   )
 
-  assert.match(output, /approval pending/i)
+  assert.match(output, /Tool Approval/i)
   assert.match(output, /write_file/)
   assert.match(output, /"path": "\/workspace\/test\.txt"/)
   assert.match(output, /approval fallback: prompt-level gate until tool-call interception/i)
   assert.match(output, /lands/i)
-  assert.match(output, /\[y\]/)
-  assert.match(output, /\[n\]/)
+  assert.match(output, /Accept/)
+  assert.match(output, /Decline/)
+  assert.match(output, /Composer is locked; resolve the approval card first\./)
 
   await controller.resolvePendingApproval(true)
 

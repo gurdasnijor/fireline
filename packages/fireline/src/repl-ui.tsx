@@ -12,6 +12,7 @@ import React, {
   useState,
   useSyncExternalStore,
 } from 'react'
+import { logReplDebug } from './repl-debug.js'
 import { REPL_PALETTE } from './repl-palette.js'
 import type {
   MessageEntry,
@@ -23,6 +24,8 @@ import type {
   TranscriptEntry,
 } from './repl.js'
 
+type ApprovalAction = 'allow' | 'deny'
+
 export function FirelineReplApp(props: {
   readonly controller: ReplViewModel
   readonly onExitRequest: (code: number) => void
@@ -33,11 +36,37 @@ export function FirelineReplApp(props: {
     () => props.controller.getSnapshot(),
   )
   const { exit } = useApp()
+  const [approvalFocus, setApprovalFocus] = useState<ApprovalAction>('allow')
   const [input, setInput] = useState('')
   const spinner = useSpinner(state.busy || state.pendingTools > 0)
   const { committedEntries, liveEntries } = partitionTranscriptEntries(state)
 
+  useEffect(() => {
+    if (state.pendingApproval) {
+      setApprovalFocus('allow')
+    }
+  }, [state.pendingApproval?.requestId])
+
+  const resolveFocusedApproval = (action: ApprovalAction) => {
+    void props.controller
+      .resolvePendingApproval(action === 'allow')
+      .catch((error: unknown) => {
+        props.onFailure(error instanceof Error ? error : new Error(String(error)))
+        exit()
+      })
+  }
+
   useInput((value, key) => {
+    logReplDebug('ui.key', {
+      approvalFocus,
+      busy: state.busy,
+      inputLength: input.length,
+      key,
+      pendingApproval: Boolean(state.pendingApproval),
+      resolvingApproval: state.resolvingApproval,
+      value,
+    })
+
     if (key.ctrl && value === 'c') {
       props.onExitRequest(130)
       exit()
@@ -51,25 +80,59 @@ export function FirelineReplApp(props: {
     }
 
     if (state.pendingApproval) {
-      if (key.ctrl || key.meta || !value) {
+      if (state.resolvingApproval) {
+        logReplDebug('ui.approval.ignored.resolving', { value })
         return
       }
 
-      if (value.toLowerCase() === 'y') {
-        void props.controller.resolvePendingApproval(true).catch((error: unknown) => {
-          props.onFailure(error instanceof Error ? error : new Error(String(error)))
-          exit()
+      if (key.tab) {
+        setApprovalFocus((current: ApprovalAction) => nextApprovalFocus(current))
+        logReplDebug('ui.approval.focus.tab', {
+          next: nextApprovalFocus(approvalFocus),
+          shift: Boolean(key.shift),
         })
-      } else if (value.toLowerCase() === 'n') {
-        void props.controller.resolvePendingApproval(false).catch((error: unknown) => {
-          props.onFailure(error instanceof Error ? error : new Error(String(error)))
-          exit()
-        })
+        return
       }
+
+      if (key.leftArrow || key.rightArrow) {
+        setApprovalFocus((current: ApprovalAction) => nextApprovalFocus(current))
+        logReplDebug('ui.approval.focus.arrow', {
+          next: nextApprovalFocus(approvalFocus),
+        })
+        return
+      }
+
+      if (key.return || value === ' ') {
+        logReplDebug('ui.approval.resolve.focused', { action: approvalFocus })
+        resolveFocusedApproval(approvalFocus)
+        return
+      }
+
+      if (key.ctrl || key.meta || !value) {
+        logReplDebug('ui.approval.ignored.nontext', { key })
+        return
+      }
+
+      if (value.toLowerCase() === 'a') {
+        setApprovalFocus('allow')
+        logReplDebug('ui.approval.resolve.hotkey', { action: 'allow' })
+        resolveFocusedApproval('allow')
+        return
+      }
+
+      if (value.toLowerCase() === 'd') {
+        setApprovalFocus('deny')
+        logReplDebug('ui.approval.resolve.hotkey', { action: 'deny' })
+        resolveFocusedApproval('deny')
+        return
+      }
+
+      logReplDebug('ui.approval.ignored.composer_key', { value })
       return
     }
 
     if (state.busy) {
+      logReplDebug('ui.input.ignored.busy', { value })
       return
     }
 
@@ -79,6 +142,7 @@ export function FirelineReplApp(props: {
       void props.controller
         .submit(currentInput)
         .then((result: 'ignored' | 'quit' | 'sent') => {
+          logReplDebug('ui.input.submit.result', { result })
           if (result === 'quit') {
             props.onExitRequest(0)
             exit()
@@ -116,7 +180,8 @@ export function FirelineReplApp(props: {
       <Box flexDirection="column" paddingX={1}>
         <Header state={state} spinner={spinner} />
         {state.pendingApproval ? (
-          <ApprovalPrompt
+          <ApprovalCard
+            focusedAction={approvalFocus}
             pending={state.pendingApproval}
             resolving={state.resolvingApproval}
             state={state}
@@ -198,23 +263,25 @@ function EmptyState() {
   )
 }
 
-function ApprovalPrompt(props: {
+function ApprovalCard(props: {
+  readonly focusedAction: ApprovalAction
   readonly pending: PendingApproval
   readonly resolving: boolean
   readonly state: ReplViewState
 }) {
   const card = buildApprovalCard(props.pending, props.state.entries)
+  const borderColor = props.resolving ? REPL_PALETTE.streaming : REPL_PALETTE.pending
 
   return (
     <Box
-      borderColor={REPL_PALETTE.pending}
+      borderColor={borderColor}
       borderStyle="round"
       flexDirection="column"
       marginTop={1}
       paddingX={1}
     >
-      <Text bold color={REPL_PALETTE.pending}>
-        approval pending
+      <Text bold color={borderColor}>
+        Tool Approval
       </Text>
       <Text bold>{card.toolName}</Text>
       <Text color={REPL_PALETTE.subdued}>
@@ -230,18 +297,42 @@ function ApprovalPrompt(props: {
       <Text color={REPL_PALETTE.subdued} italic>
         reason: {card.reason}
       </Text>
-      <Text>
-        {props.resolving ? (
-          <Text color={REPL_PALETTE.streaming}>resolving approval...</Text>
-        ) : (
-          <>
-            <Text color={REPL_PALETTE.pending}>[y]</Text>
-            <Text color={REPL_PALETTE.resolvedAllow}> approve</Text>
-            <Text color={REPL_PALETTE.subdued}> / </Text>
-            <Text color={REPL_PALETTE.pending}>[n]</Text>
-            <Text color={REPL_PALETTE.resolvedDeny}> deny</Text>
-          </>
-        )}
+      <Box marginTop={1}>
+        <ApprovalActionButton
+          focused={props.focusedAction === 'allow'}
+          label="Accept"
+          tone={REPL_PALETTE.resolvedAllow}
+        />
+        <Box marginLeft={1}>
+          <ApprovalActionButton
+            focused={props.focusedAction === 'deny'}
+            label="Decline"
+            tone={REPL_PALETTE.resolvedDeny}
+          />
+        </Box>
+      </Box>
+      <Text color={REPL_PALETTE.subdued}>
+        {props.resolving
+          ? 'Resolving approval...'
+          : 'Tab to focus actions. Enter or Space confirms. a = accept, d = decline.'}
+      </Text>
+    </Box>
+  )
+}
+
+function ApprovalActionButton(props: {
+  readonly focused: boolean
+  readonly label: string
+  readonly tone: string
+}) {
+  return (
+    <Box
+      borderColor={props.focused ? props.tone : REPL_PALETTE.subdued}
+      borderStyle="round"
+      paddingX={1}
+    >
+      <Text bold={props.focused} color={props.focused ? props.tone : REPL_PALETTE.subdued}>
+        {props.label}
       </Text>
     </Box>
   )
@@ -341,8 +432,8 @@ function Composer(props: {
       <Text color={REPL_PALETTE.subdued}>
         {props.pendingApproval
           ? props.resolvingApproval
-            ? 'Resolving approval and waiting for the running session...'
-            : 'Approval pending. Press y to allow or n to deny.'
+            ? 'Approval is resolving. Composer is locked until the decision completes.'
+            : 'Approval pending. Composer is locked; resolve the approval card first.'
           : props.busy
             ? `${props.spinner} waiting for the running session...`
             : 'Enter to send, Esc to clear, Ctrl+C or /quit to exit.'}
@@ -552,6 +643,10 @@ function toolStatusColor(status: ToolCallStatus): string {
     default:
       return REPL_PALETTE.pending
   }
+}
+
+function nextApprovalFocus(current: ApprovalAction): ApprovalAction {
+  return current === 'allow' ? 'deny' : 'allow'
 }
 
 function useSpinner(active: boolean): string {

@@ -15,6 +15,7 @@ import React from 'react'
 import { once } from 'node:events'
 import type { Readable, Writable } from 'node:stream'
 import WebSocket, { type RawData } from 'ws'
+import { logReplDebug } from './repl-debug.js'
 import { FirelineReplApp } from './repl-ui.js'
 
 const DEFAULT_SERVER_URL = process.env.FIRELINE_URL ?? 'http://127.0.0.1:4440'
@@ -135,6 +136,13 @@ export async function runRepl(options: ReplOptions = {}): Promise<number> {
   const serverUrl = options.serverUrl ?? DEFAULT_SERVER_URL
   const acpUrl = options.acpUrl ?? resolveAcpUrl(serverUrl)
   const stateStreamUrl = options.stateStreamUrl ?? process.env.FIRELINE_STREAM_URL ?? null
+  logReplDebug('repl.start', {
+    acpUrl,
+    runtimeId: options.runtimeId ?? null,
+    serverUrl,
+    sessionId: options.sessionId ?? null,
+    stateStreamUrl,
+  })
   let activeSessionId = options.sessionId ?? null
   let controller: ReplController | null = null
   let approvalWatcher: ApprovalWatcher | null = null
@@ -586,9 +594,20 @@ export class ReplController implements ReplViewModel {
   async resolvePendingApproval(allow: boolean): Promise<void> {
     const approval = this.state.pendingApproval
     if (!approval || this.state.resolvingApproval) {
+      logReplDebug('approval.resolve.skipped', {
+        allow,
+        hasPendingApproval: Boolean(approval),
+        resolvingApproval: this.state.resolvingApproval,
+      })
       return
     }
 
+    logReplDebug('approval.resolve.begin', {
+      action: allow ? 'allow' : 'deny',
+      requestId: approval.requestId,
+      sessionId: approval.sessionId,
+      toolCallId: approval.toolCallId,
+    })
     this.state = { ...this.state, resolvingApproval: true }
     this.emit()
 
@@ -599,9 +618,18 @@ export class ReplController implements ReplViewModel {
         pendingApproval: null,
         resolvingApproval: false,
       }
+      logReplDebug('approval.resolve.success', {
+        action: allow ? 'allow' : 'deny',
+        requestId: approval.requestId,
+      })
       this.emit()
     } catch (error) {
       this.state = { ...this.state, resolvingApproval: false }
+      logReplDebug('approval.resolve.error', {
+        action: allow ? 'allow' : 'deny',
+        error,
+        requestId: approval.requestId,
+      })
       this.emit()
       throw error
     }
@@ -613,6 +641,12 @@ export class ReplController implements ReplViewModel {
   }
 
   setPendingApproval(approval: PendingApproval | null): void {
+    logReplDebug('approval.pending.set', {
+      reason: approval?.reason ?? null,
+      requestId: approval?.requestId ?? null,
+      summary: approval?.summary ?? null,
+      toolCallId: approval?.toolCallId ?? null,
+    })
     this.state = {
       ...this.state,
       pendingApproval: approval,
