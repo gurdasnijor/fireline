@@ -86,6 +86,7 @@ test('conversation pane explains scrollback when the active turn is idle', () =>
 
 test('conversation pane renders the approval card inside the live shell', () => {
   const pendingApproval: PendingApproval = {
+    createdAt: Date.parse('2026-04-13T12:34:56.000Z'),
     requestId: 'request-123',
     reason: 'awaiting durable approval resolution',
     sessionId: 'session-123',
@@ -108,6 +109,11 @@ test('conversation pane renders the approval card inside the live shell', () => 
 
   assert.match(output, /Tool Approval/)
   assert.match(output, /write_file/)
+  assert.match(output, /canonical ids/i)
+  assert.match(output, /session session-123/)
+  assert.match(output, /request request-123/)
+  assert.match(output, /tool tool-1/)
+  assert.match(output, /created 2026-04-13T12:34:56\.000Z/)
   assert.match(output, /"path": "\/workspace\/test\.txt"/)
   assert.match(output, /awaiting durable approval resolution/)
   assert.match(output, /Accept/)

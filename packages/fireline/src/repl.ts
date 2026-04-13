@@ -65,6 +65,7 @@ export interface PlanEntry {
 export type TranscriptEntry = MessageEntry | ToolEntry | PlanEntry
 
 export interface PendingApproval {
+  readonly createdAt: number
   readonly requestId: string | number
   readonly sessionId: string
   readonly reason: string | null
@@ -502,6 +503,7 @@ function selectPendingApproval(
   }
 
   return {
+    createdAt: pending.createdAt,
     requestId,
     reason: pending.title ?? null,
     sessionId: pending.sessionId,
@@ -642,6 +644,7 @@ export class ReplController implements ReplViewModel {
 
   setPendingApproval(approval: PendingApproval | null): void {
     logReplDebug('approval.pending.set', {
+      createdAt: approval?.createdAt ?? null,
       reason: approval?.reason ?? null,
       requestId: approval?.requestId ?? null,
       summary: approval?.summary ?? null,

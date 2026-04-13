@@ -50,6 +50,14 @@ export FIRELINE_AGENTS_BIN="$PWD/target/debug/fireline-agents"
 export ANTHROPIC_API_KEY="..."
 ```
 
+Current `main` behavior to know before you use the deploy surface:
+
+- the examples in `examples/` still call `.start()` imperatively and should be run with `npx tsx`, not `fireline run`
+- `fireline build` shells out to `docker build` against the hosted Dockerfile in `docker/`
+- `fireline deploy` stays target-native, but it now does the target prep too: `flyctl auth docker` plus `docker push`, Wrangler scaffolding, durable Docker Compose output, and Kubernetes PVC or image-pull-secret scaffolding
+- `fireline push` is still deferred to a later phase
+- `fireline repl` connects directly to a running host at `$FIRELINE_URL` and renders the Ink ACP chat UI
+
 Then boot a spec and drop straight into the REPL:
 
 ```bash

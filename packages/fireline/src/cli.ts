@@ -1,20 +1,49 @@
 import { ChildProcess, spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, parse as parsePath, resolve as resolvePath } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { tsImport } from 'tsx/esm/api'
+import {
+  createDeployExecutionPlan,
+  createTargetScaffoldPlan,
+  decorateMissingDeployToolError,
+  hostedDockerfileForTarget,
+  writeTargetScaffold,
+} from './deploy/index.js'
+import type {
+  BuildTarget,
+  DeployTarget,
+  SerializedHarnessSpec,
+  TargetScaffoldPlan,
+} from './deploy/index.js'
 import {
   BinaryResolutionError,
   type ResolvedBinary,
   findBinary,
   resolveBinary,
 } from './resolve-binary.js'
+import {
+  loadHostedConfig,
+  parseDeployTarget,
+  resolveHostedDeploy,
+} from './hosted-config.js'
+import { probeExistingHostForRepl } from './host-probe.js'
 import { runRepl } from './repl.js'
 
-export type BuildTarget = 'cloudflare' | 'docker' | 'docker-compose' | 'fly' | 'k8s'
-export type DeployTarget = 'cloudflare-containers' | 'docker-compose' | 'fly' | 'k8s'
+export {
+  createDeployExecutionPlan,
+  createTargetScaffoldPlan,
+  writeTargetScaffold,
+} from './deploy/index.js'
+export type {
+  BuildTarget,
+  DeployExecutionPlan,
+  DeployTarget,
+  SerializedHarnessSpec,
+  TargetScaffoldPlan,
+} from './deploy/index.js'
 
 export interface ParsedArgs {
   readonly command: 'run' | 'build' | 'deploy' | 'agents' | 'repl' | 'help'
@@ -29,6 +58,8 @@ export interface ParsedArgs {
   readonly providerOverride: string | null
   readonly sessionId: string | null
   readonly target: BuildTarget | null
+  readonly targetName: string | null
+  readonly token: string | null
   readonly to: DeployTarget | null
 }
 
@@ -41,23 +72,9 @@ export interface DockerBuildPlan {
   readonly imageTag: string
 }
 
-export interface TargetScaffoldPlan {
-  readonly target: BuildTarget
-  readonly fileName: string
-  readonly filePath: string
-  readonly contents: string
-}
-
-export interface DeployExecutionPlan {
-  readonly target: DeployTarget
-  readonly command: string
-  readonly args: readonly string[]
-  readonly cwd: string
-  readonly installHint: string
-}
-
 interface HostedBuildResult {
   readonly exitCode: number
+  readonly appName: string
   readonly imageTag: string
   readonly scaffoldPlan: TargetScaffoldPlan | null
 }
@@ -65,10 +82,11 @@ interface HostedBuildResult {
 export interface CliRuntime {
   readonly cwd: () => string
   readonly loadSpec: (specPath: string) => Promise<LoadedSpec>
+  readonly loadHostedConfig: (configPath?: string) => Promise<import('./hosted-config.js').HostedConfig | null>
   readonly runChild: (
     command: string,
     args: readonly string[],
-    options?: { readonly cwd?: string },
+    options?: { readonly cwd?: string; readonly env?: NodeJS.ProcessEnv },
   ) => Promise<number>
   readonly writeTargetScaffold: (plan: TargetScaffoldPlan) => Promise<void>
 }
@@ -76,6 +94,7 @@ export interface CliRuntime {
 const defaultCliRuntime: CliRuntime = {
   cwd: () => invocationCwd(),
   loadSpec,
+  loadHostedConfig,
   runChild,
   writeTargetScaffold,
 }
@@ -92,7 +111,7 @@ Usage:
   fireline run <file.ts> [flags]     Boot conductor + streams, provision agent locally
   fireline <file.ts> [flags]         Shorthand for run
   fireline build <file.ts> [flags]   Build hosted Fireline OCI image
-  fireline deploy <file.ts> --to <platform> [-- <native-flags...>]
+  fireline deploy <file.ts> [--to <platform> | --target <name>] [-- <native-flags...>]
   fireline repl [session-id]         Connect to a running Fireline ACP host
   fireline agents <command> [args]   Install ACP agents from the public registry
   fireline --help                    Show this help
@@ -113,6 +132,8 @@ Build flags:
 
 Deploy flags:
   --to <platform>      Native deploy target: fly | cloudflare-containers | docker-compose | k8s
+  --target <name>      Hosted target from ~/.fireline/hosted.json
+  --token <value>      Override deploy auth token for the resolved target
   --state-stream <s>   Override durable state stream name baked into the spec
   --name <s>           Override deployment name baked into the spec
   --provider <p>       Override sandbox.provider baked into the spec
@@ -126,6 +147,7 @@ Env:
 Example:
   fireline run packages/fireline/test-fixtures/minimal-spec.ts
   fireline build agent.ts --target fly
+  fireline deploy agent.ts --target production
   fireline deploy agent.ts --to fly -- --remote-only
   fireline agents add pi-acp
 `.trim()
@@ -165,10 +187,12 @@ const DEPLOY_HELP = `
 fireline deploy — build a hosted image and hand off to a native platform CLI
 
 Usage:
-  fireline deploy <file.ts> --to <platform> [flags] [-- <native-flags...>]
+  fireline deploy <file.ts> [--to <platform> | --target <name>] [flags] [-- <native-flags...>]
 
 Flags:
   --to <platform>      Native deploy target: fly | cloudflare-containers | docker-compose | k8s
+  --target <name>      Hosted target from ~/.fireline/hosted.json
+  --token <value>      Override deploy auth token for the resolved target
   --state-stream <s>   Override durable state stream name baked into the spec
   --name <s>           Override deployment name baked into the spec
   --provider <p>       Override sandbox.provider baked into the spec
@@ -181,6 +205,7 @@ Native CLIs:
   k8s                   kubectl apply -f <generated>
 
 Example:
+  fireline deploy agent.ts --target production
   fireline deploy agent.ts --to fly -- --remote-only
 `.trim()
 
@@ -258,12 +283,13 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     providerOverride: null as string | null,
     sessionId: null as string | null,
     target: null as BuildTarget | null,
+    targetName: null as string | null,
+    token: null as string | null,
     to: null as DeployTarget | null,
   }
   const seen = {
     port: false,
     streamsPort: false,
-    target: false,
     to: false,
   }
   let i = 0
@@ -336,8 +362,20 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         out.providerOverride = required(argv[++i], '--provider')
         break
       case '--target':
-        seen.target = true
-        out.target = parseBuildTarget(argv[++i])
+        if (out.command === 'build') {
+          out.target = parseBuildTarget(argv[++i])
+          break
+        }
+        if (out.command === 'deploy') {
+          out.targetName = required(argv[++i], '--target')
+          break
+        }
+        throw new Error('--target is only valid with build or deploy')
+      case '--token':
+        if (out.command !== 'deploy') {
+          throw new Error('--token is only valid with deploy')
+        }
+        out.token = required(argv[++i], '--token')
         break
       case '--to':
         seen.to = true
@@ -350,9 +388,6 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     }
   }
 
-  if (out.command === 'run' && seen.target) {
-    throw new Error('--target is only valid with build')
-  }
   if (out.command === 'run' && seen.to) {
     throw new Error('--to is only valid with deploy')
   }
@@ -368,9 +403,6 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   if (out.command === 'build' && out.repl) {
     throw new Error('--repl is only valid with run')
   }
-  if (out.command === 'deploy' && seen.target) {
-    throw new Error('--target is only valid with build')
-  }
   if (out.command === 'deploy' && seen.port) {
     throw new Error('--port is only valid with run')
   }
@@ -379,9 +411,6 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   }
   if (out.command === 'deploy' && out.repl) {
     throw new Error('--repl is only valid with run')
-  }
-  if (out.command === 'deploy' && !seen.to) {
-    throw new Error('deploy requires --to <platform>')
   }
 
   return out
@@ -459,26 +488,6 @@ function parseBuildTarget(value: string | undefined): BuildTarget {
   }
 }
 
-function parseDeployTarget(value: string | undefined): DeployTarget {
-  const normalized = required(value, '--to').toLowerCase()
-  switch (normalized) {
-    case 'cloudflare-containers':
-    case 'cloudflare':
-      return 'cloudflare-containers'
-    case 'docker-compose':
-    case 'compose':
-      return 'docker-compose'
-    case 'fly':
-    case 'flyio':
-      return 'fly'
-    case 'k8s':
-    case 'kubernetes':
-      return 'k8s'
-    default:
-      throw new Error(`unsupported deploy target: ${normalized} (expected fly, cloudflare-containers, docker-compose, or k8s)`)
-  }
-}
-
 async function run(args: ParsedArgs): Promise<number> {
   const specPath = resolvePath(invocationCwd(), args.file!)
   const spec = await loadSpec(specPath)
@@ -522,7 +531,32 @@ async function run(args: ParsedArgs): Promise<number> {
 
     const hostHealthz = `http://127.0.0.1:${args.port}/healthz`
     if (await isHealthy(hostHealthz)) {
-      throw new Error(`Port ${args.port} already in use; stop the other process or pass --port <n>`)
+      if (!args.repl) {
+        throw new Error(`Port ${args.port} already in use; stop the other process or pass --port <n>`)
+      }
+
+      const existingHost = await probeExistingHostForRepl(`http://127.0.0.1:${args.port}`)
+      switch (existingHost.kind) {
+        case 'attachable':
+          console.log(`fireline: reusing fireline host at :${args.port}`)
+          return await runHostedRepl(
+            printedHandleFromExistingHost(existingHost.handle),
+            args,
+            runRepl,
+            console,
+            { sessionId: existingHost.latestSessionId },
+          )
+        case 'multiple-live-sandboxes':
+          throw new Error(
+            `Port ${args.port} already hosts Fireline with ${existingHost.count} live sandboxes; auto-attach is ambiguous. Use 'fireline repl <session-id>' or pass --port <n>.`,
+          )
+        case 'no-live-sandboxes':
+          throw new Error(
+            `Port ${args.port} already hosts Fireline, but no live sandboxes are available to attach. Stop the other process or pass --port <n>.`,
+          )
+        case 'not-fireline':
+          throw new Error(`Port ${args.port} already in use; stop the other process or pass --port <n>`)
+      }
     }
     const controlPlaneArgs = [
       '--control-plane',
@@ -578,38 +612,64 @@ export async function deploy(
   args: ParsedArgs,
   runtime: CliRuntime = defaultCliRuntime,
 ): Promise<number> {
-  const target = args.to
-  if (!target) {
-    throw new Error('deploy requires --to <platform>')
+  const hostedConfig = await runtime.loadHostedConfig()
+  const hosted = resolveHostedDeploy({
+    config: hostedConfig,
+    targetName: args.targetName,
+    deployTarget: args.to,
+    token: args.token,
+    env: process.env,
+  })
+  const effectiveArgs: ParsedArgs = {
+    ...args,
+    name: args.name ?? hosted.target?.resourceNaming?.appName ?? null,
+    to: hosted.deployTarget,
   }
 
   const scaffoldCwd = await mkdtemp(resolvePath(tmpdir(), 'fireline-deploy-'))
   try {
-    const buildResult = await executeHostedBuild(args, runtime, {
-      scaffoldTarget: deployScaffoldTarget(target),
+    const buildResult = await executeHostedBuild(effectiveArgs, runtime, {
+      scaffoldTarget: deployScaffoldTarget(hosted.deployTarget),
       scaffoldCwd,
       printResult: false,
     })
     if (buildResult.exitCode !== 0) return buildResult.exitCode
 
     const nativePlan = createDeployExecutionPlan({
-      target,
+      target: hosted.deployTarget,
       cwd: runtime.cwd(),
       imageTag: buildResult.imageTag,
       scaffoldPath: buildResult.scaffoldPlan?.filePath ?? null,
       passthroughArgs: args.passthroughArgs,
+      appName: buildResult.appName,
     })
 
-    console.log(`fireline: deploying ${buildResult.imageTag} via ${nativePlan.command}`)
-    try {
-      const exitCode = await runtime.runChild(nativePlan.command, nativePlan.args, { cwd: nativePlan.cwd })
-      if (exitCode === 0) {
-        printDeployResult(buildResult.imageTag, target)
-      }
-      return exitCode
-    } catch (error) {
-      throw decorateMissingDeployToolError(nativePlan, error)
+    if (hosted.targetName) {
+      console.log(`fireline: resolved hosted target ${hosted.targetName} -> ${hosted.deployTarget}`)
     }
+    console.log(`fireline: deploying ${buildResult.imageTag} via ${nativePlan.command}`)
+    const childEnv = hosted.token
+      ? {
+          ...process.env,
+          [hosted.tokenSinkEnvVar]: hosted.token,
+        }
+      : undefined
+    for (const step of nativePlan.steps) {
+      try {
+        const exitCode = await runtime.runChild(step.command, step.args, {
+          cwd: step.cwd,
+          env: childEnv,
+        })
+        if (exitCode !== 0) {
+          return exitCode
+        }
+      } catch (error) {
+        throw decorateMissingDeployToolError(step, error)
+      }
+    }
+
+    printDeployResult(buildResult.imageTag, hosted.deployTarget)
+    return 0
   } finally {
     await rm(scaffoldCwd, { recursive: true, force: true })
   }
@@ -740,12 +800,12 @@ async function stopChild(child: ChildProcess): Promise<void> {
 async function runChild(
   command: string,
   args: readonly string[],
-  options: { readonly cwd?: string } = {},
+  options: { readonly cwd?: string; readonly env?: NodeJS.ProcessEnv } = {},
 ): Promise<number> {
   const child = spawn(command, [...args], {
     cwd: options.cwd,
     stdio: ['ignore', 'inherit', 'inherit'],
-    env: { ...process.env },
+    env: options.env ?? { ...process.env },
   })
   return await new Promise<number>((resolveWait, reject) => {
     child.once('error', (error) => {
@@ -832,11 +892,6 @@ export interface PrintedHandle {
   readonly state: { readonly url: string }
 }
 
-export interface SerializedHarnessSpec extends Record<string, unknown> {
-  readonly name: string
-  readonly sandbox: Record<string, unknown>
-}
-
 function materializeSpec(spec: LoadedSpec, args: ParsedArgs): SerializedHarnessSpec {
   const baseSpec = serializeHarnessSpec(spec)
   return {
@@ -878,145 +933,6 @@ export function createDockerBuildPlan(options: {
     buildContext: options.buildContext,
     dockerfile: options.dockerfile,
     imageTag: options.imageTag,
-  }
-}
-
-export function createTargetScaffoldPlan(options: {
-  readonly target: BuildTarget
-  readonly cwd: string
-  readonly appName: string
-  readonly imageTag: string
-}): TargetScaffoldPlan {
-  const fileName = scaffoldFileName(options.target)
-  const filePath = resolvePath(options.cwd, fileName)
-  if (existsSync(filePath)) {
-    throw new Error(`refusing to overwrite existing scaffold file: ${filePath}`)
-  }
-  return {
-    target: options.target,
-    fileName,
-    filePath,
-    contents: renderTargetScaffold(options),
-  }
-}
-
-export async function writeTargetScaffold(plan: TargetScaffoldPlan): Promise<void> {
-  await writeFile(plan.filePath, plan.contents, { flag: 'wx' })
-}
-
-function scaffoldFileName(target: BuildTarget): string {
-  switch (target) {
-    case 'cloudflare':
-      return 'wrangler.toml'
-    case 'docker':
-      return 'Dockerfile'
-    case 'docker-compose':
-      return 'docker-compose.yml'
-    case 'fly':
-      return 'fly.toml'
-    case 'k8s':
-      return 'k8s.yaml'
-  }
-}
-
-function renderTargetScaffold(options: {
-  readonly target: BuildTarget
-  readonly appName: string
-  readonly imageTag: string
-}): string {
-  switch (options.target) {
-    case 'cloudflare':
-      return [
-        '# Scaffold only. Wire this image into your Cloudflare Containers config.',
-        `name = "${options.appName}"`,
-        `compatibility_date = "${new Date().toISOString().slice(0, 10)}"`,
-        '',
-        '[vars]',
-        `FIRELINE_IMAGE = "${options.imageTag}"`,
-        'FIRELINE_PORT = "4440"',
-        '',
-      ].join('\n')
-    case 'docker':
-      return [
-        '# Scaffold only. This target reuses the image built by `fireline build`.',
-        `FROM ${options.imageTag}`,
-        '',
-        'EXPOSE 4440',
-        '',
-      ].join('\n')
-    case 'docker-compose':
-      return [
-        'services:',
-        '  fireline:',
-        `    image: ${options.imageTag}`,
-        '    ports:',
-        '      - "4440:4440"',
-        '',
-      ].join('\n')
-    case 'fly':
-      return [
-        `app = "${options.appName}"`,
-        'primary_region = "sea"',
-        '',
-        '[build]',
-        `  image = "${options.imageTag}"`,
-        '',
-        '[http_service]',
-        '  internal_port = 4440',
-        '  force_https = true',
-        '  auto_start_machines = true',
-        '  auto_stop_machines = "off"',
-        '',
-        '  [[http_service.checks]]',
-        '    grace_period = "20s"',
-        '    interval = "15s"',
-        '    method = "GET"',
-        '    path = "/healthz"',
-        '    timeout = "5s"',
-        '',
-      ].join('\n')
-    case 'k8s':
-      return [
-        'apiVersion: apps/v1',
-        'kind: Deployment',
-        'metadata:',
-        `  name: ${options.appName}`,
-        'spec:',
-        '  replicas: 1',
-        '  selector:',
-        '    matchLabels:',
-        `      app: ${options.appName}`,
-        '  template:',
-        '    metadata:',
-        '      labels:',
-        `        app: ${options.appName}`,
-        '    spec:',
-        '      containers:',
-        `        - name: ${options.appName}`,
-        `          image: ${options.imageTag}`,
-        '          ports:',
-        '            - containerPort: 4440',
-        '          readinessProbe:',
-        '            httpGet:',
-        '              path: /healthz',
-        '              port: 4440',
-        '          livenessProbe:',
-        '            httpGet:',
-        '              path: /healthz',
-        '              port: 4440',
-        '---',
-        'apiVersion: v1',
-        'kind: Service',
-        'metadata:',
-        `  name: ${options.appName}`,
-        'spec:',
-        '  selector:',
-        `    app: ${options.appName}`,
-        '  ports:',
-        '    - port: 80',
-        '      targetPort: 4440',
-        '',
-      ].join('\n')
   }
 }
 
@@ -1075,6 +991,9 @@ export async function runHostedRepl(
   args: ParsedArgs,
   replRunner: typeof runRepl = runRepl,
   logger: ReadyLogger = console,
+  options: {
+    readonly sessionId?: string | null
+  } = {},
 ): Promise<number> {
   validatePrintedHandle(handle, 'run')
 
@@ -1085,8 +1004,21 @@ export async function runHostedRepl(
     },
     runtimeId: handle.id,
     serverUrl: `http://127.0.0.1:${args.port}`,
+    sessionId: options.sessionId ?? null,
     stateStreamUrl: handle.state.url,
   })
+}
+
+function printedHandleFromExistingHost(handle: {
+  readonly id: string
+  readonly acp: { readonly url: string }
+  readonly state: { readonly url: string }
+}): PrintedHandle {
+  return {
+    id: handle.id,
+    acp: handle.acp,
+    state: handle.state,
+  }
 }
 
 interface ReadyLogger {
@@ -1191,8 +1123,9 @@ async function executeHostedBuild(
   const effectiveSpec = materializeSpec(spec, args)
   const appName = defaultAppName(specPath, effectiveSpec.name)
   const imageTag = defaultImageTag(appName)
+  const scaffoldTarget = options.scaffoldTarget === undefined ? args.target : options.scaffoldTarget
 
-  const dockerfile = findWorkspacePath('docker/fireline-host.Dockerfile')
+  const dockerfile = findWorkspacePath(hostedDockerfileForTarget(scaffoldTarget ?? null))
   const buildContext = dirname(dirname(dockerfile))
   const plan = createDockerBuildPlan({
     buildContext,
@@ -1201,7 +1134,6 @@ async function executeHostedBuild(
     spec: effectiveSpec,
   })
 
-  const scaffoldTarget = options.scaffoldTarget === undefined ? args.target : options.scaffoldTarget
   const scaffoldPlan = scaffoldTarget
     ? createTargetScaffoldPlan({
         target: scaffoldTarget,
@@ -1216,6 +1148,7 @@ async function executeHostedBuild(
   if (exitCode !== 0) {
     return {
       exitCode,
+      appName,
       imageTag,
       scaffoldPlan,
     }
@@ -1224,7 +1157,7 @@ async function executeHostedBuild(
   const scaffoldedFiles: string[] = []
   if (scaffoldPlan) {
     await runtime.writeTargetScaffold(scaffoldPlan)
-    scaffoldedFiles.push(scaffoldPlan.filePath)
+    scaffoldedFiles.push(...scaffoldPlan.files.map((file) => file.filePath))
   }
 
   if (options.printResult ?? true) {
@@ -1233,65 +1166,10 @@ async function executeHostedBuild(
 
   return {
     exitCode: 0,
+    appName,
     imageTag,
     scaffoldPlan,
   }
-}
-
-export function createDeployExecutionPlan(options: {
-  readonly target: DeployTarget
-  readonly cwd: string
-  readonly imageTag: string
-  readonly scaffoldPath: string | null
-  readonly passthroughArgs: readonly string[]
-}): DeployExecutionPlan {
-  const scaffoldPath = requireScaffoldPath(options.target, options.scaffoldPath)
-  switch (options.target) {
-    case 'cloudflare-containers':
-      return {
-        target: options.target,
-        command: 'wrangler',
-        args: ['deploy', '--config', scaffoldPath, ...options.passthroughArgs],
-        cwd: options.cwd,
-        installHint: 'Install Wrangler: https://developers.cloudflare.com/workers/wrangler/install-and-update/',
-      }
-    case 'docker-compose':
-      return {
-        target: options.target,
-        command: 'docker',
-        args: ['compose', '-f', scaffoldPath, 'up', '-d', ...options.passthroughArgs],
-        cwd: options.cwd,
-        installHint: 'Install Docker Engine or Docker Desktop with the Compose plugin: https://docs.docker.com/compose/install/',
-      }
-    case 'fly':
-      return {
-        target: options.target,
-        command: 'flyctl',
-        args: ['deploy', '--config', scaffoldPath, '--image', options.imageTag, ...options.passthroughArgs],
-        cwd: options.cwd,
-        installHint: 'Install flyctl: https://fly.io/docs/flyctl/install/',
-      }
-    case 'k8s':
-      return {
-        target: options.target,
-        command: 'kubectl',
-        args: ['apply', '-f', scaffoldPath, ...options.passthroughArgs],
-        cwd: options.cwd,
-        installHint: 'Install kubectl: https://kubernetes.io/docs/tasks/tools/',
-      }
-  }
-}
-
-function requireScaffoldPath(target: DeployTarget, scaffoldPath: string | null): string {
-  if (!scaffoldPath) {
-    throw new Error(`deploy target '${target}' requires a generated manifest`)
-  }
-  return scaffoldPath
-}
-
-function decorateMissingDeployToolError(plan: DeployExecutionPlan, error: unknown): Error {
-  const message = (error as Error)?.message ?? String(error)
-  return new Error(`${message}\nInstall ${plan.command} and retry.\n${plan.installHint}`)
 }
 
 const invokedPath = process.argv[1] ? resolvePath(process.argv[1]) : null
