@@ -202,6 +202,9 @@ importers:
       '@fireline/client':
         specifier: workspace:*
         version: link:../client
+      '@fireline/state':
+        specifier: workspace:*
+        version: link:../state
       ink:
         specifier: ^7.0.0
         version: 7.0.0(@types/react@19.2.14)(react@19.2.5)

@@ -19,6 +19,7 @@
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.18.2",
     "@fireline/client": "workspace:*",
+    "@fireline/state": "workspace:*",
     "ink": "^7.0.0",
     "react": "^19.2.4",
     "tsx": "^4.20.6",

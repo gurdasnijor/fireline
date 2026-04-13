@@ -2,7 +2,15 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { renderToString } from 'ink'
 import React from 'react'
+import type { FirelineDB } from '@fireline/client'
+import type {
+  ChunkRow,
+  PermissionRow,
+  PromptRequestRow,
+  SessionRow,
+} from '@fireline/state'
 import { FirelineReplApp, partitionTranscriptEntries } from './repl-ui.js'
+import { SessionStatePane } from './repl-pane-state.js'
 import { ReplController } from './repl.js'
 
 test('repl controller submits prompts and renders streamed output', async () => {
@@ -161,3 +169,132 @@ test('partitionTranscriptEntries commits completed turns and keeps the active tu
   )
   assert.deepEqual(idle.liveEntries, [])
 })
+
+test('session state pane renders durable session, prompt, permission, and chunk summaries', () => {
+  const db = createFakeDb({
+    sessions: [
+      {
+        sessionId: 'session-123',
+        state: 'active',
+        supportsLoadSession: true,
+        createdAt: 1,
+        updatedAt: 2,
+        lastSeenAt: 3,
+      },
+    ],
+    promptRequests: [
+      {
+        sessionId: 'session-123',
+        requestId: 'req-1',
+        text: 'Investigate the failing build and propose a fix.',
+        state: 'active',
+        position: 1,
+        startedAt: 10,
+      },
+    ],
+    permissions: [
+      {
+        sessionId: 'session-123',
+        requestId: 'req-1',
+        title: 'Edit src/index.ts',
+        toolCallId: 'tool-1',
+        state: 'pending',
+        createdAt: 11,
+      },
+      {
+        sessionId: 'session-123',
+        requestId: 'req-0',
+        title: 'Delete tmp file',
+        toolCallId: 'tool-0',
+        state: 'resolved',
+        outcome: 'approved',
+        createdAt: 8,
+        resolvedAt: 9,
+      },
+    ],
+    chunks: [
+      {
+        sessionId: 'session-123',
+        requestId: 'req-1',
+        toolCallId: 'tool-1',
+        createdAt: 12,
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tool-1',
+          title: 'Edit src/index.ts',
+          status: 'pending',
+        },
+      },
+      {
+        sessionId: 'session-123',
+        requestId: 'req-1',
+        createdAt: 13,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: 'I am looking at the failing test output now.',
+          },
+        },
+      },
+    ],
+  })
+
+  const output = renderToString(
+    React.createElement(SessionStatePane, {
+      acpUrl: 'ws://127.0.0.1:55371/acp',
+      db,
+      runtimeId: 'runtime:46ae8df5-5588-482c-a1ea-c85b1b49723d',
+      serverUrl: 'http://127.0.0.1:4440',
+      sessionId: 'session-123',
+      stateStreamUrl:
+        'http://127.0.0.1:7474/v1/stream/fireline-state-runtime-46ae8df5-5588-482c-a1ea-c85b1b49723d',
+    }),
+    { columns: 100 },
+  )
+
+  assert.match(output, /Session state/)
+  assert.match(output, /runtime runtime:46ae8df5/)
+  assert.match(output, /Prompt turn/)
+  assert.match(output, /Investigate the failing build/)
+  assert.match(output, /chunk summary/)
+  assert.match(output, /Approval · pending/i)
+  assert.match(output, /Approval · allowed/i)
+})
+
+function createFakeDb(seed: {
+  readonly chunks: readonly ChunkRow[]
+  readonly permissions: readonly PermissionRow[]
+  readonly promptRequests: readonly PromptRequestRow[]
+  readonly sessions: readonly SessionRow[]
+}): FirelineDB {
+  return {
+    sessions: createFakeCollection(seed.sessions),
+    promptRequests: createFakeCollection(seed.promptRequests),
+    permissions: createFakeCollection(seed.permissions),
+    chunks: createFakeCollection(seed.chunks),
+    collections: {
+      sessions: createFakeCollection(seed.sessions),
+      promptRequests: createFakeCollection(seed.promptRequests),
+      permissions: createFakeCollection(seed.permissions),
+      chunks: createFakeCollection(seed.chunks),
+    },
+    close() {},
+    preload: async () => {},
+    stream: {} as FirelineDB['stream'],
+    utils: {} as FirelineDB['utils'],
+  } as unknown as FirelineDB
+}
+
+function createFakeCollection<T extends object>(seed: readonly T[]) {
+  const rows = [...seed]
+  return {
+    toArray: rows,
+    subscribe(callback: (nextRows: T[]) => void) {
+      callback(rows)
+      return {
+        unsubscribe() {},
+      }
+    },
+  }
+}
