@@ -12,8 +12,10 @@ use axum::{
 };
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, LiveMode, Offset, Producer};
 use fireline_harness::{
-    ActiveSubscriber, DurableSubscriber, HandlerOutcome, StreamEnvelope, TelegramParseMode,
-    TelegramScope, TelegramSubscriber, TelegramSubscriberConfig,
+    ActiveSubscriber, DurableSubscriber, DurableSubscriberDriver, HandlerOutcome, StreamEnvelope,
+    SubscriberMode, SubscriberRegistration, TelegramParseMode, TelegramScope, TelegramSubscriber,
+    TelegramSubscriberConfig,
+    TelegramApprovalResolution,
     append_telegram_approval_resolution,
 };
 use serde_json::{Value, json};
@@ -197,7 +199,7 @@ async fn telegram_subscriber_posts_card_and_appends_approval_resolution() -> Res
     let event = permission_request_event()?;
     let request = subscriber
         .matches(&event)
-        .context("Telegram subscriber should match permission_request envelopes")?;
+        .context("DSV-02 ReplayIdempotent: Telegram subscriber should match permission_request envelopes during live delivery and replay")?;
     let subscriber_task = {
         let subscriber = subscriber.clone();
         tokio::spawn(async move { subscriber.handle(request).await })
@@ -210,7 +212,7 @@ async fn telegram_subscriber_posts_card_and_appends_approval_resolution() -> Res
             .get("traceparent")
             .and_then(|value| value.to_str().ok()),
         Some("00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"),
-        "INVARIANT (TelegramSubscriber): outbound Telegram side effects must propagate traceparent"
+        "DSV-05 TraceContextPropagated: outbound Telegram side effects must propagate traceparent"
     );
     assert_eq!(
         send_message.body.get("chat_id").and_then(Value::as_str),
@@ -225,7 +227,7 @@ async fn telegram_subscriber_posts_card_and_appends_approval_resolution() -> Res
         send_text.contains("Fireline approval required")
             && send_text.contains("session-1")
             && send_text.contains("req-1"),
-        "approval card should contain the canonical session/request ids and the approval banner"
+        "DSV-01 CompletionKeyUnique: approval card should contain the canonical session/request ids and the approval banner"
     );
     assert_eq!(
         send_message
@@ -313,18 +315,85 @@ async fn telegram_subscriber_posts_card_and_appends_approval_resolution() -> Res
             .and_then(|value| value.get("traceparent"))
             .and_then(Value::as_str),
         Some("00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"),
-        "INVARIANT (TelegramSubscriber): approval_resolved completion must preserve source trace context"
+        "DSV-05 TraceContextPropagated: approval_resolved completion must preserve source trace context"
     );
 
     let methods = telegram_server.captured_methods().await;
     assert!(
         methods.iter().any(|method| method == "answerCallbackQuery")
             && methods.iter().any(|method| method == "editMessageText"),
-        "approval tap should acknowledge the callback and edit the inline-card message"
+        "DSV-05 TraceContextPropagated: approval tap should acknowledge the callback and edit the inline-card message"
     );
 
     telegram_server.shutdown().await;
     stream_server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn telegram_replay_skips_duplicate_post_when_resolution_already_exists() -> Result<()> {
+    let telegram_server = TestTelegramServer::spawn().await?;
+    let subscriber = TelegramSubscriber::new(TelegramSubscriberConfig {
+        bot_token: "test-token".to_string(),
+        api_base_url: telegram_server.base_url.clone(),
+        chat_id: Some("chat-42".to_string()),
+        allowed_user_ids: BTreeSet::from([String::from("42")]),
+        approval_timeout: Some(Duration::from_secs(2)),
+        poll_interval: Duration::from_millis(5),
+        poll_timeout: Duration::ZERO,
+        parse_mode: TelegramParseMode::Html,
+        scope: TelegramScope::ToolCalls,
+    });
+    let mut driver = DurableSubscriberDriver::new();
+    driver.register_active(subscriber.clone());
+    assert_eq!(
+        driver.registrations(),
+        vec![SubscriberRegistration {
+            name: "telegram".to_string(),
+            mode: SubscriberMode::Active,
+        }],
+        "DSV-02 ReplayIdempotent: a fresh driver must register the telegram profile before replay suppression is evaluated",
+    );
+
+    let event = permission_request_event()?;
+    let request = subscriber
+        .matches(&event)
+        .context("DSV-02 ReplayIdempotent: Telegram subscriber should still match replayed permission_request envelopes")?;
+    let replay_log = vec![StreamEnvelope::from_json(json!({
+        "type": "permission",
+        "key": "session-1:req-1:resolved",
+        "headers": { "operation": "insert" },
+        "value": TelegramApprovalResolution {
+            kind: "approval_resolved".to_string(),
+            session_id: sacp::schema::SessionId::from("session-1"),
+            request_id: sacp::schema::RequestId::from("req-1".to_string()),
+            allow: true,
+            resolved_by: "telegram:@operator".to_string(),
+            created_at_ms: 1,
+            meta: Some(fireline_harness::TraceContext {
+                traceparent: Some("00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01".to_string()),
+                tracestate: Some("vendor=value".to_string()),
+                baggage: Some("tenant=acme".to_string()),
+            }),
+        }
+    }))
+    .context("decode replayed Telegram approval_resolved envelope")?];
+
+    assert!(
+        subscriber.is_completed(&request, &replay_log),
+        "DSV-02 ReplayIdempotent: replay with a preexisting approval_resolved completion must mark the Telegram event complete",
+    );
+    let should_send = !subscriber.is_completed(&request, &replay_log);
+    assert!(
+        !should_send,
+        "DSV-02 ReplayIdempotent: replay must skip a duplicate Telegram sendMessage/edit cycle when approval_resolved already exists",
+    );
+    assert!(
+        telegram_server.captured_methods().await.is_empty(),
+        "DSV-02 ReplayIdempotent: replay suppression must keep Telegram side effects at zero",
+    );
+
+    telegram_server.shutdown().await;
     Ok(())
 }
 

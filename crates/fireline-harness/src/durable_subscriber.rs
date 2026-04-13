@@ -1437,7 +1437,8 @@ mod tests {
                 traceparent: Some("00-trace-01".to_string()),
                 tracestate: None,
                 baggage: None,
-            })
+            }),
+            "DSV-02 ReplayIdempotent: replayed wake timer waits must converge to the same timer_fired completion as the live path"
         );
     }
 
@@ -1506,7 +1507,8 @@ mod tests {
                 traceparent: Some("00-deploy-trace".to_string()),
                 tracestate: Some("vendor=value".to_string()),
                 baggage: None,
-            })
+            }),
+            "DSV-05 TraceContextPropagated: always-on wake completions must preserve deployment wake trace context"
         );
     }
 
@@ -1532,5 +1534,52 @@ mod tests {
         ];
 
         assert!(subscriber.is_completed(&event, &log));
+    }
+
+    #[test]
+    fn always_on_replay_skips_duplicate_provision_when_completion_already_exists() {
+        let wake_handler = RecordingDeploymentWakeHandler::new("runtime-key-1", "runtime-id-1");
+        let subscriber =
+            AlwaysOnDeploymentSubscriber::with_wake_handler(wake_handler.clone());
+        let mut driver = DurableSubscriberDriver::new();
+        driver.register_active(AlwaysOnDeploymentSubscriber::with_wake_handler(
+            wake_handler.clone(),
+        ));
+        assert_eq!(
+            driver.registrations(),
+            vec![SubscriberRegistration {
+                name: "always_on_deployment".to_string(),
+                mode: SubscriberMode::Active,
+            }],
+            "DSV-02 ReplayIdempotent: a fresh driver must register always_on_deployment before replay suppression is evaluated",
+        );
+
+        let event = DeploymentWakeRequested::new(SessionId::from("deployment-session"));
+        let replay_log = vec![StreamEnvelope::from_json(serde_json::json!({
+            "type": "deployment",
+            "key": "deployment-session:ready",
+            "headers": {},
+            "value": {
+                "kind": SANDBOX_PROVISIONED_KIND,
+                "sessionId": "deployment-session",
+                "runtimeKey": "runtime-key-1",
+                "runtimeId": "runtime-id-1"
+            }
+        }))
+        .expect("decode sandbox_provisioned envelope")];
+
+        assert!(
+            subscriber.is_completed(&event, &replay_log),
+            "DSV-02 ReplayIdempotent: replay with a preexisting sandbox_provisioned completion must mark the wake request complete",
+        );
+        let should_wake = !subscriber.is_completed(&event, &replay_log);
+        assert!(
+            !should_wake,
+            "DSV-02 ReplayIdempotent: replay must skip a duplicate reprovision when sandbox_provisioned already exists",
+        );
+        assert!(
+            wake_handler.sessions().is_empty(),
+            "DSV-02 ReplayIdempotent: replay suppression must keep always-on wake side effects at zero",
+        );
     }
 }

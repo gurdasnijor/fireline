@@ -475,7 +475,7 @@ async fn harness_auto_approve_resolves_with_same_completion_spine() -> Result<()
         .await
         .context("auto-approve prompt did not complete within timeout")?
         .context(
-            "INVARIANT (AutoApprove): prompt should complete once auto_approve appends approval_resolved",
+            "DSV-01 CompletionKeyUnique: prompt should complete once auto_approve appends approval_resolved on the canonical approval key",
         )?;
 
         let permission_events =
@@ -483,7 +483,7 @@ async fn harness_auto_approve_resolves_with_same_completion_spine() -> Result<()
                 .await?;
         assert!(
             permission_events.len() >= 2,
-            "INVARIANT (AutoApprove): stream must record both permission_request and approval_resolved envelopes",
+            "DSV-01 CompletionKeyUnique: stream must record both permission_request and approval_resolved envelopes exactly once for the shared completion spine",
         );
 
         let session_events = session_permission_events(runtime.state_stream_url(), &session_id).await?;
@@ -499,22 +499,22 @@ async fn harness_auto_approve_resolves_with_same_completion_spine() -> Result<()
         assert_eq!(
             request.get("requestId"),
             resolved.get("requestId"),
-            "INVARIANT (AutoApprove): auto_approve must reuse the same canonical requestId as the passive/manual approval path",
+            "DSV-01 CompletionKeyUnique: auto_approve must reuse the same canonical requestId as the passive/manual approval path",
         );
         assert_eq!(
             request.get("sessionId"),
             resolved.get("sessionId"),
-            "INVARIANT (AutoApprove): auto_approve completion must remain session-scoped",
+            "DSV-12 ConcurrentResolutionIsolatedByKey: auto_approve completion must remain session-scoped",
         );
         assert_eq!(
             resolved.get("allow").and_then(|value| value.as_bool()),
             Some(true),
-            "INVARIANT (AutoApprove): auto_approve must resolve with allow=true",
+            "DSV-01 CompletionKeyUnique: auto_approve must resolve with allow=true on the shared approval_resolved envelope",
         );
         assert_eq!(
             resolved.get("resolvedBy").and_then(|value| value.as_str()),
             Some("auto_approve"),
-            "INVARIANT (AutoApprove): auto_approve should identify itself on the shared approval_resolved envelope shape",
+            "DSV-05 TraceContextPropagated: auto_approve should identify itself on the shared approval_resolved envelope shape",
         );
 
         Ok(())

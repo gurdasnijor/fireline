@@ -236,7 +236,7 @@ fn driver_registers_cross_profile_inventory_without_mode_collisions() {
                 mode: SubscriberMode::Active,
             },
         ],
-        "cross-profile driver inventory should preserve each subscriber's mode and name without registration collisions",
+        "DSV-01 CompletionKeyUnique: cross-profile driver inventory should preserve each subscriber's mode and name without registration collisions",
     );
 }
 
@@ -267,22 +267,22 @@ fn completion_keys_and_completion_kinds_stay_profile_local_across_profiles() {
         approval.matches(&peer_prompt).is_none()
             && auto_approve.matches(&peer_prompt).is_none()
             && webhook.matches(&peer_prompt).is_none(),
-        "tool-scoped peer events must not leak into prompt-scoped approval or webhook profiles",
+        "DSV-12 ConcurrentResolutionIsolatedByKey: tool-scoped peer events must not leak into prompt-scoped approval or webhook profiles",
     );
     assert!(
         peer.matches(&permission).is_none(),
-        "prompt-scoped permission events must not leak into peer routing",
+        "DSV-12 ConcurrentResolutionIsolatedByKey: prompt-scoped permission events must not leak into peer routing",
     );
 
     assert_eq!(
         approval.completion_key(&approval_event),
         auto_approve.completion_key(&auto_approve_event),
-        "approval passive and auto-approve must share the same prompt-scoped completion spine",
+        "DSV-01 CompletionKeyUnique: approval passive and auto-approve must share the same prompt-scoped completion spine",
     );
     assert_eq!(
         approval.completion_key(&approval_event),
         webhook.completion_key(&webhook_event),
-        "webhook deliveries reuse the same prompt-scoped canonical key while keeping their own completion kind",
+        "DSV-01 CompletionKeyUnique: webhook deliveries reuse the same prompt-scoped canonical key while keeping their own completion kind",
     );
     assert_eq!(
         peer.completion_key(&peer_event),
@@ -290,7 +290,7 @@ fn completion_keys_and_completion_kinds_stay_profile_local_across_profiles() {
             SessionId::from("session-a"),
             ToolCallId::from("tool-1".to_string()),
         ),
-        "peer routing stays on the tool-scoped canonical key family",
+        "DSV-01 CompletionKeyUnique: peer routing stays on the tool-scoped canonical key family",
     );
 
     let approval_log = vec![approval_resolved()];
@@ -299,7 +299,7 @@ fn completion_keys_and_completion_kinds_stay_profile_local_across_profiles() {
     assert!(
         !webhook.is_completed(&webhook_event, &approval_log)
             && !peer.is_completed(&peer_event, &approval_log),
-        "approval_resolved must not satisfy webhook or peer delivery completions",
+        "DSV-12 ConcurrentResolutionIsolatedByKey: approval_resolved must not satisfy webhook or peer delivery completions",
     );
 
     let webhook_log = vec![webhook_delivered()];
@@ -308,7 +308,7 @@ fn completion_keys_and_completion_kinds_stay_profile_local_across_profiles() {
         !approval.is_completed(&approval_event, &webhook_log)
             && !auto_approve.is_completed(&auto_approve_event, &webhook_log)
             && !peer.is_completed(&peer_event, &webhook_log),
-        "webhook_delivered must stay local to the webhook subscriber even though it shares the prompt key family",
+        "DSV-12 ConcurrentResolutionIsolatedByKey: webhook_delivered must stay local to the webhook subscriber even though it shares the prompt key family",
     );
 
     let peer_log = vec![peer_delivery_ack()];
@@ -317,7 +317,7 @@ fn completion_keys_and_completion_kinds_stay_profile_local_across_profiles() {
         !approval.is_completed(&approval_event, &peer_log)
             && !auto_approve.is_completed(&auto_approve_event, &peer_log)
             && !webhook.is_completed(&webhook_event, &peer_log),
-        "peer delivery acknowledgments must stay tool-local and must not satisfy prompt-level subscribers",
+        "DSV-12 ConcurrentResolutionIsolatedByKey: peer delivery acknowledgments must stay tool-local and must not satisfy prompt-level subscribers",
     );
 }
 
@@ -337,6 +337,6 @@ fn approval_policy_fixture_stays_prompt_scoped_for_cross_profile_tests() {
         config
             .policy_for_prompt("approval required for webhook cross-profile test")
             .is_some(),
-        "the cross-profile permission_request fixture should stay aligned with the prompt-scoped approval contract",
+        "DSV-01 CompletionKeyUnique: the cross-profile permission_request fixture should stay aligned with the prompt-scoped approval contract",
     );
 }

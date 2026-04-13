@@ -322,7 +322,7 @@ async fn durable_subscriber_always_on_wake_reprovisions_stopped_runtime() -> Res
                     session_id.clone(),
                 )))
                 .await,
-            "always-on deployment subscriber should reprovision a stopped runtime",
+            "DSV-13 RebuildRaceSafe: always-on deployment subscriber should reprovision a stopped runtime once for the replayed wake request",
         )?;
         let resumed = wait_for_runtime_descriptor_from_control_plane(
             &control_plane.http,
@@ -414,11 +414,11 @@ async fn durable_subscriber_always_on_concurrent_live_wake_returns_single_runtim
         );
         let first = expect_completed(
             first,
-            "first concurrent always-on wake should return the live runtime",
+            "DSV-01 CompletionKeyUnique: first concurrent always-on wake should return the live runtime once",
         )?;
         let second = expect_completed(
             second,
-            "second concurrent always-on wake should return the live runtime",
+            "DSV-01 CompletionKeyUnique: second concurrent always-on wake should return the same live runtime rather than minting a duplicate wake result",
         )?;
 
         assert_eq!(
