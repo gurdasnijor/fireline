@@ -20,7 +20,8 @@
 | T5.2 Saved dashboard view | ○ blocked | T4.1 emitting | Pane C layout prepared preemptively |
 | `.6.1` agent.ts + reviewer.ts | ✓ LANDED `dbfac8a` | — | demo assets frozen |
 | `.6.2` `--resume` CLI verify | ○ blocked | canonical-ids Phase 5 (`mono-vkpp.7`) | see Step 3 fallback |
-| `.6.3` Telegram bidirectional chat (SIGNATURE MOMENT) | ○ new sub-epic .6.3.1–.9 | user Telegram app pre-stage (`.6.3.1`); PM-A w22 borrow pending | Steps 3/4/5 re-centered on Telegram per user directive; local-CLI approver remains wired as fallback |
+| Telegram signature (SIGNATURE MOMENT) | ○ `mono-axr.11` TelegramSubscriber as DS active profile | DS Phase 2 (`mono-axr.9`) + Phase 3 (`mono-axr.3` webhook reference) land first; ~6–8h total to demo-ready | Steps 3/4/5 center on composing `telegram()` middleware into agent.ts; bridge-as-example (`mono-thnc.6.3.3–.9`) superseded and closed 2026-04-12 |
+| Telegram adapter library reference | ✓ LANDED `d283392` | — | `examples/telegram-bridge/` retained as reference for `@chat-adapter/telegram` imports + adapter boot pattern; reused inside TelegramSubscriber impl |
 >
 > Every step must be labeled with its honesty class:
 >
@@ -75,8 +76,8 @@ Operator runs through this in the dressing room, not on stage:
 | P8 | OTel backend reachable (Betterstack) | `set -a; source deploy/observability/betterstack.env; set +a` then curl smoke per `deploy/observability/README.md §Smoke-test ingestion` | HTTP 202 Accepted |
 | P9 | Backup terminal prewarmed with fallback commands | separate tmux/cmux pane with fallback scripts open | operator can switch in <3s |
 | P10 | Step 3 restart/resume gate check | Run `docs/demos/scripts/replay-peer-to-peer.sh` through to the kill-and-resume phase | session continues post-restart. **If it does not** (per `mono-thnc.2.3` open bug, w19 fix in flight at `498fff6`), Step 3 restart beat downgrades to PRE-STAGED recording before showtime |
-| P11 | Telegram bridge health | `curl -fsS http://127.0.0.1:<bridge-port>/healthz` and send a test mention in the demo channel | 200 OK + bot replies within 2s. **If either fails**, Step 3/4/5 Telegram paths downgrade to PRE-STAGED + local-CLI approver |
-| P12 | Telegram tokens sourced in operator env | `echo $TELEGRAM_BOT_TOKEN \| head -c 10; echo $TELEGRAM_CHAT_ID` | `TELEGRAM_BOT_TOKEN` has a value (10+ chars visible); `TELEGRAM_CHAT_ID` is set if demo targets a specific chat (else empty ok). Both loaded from `deploy/telegram/bridge.env` (gitignored). |
+| P11 | Telegram bot reachable | `source deploy/telegram/bridge.env && curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getMe" \| jq -r '.ok,.result.username'` | prints `true` and `Jessica_fireline_bot`. **If not**, Step 3/4/5 downgrade to `webhook()`-profile fallback or PRE-STAGED |
+| P12 | Telegram tokens sourced in operator env | `echo $TELEGRAM_BOT_TOKEN \| head -c 10` | `TELEGRAM_BOT_TOKEN` has a value (10+ chars visible), loaded from `deploy/telegram/bridge.env` (gitignored). `TELEGRAM_CHAT_ID` optional; not needed for DM-driven DS profile. |
 
 **If any pre-flight fails, the owning step must be downgraded to PRE-STAGED or
 cut before going live.**
@@ -174,161 +175,187 @@ what a clean run looks like" without breaking.
 
 ---
 
-### Step 3 — Deploy + text your agent on Telegram (SIGNATURE MOMENT)
+### Step 3 — Compose `telegram()` middleware, DM your agent (SIGNATURE MOMENT)
 
-**Class: LIVE if `mono-thnc.6.3.8` E2E smoke green; PRE-STAGED via rehearsal recording otherwise**
+**Class: LIVE if `mono-axr.11` TelegramSubscriber DS profile green; PRE-STAGED via rehearsal recording otherwise**
 
-This is the moment that reframes the demo. Operator deploys the agent and
-the audience sees Telegram become the interface.
+This is the moment that reframes the demo — **and** what reframes the
+pitch. There is no separate bridge process. Telegram is just another
+DurableSubscriber profile, composed into the 15-line spec the same way
+`trace()` and `approve()` are.
+
+**Agent file on overhead** (same file as Step 1, one added line):
+
+```ts
+import { compose, agent, sandbox, middleware } from '@fireline/client'
+import { trace, approve, budget, secretsProxy, telegram } from '@fireline/client/middleware'
+import { localPath } from '@fireline/client/resources'
+
+export default compose(
+  sandbox({ resources: [localPath('.', '/workspace')] }),
+  middleware([
+    trace(),
+    approve({ scope: 'tool_calls' }),
+    budget({ tokens: 2_000_000 }),
+    secretsProxy({ ANTHROPIC_API_KEY: { ref: 'env:ANTHROPIC_API_KEY' } }),
+    telegram({ token: 'env:TELEGRAM_BOT_TOKEN', scope: 'tool_calls' }),
+  ]),
+  agent(['pi-acp']),
+)
+```
 
 **Action sequence:**
 
 ```bash
-# Pane A — build + deploy the image (local docker)
-npx fireline build docs/demos/assets/agent.ts
-docker run -d --name fireline-demo \
-  -p 8087:8087 \
-  -v $PWD/.fireline-streams:/var/lib/fireline/streams \
-  --env-file deploy/observability/betterstack.env \
-  --env-file deploy/telegram/bridge.env \
-  fireline/demo:latest
-
-# Pane D — projector side, Telegram demo chat already open
-# (pre-flight P11 verified bridge is listening)
+# Pane A — same fireline invocation, env-loaded token
+set -a; source deploy/telegram/bridge.env; set +a
+npx fireline docs/demos/assets/agent.ts
 ```
 
 **What the audience should see:**
 
-- Pane A: build log → image SHA → `docker run` starts cleanly
-- Pane B: bridge service log shows "connected to Telegram Bot API" and
-  "subscribed to session stream"
-- **Projector pivots to Telegram** — operator types in the demo channel:
-  `@fireline-demo read README.md and summarize it in two sentences`
+- Pane A: host boot, `telegram(): DurableSubscriber profile active
+  (polling @Jessica_fireline_bot)` log line
+- **Projector pivots to Telegram** — operator DMs the bot:
+  `read README.md and summarize it in two sentences`
 - Agent replies **in the Telegram chat** with streaming text (message
   edits happening live as the agent thinks)
-- Pane C (Betterstack) shows the trace: `fireline.session.created` (bound
-  to the Telegram user/channel) → `fireline.prompt.request` → `tool.call`
-  (read_file) → `prompt.request` end
+- Pane C (Betterstack) shows the trace: `fireline.session.created` (keyed
+  on the Telegram user) → `fireline.prompt.request` → `fireline.tool.call`
+  (read_file) → `fireline.prompt.request` end. Plus a
+  `fireline.subscriber.handle` span with
+  `fireline.subscriber_name=telegram` on each event → proof the
+  DurableSubscriber contract is carrying the chat interaction.
 
 **Then the unkillable-agent beat, on Telegram:**
 
 ```bash
 # Pane A — while user starts a second, longer prompt on Telegram:
-docker kill fireline-demo
-docker start fireline-demo
+# Ctrl-C the fireline host
+# Then immediately relaunch:
+npx fireline docs/demos/assets/agent.ts
 ```
 
 - Telegram chat: reply freezes mid-sentence
-- Telegram shows "Agent reconnecting…" (bridge handles this gracefully)
+- Operator kills + relaunches the host; no container, no sidecar, no
+  bridge process
 - Within 1–3 seconds the same message edit resumes; the agent finishes
   its thought mid-sentence
-- Audience sees: the container died, the conversation did not
+- Audience sees: the host process died, the conversation did not — and
+  the chat surface reconnects through the same DS profile
 
-**Narration beat:** "You're not looking at a Fireline UI. You're looking at
-Telegram. The user never left their existing surface. We killed the container
-and the conversation kept going because the session lives in durable-streams,
-not in the host's RAM. Your team's ops surface is the agent's home."
+**Narration beat:** "You're looking at Telegram. The agent isn't running
+a bridge, isn't running a webhook server, isn't running anything other
+than what's in that 15-line file. Telegram is a DurableSubscriber profile
+— same trait that powers webhooks, approvals, and peer routing. Chat
+surfaces are middleware. The substrate is the durable stream underneath,
+which is why we killed the process and the conversation kept going."
 
-**DEMO-RISK (largely resolved):** `mono-thnc.2.3` — session/load after
-container restart — Jeff root-caused at `498fff6`; two fixes LANDED on
-w19 branch (`8947083` approval `rebuild_from_log` live-edge stop +
-`3e22489` docker state-stream forwarding). Awaiting CI clear + merge to
-main. Once on main, pre-flight P10 flips green and Step 3 goes LIVE
-without ceremony.
+**DEMO-RISK (largely resolved):** `mono-thnc.2.3` session/load after host
+restart — Jeff root-caused at `498fff6`; two fixes LANDED on w19 branch
+(`8947083` approval `rebuild_from_log` live-edge stop + `3e22489` docker
+state-stream forwarding). Awaiting CI clear + merge. Once on main,
+pre-flight P10 flips green.
 
 **Fallbacks (three layers):**
-1. If `mono-thnc.6.3.8` Telegram E2E is shaky → fall back to
-   `mono-thnc.6.3.6`-only mode: only approval cards render on Telegram; the
-   prompt itself runs through the local ACP client in Pane B. Narration
-   stays Telegram-forward.
-2. If Telegram bridge is entirely down → fall back to local ACP client in
-   Pane B, approvals via CLI approver. Narration pivots to "showing the
-   same flow without the chat surface — the substrate is the same."
-3. If `mono-thnc.2.3` fix isn't in → play the PRE-STAGED Telegram recording
-   of the restart beat instead of doing it live.
+1. If the `telegram()` middleware is buggy post-`mono-axr.11` landing →
+   downgrade narration to Step 4-only mode (approval card renders on
+   Telegram via the same profile, but the initial prompt runs via a local
+   ACP client in Pane B). Narration stays Telegram-forward.
+2. If `mono-axr.11` hasn't landed in time → swap `telegram()` for
+   `webhook({ url, scope: 'tool_calls' })` and demo the same DS profile
+   pattern against a locally-hosted webhook receiver (`mono-axr.3`
+   Phase 3 webhook subscriber is the reference impl). Narration: "Same
+   shape, different transport — the point is the substrate."
+3. If the session/load fix isn't in → play the PRE-STAGED Telegram
+   recording of the restart beat.
 
-### Step 4 — Approval card on Telegram (Demo 2 reframed)
+### Step 4 — Approval card on Telegram (Demo 2 via DS profile)
 
-**Class: LIVE via `mono-thnc.6.3.6` Telegram approval card; PRE-STAGED or local-CLI fallback otherwise**
+**Class: LIVE via `mono-axr.11` TelegramSubscriber approval profile; local-CLI fallback otherwise**
 
-Continuing inside the same Telegram chat from Step 3, operator types a
+Continuing inside the same Telegram chat from Step 3, operator DMs a
 prompt that triggers the approval policy:
 
-> `@fireline-demo delete the build output with rm -rf dist`
+> `delete the build output with rm -rf dist`
 
 **What the audience should see:**
 
-- The agent proposes the `delete_file` tool call (or `run_command` with
-  `rm`) but does NOT execute
-- Telegram renders a **inline keyboard message** with the tool call
-  details + Approve / Deny buttons
+- The agent proposes the `delete_file` / `run_command` tool call but does
+  NOT execute
+- Telegram renders an **inline keyboard message** with the tool call
+  details + Approve / Deny buttons (rendered by the TelegramSubscriber
+  active profile)
 - Pane C: `fireline.approval.requested` span emitted with
-  `fireline.request_id`, `fireline.policy_id`, `fireline.reason`
+  `fireline.request_id`, `fireline.policy_id`, `fireline.reason`; plus
+  a `fireline.subscriber.handle` span with
+  `fireline.subscriber_name=telegram`,
+  `fireline.completion_key_variant=prompt`
 - Operator taps **Approve** on the phone/laptop
 - Telegram inline keyboard updates to "Approved by @operator"
 - Pane C: `fireline.approval.resolved` span with `fireline.allow=true`,
   `fireline.resolved_by=telegram:@operator`
 - Telegram chat continues: tool runs, agent confirms deletion
 
-**Narration beat:** "The approval is durable. If we crashed the container
-between the request and the tap, the approval would still be there when
-the container came back up — it's a row in the stream, not an in-memory
-callback. And the Approve button isn't a Fireline UI; it's Telegram. Same
-chat surface as every other conversation your team has."
+**Narration beat:** "Same middleware array as Step 1. The approval card
+comes from the same `telegram()` profile that's handling the chat
+stream. It's one row in the stream being routed to one subscriber — same
+shape as a webhook, same shape as an auto-approver. The chat surface is
+just a profile on a generic trait."
 
-**Implementation reference:** `mono-thnc.6.3.6` — Telegram callback query
-webhook writes `approval_resolved` on the state stream; approval gate's
-existing rebuild-from-log unblocks the paused tool call.
+**Implementation reference:** `mono-axr.11` — TelegramSubscriber active
+profile, companion to WebhookSubscriber (`mono-axr.3`) and
+AutoApproveSubscriber. Inline keyboard callback writes
+`approval_resolved` on the state stream; approval gate's existing
+rebuild-from-log unblocks the paused tool call.
 
-**Fallback:** if the Telegram callback query fails, operator falls back to
-the local CLI approver (`fireline approve --session <id> --request-id <id>`)
-in a side terminal. Same durable-streams write path — agent resume is
-identical; narration pivots to: "The approver is a CLI in this path. The
-Telegram inline keyboard is one of many resolvers on the same substrate."
+**Fallback:** if TelegramSubscriber misbehaves or `mono-axr.11` slips,
+operator falls back to the local CLI approver (`fireline approve
+--session <id> --request-id <id>`). Same durable-streams write path —
+agent resume is identical; narration pivots to: "The approver is a CLI
+in this path. The chat is one of many profiles; the substrate is the
+same."
 
 ---
 
-### Step 5 — Peer reviewer joins the same Telegram chat
+### Step 5 — Peer reviewer (also `telegram()`) in the same chat
 
-**Class: LIVE via `mono-thnc.6.3.7` (peer visibility); PRE-STAGED via `d543eac` recording otherwise**
+**Class: LIVE once `mono-axr.11` TelegramSubscriber is in agent + reviewer specs; PRE-STAGED via `d543eac` peer replay otherwise**
 
-Operator deploys the reviewer agent into the same bridge:
+`docs/demos/assets/reviewer.ts` carries the **same** `telegram()`
+middleware in its compose chain. No additional bridge, no additional
+bot registration — same `TELEGRAM_BOT_TOKEN` (one bot speaks for the
+fleet), role disambiguated via the TelegramSubscriber profile's
+message prefix / reply-threading.
 
 ```bash
-# Pane A — in a side terminal
-npx fireline build docs/demos/assets/reviewer.ts
-docker run -d --name fireline-reviewer \
-  -p 8088:8087 \
-  -v $PWD/.fireline-streams:/var/lib/fireline/streams \
-  --env-file deploy/observability/betterstack.env \
-  --env-file deploy/telegram/bridge.env \
-  fireline/demo:reviewer
+# Pane A — side terminal, same env already loaded
+npx fireline docs/demos/assets/reviewer.ts
 ```
 
-Operator then types on Telegram:
+Operator DMs the primary agent on Telegram:
 
-> `@fireline-demo ask @reviewer to double-check your last file change`
+> `ask the reviewer to double-check your last file change`
 
 **What the audience should see:**
 
 - Primary agent announces it's asking the reviewer
-- **Reviewer posts its own message in the same thread** (or a child thread
-  per `mono-thnc.6.3.7`'s chosen shape)
-- Pane C: trace tree shows `peer.call.out` from primary → `peer.call.in`
-  on reviewer, **joined by `_meta.traceparent`** (canonical-ids Phase 4
-  landed at `429475e` — propagation is LIVE, not adjacent-traces fallback)
+- **Reviewer posts its own message in the same Telegram chat**, prefixed
+  or threaded by the TelegramSubscriber profile's peer discriminator
+- Pane C: trace tree shows `peer.call.out` from primary →
+  `peer.call.in` on reviewer, joined by `_meta.traceparent`
+  (canonical-ids Phase 4 `429475e` — unified tree, not adjacent traces)
 - Reviewer replies; primary continues with the reviewer's annotation
 
-**Narration beat:** "Multi-agent is the same surface. You didn't learn a
-new UI. The audience is looking at one Telegram chat and one trace tree;
-behind it two agents are exchanging an ACP peer call with W3C trace
-context propagation. This is what OpenClaw-style products are built on
-top of."
+**Narration beat:** "Two agents, same middleware array, same chat.
+Multi-agent isn't a new UI or a new product surface — it's the same DS
+profile running in two places. That's what OpenClaw-style products mean
+when they say 'agent fleet': a bunch of composed specs, not a bunch of
+integrated systems."
 
-**Fallback:** re-run the off-stage FQA-5 replay
-(`docs/demos/scripts/replay-peer-to-peer.sh`, captured at `d543eac`) and
-play the Telegram-thread recording from rehearsal. Script + recording =
-deterministic fallback.
+**Fallback:** play the `d543eac` peer-to-peer replay off-stage +
+pre-staged Telegram chat screenshot. Script + recording = deterministic
+fallback if `mono-axr.11` parallelism isn't up by rehearsal.
 
 ---
 
@@ -383,9 +410,9 @@ Skip if running over time.
 |---|---|---|---|
 | 1 | LIVE | pi-acp binary resident | none |
 | 2 | LIVE | none | none |
-| 3 | LIVE **signature** (contingent on `mono-thnc.6.3.8` + `mono-thnc.2.3` fix) | Telegram demo chat + bridge pre-staged, demo agent image pre-built, volume dir prepared | Docker restart as PRE-STAGED recording if 2.3 fix slips |
-| 4 | LIVE via Telegram inline keyboard (`mono-thnc.6.3.6`) | Telegram callback query webhook registered, bot authed | Approve/Deny card shape rendered as recording if interactive webhook fails; local CLI approver as last-resort fallback |
-| 5 | LIVE via Telegram chat (`mono-thnc.6.3.7`) | reviewer image pre-built, bridge routes reviewer to same thread | Telegram chat screenshot + FQA-5 `d543eac` replay recording |
+| 3 | LIVE **signature** (contingent on `mono-axr.11` TelegramSubscriber profile + `mono-thnc.2.3` fix merged) | Telegram bot authed via @BotFather, env loaded, `docs/demos/assets/agent.ts` has `telegram()` middleware composed in | Host-restart as PRE-STAGED recording if 2.3 fix slips; `webhook()` swap as DS-profile narrative fallback if `.11` slips |
+| 4 | LIVE via TelegramSubscriber inline keyboard (`mono-axr.11` approval profile) | bot authed, callback write path through DS trait | Approve/Deny render as recording if profile flakes; local CLI approver as last-resort |
+| 5 | LIVE via `telegram()` in `reviewer.ts` too (`mono-axr.11`) | reviewer spec committed alongside agent.ts, both running against same bot | FQA-5 `d543eac` peer replay + Telegram chat screenshot |
 | 6 | LIVE (Betterstack dashboard w/ saved view) | saved-view URL bookmarked in projector browser, session-id variable auto-bound | none |
 | 7 | LIVE (split-screen show-and-tell) | `docs/demos/assets/agent.ts` pre-opened in editor for quick display | none |
 
@@ -448,7 +475,9 @@ Fail in any bucket → Rehearsal 2 drill targets that specific gap.
 
 - [x] Lock `agent.ts` + `reviewer.ts` under `docs/demos/assets/` — **DONE** `dbfac8a` (`mono-thnc.6.1`)
 - [ ] `--resume` CLI flag verification or concrete working equivalent — `mono-thnc.6.2` (blocked on canonical-ids Phase 5, see `mono-thnc.2.3` for in-scope gap)
-- [ ] Telegram bidirectional bridge — `mono-thnc.6.3` sub-epic (9 children .6.3.1–.9); signature moment per user directive. Telegram pre-stage = `mono-thnc.6.3.1` (user action), bridge build = .6.3.2 through .6.3.9 on w22 (PM-A reserve loan)
+- [x] Telegram bot pre-stage — `mono-thnc.6.3.1` LANDED (@Jessica_fireline_bot via @BotFather, token in gitignored `deploy/telegram/bridge.env`)
+- [x] Chat SDK adapter reference library — `mono-thnc.6.3.2` LANDED `d283392` (examples/telegram-bridge retained as reference; superseded as demo path)
+- [ ] TelegramSubscriber DS active profile — `mono-axr.11` (was `mono-thnc.6.3.3-.9`, superseded 2026-04-12). Companion to `mono-axr.3` WebhookSubscriber + AutoApproveSubscriber. Composed into `docs/demos/assets/agent.ts` + `reviewer.ts` via `telegram({ token, scope })` middleware. Demo signature moment; ~3–4h impl with parallel workers post-DS-Phase-3.
 - [ ] Pre-flight checklist dry-run (P1–P10) — `mono-thnc.6.4`
 - [ ] Rehearsal 1 — full-live attempt + fallback capture — `mono-thnc.7` (blocked on T2/T3/T4/T5/.6)
 - [ ] Rehearsal 2 — deliberate-fail drill — `mono-thnc.8` (blocked on Rehearsal 1)
