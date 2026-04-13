@@ -29,8 +29,8 @@ use fireline_harness::{
 use fireline_orchestration::load_coordinator::LoadCoordinatorComponent;
 use fireline_resources::MountedResource;
 use fireline_session::{
-    ActiveTurnIndex, PersistedHostSpec, ProvisionSpec, SandboxProviderRequest, SessionIndex,
-    StateMaterializer, StateMaterializerTask,
+    PersistedHostSpec, ProvisionSpec, SandboxProviderRequest, SessionIndex, StateMaterializer,
+    StateMaterializerTask,
 };
 use fireline_tools::{
     DEFAULT_TENANT_ID, DeploymentDiscoveryEvent, PeerRegistry, StreamDeploymentPeerRegistry,
@@ -165,11 +165,9 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         .build();
     let node_id = config.node_id;
     let session_index = SessionIndex::new();
-    let active_turn_index = ActiveTurnIndex::new();
-    let state_materializer = StateMaterializer::new(vec![
-        std::sync::Arc::new(session_index.clone()),
-        std::sync::Arc::new(active_turn_index.clone()),
-    ]);
+    let state_materializer = StateMaterializer::new(vec![std::sync::Arc::new(
+        session_index.clone(),
+    )]);
     // Keep a clone of the agent command around so we can thread it into
     // the `host_spec` envelope further down — SharedTerminal::spawn
     // consumes the original.
@@ -189,7 +187,6 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         state_stream_url: state_stream_url.clone(),
         state_producer: state_producer.clone(),
         peer_registry: peer_registry.clone(),
-        active_turn_lookup: std::sync::Arc::new(active_turn_index.clone()),
         mounted_resources: config.mounted_resources.clone(),
     });
 

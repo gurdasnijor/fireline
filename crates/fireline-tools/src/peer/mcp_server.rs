@@ -10,13 +10,11 @@
 //! normal SDK ACP client session against the peer's hosted endpoint.
 
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PeerRegistry;
-use super::lookup::ActiveTurnLookup;
 use super::transport;
 use crate::ToolDescriptor;
 
@@ -84,7 +82,6 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
 
 pub(crate) fn build_peer_mcp_server(
     peer_registry: Arc<dyn PeerRegistry>,
-    active_turn_lookup: Arc<dyn ActiveTurnLookup>,
     session_binding: Arc<OnceLock<String>>,
 ) -> sacp::mcp_server::McpServer<Conductor, impl sacp::RunWithConnectionTo<Conductor>> {
     sacp::mcp_server::McpServer::builder("fireline-peer")
@@ -118,7 +115,6 @@ pub(crate) fn build_peer_mcp_server(
             "Send a prompt to a named Fireline peer and return its response.",
             {
                 let peer_registry = peer_registry.clone();
-                let active_turn_lookup = active_turn_lookup.clone();
                 let session_binding = session_binding.clone();
                 async move |input: PromptPeerInput, cx| {
                     let peer = peer_registry
@@ -146,15 +142,6 @@ pub(crate) fn build_peer_mcp_server(
                         session_id = %session_id,
                     );
                     let _tool_call_guard = tool_call_span.enter();
-
-                    wait_for_current_turn_barrier(active_turn_lookup.as_ref(), &session_id)
-                        .await
-                        .ok_or_else(|| {
-                            sacp::util::internal_error(format!(
-                                "prompt peer '{}' before active turn projection caught up",
-                                input.agent_name
-                            ))
-                        })?;
 
                     let peer_call_span = tracing::info_span!(
                         "fireline.peer_call.outbound",
@@ -194,13 +181,3 @@ pub(crate) fn build_peer_mcp_server(
 }
 
 use sacp::Conductor;
-
-async fn wait_for_current_turn_barrier(
-    active_turn_lookup: &dyn ActiveTurnLookup,
-    session_id: &str,
-) -> Option<()> {
-    active_turn_lookup
-        .wait_for_current_turn(session_id, Duration::from_millis(250))
-        .await
-        .map(|_| ())
-}

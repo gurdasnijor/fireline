@@ -275,13 +275,17 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
         body_b.contains("\"type\":\"prompt_request\""),
         "remote peer runtime should record the cross-runtime prompt as a prompt_request: {body_b}"
     );
-    assert!(
-        find_prompt_request(&body_a, |text| text.contains("\"tool\":\"prompt_peer\"")).is_some(),
-        "missing parent prompt_request in runtime A: {body_a}"
+    let parent_prompt = find_prompt_request(&body_a, |text| text.contains("\"tool\":\"prompt_peer\""))
+        .expect("missing parent prompt_request in runtime A");
+    let child_prompt = find_prompt_request(&body_b, |text| text.contains("hello across mesh"))
+        .expect("missing child prompt_request in runtime B");
+    assert_ne!(
+        parent_prompt.session_id, child_prompt.session_id,
+        "peer call should materialize a distinct child session id without lookup-side synthetic state"
     );
     assert!(
-        find_prompt_request(&body_b, |text| text.contains("hello across mesh")).is_some(),
-        "missing child prompt_request in runtime B: {body_b}"
+        has_session_record(&body_b, &child_prompt.session_id),
+        "remote peer runtime should expose the child session row directly in stream state: {body_b}"
     );
     assert!(
         !body_a.contains("\"type\":\"child_session_edge\""),
@@ -424,6 +428,14 @@ async fn peer_trace_context_propagates_across_prompt_peer() -> Result<()> {
         "child session/prompt span should hang off the inbound peer span"
     );
     assert_ne!(
+        parent_prompt.session_id, child_prompt.session_id,
+        "peer call should expose a distinct child session id without lookup-side synthetic state"
+    );
+    assert!(
+        has_session_record(&read_stream_body(&stream_b).await?, &child_prompt.session_id),
+        "remote stream should carry the child session row without lookup-side synthetic state"
+    );
+    assert_ne!(
         parent_prompt.request_id, child_prompt.request_id,
         "cross-host prompt_peer should still allocate a fresh child request id"
     );
@@ -456,6 +468,17 @@ fn find_prompt_request(body: &str, predicate: impl Fn(&str) -> bool) -> Option<P
             request_id: value.get("requestId")?.as_str()?.to_string(),
             session_id: value.get("sessionId")?.as_str()?.to_string(),
         })
+    })
+}
+
+fn has_session_record(body: &str, session_id: &str) -> bool {
+    parse_state_events(body).into_iter().any(|event| {
+        event.get("type").and_then(Value::as_str) == Some("session")
+            && event
+                .get("value")
+                .and_then(|value| value.get("sessionId"))
+                .and_then(Value::as_str)
+                == Some(session_id)
     })
 }
 

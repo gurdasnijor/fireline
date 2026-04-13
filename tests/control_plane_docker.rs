@@ -218,7 +218,7 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
         }
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        loop {
+        let (parent_prompt, child_prompt, docker_body) = loop {
             let local_body = read_state_stream(&local_ready.state.url).await?;
             let docker_body = read_state_stream(&docker_ready[0].state.url).await?;
 
@@ -229,8 +229,8 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
                 text.contains("hello across docker mesh")
             });
 
-            if parent.is_some() && child.is_some() {
-                break;
+            if let (Some(parent_prompt), Some(child_prompt)) = (parent, child) {
+                break (parent_prompt, child_prompt, docker_body);
             }
 
             if tokio::time::Instant::now() >= deadline {
@@ -240,7 +240,15 @@ async fn control_plane_supports_local_and_docker_runtimes_against_one_shared_sta
             }
 
             tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        };
+        assert_ne!(
+            parent_prompt.session_id, child_prompt.session_id,
+            "cross-runtime peer prompt should expose a distinct child session id without lookup-side synthetic state"
+        );
+        assert!(
+            has_session_record(&docker_body, &child_prompt.session_id),
+            "docker peer stream should expose the child session row directly in shared state"
+        );
 
         let stopped = client
             .post(format!(
@@ -523,6 +531,17 @@ fn find_prompt_request(body: &str, predicate: impl Fn(&str) -> bool) -> Option<P
             request_id: value.get("requestId")?.as_str()?.to_string(),
             session_id: value.get("sessionId")?.as_str()?.to_string(),
         })
+    })
+}
+
+fn has_session_record(body: &str, session_id: &str) -> bool {
+    parse_state_events(body).into_iter().any(|event| {
+        event.get("type").and_then(Value::as_str) == Some("session")
+            && event
+                .get("value")
+                .and_then(|value| value.get("sessionId"))
+                .and_then(Value::as_str)
+                == Some(session_id)
     })
 }
 

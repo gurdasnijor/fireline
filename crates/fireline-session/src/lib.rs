@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 
-pub mod active_turn_index;
 pub mod host_identity;
 pub mod host_index;
 pub mod projection;
@@ -8,7 +7,6 @@ pub mod state_materializer;
 pub mod session_index;
 pub mod stream_host;
 
-pub use active_turn_index::{ActiveTurnIndex, ActiveTurnRecord};
 pub use host_identity::{
     ProvisionSpec, Endpoint, HeartbeatMetrics, HeartbeatReport, PersistedHostSpec,
     HostDescriptor, SandboxProviderKind, SandboxProviderRequest, HostRegistration,

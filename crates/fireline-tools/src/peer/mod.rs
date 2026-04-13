@@ -11,7 +11,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-pub mod lookup;
 pub mod stream;
 
 pub(crate) mod mcp_server;
@@ -29,7 +28,6 @@ use std::sync::{Arc, OnceLock};
 
 use sacp::{Client, ConnectTo, Proxy};
 
-use self::lookup::ActiveTurnLookup;
 use self::mcp_server::build_peer_mcp_server;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -52,25 +50,17 @@ pub trait PeerRegistry: Send + Sync {
 #[derive(Clone)]
 pub struct PeerComponent {
     peer_registry: Arc<dyn PeerRegistry>,
-    active_turn_lookup: Arc<dyn ActiveTurnLookup>,
 }
 
 impl PeerComponent {
-    pub fn new(
-        peer_registry: Arc<dyn PeerRegistry>,
-        active_turn_lookup: Arc<dyn ActiveTurnLookup>,
-    ) -> Self {
-        Self {
-            peer_registry,
-            active_turn_lookup,
-        }
+    pub fn new(peer_registry: Arc<dyn PeerRegistry>) -> Self {
+        Self { peer_registry }
     }
 }
 
 impl ConnectTo<sacp::Conductor> for PeerComponent {
     async fn connect_to(self, client: impl ConnectTo<Proxy>) -> Result<(), sacp::Error> {
         let peer_registry = self.peer_registry;
-        let active_turn_lookup = self.active_turn_lookup;
 
         sacp::Proxy
             .builder()
@@ -79,12 +69,10 @@ impl ConnectTo<sacp::Conductor> for PeerComponent {
                 Client,
                 {
                     let peer_registry = peer_registry.clone();
-                    let active_turn_lookup = active_turn_lookup.clone();
                     async move |request: sacp::schema::NewSessionRequest, responder, cx| {
                         let session_binding = Arc::new(OnceLock::new());
                         let mcp_server = build_peer_mcp_server(
                             peer_registry.clone(),
-                            active_turn_lookup.clone(),
                             session_binding.clone(),
                         );
                         cx.build_session_from(request)
