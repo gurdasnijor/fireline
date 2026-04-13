@@ -9,7 +9,7 @@
 //! conductor — it's the explicit "developer wires HTTP into the substrate"
 //! point that the rivet HTTP server pattern advocates.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
@@ -154,20 +154,31 @@ fn build_conductor_with_terminal(
 }
 
 async fn handle_upgrade(conductor: ConductorImpl<Agent>, socket: WebSocket) -> anyhow::Result<()> {
+    let debug = AcpDebug::from_env();
+    debug.log_open();
     let (write, mut read) = socket.split();
 
+    let outgoing_debug = debug.clone();
     let outgoing = SinkExt::with(
         SinkExt::sink_map_err(write, std::io::Error::other),
-        |line: String| async move { Ok::<_, std::io::Error>(Message::Text(line.into())) },
+        move |line: String| {
+            let debug = outgoing_debug.clone();
+            async move {
+                debug.log_send(&line);
+                Ok::<_, std::io::Error>(Message::Text(line.into()))
+            }
+        },
     );
 
-    let first_line = read_initial_line(&mut read).await?;
+    let first_line = read_initial_line(&mut read, &debug).await?;
     let inbound_context = first_line
         .as_deref()
         .and_then(extract_remote_trace_context);
 
-    let remaining_incoming = StreamExt::filter_map(read, |message| async move {
-        stream_message_to_line(message)
+    let incoming_debug = debug.clone();
+    let remaining_incoming = StreamExt::filter_map(read, move |message| {
+        let debug = incoming_debug.clone();
+        async move { stream_message_to_line(message, &debug) }
     });
     let incoming = futures::stream::once(async move {
         first_line.map(Ok::<_, std::io::Error>)
@@ -180,52 +191,177 @@ async fn handle_upgrade(conductor: ConductorImpl<Agent>, socket: WebSocket) -> a
         Ok::<_, sacp::Error>(())
     };
 
-    if let Some(parent_context) = inbound_context {
+    let result = if let Some(parent_context) = inbound_context {
         let inbound_span = tracing::info_span!("fireline.peer_call.inbound");
         let _ = inbound_span.set_parent(parent_context);
-        serve_connection.instrument(inbound_span).await?;
+        serve_connection.instrument(inbound_span).await
     } else {
-        serve_connection.await?;
+        serve_connection.await
+    };
+
+    if let Err(error) = &result {
+        debug.log_close_error(error);
     }
+
+    result?;
 
     Ok(())
 }
 
 async fn read_initial_line(
     read: &mut futures::stream::SplitStream<WebSocket>,
+    debug: &AcpDebug,
 ) -> std::io::Result<Option<String>> {
     while let Some(message) = read.next().await {
-        if let Some(result) = stream_message_to_line(message) {
+        if let Some(result) = stream_message_to_line(message, debug) {
             return result.map(Some);
         }
     }
+    debug.log_close_without_frame();
     Ok(None)
 }
 
 fn stream_message_to_line(
     message: Result<Message, axum::Error>,
+    debug: &AcpDebug,
 ) -> Option<Result<String, std::io::Error>> {
     match message {
-        Ok(Message::Text(text)) => normalized_line(text.as_str()),
+        Ok(Message::Text(text)) => normalized_line(text.as_str(), debug),
         Ok(Message::Binary(bytes)) => String::from_utf8(bytes.to_vec())
             .ok()
-            .and_then(|text| normalized_line(&text)),
-        Ok(Message::Close(_)) => Some(Err(std::io::Error::new(
-            std::io::ErrorKind::ConnectionAborted,
-            "websocket closed",
-        ))),
+            .and_then(|text| normalized_line(&text, debug)),
+        Ok(Message::Close(frame)) => {
+            debug.log_close_frame(frame.as_ref().map(|frame| (frame.code, frame.reason.as_str())));
+            Some(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "websocket closed",
+            )))
+        }
         Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => None,
-        Err(err) => Some(Err(std::io::Error::other(err))),
+        Err(err) => {
+            debug.log_close_transport_error(&err);
+            Some(Err(std::io::Error::other(err)))
+        }
     }
 }
 
-fn normalized_line(raw: &str) -> Option<Result<String, std::io::Error>> {
+#[derive(Clone, Default)]
+struct AcpDebug {
+    enabled: bool,
+    last_message: Arc<Mutex<Option<String>>>,
+}
+
+impl AcpDebug {
+    fn from_env() -> Self {
+        Self {
+            enabled: std::env::var("FIRELINE_ACP_DEBUG")
+                .map(|value| value != "0" && !value.is_empty())
+                .unwrap_or(false),
+            last_message: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn log_open(&self) {
+        if self.enabled {
+            tracing::info!("FL-DEBUG[acp-open]");
+            eprintln!("FL-DEBUG[acp-open]");
+        }
+    }
+
+    fn log_recv(&self, line: &str) {
+        if self.enabled {
+            let msg = truncate_for_debug(line);
+            tracing::info!("FL-DEBUG[acp-recv] {}", msg);
+            eprintln!("FL-DEBUG[acp-recv] {}", msg);
+        }
+        self.set_last_message(line);
+    }
+
+    fn log_send(&self, line: &str) {
+        if self.enabled {
+            let msg = truncate_for_debug(line);
+            tracing::info!("FL-DEBUG[acp-send] {}", msg);
+            eprintln!("FL-DEBUG[acp-send] {}", msg);
+        }
+        self.set_last_message(line);
+    }
+
+    fn log_close_frame(&self, frame: Option<(u16, &str)>) {
+        if !self.enabled {
+            return;
+        }
+        if let Some((code, reason)) = frame {
+            tracing::info!("FL-DEBUG[acp-close] code={} reason={}", code, reason);
+            eprintln!("FL-DEBUG[acp-close] code={} reason={}", code, reason);
+        } else {
+            tracing::info!("FL-DEBUG[acp-close] code=none reason=");
+            eprintln!("FL-DEBUG[acp-close] code=none reason=");
+        }
+        self.log_last_before_close();
+    }
+
+    fn log_close_transport_error(&self, err: &axum::Error) {
+        if !self.enabled {
+            return;
+        }
+        tracing::info!("FL-DEBUG[acp-close] code=1006 reason={}", err);
+        eprintln!("FL-DEBUG[acp-close] code=1006 reason={}", err);
+        self.log_last_before_close();
+    }
+
+    fn log_close_error(&self, err: &sacp::Error) {
+        if !self.enabled {
+            return;
+        }
+        tracing::info!("FL-DEBUG[acp-close] code=1006 reason={}", err);
+        eprintln!("FL-DEBUG[acp-close] code=1006 reason={}", err);
+        self.log_last_before_close();
+    }
+
+    fn log_close_without_frame(&self) {
+        if !self.enabled {
+            return;
+        }
+        tracing::info!("FL-DEBUG[acp-close] code=none reason=stream-ended");
+        eprintln!("FL-DEBUG[acp-close] code=none reason=stream-ended");
+        self.log_last_before_close();
+    }
+
+    fn log_last_before_close(&self) {
+        let last = self
+            .last_message
+            .lock()
+            .ok()
+            .and_then(|last| last.clone())
+            .unwrap_or_default();
+        let msg = truncate_for_debug(&last);
+        tracing::info!("FL-DEBUG[acp-last-before-close] {}", msg);
+        eprintln!("FL-DEBUG[acp-last-before-close] {}", msg);
+    }
+
+    fn set_last_message(&self, line: &str) {
+        if let Ok(mut slot) = self.last_message.lock() {
+            *slot = Some(line.to_string());
+        }
+    }
+}
+
+fn normalized_line(raw: &str, debug: &AcpDebug) -> Option<Result<String, std::io::Error>> {
     let line = raw.trim().to_string();
     if line.is_empty() {
         return None;
     }
+    debug.log_recv(&line);
     emit_request_span(&line);
     Some(Ok(line))
+}
+
+fn truncate_for_debug(line: &str) -> String {
+    const LIMIT: usize = 200;
+    if line.len() <= LIMIT {
+        return line.to_string();
+    }
+    format!("{}…", &line[..LIMIT])
 }
 
 fn emit_request_span(line: &str) {

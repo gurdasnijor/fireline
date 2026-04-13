@@ -317,15 +317,22 @@ pub async fn install_agent(agent: &RemoteAgent) -> Result<PathBuf> {
             args,
             env,
         } => {
-            write_wrapper(
-                &install_path,
-                launcher,
-                &package,
-                &args,
-                &env,
-                &agent.id,
-            )
-            .await?;
+            match launcher {
+                LauncherKind::Npx => {
+                    install_npx_package(agent, &package, &args, &env, &install_path).await?;
+                }
+                LauncherKind::Uvx => {
+                    write_wrapper(
+                        &install_path,
+                        launcher,
+                        &package,
+                        &args,
+                        &env,
+                        &agent.id,
+                    )
+                    .await?;
+                }
+            }
         }
         InstallPlan::BinaryArchive { archive, command } => {
             install_binary_archive(agent, &archive, &command, &install_path).await?;
@@ -346,6 +353,14 @@ pub async fn resolve_agent_launch_command(agent_command: Vec<String>) -> Result<
 
     let installed_path = installed_command_path(&token)?;
     if installed_path.exists() {
+        if needs_package_wrapper_upgrade(&installed_path)? {
+            let upgraded = install_agent_by_id(&token).await.map_err(|error| {
+                anyhow!(
+                    "managed ACP agent '{token}' uses a legacy launcher wrapper and refresh failed: {error:#}"
+                )
+            })?;
+            return Ok(vec![upgraded.to_string_lossy().into_owned()]);
+        }
         return Ok(vec![installed_path.to_string_lossy().into_owned()]);
     }
 
@@ -505,6 +520,52 @@ async fn write_wrapper(
     Ok(())
 }
 
+async fn install_npx_package(
+    agent: &RemoteAgent,
+    package: &str,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+    install_path: &Path,
+) -> Result<()> {
+    let agent_dir = install_agent_dir(&agent.id)?;
+    if agent_dir.exists() {
+        std::fs::remove_dir_all(&agent_dir)
+            .with_context(|| format!("remove prior install dir {}", agent_dir.display()))?;
+    }
+    fs::create_dir_all(&agent_dir)
+        .await
+        .with_context(|| format!("create install dir {}", agent_dir.display()))?;
+
+    let status = Command::new("npm")
+        .args(["install", "--silent", "--no-save", "--prefix"])
+        .arg(&agent_dir)
+        .arg(package)
+        .status()
+        .context("spawn npm install for ACP package agent")?;
+    if !status.success() {
+        anyhow::bail!("npm install failed for ACP package agent '{package}' with status {status}");
+    }
+
+    let package_name = normalized_package_name(package);
+    let package_dir = installed_package_dir(&agent_dir, &package_name);
+    let package_json = std::fs::read_to_string(package_dir.join("package.json"))
+        .with_context(|| format!("read installed package manifest {}", package_dir.display()))?;
+    let package_manifest: serde_json::Value =
+        serde_json::from_str(&package_json).context("parse installed package manifest")?;
+    let binary_name = installed_binary_name(&agent.id, &package_name, &package_manifest)?;
+    let binary_path = installed_binary_path(&agent_dir, &binary_name);
+
+    if !binary_path.exists() {
+        anyhow::bail!(
+            "installed ACP package binary '{}' not found at {}",
+            binary_name,
+            binary_path.display()
+        );
+    }
+
+    write_env_binary_wrapper(install_path, &binary_path, args, env, &agent.id).await
+}
+
 async fn write_binary_wrapper(
     install_path: &Path,
     target_path: &Path,
@@ -517,6 +578,25 @@ async fn write_binary_wrapper(
         "#!/usr/bin/env bash\nset -euo pipefail\nexec \"{}\" \"$@\"\n",
         target_path.display()
     );
+
+    fs::write(install_path, script)
+        .await
+        .with_context(|| format!("write binary wrapper for {agent_id}"))?;
+    make_executable(install_path)?;
+    Ok(())
+}
+
+async fn write_env_binary_wrapper(
+    install_path: &Path,
+    target_path: &Path,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+    agent_id: &str,
+) -> Result<()> {
+    #[cfg(windows)]
+    let script = build_windows_binary_wrapper(target_path, args, env);
+    #[cfg(not(windows))]
+    let script = build_unix_binary_wrapper(target_path, args, env);
 
     fs::write(install_path, script)
         .await
@@ -564,6 +644,38 @@ fn build_unix_package_wrapper(
     script
 }
 
+#[cfg(not(windows))]
+fn build_unix_binary_wrapper(
+    target_path: &Path,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+) -> String {
+    let mut script = String::from("#!/usr/bin/env bash\nset -euo pipefail\n");
+    for (key, value) in env {
+        script.push_str(&format!(
+            "export {}={}\n",
+            key,
+            shell_escape_unix(value)
+        ));
+    }
+    let extra_args = args
+        .iter()
+        .map(|arg| shell_escape_unix(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let tail = if extra_args.is_empty() {
+        String::new()
+    } else {
+        format!(" {extra_args}")
+    };
+    script.push_str(&format!(
+        "exec \"{}\"{} \"$@\"\n",
+        target_path.display(),
+        tail
+    ));
+    script
+}
+
 #[cfg(windows)]
 fn build_windows_package_wrapper(
     launcher: LauncherKind,
@@ -595,6 +707,26 @@ fn build_windows_package_wrapper(
     script
 }
 
+#[cfg(windows)]
+fn build_windows_binary_wrapper(
+    target_path: &Path,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+) -> String {
+    let mut script = String::from("@echo off\r\n");
+    for (key, value) in env {
+        script.push_str(&format!("set {}={}\r\n", key, value));
+    }
+    let extra_args = args.join(" ");
+    let tail = if extra_args.is_empty() {
+        String::new()
+    } else {
+        format!(" {extra_args}")
+    };
+    script.push_str(&format!("\"{}\"{} %*\r\n", target_path.display(), tail));
+    script
+}
+
 #[cfg(not(windows))]
 fn make_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -622,6 +754,92 @@ fn archive_extension(url: &str) -> &'static str {
     } else {
         ".bin"
     }
+}
+
+fn normalized_package_name(package_spec: &str) -> String {
+    if package_spec.starts_with('@') {
+        match package_spec[1..].find('@') {
+            Some(index) => package_spec[..index + 1].to_string(),
+            None => package_spec.to_string(),
+        }
+    } else {
+        package_spec
+            .split_once('@')
+            .map(|(name, _)| name.to_string())
+            .unwrap_or_else(|| package_spec.to_string())
+    }
+}
+
+fn installed_package_dir(agent_dir: &Path, package_name: &str) -> PathBuf {
+    let mut path = agent_dir.join("node_modules");
+    for segment in package_name.split('/') {
+        path.push(segment);
+    }
+    path
+}
+
+fn installed_binary_path(agent_dir: &Path, binary_name: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        return agent_dir
+            .join("node_modules")
+            .join(".bin")
+            .join(format!("{binary_name}.cmd"));
+    }
+    #[cfg(not(windows))]
+    {
+        agent_dir.join("node_modules").join(".bin").join(binary_name)
+    }
+}
+
+fn installed_binary_name(
+    agent_id: &str,
+    package_name: &str,
+    package_manifest: &serde_json::Value,
+) -> Result<String> {
+    let default_name = package_name
+        .rsplit('/')
+        .next()
+        .unwrap_or(package_name)
+        .to_string();
+    let Some(bin) = package_manifest.get("bin") else {
+        return Ok(default_name);
+    };
+
+    if let Some(path) = bin.as_str() {
+        if !path.is_empty() {
+            return Ok(default_name);
+        }
+    }
+
+    let Some(bin_map) = bin.as_object() else {
+        return Ok(default_name);
+    };
+
+    if bin_map.len() == 1 {
+        return Ok(bin_map.keys().next().expect("single bin key").to_string());
+    }
+
+    if bin_map.contains_key(agent_id) {
+        return Ok(agent_id.to_string());
+    }
+
+    if bin_map.contains_key(&default_name) {
+        return Ok(default_name);
+    }
+
+    anyhow::bail!(
+        "installed ACP package '{}' exposes multiple binaries ({:?}); could not choose one for agent '{}'",
+        package_name,
+        bin_map.keys().collect::<Vec<_>>(),
+        agent_id
+    )
+}
+
+fn needs_package_wrapper_upgrade(path: &Path) -> Result<bool> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("read installed ACP wrapper {}", path.display()))?;
+    Ok(raw.contains("exec npx ") || raw.contains("exec uvx ") || raw.contains("\r\nnpx "))
 }
 
 fn normalized_relative_command(command: &str) -> PathBuf {
