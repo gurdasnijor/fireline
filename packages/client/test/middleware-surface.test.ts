@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
 
 import { agent, compose, middleware, sandbox, Sandbox } from '../src/sandbox.js'
-import { autoApprove, durableSubscriber, telegram, webhook } from '../src/middleware.js'
+import { approve, autoApprove, durableSubscriber, telegram, webhook } from '../src/middleware.js'
 
 describe('durable-subscriber middleware surface', () => {
   afterEach(() => {
@@ -93,6 +93,79 @@ describe('durable-subscriber middleware surface', () => {
     ])
   })
 
+  it('lowers tool-call and prompt approval scopes to distinct topology policies', async () => {
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            id: 'sandbox-1',
+            provider: 'local',
+            acp: { url: 'ws://127.0.0.1:9000' },
+            state: { url: 'http://127.0.0.1:7474/v1/stream/state' },
+          }),
+          {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          },
+        ),
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const toolHarness = compose(
+      sandbox({ provider: 'local' }),
+      middleware([approve({ scope: 'tool_calls', timeoutMs: 60_000 })]),
+      agent(['node', 'agent.mjs']),
+    )
+    await new Sandbox({ serverUrl: 'http://127.0.0.1:4440' }).provision(toolHarness)
+
+    const promptHarness = compose(
+      sandbox({ provider: 'local' }),
+      middleware([approve({ scope: 'prompts', timeoutMs: 15_000 })]),
+      agent(['node', 'agent.mjs']),
+    )
+    await new Sandbox({ serverUrl: 'http://127.0.0.1:4440' }).provision(promptHarness)
+
+    const [, toolRequest] = fetchMock.mock.calls[0] as [string, RequestInit]
+    const [, promptRequest] = fetchMock.mock.calls[1] as [string, RequestInit]
+    const toolBody = JSON.parse(String(toolRequest.body)) as {
+      readonly topology: {
+        readonly components: readonly Array<{
+          readonly name: string
+          readonly config?: Record<string, unknown>
+        }>
+      }
+    }
+    const promptBody = JSON.parse(String(promptRequest.body)) as typeof toolBody
+
+    expect(toolBody.topology.components).toContainEqual({
+      name: 'approval_gate',
+      config: {
+        timeoutMs: 60_000,
+        policies: [
+          {
+            match: { kind: 'toolPrefix', prefix: '' },
+            action: 'requireApproval',
+            reason: 'approval required for tool call',
+          },
+        ],
+      },
+    })
+    expect(promptBody.topology.components).toContainEqual({
+      name: 'approval_gate',
+      config: {
+        timeoutMs: 15_000,
+        policies: [
+          {
+            match: { kind: 'promptContains', needle: '' },
+            action: 'requireApproval',
+            reason: 'approval required for every prompt',
+          },
+        ],
+      },
+    })
+  })
+
   it('keeps durable-subscriber key strategies canonical at the type surface', () => {
     const profile = durableSubscriber(
       webhook({
@@ -105,6 +178,15 @@ describe('durable-subscriber middleware surface', () => {
     expect(profile.kind).toBe('webhook')
     expectTypeOf(profile.keyBy).toEqualTypeOf<
       'session_request' | 'session_tool_call' | undefined
+    >()
+  })
+
+  it('keeps approve scope aliases available at the type surface', () => {
+    expectTypeOf(approve({ scope: 'tool_calls' }).scope).toEqualTypeOf<
+      'tool_calls' | 'prompts' | 'all'
+    >()
+    expectTypeOf(approve({ scope: 'prompts' }).scope).toEqualTypeOf<
+      'tool_calls' | 'prompts' | 'all'
     >()
   })
 

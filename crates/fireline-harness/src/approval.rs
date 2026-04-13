@@ -1,37 +1,22 @@
 //! Approval gate proxy.
 //!
-//! Intercepts `session/prompt` requests flowing from the client
-//! and runs each one through a configured policy. Matching
-//! policies can either:
+//! Supports two gate points:
 //!
-//! - **Deny** the request outright, returning a tool-level error
-//!   so the agent sees a failure instead of the requested action
+//! - Prompt-scoped approval via `session/prompt` interception when a
+//!   configured prompt policy matches
+//! - Tool-call-scoped approval via ACP `session/request_permission`
+//!   interception when a configured tool policy matches
+//!
+//! Matching policies can either:
+//!
+//! - **Deny** the request outright
 //! - **RequireApproval** — emit a `permission_request` event to the
-//!   durable state stream keyed by the intercepted ACP JSON-RPC
-//!   `request_id`, then block the request until a matching
-//!   `approval_resolved` event appears on the stream. The request is
-//!   forwarded to the agent only if the resolution event carries
-//!   `allow: true`. A `Deny` resolution surfaces as a gate error the
-//!   agent never sees.
+//!   durable state stream keyed by canonical ACP identity, then block
+//!   until a matching `approval_resolved` event appears on the stream
 //!
-//! # Why prompt-level, not tool-call-level
-//!
-//! The obvious gate point is an individual tool call — "ask
-//! before the agent runs `shell`." That would require
-//! intercepting agent→MCP tool dispatches, which today don't
-//! present a cleanly typed ACP proxy hook (tool calls travel as
-//! MCP-over-ACP). Until that hook lands upstream in
-//! `agent-client-protocol-core`, this component gates at the
-//! *prompt* level: scan the user's prompt for dangerous
-//! keywords, risky file paths, or other policy-relevant
-//! substrings, and refuse or escalate before the agent ever sees
-//! the request. That's a strictly weaker guarantee than tool-
-//! call gating, but it's real, it composes with the existing
-//! proxy chain, and it maps cleanly to concrete user policies.
-//!
-//! Tool-name policies are retained on `ApprovalMatch` for
-//! eventual use once the SDK supports tool-call interception;
-//! the pattern matcher already handles them in tests.
+//! Prompt approvals key on `(session_id, request_id)`. Tool approvals
+//! key on `(session_id, tool_call_id)` so replay and rebuild follow the
+//! same canonical completion spine as other tool-scoped subscribers.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -40,15 +25,17 @@ use std::time::Duration;
 use anyhow::Result as AnyhowResult;
 use durable_streams::Producer;
 use fireline_acp_ids::{RequestId, SessionId, ToolCallId};
-use sacp::schema::{ContentBlock, PromptRequest};
+use sacp::schema::{
+    ContentBlock, PermissionOption, PermissionOptionKind, PromptRequest, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+};
 use sacp::{Agent, Client, ConnectTo, Proxy};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{
     CompletionKey, DurableSubscriber, DurableSubscriberDriver, PassiveSubscriber,
-    PassiveWaitPolicy, StreamEnvelope,
-    TraceContext,
+    PassiveWaitPolicy, StreamEnvelope, TraceContext,
 };
 
 use crate::agent_observability::{
@@ -73,11 +60,9 @@ pub struct ApprovalPolicy {
 pub enum ApprovalMatch {
     /// The prompt text contains this case-insensitive substring.
     PromptContains { needle: String },
-    /// Exact match by tool name — retained for future use once
-    /// tool-call interception is possible. Not yet evaluated
-    /// anywhere in the prompt-level gate.
+    /// Exact match by tool-call title on ACP `session/request_permission`.
     Tool { name: String },
-    /// Prefix match on the tool name.
+    /// Prefix match on the tool-call title.
     ToolPrefix { prefix: String },
 }
 
@@ -148,12 +133,45 @@ pub struct ApprovalGateComponent {
     approval_subscriber: ApprovalGateSubscriber,
     approved_sessions: Arc<Mutex<HashSet<SessionId>>>,
     pending_sessions: Arc<Mutex<HashMap<SessionId, PendingApproval>>>,
+    resolved_tool_calls: Arc<Mutex<HashMap<(SessionId, ToolCallId), ApprovalResolution>>>,
+    pending_tool_calls: Arc<Mutex<HashMap<(SessionId, ToolCallId), String>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingApproval {
     request_id: RequestId,
     reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum ApprovalSubject {
+    Prompt {
+        session_id: SessionId,
+        request_id: RequestId,
+    },
+    ToolCall {
+        session_id: SessionId,
+        tool_call_id: ToolCallId,
+    },
+}
+
+impl ApprovalSubject {
+    fn stream_key(&self) -> String {
+        match self {
+            Self::Prompt {
+                session_id,
+                request_id,
+            } => format!("{session_id}:{}", request_id_key(request_id)),
+            Self::ToolCall {
+                session_id,
+                tool_call_id,
+            } => format!("{session_id}:{tool_call_id}"),
+        }
+    }
+
+    fn resolved_stream_key(&self) -> String {
+        format!("{}:resolved", self.stream_key())
+    }
 }
 
 #[derive(Clone)]
@@ -168,13 +186,8 @@ impl ApprovalGateSubscriber {
         Self { approval_timeout }
     }
 
-    fn permission_request_envelope(
-        &self,
-        session_id: &SessionId,
-        request_id: &RequestId,
-        reason: &str,
-    ) -> StreamEnvelope {
-        permission_request_envelope(session_id.clone(), request_id.clone(), reason.to_string())
+    fn permission_request_envelope(&self, event: &PermissionEvent) -> StreamEnvelope {
+        permission_request_envelope_from_event(event.clone())
             .expect("permission request event must serialize")
     }
 
@@ -189,12 +202,12 @@ impl ApprovalGateSubscriber {
         request_event: &PermissionEvent,
         log: &[StreamEnvelope],
     ) -> Option<PermissionEvent> {
+        let expected_subject = request_event.subject()?;
         log.iter().find_map(|envelope| {
             let event = Self::decode_permission_event(envelope)?;
             (event.kind == "approval_resolved"
-                && event.session_id == request_event.session_id
-                && event.request_id == request_event.request_id)
-                .then_some(event)
+                && event.subject().as_ref() == Some(&expected_subject))
+            .then_some(event)
         })
     }
 }
@@ -209,17 +222,23 @@ impl DurableSubscriber for ApprovalGateSubscriber {
 
     fn matches(&self, envelope: &StreamEnvelope) -> Option<Self::Event> {
         let event = Self::decode_permission_event(envelope)?;
-        (event.kind == "permission_request" && event.request_id.is_some()).then_some(event)
+        (event.kind == "permission_request" && event.subject().is_some()).then_some(event)
     }
 
     fn completion_key(&self, event: &Self::Event) -> CompletionKey {
-        CompletionKey::prompt(
-            event.session_id.clone(),
-            event
-                .request_id
-                .clone()
-                .expect("approval permission_request must carry request_id"),
-        )
+        match event
+            .subject()
+            .expect("approval permission_request must carry canonical subject identity")
+        {
+            ApprovalSubject::Prompt {
+                session_id,
+                request_id,
+            } => CompletionKey::prompt(session_id, request_id),
+            ApprovalSubject::ToolCall {
+                session_id,
+                tool_call_id,
+            } => CompletionKey::tool(session_id, tool_call_id),
+        }
     }
 
     fn is_completed(&self, event: &Self::Event, log: &[StreamEnvelope]) -> bool {
@@ -235,6 +254,7 @@ impl PassiveSubscriber for ApprovalGateSubscriber {
     }
 }
 
+#[derive(Clone)]
 struct ApprovalResolution {
     allow: bool,
     resolved_by: String,
@@ -270,6 +290,8 @@ impl ApprovalGateComponent {
             approval_subscriber,
             approved_sessions: Arc::new(Mutex::new(HashSet::new())),
             pending_sessions: Arc::new(Mutex::new(HashMap::new())),
+            resolved_tool_calls: Arc::new(Mutex::new(HashMap::new())),
+            pending_tool_calls: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -307,6 +329,8 @@ impl ApprovalGateComponent {
 
         let mut pending = None;
         let mut approved = false;
+        let mut pending_tool_calls = HashMap::new();
+        let mut resolved_tool_calls = HashMap::new();
         for envelope in &log {
             let Some(event) = ApprovalGateSubscriber::decode_permission_event(envelope) else {
                 continue;
@@ -317,18 +341,47 @@ impl ApprovalGateComponent {
 
             match event.kind.as_str() {
                 "permission_request" => {
-                    let Some(request_id) = event.request_id else {
+                    if let Some(request_id) = event.request_id {
+                        let Some(reason) = event.reason else {
+                            continue;
+                        };
+                        approved = false;
+                        pending = Some(PendingApproval { request_id, reason });
+                        continue;
+                    }
+
+                    let Some(tool_call_id) = event.tool_call_id else {
                         continue;
                     };
+                    if resolved_tool_calls.contains_key(&(session_id.clone(), tool_call_id.clone()))
+                    {
+                        continue;
+                    }
                     let Some(reason) = event.reason else {
                         continue;
                     };
-                    approved = false;
-                    pending = Some(PendingApproval { request_id, reason });
+                    pending_tool_calls.insert((session_id.clone(), tool_call_id), reason);
                 }
                 "approval_resolved" => {
-                    pending = None;
-                    approved = event.allow.unwrap_or(false);
+                    if event.request_id.is_some() {
+                        pending = None;
+                        approved = event.allow.unwrap_or(false);
+                        continue;
+                    }
+
+                    let Some(tool_call_id) = event.tool_call_id else {
+                        continue;
+                    };
+                    let key = (session_id.clone(), tool_call_id);
+                    pending_tool_calls.remove(&key);
+                    resolved_tool_calls
+                        .entry(key)
+                        .or_insert(ApprovalResolution {
+                            allow: event.allow.unwrap_or(false),
+                            resolved_by: event
+                                .resolved_by
+                                .unwrap_or_else(|| "external_approval".to_string()),
+                        });
                 }
                 _ => {}
             }
@@ -355,26 +408,34 @@ impl ApprovalGateComponent {
                 .remove(session_id);
         }
 
+        {
+            let mut resolved = self
+                .resolved_tool_calls
+                .lock()
+                .expect("approval state poisoned");
+            resolved.retain(|(candidate_session_id, _), _| candidate_session_id != session_id);
+            resolved.extend(resolved_tool_calls);
+        }
+        {
+            let mut pending = self
+                .pending_tool_calls
+                .lock()
+                .expect("approval state poisoned");
+            pending.retain(|(candidate_session_id, _), _| candidate_session_id != session_id);
+            pending.extend(pending_tool_calls);
+        }
+
         Ok(())
     }
 
-    async fn emit_permission_request(
-        &self,
-        session_id: &SessionId,
-        request_id: &RequestId,
-        reason: &str,
-    ) -> Result<(), sacp::Error> {
+    async fn emit_permission_request(&self, event: PermissionEvent) -> Result<(), sacp::Error> {
         let Some(producer) = self.state_producer.as_ref() else {
             return Err(sacp::util::internal_error(
                 "approval gate has no state producer; cannot emit permission_request",
             ));
         };
 
-        producer.append_json(
-            &self
-                .approval_subscriber
-                .permission_request_envelope(session_id, request_id, reason),
-        );
+        producer.append_json(&self.approval_subscriber.permission_request_envelope(&event));
         producer
             .flush()
             .await
@@ -388,8 +449,7 @@ impl ApprovalGateComponent {
     /// elapses or the stream terminates.
     async fn wait_for_approval(
         &self,
-        session_id: &SessionId,
-        request_id: &RequestId,
+        request_event: PermissionEvent,
     ) -> Result<ApprovalResolution, sacp::Error> {
         let state_stream_url = self
             .state_stream_url
@@ -398,11 +458,7 @@ impl ApprovalGateComponent {
 
         let request_envelope = self
             .approval_subscriber
-            .permission_request_envelope(session_id, request_id, "pending");
-        let request_event = self
-            .approval_subscriber
-            .matches(&request_envelope)
-            .expect("approval request envelope must match the approval subscriber");
+            .permission_request_envelope(&request_event);
         let log = self
             .subscriber_driver
             .wait_for_passive_completion(
@@ -411,7 +467,7 @@ impl ApprovalGateComponent {
                 state_stream_url,
             )
             .await
-            .map_err(|error| map_wait_error(session_id, error))?;
+            .map_err(|error| map_wait_error(request_event.session_id(), error))?;
 
         let resolution = self
             .approval_subscriber
@@ -435,6 +491,18 @@ impl ApprovalGateComponent {
             .lock()
             .expect("approval state poisoned")
             .contains(session_id)
+    }
+
+    fn resolved_tool_call(
+        &self,
+        session_id: &SessionId,
+        tool_call_id: &ToolCallId,
+    ) -> Option<ApprovalResolution> {
+        self.resolved_tool_calls
+            .lock()
+            .expect("approval state poisoned")
+            .get(&(session_id.clone(), tool_call_id.clone()))
+            .cloned()
     }
 }
 
@@ -464,17 +532,9 @@ struct PermissionEvent {
     meta: Option<TraceContext>,
 }
 
-pub fn permission_request_envelope(
-    session_id: SessionId,
-    request_id: RequestId,
-    reason: String,
-) -> AnyhowResult<StreamEnvelope> {
-    Ok(StreamEnvelope {
-        entity_type: "permission".to_string(),
-        key: format!("{session_id}:{}", request_id_key(&request_id)),
-        headers: insert_headers(),
-        source_offset: None,
-        value: Some(serde_json::to_value(PermissionEvent {
+impl PermissionEvent {
+    fn prompt_request(session_id: SessionId, request_id: RequestId, reason: String) -> Self {
+        Self {
             kind: "permission_request".to_string(),
             session_id,
             request_id: Some(request_id),
@@ -484,8 +544,116 @@ pub fn permission_request_envelope(
             reason: Some(reason),
             created_at_ms: now_ms(),
             meta: None,
-        })?),
+        }
+    }
+
+    fn tool_request(session_id: SessionId, tool_call_id: ToolCallId, reason: String) -> Self {
+        Self {
+            kind: "permission_request".to_string(),
+            session_id,
+            request_id: None,
+            tool_call_id: Some(tool_call_id),
+            allow: None,
+            resolved_by: None,
+            reason: Some(reason),
+            created_at_ms: now_ms(),
+            meta: None,
+        }
+    }
+
+    fn prompt_resolution(
+        session_id: SessionId,
+        request_id: RequestId,
+        allow: bool,
+        resolved_by: String,
+        meta: Option<TraceContext>,
+    ) -> Self {
+        Self {
+            kind: "approval_resolved".to_string(),
+            session_id,
+            request_id: Some(request_id),
+            tool_call_id: None,
+            allow: Some(allow),
+            resolved_by: Some(resolved_by),
+            reason: None,
+            created_at_ms: now_ms(),
+            meta,
+        }
+    }
+
+    fn tool_resolution(
+        session_id: SessionId,
+        tool_call_id: ToolCallId,
+        allow: bool,
+        resolved_by: String,
+        meta: Option<TraceContext>,
+    ) -> Self {
+        Self {
+            kind: "approval_resolved".to_string(),
+            session_id,
+            request_id: None,
+            tool_call_id: Some(tool_call_id),
+            allow: Some(allow),
+            resolved_by: Some(resolved_by),
+            reason: None,
+            created_at_ms: now_ms(),
+            meta,
+        }
+    }
+
+    fn subject(&self) -> Option<ApprovalSubject> {
+        match (&self.request_id, &self.tool_call_id) {
+            (Some(request_id), None) => Some(ApprovalSubject::Prompt {
+                session_id: self.session_id.clone(),
+                request_id: request_id.clone(),
+            }),
+            (None, Some(tool_call_id)) => Some(ApprovalSubject::ToolCall {
+                session_id: self.session_id.clone(),
+                tool_call_id: tool_call_id.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+}
+
+fn permission_request_envelope_from_event(event: PermissionEvent) -> AnyhowResult<StreamEnvelope> {
+    let Some(subject) = event.subject() else {
+        anyhow::bail!("permission request event must carry request_id or tool_call_id");
+    };
+
+    Ok(StreamEnvelope {
+        entity_type: "permission".to_string(),
+        key: subject.stream_key(),
+        headers: insert_headers(),
+        source_offset: None,
+        value: Some(serde_json::to_value(event)?),
     })
+}
+
+pub fn permission_request_envelope(
+    session_id: SessionId,
+    request_id: RequestId,
+    reason: String,
+) -> AnyhowResult<StreamEnvelope> {
+    permission_request_envelope_from_event(PermissionEvent::prompt_request(
+        session_id, request_id, reason,
+    ))
+}
+
+pub fn tool_permission_request_envelope(
+    session_id: SessionId,
+    tool_call_id: ToolCallId,
+    reason: String,
+) -> AnyhowResult<StreamEnvelope> {
+    permission_request_envelope_from_event(PermissionEvent::tool_request(
+        session_id,
+        tool_call_id,
+        reason,
+    ))
 }
 
 pub fn approval_resolution_envelope(
@@ -504,22 +672,51 @@ pub fn approval_resolution_envelope_with_trace(
     resolved_by: String,
     meta: Option<TraceContext>,
 ) -> AnyhowResult<StreamEnvelope> {
+    approval_resolution_envelope_from_event(PermissionEvent::prompt_resolution(
+        session_id,
+        request_id,
+        allow,
+        resolved_by,
+        meta,
+    ))
+}
+
+pub fn tool_approval_resolution_envelope(
+    session_id: SessionId,
+    tool_call_id: ToolCallId,
+    allow: bool,
+    resolved_by: String,
+) -> AnyhowResult<StreamEnvelope> {
+    tool_approval_resolution_envelope_with_trace(session_id, tool_call_id, allow, resolved_by, None)
+}
+
+pub fn tool_approval_resolution_envelope_with_trace(
+    session_id: SessionId,
+    tool_call_id: ToolCallId,
+    allow: bool,
+    resolved_by: String,
+    meta: Option<TraceContext>,
+) -> AnyhowResult<StreamEnvelope> {
+    approval_resolution_envelope_from_event(PermissionEvent::tool_resolution(
+        session_id,
+        tool_call_id,
+        allow,
+        resolved_by,
+        meta,
+    ))
+}
+
+fn approval_resolution_envelope_from_event(event: PermissionEvent) -> AnyhowResult<StreamEnvelope> {
+    let Some(subject) = event.subject() else {
+        anyhow::bail!("approval resolution event must carry request_id or tool_call_id");
+    };
+
     Ok(StreamEnvelope {
         entity_type: "permission".to_string(),
-        key: format!("{session_id}:{}:resolved", request_id_key(&request_id)),
+        key: subject.resolved_stream_key(),
         headers: insert_headers(),
         source_offset: None,
-        value: Some(serde_json::to_value(PermissionEvent {
-            kind: "approval_resolved".to_string(),
-            session_id,
-            request_id: Some(request_id),
-            tool_call_id: None,
-            allow: Some(allow),
-            resolved_by: Some(resolved_by),
-            reason: None,
-            created_at_ms: now_ms(),
-            meta,
-        })?),
+        value: Some(serde_json::to_value(event)?),
     })
 }
 
@@ -569,6 +766,11 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                                         ),
                                     ));
                                 };
+                                let request_event = PermissionEvent::prompt_request(
+                                    session_id.clone(),
+                                    request_id.clone(),
+                                    reason.clone(),
+                                );
                                 ensure_prompt_request_span(&session_id, &request_id, Some("session/prompt"));
                                 let should_emit = {
                                     let mut pending_sessions = this
@@ -595,10 +797,7 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                                         &policy_id,
                                         &reason,
                                     );
-                                    if let Err(error) =
-                                        this.emit_permission_request(&session_id, &request_id, &reason)
-                                            .await
-                                    {
+                                    if let Err(error) = this.emit_permission_request(request_event.clone()).await {
                                         clear_approval_requested_span(&session_id, &request_id);
                                         this.pending_sessions
                                             .lock()
@@ -607,18 +806,17 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                                         return responder.respond_with_error(error);
                                     }
                                 }
-                                let resolution =
-                                    match this.wait_for_approval(&session_id, &request_id).await {
-                                        Ok(resolution) => resolution,
-                                        Err(error) => {
-                                            clear_approval_requested_span(&session_id, &request_id);
-                                            this.pending_sessions
-                                                .lock()
-                                                .expect("approval state poisoned")
-                                                .remove(&session_id);
-                                            return responder.respond_with_error(error);
-                                        }
-                                    };
+                                let resolution = match this.wait_for_approval(request_event).await {
+                                    Ok(resolution) => resolution,
+                                    Err(error) => {
+                                        clear_approval_requested_span(&session_id, &request_id);
+                                        this.pending_sessions
+                                            .lock()
+                                            .expect("approval state poisoned")
+                                            .remove(&session_id);
+                                        return responder.respond_with_error(error);
+                                    }
+                                };
                                 emit_approval_resolved_span(
                                     &session_id,
                                     &request_id,
@@ -640,6 +838,96 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                                     .insert(session_id);
                                 cx.send_request_to(Agent, request)
                                     .forward_response_to(responder)
+                            }
+                        }
+                    }
+                },
+                sacp::on_receive_request!(),
+            )
+            .on_receive_request_from(
+                Agent,
+                {
+                    let this = this.clone();
+                    async move |request: RequestPermissionRequest, responder, cx| {
+                        let session_id = request.session_id.clone();
+                        let tool_call_id = request.tool_call.tool_call_id.clone();
+                        let tool_title = request.tool_call.fields.title.clone().unwrap_or_default();
+
+                        let Some((action, reason)) = this
+                            .config
+                            .policy_for_tool(&tool_title)
+                            .map(|policy| (policy.action, policy.reason.clone()))
+                        else {
+                            return cx
+                                .send_request_to(Client, request)
+                                .forward_response_to(responder);
+                        };
+
+                        let tool_key = (session_id.clone(), tool_call_id.clone());
+                        if let Some(resolution) =
+                            this.resolved_tool_call(&session_id, &tool_call_id)
+                        {
+                            return responder
+                                .respond(tool_permission_response(&request.options, resolution.allow));
+                        }
+
+                        match action {
+                            ApprovalAction::Deny => responder.respond(RequestPermissionResponse::new(
+                                tool_permission_outcome(&request.options, false),
+                            )),
+                            ApprovalAction::RequireApproval => {
+                                let request_event = PermissionEvent::tool_request(
+                                    session_id.clone(),
+                                    tool_call_id.clone(),
+                                    reason.clone(),
+                                );
+
+                                let should_emit = {
+                                    let mut pending = this
+                                        .pending_tool_calls
+                                        .lock()
+                                        .expect("approval state poisoned");
+                                    let should_emit = !pending.contains_key(&tool_key);
+                                    pending.insert(tool_key.clone(), reason.clone());
+                                    should_emit
+                                };
+
+                                if should_emit {
+                                    if let Err(error) =
+                                        this.emit_permission_request(request_event.clone()).await
+                                    {
+                                        this.pending_tool_calls
+                                            .lock()
+                                            .expect("approval state poisoned")
+                                            .remove(&tool_key);
+                                        return responder.respond_with_error(error);
+                                    }
+                                }
+
+                                let resolution = match this.wait_for_approval(request_event).await {
+                                    Ok(resolution) => resolution,
+                                    Err(error) => {
+                                        this.pending_tool_calls
+                                            .lock()
+                                            .expect("approval state poisoned")
+                                            .remove(&tool_key);
+                                        return responder.respond_with_error(error);
+                                    }
+                                };
+
+                                this.pending_tool_calls
+                                    .lock()
+                                    .expect("approval state poisoned")
+                                    .remove(&tool_key);
+                                this.resolved_tool_calls
+                                    .lock()
+                                    .expect("approval state poisoned")
+                                    .insert(tool_key, resolution.clone());
+
+                                responder.respond(tool_permission_response(
+                                    &request.options,
+                                    resolution.allow,
+                                ))
                             }
                         }
                     }
@@ -696,6 +984,28 @@ fn request_id_key(request_id: &RequestId) -> String {
         RequestId::Null => "null".to_string(),
         RequestId::Number(number) => number.to_string(),
         RequestId::Str(text) => text.clone(),
+    }
+}
+
+fn tool_permission_response(
+    options: &[PermissionOption],
+    allow: bool,
+) -> RequestPermissionResponse {
+    RequestPermissionResponse::new(tool_permission_outcome(options, allow))
+}
+
+fn tool_permission_outcome(options: &[PermissionOption], allow: bool) -> RequestPermissionOutcome {
+    let selected = options.iter().find(|option| match option.kind {
+        PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways => allow,
+        PermissionOptionKind::RejectOnce | PermissionOptionKind::RejectAlways => !allow,
+        _ => false,
+    });
+
+    match selected {
+        Some(option) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+            option.option_id.clone(),
+        )),
+        None => RequestPermissionOutcome::Cancelled,
     }
 }
 
@@ -799,6 +1109,25 @@ mod tests {
             .flush()
             .await
             .context("flush approval_resolved test event")?;
+        Ok(())
+    }
+
+    async fn append_tool_approval_resolved_event(
+        producer: &Producer,
+        session_id: &str,
+        tool_call_id: &str,
+        allow: bool,
+    ) -> Result<()> {
+        producer.append_json(&tool_approval_resolution_envelope(
+            SessionId::from(session_id.to_string()),
+            ToolCallId::from(tool_call_id.to_string()),
+            allow,
+            "approval-test".to_string(),
+        )?);
+        producer
+            .flush()
+            .await
+            .context("flush tool-scoped approval_resolved test event")?;
         Ok(())
     }
 
@@ -939,17 +1268,23 @@ mod tests {
         let waiter_a = tokio::spawn({
             let gate = gate.clone();
             async move {
-                let session_id = SessionId::from("session-a");
-                let request_id = RequestId::from("request-a".to_string());
-                gate.wait_for_approval(&session_id, &request_id).await
+                gate.wait_for_approval(PermissionEvent::prompt_request(
+                    SessionId::from("session-a"),
+                    RequestId::from("request-a".to_string()),
+                    "approval".to_string(),
+                ))
+                .await
             }
         });
         let mut waiter_b = tokio::spawn({
             let gate = gate.clone();
             async move {
-                let session_id = SessionId::from("session-b");
-                let request_id = RequestId::from("request-b".to_string());
-                gate.wait_for_approval(&session_id, &request_id).await
+                gate.wait_for_approval(PermissionEvent::prompt_request(
+                    SessionId::from("session-b"),
+                    RequestId::from("request-b".to_string()),
+                    "approval".to_string(),
+                ))
+                .await
             }
         });
 
@@ -980,6 +1315,139 @@ mod tests {
         assert!(
             allow_b.allow,
             "INVARIANT (ApprovalGate): session B must release once its own approval_resolved arrives"
+        );
+
+        server.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tool_call_waiters_are_isolated_by_session_and_tool_call_id() -> Result<()> {
+        let server = TestStreamServer::spawn().await?;
+        let stream_url = server.stream_url(&format!("approval-gate-{}", uuid::Uuid::new_v4()));
+        ensure_json_stream_exists(&stream_url).await?;
+        let producer = test_permission_producer(&stream_url);
+        seed_permission_stream(&producer).await?;
+        let gate = ApprovalGateComponent::with_stream_and_timeout(
+            ApprovalConfig::default(),
+            Some(stream_url),
+            None,
+            Some(Duration::from_secs(5)),
+        );
+
+        let waiter_a = tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                gate.wait_for_approval(PermissionEvent::tool_request(
+                    SessionId::from("session-a"),
+                    ToolCallId::from("tool-a".to_string()),
+                    "tool approval".to_string(),
+                ))
+                .await
+            }
+        });
+        let mut waiter_b = tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                gate.wait_for_approval(PermissionEvent::tool_request(
+                    SessionId::from("session-a"),
+                    ToolCallId::from("tool-b".to_string()),
+                    "tool approval".to_string(),
+                ))
+                .await
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        append_tool_approval_resolved_event(&producer, "session-a", "tool-a", true).await?;
+
+        let allow_a = tokio::time::timeout(Duration::from_secs(2), waiter_a)
+            .await
+            .context("tool waiter A did not resolve after matching approval")?
+            .context("tool waiter A panicked")??;
+        assert!(
+            allow_a.allow,
+            "INVARIANT (ApprovalGate): matching tool_call_id approval_resolved must release the corresponding waiter"
+        );
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), &mut waiter_b)
+                .await
+                .is_err(),
+            "INVARIANT (ApprovalGate): resolving tool A must not release tool B's waiter"
+        );
+
+        append_tool_approval_resolved_event(&producer, "session-a", "tool-b", true).await?;
+        let allow_b = tokio::time::timeout(Duration::from_secs(2), waiter_b)
+            .await
+            .context("tool waiter B did not resolve after its own approval")?
+            .context("tool waiter B panicked")??;
+        assert!(
+            allow_b.allow,
+            "INVARIANT (ApprovalGate): tool waiter B must release once its own tool_call_id approval_resolved arrives"
+        );
+
+        server.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebuild_from_log_keeps_resolved_tool_call_completed_after_duplicate_request()
+    -> Result<()> {
+        let server = TestStreamServer::spawn().await?;
+        let stream_url = server.stream_url(&format!("approval-gate-{}", uuid::Uuid::new_v4()));
+        ensure_json_stream_exists(&stream_url).await?;
+        let producer = test_permission_producer(&stream_url);
+        seed_permission_stream(&producer).await?;
+
+        producer.append_json(&tool_permission_request_envelope(
+            SessionId::from("session-a"),
+            ToolCallId::from("tool-1".to_string()),
+            "tool approval".to_string(),
+        )?);
+        producer.append_json(&tool_approval_resolution_envelope(
+            SessionId::from("session-a"),
+            ToolCallId::from("tool-1".to_string()),
+            true,
+            "approval-test".to_string(),
+        )?);
+        producer.append_json(&tool_permission_request_envelope(
+            SessionId::from("session-a"),
+            ToolCallId::from("tool-1".to_string()),
+            "duplicate replay".to_string(),
+        )?);
+        producer
+            .flush()
+            .await
+            .context("flush tool replay sequence")?;
+
+        let gate = ApprovalGateComponent::with_stream_and_timeout(
+            ApprovalConfig::default(),
+            Some(stream_url),
+            None,
+            Some(Duration::from_secs(5)),
+        );
+
+        gate.rebuild_from_log(&SessionId::from("session-a")).await?;
+
+        assert!(
+            gate.resolved_tool_call(
+                &SessionId::from("session-a"),
+                &ToolCallId::from("tool-1".to_string())
+            )
+            .is_some(),
+            "INVARIANT (ApprovalGate): replay should preserve completed tool_call_id approvals after session/load rebuild",
+        );
+        assert!(
+            !gate
+                .pending_tool_calls
+                .lock()
+                .expect("approval state poisoned")
+                .contains_key(&(
+                    SessionId::from("session-a"),
+                    ToolCallId::from("tool-1".to_string())
+                )),
+            "INVARIANT (ApprovalGate): duplicate replayed permission_request must not re-open a completed tool_call_id approval",
         );
 
         server.shutdown().await;
