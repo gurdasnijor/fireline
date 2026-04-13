@@ -12,7 +12,7 @@ This directory stays local until `mono-axr.6` lands the real `telegram()` middle
 
 The runtime story this file targets is:
 
-1. start the agent with `telegram({ token, scope: 'tool_calls' })`
+1. start the agent with `telegram({ token: { ref: 'env:TELEGRAM_BOT_TOKEN' }, events: ['permission_request'] })`
 2. DM the bot on Telegram
 3. Fireline turns the inbound message into the session prompt path
 4. a tool-call approval becomes an inline Approve / Deny card in Telegram
@@ -36,20 +36,26 @@ import { agent, compose, middleware, sandbox } from '@fireline/client'
 import { approve, telegram, trace } from '@fireline/client/middleware'
 import { localPath } from '@fireline/client/resources'
 
-const token = process.env.TELEGRAM_BOT_TOKEN
-if (!token) throw new Error('TELEGRAM_BOT_TOKEN is required')
 const repoPath = process.env.REPO_PATH ?? '../..'
 const agentCommand = (process.env.AGENT_COMMAND ?? 'pi-acp').split(' ')
 
 export default compose(
   sandbox({ resources: [localPath(repoPath, '/workspace')], labels: { demo: 'telegram-demo' } }),
-  middleware([trace(), approve({ scope: 'tool_calls' }), telegram({ token, scope: 'tool_calls' })]),
+  middleware([
+    trace(),
+    approve({ scope: 'tool_calls' }),
+    telegram({ token: { ref: 'env:TELEGRAM_BOT_TOKEN' }, events: ['permission_request'] }),
+  ]),
   agent(agentCommand),
 )
 ```
 
 That is the whole point of the pivot: Telegram is just another middleware entry
 that lowers into a DurableSubscriber profile inside the host.
+
+One current surface detail: the merged TypeScript API on `main` models
+TelegramSubscriber matching through `events`, not the earlier draft
+`scope: 'tool_calls'` shorthand from the operator script.
 
 ## Run
 
