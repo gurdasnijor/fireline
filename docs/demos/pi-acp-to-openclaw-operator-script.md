@@ -12,7 +12,7 @@
 | Gate | Status | Blocker | Demo impact |
 |---|---|---|---|
 | T1 `fireline deploy` wrapper | ✓ LANDED | — | Step 5 command set is real |
-| T2 Tier A local Docker smoke | ⚠ partial | session/load after restart — **fix in flight on w19 per Jeff's analysis `498fff6`** (missing `.live(LiveMode::Off)` + bootstrap state-stream-url forwarding), ETA 2–4h | Step 3 signature moment goes LIVE if fix lands before Rehearsal 1; else PRE-STAGED fallback |
+| T2 Tier A local Docker smoke | ⚠ partial | session/load restart — **fixes LANDED on w19 branch**: `8947083` (approval: `rebuild_from_log` stops at live edge, addresses missing `.live(LiveMode::Off)`) + `3e22489` (docker: forward advertised state stream for embedded-spec boot). Awaiting CI + merge to main. | Step 3 signature moment goes LIVE once commits hit main + pre-flight P10 flips green |
 | T3 peer-to-peer replay | ✓ LANDED `d543eac` | — | Step 6 has driver script ready |
 | T4.1 five OTel spans | ◐ in flight on w25 | — | Pane C / Step 7 fidelity depends on this |
 | T4.2 peer `_meta` propagation | ○ blocked | canonical-ids Phase 4 (`mono-vkpp.6`) | Step 6 trace tree lineage across agents degrades if not green; acceptable fallback |
@@ -224,9 +224,12 @@ Discord. The user never left their existing surface. We killed the container
 and the conversation kept going because the session lives in durable-streams,
 not in the host's RAM. Your team's ops surface is the agent's home."
 
-**DEMO-RISK (mitigating, partially resolved):** `mono-thnc.2.3` —
-session/load after container restart — Jeff root-caused at `498fff6`, fix
-in flight on w19. Pre-flight P10 is the go/no-go gate.
+**DEMO-RISK (largely resolved):** `mono-thnc.2.3` — session/load after
+container restart — Jeff root-caused at `498fff6`; two fixes LANDED on
+w19 branch (`8947083` approval `rebuild_from_log` live-edge stop +
+`3e22489` docker state-stream forwarding). Awaiting CI clear + merge to
+main. Once on main, pre-flight P10 flips green and Step 3 goes LIVE
+without ceremony.
 
 **Fallbacks (three layers):**
 1. If `mono-thnc.6.3.8` Discord E2E is shaky → fall back to
