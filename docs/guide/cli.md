@@ -46,6 +46,80 @@ npx fireline deploy agent.ts --to k8s -- --namespace fireline
 npx fireline agents add pi-acp
 ```
 
+## Transport Modes
+
+Fireline now supports the two ACP transport shapes you are most likely to
+need locally:
+
+- WebSocket `/acp` for hosted or long-running Fireline runtimes
+- native stdio for editor and terminal clients that spawn an ACP subprocess
+
+Use WebSocket when Fireline is already running as a host and another tool
+needs to attach to it over the network. This is the shape behind
+`fireline run`, the local host bootstrap, and remote/browser-facing ACP
+clients.
+
+Use stdio when the ACP client wants to spawn Fireline itself and talk over
+newline-delimited JSON-RPC on stdin/stdout. This is the baseline ACP
+transport for tools such as Zed, Codex, and Gemini CLI. The user-facing
+wrapper is:
+
+```bash
+npx fireline acp-stdio docs/demos/assets/agent.ts
+```
+
+Both transport modes terminate onto the same wired conductor. The middleware
+chain, DurableSubscriber profiles, approval gate, peer routing, and durable
+state stream behavior stay the same; only the last transport hop changes.
+
+Typical subprocess command shape:
+
+```json
+{
+  "command": "npx",
+  "args": ["fireline", "acp-stdio", "docs/demos/assets/agent.ts"],
+  "env": {
+    "ANTHROPIC_API_KEY": "..."
+  }
+}
+```
+
+Examples:
+
+```json
+// Zed external agent server
+{
+  "type": "custom",
+  "command": "npx",
+  "args": ["fireline", "acp-stdio", "docs/demos/assets/agent.ts"],
+  "env": {
+    "ANTHROPIC_API_KEY": "..."
+  }
+}
+```
+
+```json
+// Codex ACP subprocess
+{
+  "command": "npx",
+  "args": ["fireline", "acp-stdio", "docs/demos/assets/agent.ts"],
+  "env": {
+    "ANTHROPIC_API_KEY": "..."
+  }
+}
+```
+
+```json
+// Gemini CLI ACP subprocess
+{
+  "command": "npx",
+  "args": ["fireline", "acp-stdio", "docs/demos/assets/agent.ts"],
+  "env": {
+    "ANTHROPIC_API_KEY": "..."
+  }
+}
+```
+
 ## `fireline run`
 
 `run` boots `fireline-streams`, boots the local Fireline host, provisions
