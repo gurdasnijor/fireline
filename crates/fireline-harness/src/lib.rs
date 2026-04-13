@@ -12,6 +12,7 @@ pub mod routes_acp;
 pub mod secrets;
 pub mod shared_terminal;
 pub mod state_projector;
+pub mod telegram_subscriber;
 pub mod topology;
 pub mod trace;
 pub mod webhook_subscriber;
@@ -42,6 +43,10 @@ pub use secrets::{
     LocalCredentialResolver, SecretValue, SecretsInjectionComponent,
 };
 pub use shared_terminal::{AttachError, SharedTerminal, SharedTerminalAttachment};
+pub use telegram_subscriber::{
+    TelegramApprovalResolution, TelegramParseMode, TelegramScope, TelegramSubscriber,
+    TelegramSubscriberConfig, append_telegram_approval_resolution,
+};
 pub use topology::{
     ComponentContext, ProxyComponentInstance, ResolvedTopology, TopologyComponentSpec,
     TopologyRegistry, TopologyRegistryBuilder, TopologySpec, TraceWriterInstance,
