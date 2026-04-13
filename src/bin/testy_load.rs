@@ -79,7 +79,7 @@ impl ResumableTesty {
             if !chunk.data.is_empty() {
                 let events: Vec<serde_json::Value> = serde_json::from_slice(&chunk.data)?;
                 for event in events {
-                    if event.get("type").and_then(|v| v.as_str()) != Some("session") {
+                    if event.get("type").and_then(|v| v.as_str()) != Some("session_v2") {
                         continue;
                     }
                     let Some(value) = event.get("value") else {
