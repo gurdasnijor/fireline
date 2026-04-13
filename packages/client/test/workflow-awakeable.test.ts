@@ -287,7 +287,12 @@ describe('workflow awakeable surface', () => {
   it('ctx.awakeable rejects on the matching canonical rejection envelope', async () => {
     appendMock.mockResolvedValue()
     const unsubscribe = vi.fn()
-    streamMock.mockResolvedValue({
+    streamMock.mockResolvedValueOnce({
+      async json() {
+        return []
+      },
+    })
+    streamMock.mockResolvedValueOnce({
       subscribeJson(
         subscriber: (
           batch: JsonBatch<{
