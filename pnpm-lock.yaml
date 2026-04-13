@@ -211,6 +211,22 @@ importers:
       ws:
         specifier: ^8.18.3
         version: 8.20.0
+    optionalDependencies:
+      '@fireline/cli-darwin-arm64':
+        specifier: workspace:*
+        version: link:../fireline-darwin-arm64
+      '@fireline/cli-darwin-x64':
+        specifier: workspace:*
+        version: link:../fireline-darwin-x64
+      '@fireline/cli-linux-arm64':
+        specifier: workspace:*
+        version: link:../fireline-linux-arm64
+      '@fireline/cli-linux-x64':
+        specifier: workspace:*
+        version: link:../fireline-linux-x64
+      '@fireline/cli-win32-x64':
+        specifier: workspace:*
+        version: link:../fireline-win32-x64
     devDependencies:
       '@types/node':
         specifier: ^24.0.0
@@ -224,6 +240,16 @@ importers:
       typescript:
         specifier: ^5.6.0
         version: 5.9.3
+
+  packages/fireline-darwin-arm64: {}
+
+  packages/fireline-darwin-x64: {}
+
+  packages/fireline-linux-arm64: {}
+
+  packages/fireline-linux-x64: {}
+
+  packages/fireline-win32-x64: {}
 
   packages/state:
     dependencies:

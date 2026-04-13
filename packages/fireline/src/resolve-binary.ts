@@ -1,9 +1,18 @@
 import { existsSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { createRequire } from 'node:module'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export type BinaryName = 'fireline' | 'fireline-streams' | 'fireline-agents'
-export type BinarySource = 'env' | 'release' | 'debug'
+export type BinarySource = 'env' | 'package' | 'release' | 'debug'
+
+const PLATFORM_PACKAGES: Record<string, string> = {
+  'darwin-arm64': '@fireline/cli-darwin-arm64',
+  'darwin-x64': '@fireline/cli-darwin-x64',
+  'linux-arm64': '@fireline/cli-linux-arm64',
+  'linux-x64': '@fireline/cli-linux-x64',
+  'win32-x64': '@fireline/cli-win32-x64',
+}
 
 export interface BinaryLookup {
   /** Name of the executable. */
@@ -37,6 +46,7 @@ export class BinaryResolutionError extends Error {
 }
 
 const DEFAULT_SEARCH_FROM = dirname(fileURLToPath(import.meta.url))
+const PACKAGE_REQUIRE = createRequire(import.meta.url)
 
 export function findBinary(lookup: BinaryLookup): ResolvedBinary | null {
   const envOverride = process.env[lookup.envVar]
@@ -53,6 +63,15 @@ export function findBinary(lookup: BinaryLookup): ResolvedBinary | null {
       lookup,
       `${lookup.envVar}=${envOverride} but no binary exists at that path`,
     )
+  }
+
+  const packagedBinary = findPackagedBinary(lookup.name)
+  if (packagedBinary) {
+    return {
+      name: lookup.name,
+      path: packagedBinary,
+      source: 'package',
+    }
   }
 
   const searchFrom = lookup.searchFrom ?? DEFAULT_SEARCH_FROM
@@ -75,21 +94,42 @@ export function resolveBinary(lookup: BinaryLookup): ResolvedBinary {
   if (resolved) {
     return resolved
   }
+  const platformKey = `${process.platform}-${process.arch}`
+  const platformPackage = PLATFORM_PACKAGES[platformKey]
   throw new BinaryResolutionError(
     'not-found',
     lookup,
     [
       `Could not find '${lookup.name}'.`,
-      `Tried ${lookup.envVar}, target/release/${lookup.name}, and target/debug/${lookup.name}.`,
-      `Fix: run 'cargo build --release --bin ${lookup.name}' from the fireline workspace root,`,
+      `Tried ${lookup.envVar}, ${platformPackage ?? `no platform package for ${platformKey}`}, target/release/${lookup.name}, and target/debug/${lookup.name}.`,
+      `Fix: install @fireline/cli for your platform, run 'cargo build --release --bin ${lookup.name}' from the fireline workspace root,`,
       `or set ${lookup.envVar} to an absolute path.`,
     ].join('\n'),
   )
 }
 
+function findPackagedBinary(name: BinaryName): string | null {
+  const platformPackage = PLATFORM_PACKAGES[`${process.platform}-${process.arch}`]
+  if (!platformPackage) {
+    return null
+  }
+
+  try {
+    const pkgJsonPath = PACKAGE_REQUIRE.resolve(`${platformPackage}/package.json`)
+    const candidate = join(dirname(pkgJsonPath), 'bin', name)
+    if (existsSync(candidate)) {
+      return candidate
+    }
+  } catch {
+    return null
+  }
+
+  return null
+}
+
 function findTargetBinary(
   name: BinaryName,
-  source: Exclude<BinarySource, 'env'>,
+  source: Exclude<BinarySource, 'env' | 'package'>,
   searchFrom: string,
 ): string | null {
   let dir = searchFrom

@@ -84,13 +84,16 @@ in this order:
 
 1. `$FIRELINE_BIN` / `$FIRELINE_STREAMS_BIN` (absolute paths)
 2. Platform-specific optional npm dependency (`@fireline/cli-darwin-arm64`,
-   etc.) — not yet published
-3. `target/debug/<name>` or `target/release/<name>` relative to the
-   workspace root (dev fallback)
+   `@fireline/cli-darwin-x64`, `@fireline/cli-linux-arm64`,
+   `@fireline/cli-linux-x64`, `@fireline/cli-win32-x64`). These
+   packages also carry the companion `fireline-agents` binary used by
+   `fireline agents`.
+3. `target/release/<name>` relative to the workspace root
+4. `target/debug/<name>` relative to the workspace root (dev fallback)
 
 For local dev against this workspace, run
-`cargo build --bin fireline --bin fireline-streams` once before invoking
-the CLI.
+`cargo build --release --bin fireline --bin fireline-streams` once
+before invoking the CLI.
 
 ## Exit codes
 

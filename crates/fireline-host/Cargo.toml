@@ -18,7 +18,6 @@ fireline-sandbox.workspace = true
 fireline-session.workspace = true
 fireline-tools.workspace = true
 futures.workspace = true
-nix.workspace = true
 reqwest.workspace = true
 sacp.workspace = true
 sacp-conductor.workspace = true
