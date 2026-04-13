@@ -35,6 +35,7 @@ export function FirelineTuiPreview(props: FirelineTuiPreviewProps) {
     busy: true,
     entries: transcript,
     pendingApproval: {
+      createdAt: 1_710_000_000_060,
       requestId: 'req-2',
       reason: 'durable approval pending for write_file',
       sessionId,
