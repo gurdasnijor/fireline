@@ -1,0 +1,83 @@
+name: Fireline Client
+
+on:
+  pull_request:
+    paths:
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - packages/client/**
+      - packages/state/**
+      - .github/workflows/fireline-client.yml
+  push:
+    branches:
+      - main
+    paths:
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - packages/client/**
+      - packages/state/**
+      - .github/workflows/fireline-client.yml
+  workflow_dispatch:
+
+jobs:
+  client-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Detect client test targets
+        id: targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF}"
+            changed_files="$(git diff --name-only "origin/${GITHUB_BASE_REF}"...HEAD)"
+          else
+            changed_files="$(git diff-tree --no-commit-id --name-only -r HEAD)"
+          fi
+          printf 'Changed files:\n%s\n' "${changed_files}"
+          if printf '%s\n' "${changed_files}" | grep -qx 'packages/client/test/acp.test.ts'; then
+            echo "run_acp_test=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "run_acp_test=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Build @fireline/state
+        run: pnpm --filter @fireline/state build
+
+      - name: Test @fireline/state
+        run: pnpm --filter @fireline/state test
+
+      - name: Build @fireline/client
+        run: pnpm --filter @fireline/client build
+
+      - name: Lint @fireline/client
+        run: pnpm --filter @fireline/client lint
+
+      - name: Smoke test @fireline/client current surface
+        run: pnpm --filter @fireline/client test -- db-plane-separation.test.ts
+
+      - name: Test @fireline/client ACP integration when touched
+        if: steps.targets.outputs.run_acp_test == 'true'
+        run: pnpm --filter @fireline/client test -- acp.test.ts
