@@ -94,6 +94,18 @@ Notes:
 target manifest, then hands off to the native platform CLI. It does not
 call a Fireline-owned deploy API.
 
+Binary resolution order (how `fireline` locates its backing binaries):
+
+1. `$FIRELINE_BIN` / `$FIRELINE_STREAMS_BIN` / `$FIRELINE_AGENTS_BIN`
+   env vars
+2. Platform-specific optional npm dependency
+   (`@fireline/cli-darwin-arm64`, `@fireline/cli-darwin-x64`,
+   `@fireline/cli-linux-arm64`, `@fireline/cli-linux-x64`,
+   `@fireline/cli-win32-x64`). These packages also carry the
+   `fireline-agents` companion binary used by `fireline agents`.
+3. `target/release/<name>` walking up from the CLI's own directory
+4. `target/debug/<name>` walking up from the CLI's own directory
+
 Usage:
 
 ```bash
@@ -183,5 +195,9 @@ with `fireline run`; keep using `npx tsx` directly for those.
 ## Known Limits
 
 - the examples under `examples/` still use the imperative `.start()` pattern
-- `--repl` is still a stub
+- `--repl` is still a stub. Connect any ACP client (pi-acp, use-acp,
+  claude-code, a custom client) to the printed ACP URL.
 - `deploy` is target-native orchestration only; there is no Fireline-owned deploy endpoint
+- The CLI spawns an HTTP control plane. The longer-term plan is an
+  embedded in-process conductor with stdio transport; see
+  [docs/proposals/declarative-agent-api-design.md](../proposals/declarative-agent-api-design.md).

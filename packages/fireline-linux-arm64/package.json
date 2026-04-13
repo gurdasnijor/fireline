@@ -1,0 +1,17 @@
+{
+  "name": "@fireline/cli-linux-arm64",
+  "version": "0.0.1",
+  "description": "Fireline CLI native binaries for Linux arm64",
+  "license": "MIT OR Apache-2.0",
+  "repository": "https://github.com/fireline/fireline",
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "files": [
+    "bin/fireline",
+    "bin/fireline-streams",
+    "bin/fireline-agents"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

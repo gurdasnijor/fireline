@@ -3,22 +3,61 @@ name: Fireline CLI
 on:
   pull_request:
     paths:
+      - Cargo.toml
       - package.json
       - pnpm-lock.yaml
       - pnpm-workspace.yaml
       - packages/fireline/**
+      - packages/fireline-*/**
+      - scripts/stage-fireline-platform-package.mjs
       - .github/workflows/fireline-cli.yml
   push:
+    branches:
+      - main
+    tags:
+      - 'v*'
     paths:
+      - Cargo.toml
       - package.json
       - pnpm-lock.yaml
       - pnpm-workspace.yaml
       - packages/fireline/**
+      - packages/fireline-*/**
+      - scripts/stage-fireline-platform-package.mjs
       - .github/workflows/fireline-cli.yml
   workflow_dispatch:
 
+concurrency:
+  group: fireline-cli-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  cli:
+  package-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Derive target matrix from Cargo metadata
+        id: matrix
+        shell: bash
+        run: |
+          cargo metadata --no-deps --format-version 1 > /tmp/fireline-cli-metadata.json
+          MATRIX=$(node <<'EOF'
+          const fs = require('node:fs')
+          const metadata = JSON.parse(fs.readFileSync('/tmp/fireline-cli-metadata.json', 'utf8'))
+          const platforms = metadata.workspace_metadata.fireline_cli.platforms
+          process.stdout.write(JSON.stringify({ include: platforms }))
+          EOF
+          )
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  lint-test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -44,3 +83,216 @@ jobs:
 
       - name: Test @fireline/cli
         run: pnpm --filter @fireline/cli test
+
+  pack-main:
+    runs-on: ubuntu-latest
+    needs:
+      - lint-test
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build @fireline/cli
+        run: pnpm --filter @fireline/cli build
+
+      - name: Pack @fireline/cli
+        run: |
+          mkdir -p dist/npm
+          cd packages/fireline
+          pnpm pack --pack-destination ../../dist/npm
+
+      - name: Upload @fireline/cli tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: fireline-cli-main
+          path: dist/npm/*.tgz
+
+  pack-platform:
+    needs:
+      - package-matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.package-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: fireline-cli-${{ matrix.id }}
+
+      - name: Build platform binaries
+        shell: bash
+        run: |
+          cargo build \
+            --release \
+            --target "${{ matrix.rust_target }}" \
+            --bin fireline \
+            --bin fireline-streams \
+            --bin fireline-agents
+
+      - name: Stage binaries into platform package
+        shell: bash
+        run: |
+          node scripts/stage-fireline-platform-package.mjs \
+            --artifact-dir "target/${{ matrix.rust_target }}/release" \
+            --package-dir "${{ matrix.package_dir }}" \
+            --exe-suffix "${{ matrix.exe_suffix }}"
+
+      - name: Pack platform package
+        shell: bash
+        run: |
+          mkdir -p dist/npm
+          npm pack "${{ matrix.package_dir }}" --pack-destination dist/npm
+
+      - name: Upload platform tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: fireline-cli-platform-${{ matrix.id }}
+          path: dist/npm/*.tgz
+
+  smoke:
+    needs:
+      - package-matrix
+      - pack-main
+      - pack-platform
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.package-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Download @fireline/cli tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: fireline-cli-main
+          path: dist/npm/main
+
+      - name: Download platform tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: fireline-cli-platform-${{ matrix.id }}
+          path: dist/npm/platform
+
+      - name: Install tarballs and smoke test npx fireline --help
+        shell: bash
+        run: |
+          mkdir -p smoke
+          MAIN_TGZ=$(find dist/npm/main -name '*.tgz' | head -n 1)
+          PLATFORM_TGZ=$(find dist/npm/platform -name '*.tgz' | head -n 1)
+          cat > smoke/package.json <<EOF
+          {
+            "name": "fireline-cli-smoke",
+            "private": true,
+            "dependencies": {
+              "@fireline/cli": "file:../${MAIN_TGZ}",
+              "${{ matrix.package }}": "file:../${PLATFORM_TGZ}"
+            }
+          }
+          EOF
+          cd smoke
+          npm install --omit=optional
+          npx fireline --help
+          node --input-type=module <<'EOF'
+          import { basename } from 'node:path'
+          import { resolveBinary } from './node_modules/@fireline/cli/dist/resolve-binary.js'
+
+          const binaries = [
+            ['fireline', 'FIRELINE_BIN'],
+            ['fireline-streams', 'FIRELINE_STREAMS_BIN'],
+            ['fireline-agents', 'FIRELINE_AGENTS_BIN'],
+          ]
+
+          for (const [name, envVar] of binaries) {
+            const resolved = resolveBinary({ name, envVar })
+            if (resolved.source !== 'package') {
+              throw new Error(`expected ${name} to resolve from a platform package, got ${resolved.source}`)
+            }
+            if (basename(resolved.path) !== name) {
+              throw new Error(`expected ${name} to resolve to an extensionless packaged binary, got ${resolved.path}`)
+            }
+            if (!resolved.path.includes('@fireline/cli-')) {
+              throw new Error(`expected ${name} to resolve from a platform package, got ${resolved.path}`)
+            }
+          }
+          EOF
+
+  publish:
+    needs:
+      - pack-main
+      - pack-platform
+      - smoke
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Download @fireline/cli tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: fireline-cli-main
+          path: dist/npm/main
+
+      - name: Download platform tarballs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fireline-cli-platform-*
+          path: dist/npm/platform
+          merge-multiple: true
+
+      - name: Publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for pkg in dist/npm/platform/*.tgz; do
+            npm publish "$pkg" --access public --provenance
+          done
+
+      - name: Publish @fireline/cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm publish dist/npm/main/*.tgz --access public --provenance

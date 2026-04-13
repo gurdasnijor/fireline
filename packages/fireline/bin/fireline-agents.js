@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 const { resolveBinary } = await import('../dist/resolve-binary.js')
 
 const bin = resolveBinary({ name: 'fireline-agents', envVar: 'FIRELINE_AGENTS_BIN' })
-const child = spawn(bin, process.argv.slice(2), { stdio: 'inherit' })
+const child = spawn(bin.path, process.argv.slice(2), { stdio: 'inherit' })
 
 child.on('exit', (code, signal) => {
   if (signal) {

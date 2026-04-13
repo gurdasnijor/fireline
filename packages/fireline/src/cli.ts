@@ -780,8 +780,8 @@ function maybeLogBinaryMismatch(
   streamsBin: ResolvedBinary,
 ): void {
   if (
-    firelineBin.source === 'env' ||
-    streamsBin.source === 'env' ||
+    (firelineBin.source !== 'release' && firelineBin.source !== 'debug') ||
+    (streamsBin.source !== 'release' && streamsBin.source !== 'debug') ||
     firelineBin.source === streamsBin.source
   ) {
     return

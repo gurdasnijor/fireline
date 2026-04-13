@@ -1,0 +1,17 @@
+{
+  "name": "@fireline/cli-win32-x64",
+  "version": "0.0.1",
+  "description": "Fireline CLI native binaries for Windows x64",
+  "license": "MIT OR Apache-2.0",
+  "repository": "https://github.com/fireline/fireline",
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "files": [
+    "bin/fireline",
+    "bin/fireline-streams",
+    "bin/fireline-agents"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
