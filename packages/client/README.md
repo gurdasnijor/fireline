@@ -1,61 +1,398 @@
-## @fireline/client
+# `@fireline/client`
 
-`@fireline/client` is Fireline's control-plane package for composing a harness, provisioning a sandbox, and handing ACP/state endpoints back to the caller. It does not wrap ACP itself; once you have a `SandboxHandle`, you talk to the agent with `@agentclientprotocol/sdk` and observe durable state with `@fireline/state`.
+Calling an ACP agent directly gets you a session. It does not give you a
+portable harness, a durable state stream, approval resolution, or a clean way
+to run the same agent locally and remotely.
 
-### Quick start
+`@fireline/client` is the TypeScript package for that missing layer. You use it
+to:
+
+- declare a Fireline harness with `sandbox(...)`, `middleware(...)`, and `agent(...)`
+- start that harness on a Fireline host with `compose(...).start(...)`
+- connect to the agent over ACP
+- observe the run through the durable state stream
+- start small multi-agent topologies with `peer(...)`, `fanout(...)`, and `pipe(...)`
+
+## Package Map
+
+- `@fireline/client`
+  core harness, runtime, topology, ACP, and DB helpers
+- `@fireline/client/middleware`
+  middleware builders such as `trace()`, `approve()`, `budget()`, and `secretsProxy()`
+- `@fireline/client/resources`
+  mount helpers such as `localPath(...)`
+- `@fireline/client/admin`
+  sandbox admin reads and deletes
+- `@fireline/client/workflow`
+  awakeable and completion-key helpers
+
+## Fastest Path
 
 ```ts
-import { Sandbox, agent, compose, sandbox } from '@fireline/client'
-import { trace } from '@fireline/client/middleware'
+import fireline, { agent, compose, middleware, sandbox } from '@fireline/client'
+import { approve, budget, trace } from '@fireline/client/middleware'
+import { localPath } from '@fireline/client/resources'
 
-const config = compose(sandbox(), [trace()], agent(['npx', '-y', '@anthropic-ai/claude-code-acp']))
-const handle = await new Sandbox({ serverUrl: 'http://127.0.0.1:4440' }).provision(config)
-const acp = await connectWithAcpSdk(handle.acp.url)
-await acp.initialize()
-const response = await acp.connection.prompt({ sessionId, prompt: [{ type: 'text', text: 'hello' }] })
+const reviewer = compose(
+  sandbox({
+    provider: 'local',
+    resources: [localPath('.', '/workspace')],
+    labels: { role: 'reviewer' },
+  }),
+  middleware([
+    trace(),
+    approve({ scope: 'tool_calls' }),
+    budget({ tokens: 500_000 }),
+  ]),
+  agent(['npx', '-y', '@agentclientprotocol/claude-agent-acp']),
+).as('reviewer')
+
+const handle = await reviewer.start({
+  serverUrl: 'http://127.0.0.1:4440',
+  stateStream: 'demo:reviewer',
+})
+
+const acp = await handle.connect('reviewer-ui')
+const db = await fireline.db({ stateStreamUrl: handle.state.url })
 ```
 
-`connectWithAcpSdk()` stands in for your `@agentclientprotocol/sdk` transport/client setup. The key point is that Fireline gives you `handle.acp.url`; ACP itself stays a third-party concern.
+That is the package's main story on current `main`: author a harness once, boot
+it on a Fireline host, talk to it over ACP, and watch the durable stream update
+in real time.
 
-### Core concepts
+## Root Surface
 
-- Sandbox = execution environment. In the current client surface this is the `Sandbox` class plus the `sandbox({...})` definition used by `compose(...)`.
-- Middleware = serializable ACP pipeline interceptors such as `trace()`, `approve()`, `budget()`, `contextInjection()`, and `peer()`.
-- Harness = `compose(sandbox, middleware, agent)`. The return value is a serializable `HarnessConfig`, which is the runnable unit sent to the Fireline host.
-- State observation = `@fireline/state`. Fireline returns `handle.state.url`; `@fireline/state` subscribes to that durable stream and materializes live collections.
-- ACP sessions = `@agentclientprotocol/sdk`. Fireline returns `handle.acp.url`; the ACP SDK owns session creation, prompting, updates, and reconnects.
+### `compose(sandboxConfig, middlewareConfig, agentConfig)`
 
-### API reference
+Builds one runnable harness value. This is the product surface you keep in
+source control and reuse across local dev, demos, and hosted runs.
 
-- `Sandbox` from `@fireline/client`
-  `provision(config)` posts a composed harness to the Fireline host and returns a `SandboxHandle`.
-  The redesign proposal also discusses `execute()`, but that method is not exported in the landed Phase 1-3 package surface.
-- `compose(sandbox, middleware, agent)` from `@fireline/client`
-  Returns a `HarnessConfig<'default'>`, which is the serializable harness spec you pass into `Sandbox.provision(...)`.
-- Middleware helpers from `@fireline/client/middleware`
-  `trace()`, `approve()`, `budget()`, `contextInjection()`, and `peer()` each build one serializable middleware spec.
-- `SandboxAdmin` from `@fireline/client/admin`
-  `get()`, `list()`, `destroy()`, `status()`, and `healthCheck()` are exported today.
-  `findOrCreate()` appears in the redesign vocabulary, but it is not part of the current public API yet.
-- Types from `@fireline/client`
-  `SandboxConfig`, `SandboxHandle`, `HarnessConfig`, `Middleware`, `SandboxStatus`, `SandboxDescriptor`, `SandboxDefinition`, `AgentConfig`, and `Endpoint`.
+```ts
+import { agent, compose, middleware, sandbox } from '@fireline/client'
 
-### Multi-agent topologies
+const harness = compose(
+  sandbox({ provider: 'local' }),
+  middleware([]),
+  agent(['../../target/debug/fireline-testy-load']),
+)
+```
 
-- `peer(harness1, harness2)`
-  Proposed typed topology combinator from the redesign docs. Not exported in the current Phase 1-3 package surface.
-- `fanout(harness, { count: N })`
-  Proposed typed topology combinator. Not exported in the current Phase 1-3 package surface.
-- `pipe(harness1, harness2)`
-  Proposed typed topology combinator. Not exported in the current Phase 1-3 package surface.
-- `peer()`
-  Exported today from `@fireline/client/middleware`. This is middleware-level peer wiring that injects the `peer_mcp` topology component inside a single harness.
+### `sandbox(options?)`
 
-### Integration patterns
+Defines where the agent runs and what it can see. Put provider choice, labels,
+resources, and env vars here.
 
-See [examples/](./examples/) for pointers to runnable client flows. The current examples index links directly to the package's ACP, topology, browser, and hosted-sandbox tests until standalone example programs land.
+```ts
+import { sandbox } from '@fireline/client'
+import { localPath } from '@fireline/client/resources'
 
-### Architecture
+const sandboxConfig = sandbox({
+  provider: 'docker',
+  image: 'node:22-slim',
+  resources: [localPath('.', '/workspace')],
+  labels: { demo: 'code-review' },
+})
+```
 
-- [Client API redesign](../../docs/proposals/client-api-redesign.md)
-- [Sandbox provider model](../../docs/proposals/sandbox-provider-model.md)
+### `middleware(chain)`
+
+Wraps an ordered middleware array into a serializable chain. Order matters: the
+host lowers this array in order when it provisions the runtime.
+
+```ts
+import { middleware } from '@fireline/client'
+import { approve, budget, trace } from '@fireline/client/middleware'
+
+const chain = middleware([
+  trace(),
+  approve({ scope: 'tool_calls' }),
+  budget({ tokens: 250_000 }),
+])
+```
+
+### `agent(command)`
+
+Defines the ACP-speaking process Fireline should launch inside the sandbox.
+
+```ts
+import { agent } from '@fireline/client'
+
+const agentConfig = agent(['npx', '-y', '@agentclientprotocol/claude-agent-acp'])
+```
+
+Single-token ACP registry ids such as `agent(['pi-acp'])` are also valid on
+current `main`.
+
+### `harness.as(name)`
+
+Gives the harness a stable logical name. Use this when you want readable handle
+names or when you are composing topologies.
+
+```ts
+const reviewer = compose(
+  sandbox({ provider: 'local' }),
+  middleware([]),
+  agent(['../../target/debug/fireline-testy-load']),
+).as('reviewer')
+```
+
+### `harness.start(options)`
+
+Provisions the harness on a Fireline host and returns a live `FirelineAgent`
+handle with ACP and state endpoints plus runtime methods.
+
+```ts
+const handle = await reviewer.start({
+  serverUrl: 'http://127.0.0.1:4440',
+  stateStream: 'demo:reviewer',
+})
+```
+
+`start(...)` is the API most apps should use. It is the landed replacement for
+"provision a sandbox, then manually stitch the rest together."
+
+### `handle.connect(clientName?)`
+
+Opens a ready-to-use ACP client against the running agent.
+
+```ts
+const acp = await handle.connect('reviewer-ui')
+const { sessionId } = await acp.newSession({ cwd: '/workspace', mcpServers: [] })
+```
+
+### `handle.resolvePermission(sessionId, requestId, outcome)`
+
+Resolves a pending approval request back into the same durable run.
+
+```ts
+await handle.resolvePermission(sessionId, requestId, {
+  allow: true,
+  resolvedBy: 'reviewer-ui',
+})
+```
+
+Use this when your app is the human-in-the-loop surface for
+`approve({ scope: 'tool_calls' })`.
+
+### `handle.stop()` / `handle.destroy()`
+
+Stops the running sandbox for this handle.
+
+```ts
+await handle.stop()
+```
+
+`destroy()` is the same runtime operation when you prefer that verb:
+
+```ts
+await handle.destroy()
+```
+
+### `connectAcp(endpoint, clientName?)`
+
+Connects directly when you already have an ACP endpoint and do not need a
+`FirelineAgent` handle in hand.
+
+```ts
+import { connectAcp } from '@fireline/client'
+
+const acp = await connectAcp('ws://127.0.0.1:4440/acp', 'dashboard')
+```
+
+Most app code should prefer `handle.connect(...)`, but `connectAcp(...)` is the
+right lower-level helper when you are reconnecting from a saved endpoint.
+
+### `fireline.db(options?)`
+
+Opens the durable state DB and hoists the live collections directly onto the DB
+instance.
+
+```ts
+import fireline from '@fireline/client'
+
+const db = await fireline.db({ stateStreamUrl: handle.state.url })
+const subscription = db.permissions.subscribe((rows) => {
+  console.log('pending approvals', rows.filter((row) => row.state === 'pending').length)
+})
+```
+
+The collection surface itself comes from `@fireline/state`. Reach for that
+package when you want the collection and type reference directly.
+
+### `new Sandbox({ serverUrl, token? })`
+
+This is the lower-level client when you already have a serialized harness config
+and want to provision it yourself.
+
+```ts
+import { Sandbox, agent, compose, middleware, sandbox } from '@fireline/client'
+
+const client = new Sandbox({ serverUrl: 'http://127.0.0.1:4440' })
+const handle = await client.provision(
+  compose(
+    sandbox({ provider: 'local' }),
+    middleware([]),
+    agent(['../../target/debug/fireline-testy-load']),
+  ),
+)
+```
+
+Most package users should prefer `compose(...).start(...)`. `Sandbox` is the
+escape hatch when you need explicit provisioning control.
+
+## Topology Helpers
+
+These helpers start more than one harness for you. They all return objects with
+their own `.start(...)` method.
+
+### `peer(...harnesses)`
+
+Starts named harnesses together on one shared `stateStream` and returns a handle
+map keyed by harness name.
+
+```ts
+import { agent, compose, middleware, peer, sandbox } from '@fireline/client'
+import { peer as peerMiddleware, trace } from '@fireline/client/middleware'
+
+const reviewer = compose(
+  sandbox({ provider: 'local' }),
+  middleware([trace(), peerMiddleware({ peers: ['writer'] })]),
+  agent(['../../target/debug/fireline-testy-load']),
+).as('reviewer')
+
+const writer = compose(
+  sandbox({ provider: 'local' }),
+  middleware([trace(), peerMiddleware({ peers: ['reviewer'] })]),
+  agent(['../../target/debug/fireline-testy-load']),
+).as('writer')
+
+const handles = await peer(reviewer, writer).start({
+  serverUrl: 'http://127.0.0.1:4440',
+  stateStream: 'demo:peer',
+})
+```
+
+Important: topology-level `peer(...)` starts the named harnesses together.
+Middleware-level `peer({ peers: [...] })` is what turns on peer routing inside
+each harness.
+
+### `fanout(harness, { count })`
+
+Starts `N` copies of the same harness for parallel work.
+
+```ts
+import { fanout } from '@fireline/client'
+
+const workers = await fanout(
+  compose(
+    sandbox({ provider: 'local' }),
+    middleware([]),
+    agent(['../../target/debug/fireline-testy-load']),
+  ).as('worker'),
+  { count: 3 },
+).start({
+  serverUrl: 'http://127.0.0.1:4440',
+  name: 'review-worker',
+})
+```
+
+This returns an array of `FirelineAgent` handles with numbered runtime names
+such as `review-worker-1`, `review-worker-2`, and `review-worker-3`.
+
+### `pipe(...harnesses)`
+
+Starts named harnesses sequentially on one shared `stateStream`.
+
+```ts
+import { pipe } from '@fireline/client'
+import { trace } from '@fireline/client/middleware'
+
+const researcher = compose(
+  sandbox({ provider: 'local' }),
+  middleware([trace()]),
+  agent(['../../target/debug/fireline-testy-load']),
+).as('researcher')
+
+const writer = compose(
+  sandbox({ provider: 'local' }),
+  middleware([trace()]),
+  agent(['../../target/debug/fireline-testy-load']),
+).as('writer')
+
+const handles = await pipe(researcher, writer).start({
+  serverUrl: 'http://127.0.0.1:4440',
+  stateStream: 'demo:pipe',
+})
+```
+
+Use this when the stages should share one durable history but come up in a
+deliberate order.
+
+## Middleware Import Path
+
+Middleware builders live on the subpath import:
+
+```ts
+import {
+  attachTools,
+  approve,
+  autoApprove,
+  budget,
+  contextInjection,
+  durableSubscriber,
+  inject,
+  peer as peerMiddleware,
+  peerRouting,
+  secretsProxy,
+  telegram,
+  trace,
+  wakeDeployment,
+  webhook,
+} from '@fireline/client/middleware'
+```
+
+The most common starting point is still small:
+
+```ts
+import { middleware } from '@fireline/client'
+import { approve, budget, secretsProxy, trace } from '@fireline/client/middleware'
+
+const chain = middleware([
+  trace(),
+  approve({ scope: 'tool_calls' }),
+  budget({ tokens: 500_000 }),
+  secretsProxy({
+    ANTHROPIC_API_KEY: { ref: 'env:ANTHROPIC_API_KEY' },
+  }),
+])
+```
+
+## Types You Will Usually Reach For
+
+The root package exports the runtime and authoring types most app code needs:
+
+- `Harness`
+- `HarnessHandle`
+- `SandboxDefinition`
+- `SandboxHandle`
+- `StartOptions`
+- `ConnectedAcp`
+- `FirelineDB`
+- `ResolvePermissionOutcome`
+- `SessionId`
+- `RequestId`
+- `ToolCallId`
+
+Example:
+
+```ts
+import type { FirelineDB, Harness, SessionId } from '@fireline/client'
+```
+
+## Related Docs
+
+- [Compose and Start](../../docs/guide/compose-and-start.md)
+- [Middleware](../../docs/guide/middleware.md)
+- [Providers](../../docs/guide/providers.md)
+- [Observation](../../docs/guide/observation.md)
+- [`@fireline/state`](../state/README.md)
