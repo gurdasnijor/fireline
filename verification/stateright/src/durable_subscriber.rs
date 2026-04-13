@@ -261,11 +261,157 @@ impl Model for DurableSubscriberModel {
     }
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum SessionId {
+    First,
+    Second,
+}
+
+impl SessionId {
+    const ALL: [Self; 2] = [Self::First, Self::Second];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::First => 0,
+            Self::Second => 1,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Hash, PartialEq, Eq)]
+struct SessionScopedApprovalState {
+    registrations: [RegistrationSnapshot; 2],
+    semantic_winners: [u8; 2],
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum SessionScopedApprovalAction {
+    Register { session: SessionId },
+    Resolve { session: SessionId },
+    ResolveDuplicate { session: SessionId },
+}
+
+#[derive(Clone, Default)]
+struct SessionScopedApprovalModel;
+
+impl SessionScopedApprovalModel {
+    fn register(mut state: SessionScopedApprovalState, session: SessionId) -> SessionScopedApprovalState {
+        let index = session.index();
+        let slot = &mut state.registrations[index];
+        if slot.state != WaitState::Idle {
+            return state;
+        }
+        if state.semantic_winners[index] > 0 {
+            slot.state = WaitState::Completed;
+            slot.completion_count = 1;
+        } else {
+            slot.state = WaitState::Waiting;
+        }
+        state
+    }
+
+    fn resolve(mut state: SessionScopedApprovalState, session: SessionId) -> SessionScopedApprovalState {
+        let index = session.index();
+        if state.semantic_winners[index] == 0 {
+            state.semantic_winners[index] = 1;
+            let slot = &mut state.registrations[index];
+            if slot.state != WaitState::Idle {
+                slot.state = WaitState::Completed;
+                slot.completion_count = 1;
+            }
+        }
+        state
+    }
+
+    fn session_isolation_holds(state: &SessionScopedApprovalState) -> bool {
+        SessionId::ALL.into_iter().all(|session| {
+            let index = session.index();
+            let registration = state.registrations[index];
+            let own_winner = state.semantic_winners[index];
+
+            let self_consistent =
+                (registration.state != WaitState::Completed || own_winner == 1)
+                    && registration.completion_count <= 1;
+
+            let other_sessions_blocked = SessionId::ALL.into_iter().all(|other| {
+                if other == session {
+                    return true;
+                }
+                let other_index = other.index();
+                if own_winner == 1 && state.semantic_winners[other_index] == 0 {
+                    state.registrations[other_index].state != WaitState::Completed
+                        && state.registrations[other_index].completion_count == 0
+                } else {
+                    true
+                }
+            });
+
+            self_consistent && other_sessions_blocked
+        })
+    }
+}
+
+impl Model for SessionScopedApprovalModel {
+    type State = SessionScopedApprovalState;
+    type Action = SessionScopedApprovalAction;
+
+    fn init_states(&self) -> Vec<Self::State> {
+        vec![SessionScopedApprovalState::default()]
+    }
+
+    fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
+        for session in SessionId::ALL {
+            let index = session.index();
+            if state.registrations[index].state == WaitState::Idle {
+                actions.push(SessionScopedApprovalAction::Register { session });
+            }
+            if state.semantic_winners[index] == 0 {
+                actions.push(SessionScopedApprovalAction::Resolve { session });
+            } else {
+                actions.push(SessionScopedApprovalAction::ResolveDuplicate { session });
+            }
+        }
+    }
+
+    fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
+        Some(match action {
+            SessionScopedApprovalAction::Register { session } => Self::register(state.clone(), session),
+            SessionScopedApprovalAction::Resolve { session }
+            | SessionScopedApprovalAction::ResolveDuplicate { session } => {
+                Self::resolve(state.clone(), session)
+            }
+        })
+    }
+
+    fn properties(&self) -> Vec<Property<Self>> {
+        vec![
+            Property::always(
+                "OverlappingRequestIdsRemainSessionScoped",
+                |_, state: &SessionScopedApprovalState| Self::session_isolation_holds(state),
+            ),
+            Property::sometimes(
+                "OverlappingRequestIdsCanCompleteIndependently",
+                |_, state: &SessionScopedApprovalState| {
+                    SessionId::ALL.into_iter().all(|session| {
+                        let index = session.index();
+                        state.semantic_winners[index] == 1
+                            && state.registrations[index].state == WaitState::Completed
+                    })
+                },
+            ),
+        ]
+    }
+
+    fn within_boundary(&self, _state: &Self::State) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use stateright::{Checker, Model};
 
-    use super::DurableSubscriberModel;
+    use super::{DurableSubscriberModel, SessionScopedApprovalModel};
 
     #[test]
     fn durable_subscriber_model_first_resolution_wins() {
@@ -279,6 +425,15 @@ mod tests {
     #[test]
     fn durable_subscriber_model_rebuild_race_converges() {
         let checker = DurableSubscriberModel::default()
+            .checker()
+            .spawn_bfs()
+            .join();
+        checker.assert_properties();
+    }
+
+    #[test]
+    fn durable_subscriber_model_overlapping_request_ids_remain_session_scoped() {
+        let checker = SessionScopedApprovalModel::default()
             .checker()
             .spawn_bfs()
             .join();
