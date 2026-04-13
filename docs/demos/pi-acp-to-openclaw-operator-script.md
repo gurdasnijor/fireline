@@ -22,7 +22,7 @@
 | `.6.2` `--resume` CLI verify | ○ blocked | canonical-ids Phase 5 (`mono-vkpp.7`) | see Step 3 fallback |
 | Telegram signature (SIGNATURE MOMENT) | ○ `mono-axr.11` TelegramSubscriber as DS active profile | DS Phase 2 (`mono-axr.9`) + Phase 3 (`mono-axr.3` webhook reference) land first; ~6–8h total to demo-ready | Steps 3/4/5 center on composing `telegram()` middleware into agent.ts; bridge-as-example (`mono-thnc.6.3.3–.9`) superseded and closed 2026-04-12 |
 | Telegram adapter library reference | ✓ LANDED `d283392` | — | `examples/telegram-bridge/` retained as reference for `@chat-adapter/telegram` imports + adapter boot pattern; reused inside TelegramSubscriber impl |
-| **Runtime: pi-acp provisioning** | ⚠ partial — **wrapper class fixed (`mono-dls` MERGED `232180a`)**; **config residual pending (`mono-pi-acp-residual` P1)** | Legacy npx ACP wrapper bug fixed in `232180a` (install-local + wrap real `.bin` entry, auto-refresh stale wrappers, gated `FIRELINE_ACP_DEBUG=1` logging). Residual surface: pi-acp PATH/env config (binary-on-PATH, ANTHROPIC_API_KEY, secretsProxy path) — failure mode now **CLEAR ERROR** not silent close. | **Fallback STAYS staged**: `docs/demos/assets/agent-testy-load.ts` swap is the safety net if residual diagnosis slips past rehearsal. Use `FL-DEBUG[acp-close]` log line in residual diagnostic to identify the concrete missing reason. |
+| **Runtime: agent provisioning** | ✅ **WORKING** end-to-end | Wrapper class fixed (`mono-dls` `232180a`). Root cause of remaining 1006 close was `secretsProxy()` middleware not forwarding `env:*` refs to spawned process; user removed `secretsProxy` and `npx fireline run docs/demos/assets/agent.ts --repl` proves real Claude responses. Demo spec at `docs/demos/assets/agent.ts` now uses `trace()`-only middleware + `claude-agent-acp` direct command. | Testy-load fallback still staged at `docs/demos/assets/agent-testy-load.ts` as belt-and-suspenders insurance. `secretsProxy` env-forwarding fix tracked as **`mono-4t4`** post-demo. If approval/budget middleware re-added pre-rehearsal, retest first — `secretsProxy` was the specific break, those may be fine. |
 >
 > Every step must be labeled with its honesty class:
 >
@@ -79,7 +79,7 @@ Operator runs through this in the dressing room, not on stage:
 | P10 | Step 3 restart/resume gate check | Run `docs/demos/scripts/replay-peer-to-peer.sh` through to the kill-and-resume phase | session continues post-restart. **If it does not** (per `mono-thnc.2.3` open bug, w19 fix in flight at `498fff6`), Step 3 restart beat downgrades to PRE-STAGED recording before showtime |
 | P11 | Telegram bot reachable | `source deploy/telegram/bridge.env && curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getMe" \| jq -r '.ok,.result.username'` | prints `true` and `Jessica_fireline_bot`. **If not**, Step 3/4/5 downgrade to `webhook()`-profile fallback or PRE-STAGED |
 | P12 | Telegram tokens sourced in operator env | `echo $TELEGRAM_BOT_TOKEN \| head -c 10` | `TELEGRAM_BOT_TOKEN` has a value (10+ chars visible), loaded from `deploy/telegram/bridge.env` (gitignored). `TELEGRAM_CHAT_ID` optional; not needed for DM-driven DS profile. |
-| P13 | pi-acp provisioning sanity check (`mono-dls` wrapper fixed `232180a`; **`mono-pi-acp-residual` config gap remains P1**) | `FIRELINE_ACP_DEBUG=1 npx fireline run docs/demos/assets/agent.ts --repl 2>&1 \| tee /tmp/p13.log` then send one prompt; check `/tmp/p13.log` for `FL-DEBUG[acp-close]` line | **PASS** = ACP socket stays open for the reply, no `acp-close` line. **FAIL** with clear error (binary-not-on-PATH / missing ANTHROPIC_API_KEY / secretsProxy path / etc) → either fix the named env/PATH gap inline OR swap to `docs/demos/assets/agent-testy-load.ts` fallback if residual diagnosis exceeds rehearsal budget. |
+| P13 | Agent provisioning end-to-end | `npx fireline run docs/demos/assets/agent.ts --repl` then send one prompt | **PASS** = real Claude response prints in REPL. Should pass on current main (proven by user pre-rehearsal). **FAIL** = swap to `docs/demos/assets/agent-testy-load.ts` fallback. If approval/budget middleware was added back to spec, drop them and retest before declaring fail (`secretsProxy` is the only known broken middleware; `mono-4t4` post-demo). |
 
 **If any pre-flight fails, the owning step must be downgraded to PRE-STAGED or
 cut before going live.**
@@ -265,20 +265,17 @@ pre-flight P10 flips green.
 
 **Fallbacks (four layers):**
 
-0. **Runtime fallback (pi-acp config residual `mono-pi-acp-residual`)**:
-   wrapper class fixed in `mono-dls` (`232180a`); residual config gap
-   may still cause CLEAR ERROR on `agent(['pi-acp'])` attach (binary
-   PATH / ANTHROPIC_API_KEY / secretsProxy path). If pre-flight P13
-   surfaces the error and inline fix isn't fast (named env/PATH gap +
-   30s) → swap the spec to `docs/demos/assets/agent-testy-load.ts`
-   (identical middleware chain; `fireline-testy-load` deterministic
-   echo agent instead of pi-acp). Narrative preserved ("same 15-line
-   spec, same middleware array, only the model behind it changes") —
-   only the real-model beat degrades to canned echoes. All subsequent
-   Telegram/approval/peer steps continue against the fallback spec
-   unmodified. Label in narration if asked: "We're running a
-   deterministic stand-in agent today so the demo is reproducible;
-   the middleware and substrate path are identical."
+0. **Runtime fallback** (RETAINED AS INSURANCE — not expected to fire):
+   end-to-end agent provisioning is GREEN on current main with the
+   user's minimal `trace()`-only spec + `claude-agent-acp` direct
+   command. `secretsProxy` env-forwarding is the only known broken
+   middleware (tracked as `mono-4t4` P1 post-demo). If a regression
+   surfaces during rehearsal, swap to
+   `docs/demos/assets/agent-testy-load.ts` (deterministic echo agent;
+   same middleware shape). Narrative preserved if needed: "We're
+   running a deterministic stand-in agent today so the demo is
+   reproducible; the substrate path is identical." Don't expect to
+   need this layer.
 1. If the `telegram()` middleware is buggy post-`mono-axr.11` landing →
    downgrade narration to Step 4-only mode (approval card renders on
    Telegram via the same profile, but the initial prompt runs via a local
