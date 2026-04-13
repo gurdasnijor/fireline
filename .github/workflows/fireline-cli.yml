@@ -109,13 +109,18 @@ jobs:
       - name: Build @fireline/cli and workspace deps (topological)
         run: pnpm --filter @fireline/cli... build
 
-      - name: Pack @fireline/cli
+      - name: Pack @fireline/cli and workspace deps
         run: |
           mkdir -p dist/npm
-          cd packages/fireline
-          pnpm pack --pack-destination ../../dist/npm
+          # Pack the CLI plus its workspace deps so smoke can install them as file:
+          # refs. Without @fireline/state + @fireline/client alongside, npm tries to
+          # resolve them from the public registry and 404s (they are unpublished
+          # workspace packages).
+          (cd packages/fireline && pnpm pack --pack-destination ../../dist/npm)
+          (cd packages/client   && pnpm pack --pack-destination ../../dist/npm)
+          (cd packages/state    && pnpm pack --pack-destination ../../dist/npm)
 
-      - name: Upload @fireline/cli tarball
+      - name: Upload workspace tarballs
         uses: actions/upload-artifact@v4
         with:
           name: fireline-cli-main
@@ -224,14 +229,24 @@ jobs:
         shell: bash
         run: |
           mkdir -p smoke
-          MAIN_TGZ=$(find dist/npm/main -name '*.tgz' | head -n 1)
+          # pack-main now uploads three tarballs (cli + client + state); select by prefix.
+          CLI_TGZ=$(find dist/npm/main -name 'fireline-cli-*.tgz' | head -n 1)
+          CLIENT_TGZ=$(find dist/npm/main -name 'fireline-client-*.tgz' | head -n 1)
+          STATE_TGZ=$(find dist/npm/main -name 'fireline-state-*.tgz' | head -n 1)
           PLATFORM_TGZ=$(find dist/npm/platform -name '*.tgz' | head -n 1)
+          if [[ -z "$CLIENT_TGZ" || -z "$STATE_TGZ" ]]; then
+            echo "missing @fireline/client or @fireline/state tarball in dist/npm/main" >&2
+            ls -la dist/npm/main >&2
+            exit 1
+          fi
           cat > smoke/package.json <<EOF
           {
             "name": "fireline-cli-smoke",
             "private": true,
             "dependencies": {
-              "@fireline/cli": "file:../${MAIN_TGZ}",
+              "@fireline/cli": "file:../${CLI_TGZ}",
+              "@fireline/client": "file:../${CLIENT_TGZ}",
+              "@fireline/state": "file:../${STATE_TGZ}",
               "${{ matrix.package }}": "file:../${PLATFORM_TGZ}"
             }
           }
