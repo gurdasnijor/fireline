@@ -17,7 +17,6 @@ use crate::approval::{
     ApprovalAction, ApprovalConfig, ApprovalGateComponent, ApprovalMatch, ApprovalPolicy,
 };
 use crate::audit::{AuditConfig, AuditSink, AuditTracer};
-use crate::auto_approve::{AutoApproveConfig, AutoApproveSubscriberComponent};
 use crate::budget::{BudgetAction, BudgetComponent, BudgetConfig};
 use crate::context::{
     ContextConfig, ContextInjectionComponent, ContextPlacement, ContextSource, DatetimeSource,
@@ -75,13 +74,6 @@ pub struct ApprovalGateComponentConfig {
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub policies: Vec<ApprovalPolicyConfig>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AutoApproveComponentConfig {
-    #[serde(default)]
-    pub resolved_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -303,26 +295,6 @@ pub fn build_host_topology_registry(context: ComponentContext) -> TopologyRegist
                 ))
             }
         })
-        .register_component("auto_approve", {
-            let context = context.clone();
-            move |config| {
-                let parsed = config
-                    .cloned()
-                    .map(serde_json::from_value::<AutoApproveComponentConfig>)
-                    .transpose()
-                    .context("parse auto approve config")?
-                    .unwrap_or_default();
-                Ok(sacp::DynConnectTo::new(
-                    AutoApproveSubscriberComponent::new(
-                        AutoApproveConfig {
-                            resolved_by: parsed.resolved_by,
-                        },
-                        context.state_stream_url.clone(),
-                        context.state_producer.clone(),
-                    ),
-                ))
-            }
-        })
         .register_component("secrets_injection", move |config| {
             let parsed = config
                 .cloned()
@@ -362,9 +334,9 @@ pub fn build_host_topology_registry(context: ComponentContext) -> TopologyRegist
                     FsBackendConfig::Local => {
                         Arc::new(LocalFileBackend::new(context.mounted_resources.clone()))
                     }
-                    FsBackendConfig::StreamFs => {
-                        Arc::new(StreamFsFileBackend::new(context.state_stream_url.clone()))
-                    }
+                    FsBackendConfig::StreamFs => Arc::new(StreamFsFileBackend::new(
+                        context.state_stream_url.clone(),
+                    )),
                 };
                 Ok(sacp::DynConnectTo::new(FsBackendComponent::new(
                     backend,
@@ -427,9 +399,7 @@ fn build_context_config(config: ContextInjectionConfig) -> ContextConfig {
 fn parse_credential_ref(raw: &str) -> Result<fireline_tools::CredentialRef> {
     if let Some(var) = raw.strip_prefix("env:") {
         if var.is_empty() {
-            return Err(anyhow!(
-                "invalid env credential ref '{raw}': missing variable name"
-            ));
+            return Err(anyhow!("invalid env credential ref '{raw}': missing variable name"));
         }
         return Ok(fireline_tools::CredentialRef::Env {
             var: var.to_string(),
@@ -438,9 +408,7 @@ fn parse_credential_ref(raw: &str) -> Result<fireline_tools::CredentialRef> {
 
     if let Some(key) = raw.strip_prefix("secret:") {
         if key.is_empty() {
-            return Err(anyhow!(
-                "invalid secret credential ref '{raw}': missing key"
-            ));
+            return Err(anyhow!("invalid secret credential ref '{raw}': missing key"));
         }
         return Ok(fireline_tools::CredentialRef::Secret {
             key: key.to_string(),

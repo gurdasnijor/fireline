@@ -2,7 +2,6 @@
 
 pub mod approval;
 pub mod audit;
-pub mod auto_approve;
 pub mod budget;
 pub mod context;
 pub mod durable_subscriber;
@@ -18,23 +17,17 @@ pub mod webhook_subscriber;
 
 pub use approval::{
     ApprovalAction, ApprovalConfig, ApprovalGateComponent, ApprovalMatch, ApprovalPolicy,
-    approval_resolution_envelope, permission_request_envelope,
 };
 pub use audit::{AuditConfig, AuditDirection, AuditRecord, AuditSink, AuditTracer};
-pub use auto_approve::{AutoApproveConfig, AutoApproveSubscriber, AutoApproveSubscriberComponent};
 pub use budget::{BudgetAction, BudgetComponent, BudgetConfig};
 pub use context::{
     ContextConfig, ContextInjectionComponent, ContextPlacement, ContextSource, DatetimeSource,
     WorkspaceFileSource,
 };
 pub use durable_subscriber::{
-    ActiveSubscriber, AlwaysOnDeploymentSubscriber, CompletionKey, DEPLOYMENT_WAKE_REQUESTED_KIND,
-    DeploymentWakeHandler, DeploymentWakeRequested, DurableSubscriber, DurableSubscriberDriver,
-    HandlerOutcome, PassiveSubscriber, PassiveWaitPolicy, ProvisionedRuntime,
-    ResumeDeploymentWakeHandler, RetryPolicy, SANDBOX_PROVISIONED_KIND, SandboxProvisioned,
-    StreamEnvelope, SubscriberMode, SubscriberRegistration, SystemWakeTimerRuntime,
-    TIMER_FIRED_KIND, TimerFired, TraceContext, WAKE_TIMER_REQUESTED_KIND, WakeTimerRequest,
-    WakeTimerRuntime, WakeTimerSubscriber,
+    ActiveSubscriber, CompletionKey, DurableSubscriber, DurableSubscriberDriver, HandlerOutcome,
+    PassiveSubscriber, PassiveWaitPolicy, RetryPolicy, StreamEnvelope, SubscriberMode,
+    SubscriberRegistration, TraceContext,
 };
 pub use peer_routing::{
     PEER_DELIVERY_ACK_ENTITY_TYPE, PeerDeliveryAcknowledged, PeerDispatchSuccess,

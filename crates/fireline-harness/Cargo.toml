@@ -13,7 +13,6 @@ axum.workspace = true
 dirs.workspace = true
 durable-streams.workspace = true
 fireline-acp-ids.workspace = true
-fireline-orchestration.workspace = true
 fireline-resources.workspace = true
 fireline-session.workspace = true
 fireline-tools.workspace = true

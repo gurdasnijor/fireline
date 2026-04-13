@@ -1,28 +1,22 @@
-//! Durable subscriber substrate and profile implementations.
+//! Durable subscriber substrate scaffolding.
 //!
-//! Phase 1 landed the trait surface and registration contract. Later phases add
-//! concrete profiles without replacing the underlying substrate.
+//! Phase 1 intentionally lands only the Rust trait and registration surface.
+//! The driver remains inert until Phase 2 ports the approval gate onto it.
 
 use std::fmt;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use durable_streams::{Client as DurableStreamsClient, LiveMode, Offset};
 use fireline_acp_ids::{PromptRequestRef, RequestId, SessionId, ToolCallId, ToolInvocationRef};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-pub const WAKE_TIMER_REQUESTED_KIND: &str = "wake_timer_requested";
-pub const TIMER_FIRED_KIND: &str = "timer_fired";
-pub const DEPLOYMENT_WAKE_REQUESTED_KIND: &str = "deployment_wake_requested";
-pub const SANDBOX_PROVISIONED_KIND: &str = "sandbox_provisioned";
-
-/// Canonical completion identity for durable subscribers.
+/// Canonical completion identity for agent-bound durable subscribers.
 ///
-/// Prompt/tool completions stay ACP-shaped, and deployment wake profiles reuse
-/// canonical `SessionId` rather than introducing a second deployment id.
+/// The first cut intentionally admits only ACP-shaped prompt and tool
+/// references. Infrastructure-only identifiers stay outside this surface.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CompletionKey {
@@ -33,9 +27,6 @@ pub enum CompletionKey {
     Tool {
         session_id: SessionId,
         tool_call_id: ToolCallId,
-    },
-    Session {
-        session_id: SessionId,
     },
 }
 
@@ -57,16 +48,9 @@ impl CompletionKey {
     }
 
     #[must_use]
-    pub fn session(session_id: SessionId) -> Self {
-        Self::Session { session_id }
-    }
-
-    #[must_use]
     pub fn session_id(&self) -> &SessionId {
         match self {
-            Self::Prompt { session_id, .. }
-            | Self::Tool { session_id, .. }
-            | Self::Session { session_id } => session_id,
+            Self::Prompt { session_id, .. } | Self::Tool { session_id, .. } => session_id,
         }
     }
 
@@ -81,7 +65,6 @@ impl CompletionKey {
                 session_id,
                 tool_call_id,
             } => format!("tool:{session_id}:{tool_call_id}"),
-            Self::Session { session_id } => format!("session:{session_id}"),
         }
     }
 
@@ -95,7 +78,7 @@ impl CompletionKey {
                 session_id: session_id.clone(),
                 request_id: request_id.clone(),
             }),
-            Self::Tool { .. } | Self::Session { .. } => None,
+            Self::Tool { .. } => None,
         }
     }
 
@@ -109,7 +92,7 @@ impl CompletionKey {
                 session_id: session_id.clone(),
                 tool_call_id: tool_call_id.clone(),
             }),
-            Self::Prompt { .. } | Self::Session { .. } => None,
+            Self::Prompt { .. } => None,
         }
     }
 }
@@ -168,10 +151,10 @@ impl TraceContext {
     }
 }
 
-/// Typed view of a stream row consumed by durable subscribers.
+/// Typed view of an agent-plane stream row.
 ///
-/// The payload stays JSON-backed but exposes helpers for decoding canonical
-/// prompt, tool, and deployment-session identifiers plus trace fields.
+/// Phase 1 keeps the payload as JSON but exposes helpers for decoding the
+/// canonical ACP identifier and trace fields future subscribers consume.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StreamEnvelope {
     #[serde(rename = "type")]
@@ -203,11 +186,6 @@ impl StreamEnvelope {
     }
 
     #[must_use]
-    pub fn kind(&self) -> Option<&str> {
-        self.value.as_ref()?.get("kind")?.as_str()
-    }
-
-    #[must_use]
     pub fn with_source_offset(mut self, offset: Offset) -> Self {
         self.source_offset = Some(offset.to_string());
         self
@@ -222,12 +200,6 @@ impl StreamEnvelope {
     pub fn without_source_offset(mut self) -> Self {
         self.source_offset = None;
         self
-    }
-
-    #[must_use]
-    pub fn session_id(&self) -> Option<SessionId> {
-        let value = self.value.as_ref()?;
-        session_id_from_value(value.get("sessionId")?)
     }
 
     #[must_use]
@@ -253,7 +225,6 @@ impl StreamEnvelope {
         self.prompt_ref()
             .map(CompletionKey::from)
             .or_else(|| self.tool_ref().map(CompletionKey::from))
-            .or_else(|| self.session_id().map(CompletionKey::session))
     }
 
     #[must_use]
@@ -385,426 +356,11 @@ impl RetryPolicy {
     }
 }
 
-/// Timer runtime abstraction used by the prompt-bound wake timer profile.
-#[async_trait]
-pub trait WakeTimerRuntime: Send + Sync {
-    fn now_ms(&self) -> i64;
-
-    async fn sleep(&self, duration: Duration);
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SystemWakeTimerRuntime;
-
-#[async_trait]
-impl WakeTimerRuntime for SystemWakeTimerRuntime {
-    fn now_ms(&self) -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64
-    }
-
-    async fn sleep(&self, duration: Duration) {
-        tokio::time::sleep(duration).await;
-    }
-}
-
-/// Agent-bound deferred wake request keyed by canonical prompt identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WakeTimerRequest {
-    pub kind: String,
-    pub session_id: SessionId,
-    pub request_id: RequestId,
-    pub fire_at_ms: i64,
-    #[serde(
-        default,
-        rename = "_meta",
-        skip_serializing_if = "TraceContext::is_empty"
-    )]
-    pub trace_context: TraceContext,
-}
-
-impl WakeTimerRequest {
-    #[must_use]
-    pub fn new(session_id: SessionId, request_id: RequestId, fire_at_ms: i64) -> Self {
-        Self {
-            kind: WAKE_TIMER_REQUESTED_KIND.to_string(),
-            session_id,
-            request_id,
-            fire_at_ms,
-            trace_context: TraceContext::default(),
-        }
-    }
-
-    #[must_use]
-    pub fn with_trace_context(mut self, trace_context: TraceContext) -> Self {
-        self.trace_context = trace_context;
-        self
-    }
-
-    #[must_use]
-    pub fn completion_key(&self) -> CompletionKey {
-        CompletionKey::prompt(self.session_id.clone(), self.request_id.clone())
-    }
-
-    #[must_use]
-    pub fn remaining_delay(&self, now_ms: i64) -> Duration {
-        let remaining_ms = self.fire_at_ms.saturating_sub(now_ms);
-        if remaining_ms <= 0 {
-            Duration::ZERO
-        } else {
-            Duration::from_millis(remaining_ms as u64)
-        }
-    }
-
-    #[must_use]
-    pub fn completion(&self, fired_at_ms: i64) -> TimerFired {
-        TimerFired::new(
-            self.session_id.clone(),
-            self.request_id.clone(),
-            fired_at_ms.max(self.fire_at_ms),
-        )
-        .with_trace_context(self.trace_context.clone())
-    }
-}
-
-/// Completion appended when a prompt-bound timer fires.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TimerFired {
-    pub kind: String,
-    pub session_id: SessionId,
-    pub request_id: RequestId,
-    pub fired_at_ms: i64,
-    #[serde(
-        default,
-        rename = "_meta",
-        skip_serializing_if = "TraceContext::is_empty"
-    )]
-    pub trace_context: TraceContext,
-}
-
-impl TimerFired {
-    #[must_use]
-    pub fn new(session_id: SessionId, request_id: RequestId, fired_at_ms: i64) -> Self {
-        Self {
-            kind: TIMER_FIRED_KIND.to_string(),
-            session_id,
-            request_id,
-            fired_at_ms,
-            trace_context: TraceContext::default(),
-        }
-    }
-
-    #[must_use]
-    pub fn with_trace_context(mut self, trace_context: TraceContext) -> Self {
-        self.trace_context = trace_context;
-        self
-    }
-}
-
-/// Active subscriber that waits until a prompt-bound wake deadline then
-/// appends a `timer_fired` completion on the same canonical key.
-pub struct WakeTimerSubscriber<R = SystemWakeTimerRuntime> {
-    name: String,
-    runtime: R,
-    retry_policy: RetryPolicy,
-}
-
-impl WakeTimerSubscriber<SystemWakeTimerRuntime> {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::with_runtime(SystemWakeTimerRuntime)
-    }
-}
-
-impl Default for WakeTimerSubscriber<SystemWakeTimerRuntime> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<R> WakeTimerSubscriber<R> {
-    #[must_use]
-    pub fn with_runtime(runtime: R) -> Self {
-        Self {
-            name: "wake_timer".to_string(),
-            runtime,
-            retry_policy: RetryPolicy::default(),
-        }
-    }
-
-    #[must_use]
-    pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
-        self.retry_policy = retry_policy;
-        self
-    }
-}
-
-impl<R> DurableSubscriber for WakeTimerSubscriber<R>
-where
-    R: WakeTimerRuntime,
-{
-    type Event = WakeTimerRequest;
-    type Completion = TimerFired;
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn matches(&self, envelope: &StreamEnvelope) -> Option<Self::Event> {
-        let event: WakeTimerRequest = envelope.value_as()?;
-        (event.kind == WAKE_TIMER_REQUESTED_KIND).then_some(event)
-    }
-
-    fn completion_key(&self, event: &Self::Event) -> CompletionKey {
-        event.completion_key()
-    }
-
-    fn is_completed(&self, event: &Self::Event, log: &[StreamEnvelope]) -> bool {
-        log_contains_completion(log, TIMER_FIRED_KIND, &event.completion_key())
-    }
-}
-
-#[async_trait]
-impl<R> ActiveSubscriber for WakeTimerSubscriber<R>
-where
-    R: WakeTimerRuntime,
-{
-    async fn handle(&self, event: Self::Event) -> HandlerOutcome<Self::Completion> {
-        let remaining = event.remaining_delay(self.runtime.now_ms());
-        if !remaining.is_zero() {
-            self.runtime.sleep(remaining).await;
-        }
-        HandlerOutcome::Completed(event.completion(self.runtime.now_ms()))
-    }
-
-    fn retry_policy(&self) -> RetryPolicy {
-        self.retry_policy
-    }
-}
-
-/// Session-scoped request that asks the host to ensure a deployment is awake.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeploymentWakeRequested {
-    pub kind: String,
-    pub session_id: SessionId,
-    #[serde(
-        default,
-        rename = "_meta",
-        skip_serializing_if = "TraceContext::is_empty"
-    )]
-    pub trace_context: TraceContext,
-}
-
-impl DeploymentWakeRequested {
-    #[must_use]
-    pub fn new(session_id: SessionId) -> Self {
-        Self {
-            kind: DEPLOYMENT_WAKE_REQUESTED_KIND.to_string(),
-            session_id,
-            trace_context: TraceContext::default(),
-        }
-    }
-
-    #[must_use]
-    pub fn with_trace_context(mut self, trace_context: TraceContext) -> Self {
-        self.trace_context = trace_context;
-        self
-    }
-
-    #[must_use]
-    pub fn completion_key(&self) -> CompletionKey {
-        CompletionKey::session(self.session_id.clone())
-    }
-}
-
-/// Completion appended once the existing wake/provision path yields a runtime.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SandboxProvisioned {
-    pub kind: String,
-    pub session_id: SessionId,
-    #[serde(rename = "runtimeKey")]
-    pub runtime_key: String,
-    #[serde(rename = "runtimeId")]
-    pub runtime_id: String,
-    #[serde(
-        default,
-        rename = "_meta",
-        skip_serializing_if = "TraceContext::is_empty"
-    )]
-    pub trace_context: TraceContext,
-}
-
-impl SandboxProvisioned {
-    #[must_use]
-    pub fn new(
-        session_id: SessionId,
-        runtime_key: impl Into<String>,
-        runtime_id: impl Into<String>,
-    ) -> Self {
-        Self {
-            kind: SANDBOX_PROVISIONED_KIND.to_string(),
-            session_id,
-            runtime_key: runtime_key.into(),
-            runtime_id: runtime_id.into(),
-            trace_context: TraceContext::default(),
-        }
-    }
-
-    #[must_use]
-    pub fn with_trace_context(mut self, trace_context: TraceContext) -> Self {
-        self.trace_context = trace_context;
-        self
-    }
-}
-
-/// Minimal runtime identity surfaced by the wake/provision substrate.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProvisionedRuntime {
-    pub runtime_key: String,
-    pub runtime_id: String,
-}
-
-/// Host-owned adapter that translates a deployment wake into the existing
-/// session resume/provision path.
-#[async_trait]
-pub trait DeploymentWakeHandler: Send + Sync {
-    async fn wake(&self, session_id: &SessionId) -> Result<ProvisionedRuntime>;
-}
-
-#[derive(Clone)]
-pub struct ResumeDeploymentWakeHandler {
-    http: reqwest::Client,
-    control_plane_url: String,
-    shared_state_url: String,
-}
-
-impl ResumeDeploymentWakeHandler {
-    #[must_use]
-    pub fn new(
-        http: reqwest::Client,
-        control_plane_url: impl Into<String>,
-        shared_state_url: impl Into<String>,
-    ) -> Self {
-        Self {
-            http,
-            control_plane_url: control_plane_url.into(),
-            shared_state_url: shared_state_url.into(),
-        }
-    }
-}
-
-#[async_trait]
-impl DeploymentWakeHandler for ResumeDeploymentWakeHandler {
-    async fn wake(&self, session_id: &SessionId) -> Result<ProvisionedRuntime> {
-        let session_id = session_id.to_string();
-        let descriptor = fireline_orchestration::resume(
-            &self.http,
-            &self.control_plane_url,
-            &self.shared_state_url,
-            &session_id,
-        )
-        .await?;
-
-        Ok(ProvisionedRuntime {
-            runtime_key: descriptor.host_key,
-            runtime_id: descriptor.host_id,
-        })
-    }
-}
-
-/// Active subscriber that turns `deployment_wake_requested` into
-/// `sandbox_provisioned` by delegating to the existing wake/provision
-/// composition helper.
-pub struct AlwaysOnDeploymentSubscriber {
-    name: String,
-    wake_handler: Arc<dyn DeploymentWakeHandler>,
-    retry_policy: RetryPolicy,
-}
-
-impl AlwaysOnDeploymentSubscriber {
-    #[must_use]
-    pub fn new(
-        http: reqwest::Client,
-        control_plane_url: impl Into<String>,
-        shared_state_url: impl Into<String>,
-    ) -> Self {
-        Self::with_wake_handler(ResumeDeploymentWakeHandler::new(
-            http,
-            control_plane_url,
-            shared_state_url,
-        ))
-    }
-
-    #[must_use]
-    pub fn with_wake_handler<H>(wake_handler: H) -> Self
-    where
-        H: DeploymentWakeHandler + 'static,
-    {
-        Self {
-            name: "always_on_deployment".to_string(),
-            wake_handler: Arc::new(wake_handler),
-            retry_policy: RetryPolicy::default(),
-        }
-    }
-
-    #[must_use]
-    pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
-        self.retry_policy = retry_policy;
-        self
-    }
-}
-
-impl DurableSubscriber for AlwaysOnDeploymentSubscriber {
-    type Event = DeploymentWakeRequested;
-    type Completion = SandboxProvisioned;
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn matches(&self, envelope: &StreamEnvelope) -> Option<Self::Event> {
-        let event: DeploymentWakeRequested = envelope.value_as()?;
-        (event.kind == DEPLOYMENT_WAKE_REQUESTED_KIND).then_some(event)
-    }
-
-    fn completion_key(&self, event: &Self::Event) -> CompletionKey {
-        event.completion_key()
-    }
-
-    fn is_completed(&self, event: &Self::Event, log: &[StreamEnvelope]) -> bool {
-        log_contains_completion(log, SANDBOX_PROVISIONED_KIND, &event.completion_key())
-    }
-}
-
-#[async_trait]
-impl ActiveSubscriber for AlwaysOnDeploymentSubscriber {
-    async fn handle(&self, event: Self::Event) -> HandlerOutcome<Self::Completion> {
-        let session_id = event.session_id.clone();
-        let trace_context = event.trace_context.clone();
-        match self.wake_handler.wake(&session_id).await {
-            Ok(runtime) => HandlerOutcome::Completed(
-                SandboxProvisioned::new(session_id, runtime.runtime_key, runtime.runtime_id)
-                    .with_trace_context(trace_context),
-            ),
-            Err(error) => HandlerOutcome::RetryTransient(error),
-        }
-    }
-
-    fn retry_policy(&self) -> RetryPolicy {
-        self.retry_policy
-    }
-}
-
-/// Durable subscriber driver.
+/// Phase 1 registration-only driver.
 ///
-/// The driver now retains passive replay/wait helpers and subscriber
-/// registration. Later active profiles hang off the same surface.
+/// The driver records the durable subscriber inventory without dispatching or
+/// replaying anything yet. That keeps the substrate inert until the first real
+/// consumer ports onto it in Phase 2.
 #[derive(Default)]
 pub struct DurableSubscriberDriver {
     registrations: Vec<Box<dyn ErasedRegistration>>,
@@ -966,12 +522,6 @@ fn non_empty_meta_value(meta: &Map<String, Value>, field: &str) -> Option<String
         .map(str::to_string)
 }
 
-fn log_contains_completion(log: &[StreamEnvelope], kind: &str, key: &CompletionKey) -> bool {
-    log.iter().any(|envelope| {
-        envelope.kind() == Some(kind) && envelope.completion_key().as_ref() == Some(key)
-    })
-}
-
 fn session_id_from_value(value: &Value) -> Option<SessionId> {
     value.as_str().map(|text| SessionId::from(text.to_string()))
 }
@@ -1067,8 +617,6 @@ fn request_id_storage_key(value: &RequestId) -> String {
 }
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
 
     #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1138,67 +686,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct RecordingWakeTimerRuntime {
-        now_ms: Arc<Mutex<i64>>,
-        sleeps: Arc<Mutex<Vec<Duration>>>,
-    }
-
-    impl RecordingWakeTimerRuntime {
-        fn new(now_ms: i64) -> Self {
-            Self {
-                now_ms: Arc::new(Mutex::new(now_ms)),
-                sleeps: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-
-        fn sleeps(&self) -> Vec<Duration> {
-            self.sleeps.lock().unwrap().clone()
-        }
-    }
-
-    #[async_trait]
-    impl WakeTimerRuntime for RecordingWakeTimerRuntime {
-        fn now_ms(&self) -> i64 {
-            *self.now_ms.lock().unwrap()
-        }
-
-        async fn sleep(&self, duration: Duration) {
-            self.sleeps.lock().unwrap().push(duration);
-            *self.now_ms.lock().unwrap() += duration.as_millis() as i64;
-        }
-    }
-
-    #[derive(Clone)]
-    struct RecordingDeploymentWakeHandler {
-        runtime: ProvisionedRuntime,
-        sessions: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl RecordingDeploymentWakeHandler {
-        fn new(runtime_key: &str, runtime_id: &str) -> Self {
-            Self {
-                runtime: ProvisionedRuntime {
-                    runtime_key: runtime_key.to_string(),
-                    runtime_id: runtime_id.to_string(),
-                },
-                sessions: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-
-        fn sessions(&self) -> Vec<String> {
-            self.sessions.lock().unwrap().clone()
-        }
-    }
-
-    #[async_trait]
-    impl DeploymentWakeHandler for RecordingDeploymentWakeHandler {
-        async fn wake(&self, session_id: &SessionId) -> Result<ProvisionedRuntime> {
-            self.sessions.lock().unwrap().push(session_id.to_string());
-            Ok(self.runtime.clone())
-        }
-    }
-
     #[test]
     fn completion_key_round_trips_canonical_refs() {
         let prompt_key = CompletionKey::from(PromptRequestRef {
@@ -1229,16 +716,6 @@ mod tests {
     }
 
     #[test]
-    fn completion_key_supports_session_scoped_deployments() {
-        let key = CompletionKey::session(SessionId::from("deployment-session"));
-
-        assert_eq!(key.session_id(), &SessionId::from("deployment-session"));
-        assert_eq!(key.prompt_ref(), None);
-        assert_eq!(key.tool_ref(), None);
-        assert_eq!(key.storage_key(), "session:deployment-session");
-    }
-
-    #[test]
     fn stream_envelope_extracts_prompt_key_and_trace_context() {
         let envelope = StreamEnvelope::from_json(serde_json::json!({
             "type": "permission",
@@ -1256,7 +733,6 @@ mod tests {
         }))
         .expect("decode stream envelope");
 
-        assert_eq!(envelope.kind(), Some("permission_request"));
         assert_eq!(
             envelope.completion_key(),
             Some(CompletionKey::prompt(
@@ -1283,7 +759,6 @@ mod tests {
             "key": "session-2:tool-9",
             "headers": {},
             "value": {
-                "kind": "tool_invoked",
                 "sessionId": "session-2",
                 "toolCallId": "tool-9"
             }
@@ -1296,27 +771,6 @@ mod tests {
                 SessionId::from("session-2"),
                 ToolCallId::from("tool-9".to_string())
             ))
-        );
-    }
-
-    #[test]
-    fn stream_envelope_extracts_session_key_when_prompt_and_tool_keys_are_absent() {
-        let envelope = StreamEnvelope::from_json(serde_json::json!({
-            "type": "deployment",
-            "key": "deployment-session",
-            "headers": {},
-            "value": {
-                "kind": DEPLOYMENT_WAKE_REQUESTED_KIND,
-                "sessionId": "deployment-session"
-            }
-        }))
-        .expect("decode stream envelope");
-
-        assert_eq!(
-            envelope.completion_key(),
-            Some(CompletionKey::session(SessionId::from(
-                "deployment-session"
-            )))
         );
     }
 
@@ -1403,137 +857,5 @@ mod tests {
             Some(Duration::from_millis(250))
         );
         assert_eq!(policy.backoff_for_attempt(5), None);
-    }
-
-    #[tokio::test]
-    async fn wake_timer_subscriber_replay_restores_pending_wait_using_remaining_delay() {
-        let runtime = RecordingWakeTimerRuntime::new(1_250);
-        let subscriber = WakeTimerSubscriber::with_runtime(runtime.clone());
-        let event = WakeTimerRequest::new(
-            SessionId::from("session-1"),
-            RequestId::from("request-1".to_string()),
-            1_600,
-        )
-        .with_trace_context(TraceContext {
-            traceparent: Some("00-trace-01".to_string()),
-            tracestate: None,
-            baggage: None,
-        });
-
-        let outcome = subscriber.handle(event).await;
-        let completion = match outcome {
-            HandlerOutcome::Completed(completion) => completion,
-            HandlerOutcome::RetryTransient(error) | HandlerOutcome::Failed(error) => {
-                panic!("unexpected wake timer failure: {error:#}")
-            }
-        };
-
-        assert_eq!(runtime.sleeps(), vec![Duration::from_millis(350)]);
-        assert_eq!(
-            completion,
-            TimerFired::new(
-                SessionId::from("session-1"),
-                RequestId::from("request-1".to_string()),
-                1_600
-            )
-            .with_trace_context(TraceContext {
-                traceparent: Some("00-trace-01".to_string()),
-                tracestate: None,
-                baggage: None,
-            })
-        );
-    }
-
-    #[test]
-    fn wake_timer_subscriber_detects_existing_completion() {
-        let subscriber = WakeTimerSubscriber::new();
-        let event = WakeTimerRequest::new(
-            SessionId::from("session-1"),
-            RequestId::from("request-1".to_string()),
-            1_600,
-        );
-        let log = vec![
-            StreamEnvelope::from_json(serde_json::json!({
-                "type": "completion",
-                "key": "session-1:request-1:timer",
-                "headers": {},
-                "value": {
-                    "kind": TIMER_FIRED_KIND,
-                    "sessionId": "session-1",
-                    "requestId": "request-1",
-                    "firedAtMs": 1600
-                }
-            }))
-            .expect("decode timer completion envelope"),
-        ];
-
-        assert!(subscriber.is_completed(&event, &log));
-    }
-
-    #[tokio::test]
-    async fn always_on_deployment_subscriber_delegates_to_wake_handler() {
-        let wake_handler = RecordingDeploymentWakeHandler::new("runtime-key-1", "runtime-id-1");
-        let subscriber = AlwaysOnDeploymentSubscriber::with_wake_handler(wake_handler.clone())
-            .with_retry_policy(RetryPolicy {
-                max_attempts: 3,
-                initial_backoff: Duration::from_millis(50),
-                max_backoff: Duration::from_secs(1),
-            });
-        let event = DeploymentWakeRequested::new(SessionId::from("deployment-session"))
-            .with_trace_context(TraceContext {
-                traceparent: Some("00-deploy-trace".to_string()),
-                tracestate: Some("vendor=value".to_string()),
-                baggage: None,
-            });
-
-        let outcome = subscriber.handle(event).await;
-        let completion = match outcome {
-            HandlerOutcome::Completed(completion) => completion,
-            HandlerOutcome::RetryTransient(error) | HandlerOutcome::Failed(error) => {
-                panic!("unexpected deployment wake failure: {error:#}")
-            }
-        };
-
-        assert_eq!(
-            wake_handler.sessions(),
-            vec!["deployment-session".to_string()]
-        );
-        assert_eq!(
-            completion,
-            SandboxProvisioned::new(
-                SessionId::from("deployment-session"),
-                "runtime-key-1",
-                "runtime-id-1",
-            )
-            .with_trace_context(TraceContext {
-                traceparent: Some("00-deploy-trace".to_string()),
-                tracestate: Some("vendor=value".to_string()),
-                baggage: None,
-            })
-        );
-    }
-
-    #[test]
-    fn always_on_deployment_subscriber_detects_existing_provisioning_completion() {
-        let subscriber = AlwaysOnDeploymentSubscriber::with_wake_handler(
-            RecordingDeploymentWakeHandler::new("runtime-key-1", "runtime-id-1"),
-        );
-        let event = DeploymentWakeRequested::new(SessionId::from("deployment-session"));
-        let log = vec![
-            StreamEnvelope::from_json(serde_json::json!({
-                "type": "deployment",
-                "key": "deployment-session:ready",
-                "headers": {},
-                "value": {
-                    "kind": SANDBOX_PROVISIONED_KIND,
-                    "sessionId": "deployment-session",
-                    "runtimeKey": "runtime-key-1",
-                    "runtimeId": "runtime-id-1"
-                }
-            }))
-            .expect("decode sandbox_provisioned envelope"),
-        ];
-
-        assert!(subscriber.is_completed(&event, &log));
     }
 }
