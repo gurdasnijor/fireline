@@ -11,8 +11,17 @@ export {
   WorkflowContext,
   workflowContext,
   type Awakeable,
+  type AwakeableResolution,
   type WorkflowContextOptions,
 } from './awakeable.js'
+export {
+  raceAwakeables,
+  type AwakeableRaceWinner,
+} from './race.js'
+export {
+  AwakeableTimeoutError,
+  withAwakeableTimeout,
+} from './timeout.js'
 export {
   completionKeyStorageKey,
   promptCompletionKey,

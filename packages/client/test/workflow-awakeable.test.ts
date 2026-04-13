@@ -28,9 +28,11 @@ vi.mock('@durable-streams/client', () => {
 })
 
 import {
+  AwakeableTimeoutError,
   AwakeableAlreadyResolvedError,
   rejectAwakeable,
   promptCompletionKey,
+  raceAwakeables,
   resolveAwakeable,
   workflowContext,
 } from '../src/index.js'
@@ -273,5 +275,136 @@ describe('workflow awakeable surface', () => {
         },
       },
     })
+  })
+
+  it('raceAwakeables returns the first resolved branch and preserves winner trace context', async () => {
+    appendMock.mockResolvedValue()
+    const subscribers: Array<
+      (
+        batch: JsonBatch<{
+          readonly type: string
+          readonly key: string
+          readonly value?: Record<string, unknown>
+        }>,
+      ) => void
+    > = []
+    streamMock.mockResolvedValue({
+      subscribeJson(
+        subscriber: (
+          batch: JsonBatch<{
+            readonly type: string
+            readonly key: string
+            readonly value?: Record<string, unknown>
+          }>,
+        ) => void,
+      ) {
+        subscribers.push(subscriber)
+        return vi.fn()
+      },
+    })
+
+    const ctx = workflowContext({
+      stateStreamUrl: 'http://127.0.0.1:7474/v1/stream/state',
+    })
+    const first = ctx.awakeable<string>(
+      promptCompletionKey({
+        sessionId: 'session-a' as SessionId,
+        requestId: 'request-a' as RequestId,
+      }),
+    )
+    const second = ctx.awakeable<string>(
+      promptCompletionKey({
+        sessionId: 'session-a' as SessionId,
+        requestId: 'request-b' as RequestId,
+      }),
+    )
+
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(subscribers).toHaveLength(2)
+
+    const raced = raceAwakeables([first, second])
+
+    subscribers[1]!({
+      items: [
+        {
+          type: 'awakeable',
+          key: 'prompt:session-a:request-b:resolved',
+          value: {
+            kind: 'awakeable_resolved',
+            sessionId: 'session-a',
+            requestId: 'request-b',
+            value: 'winner-b',
+            resolvedAtMs: 1,
+            _meta: {
+              traceparent:
+                '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01',
+            },
+          },
+        },
+      ],
+      offset: '2',
+      upToDate: true,
+      streamClosed: false,
+    })
+
+    await expect(raced).resolves.toEqual({
+      winnerIndex: 1,
+      winnerKey: promptCompletionKey({
+        sessionId: 'session-a' as SessionId,
+        requestId: 'request-b' as RequestId,
+      }),
+      value: 'winner-b',
+      traceContext: {
+        traceparent:
+          '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01',
+        tracestate: undefined,
+        baggage: undefined,
+      },
+    })
+
+    subscribers[0]!({
+      items: [
+        {
+          type: 'awakeable',
+          key: 'prompt:session-a:request-a:resolved',
+          value: {
+            kind: 'awakeable_resolved',
+            sessionId: 'session-a',
+            requestId: 'request-a',
+            value: 'later-a',
+            resolvedAtMs: 2,
+          },
+        },
+      ],
+      offset: '3',
+      upToDate: true,
+      streamClosed: false,
+    })
+
+    await expect(first.promise).resolves.toBe('later-a')
+  })
+
+  it('awakeable.withTimeout stays signature-only until DS Phase 6 lands', async () => {
+    appendMock.mockResolvedValue()
+    streamMock.mockResolvedValue({
+      subscribeJson() {
+        return vi.fn()
+      },
+    })
+
+    const ctx = workflowContext({
+      stateStreamUrl: 'http://127.0.0.1:7474/v1/stream/state',
+    })
+    const awakeable = ctx.awakeable<boolean>(
+      promptCompletionKey({
+        sessionId: 'session-timeout' as SessionId,
+        requestId: 'request-timeout' as RequestId,
+      }),
+    )
+
+    await expect(awakeable.withTimeout(30_000)).rejects.toBeInstanceOf(
+      AwakeableTimeoutError,
+    )
   })
 })

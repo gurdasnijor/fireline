@@ -5,8 +5,10 @@ import { connectAcp } from './connect.js'
 import { Sandbox, agent, compose, middleware, sandbox } from './sandbox.js'
 import { fanout, peer, pipe } from './topology.js'
 import {
+  AwakeableTimeoutError,
   WorkflowContext,
   awakeableRejectionEnvelope,
+  raceAwakeables,
   completionKeyStorageKey,
   promptCompletionKey,
   rejectAwakeable,
@@ -32,6 +34,8 @@ const fireline = {
   workflowContext,
   awakeableRejectionEnvelope,
   rejectAwakeable,
+  raceAwakeables,
+  AwakeableTimeoutError,
   resolveAwakeable,
   promptCompletionKey,
   toolCompletionKey,
@@ -48,9 +52,11 @@ export { fanout, peer, pipe }
 export { appendApprovalResolved } from './events.js'
 export { connectAcp } from './connect.js'
 export {
+  AwakeableTimeoutError,
   AwakeableAlreadyResolvedError,
   WorkflowContext,
   awakeableRejectionEnvelope,
+  raceAwakeables,
   completionKeyStorageKey,
   promptCompletionKey,
   rejectAwakeable,
@@ -74,6 +80,8 @@ export type { ConnectedAcp } from './connect.js'
 export type {
   Awakeable,
   AwakeableKey,
+  AwakeableRaceWinner,
+  AwakeableResolution,
   CompletionKey,
   RejectAwakeableOptions,
   ResolveAwakeableOptions,

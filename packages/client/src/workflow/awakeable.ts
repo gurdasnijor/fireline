@@ -1,8 +1,9 @@
-import { DurableStream, stream } from '@durable-streams/client'
+import { DurableStream, stream, type JsonBatch } from '@durable-streams/client'
 
 import type { SessionId } from '../acp-ids.js'
-import type { CompletionKey } from './keys.js'
+import type { CompletionKey, WorkflowTraceContext } from './keys.js'
 import { completionKeyStorageKey, sessionCompletionKey } from './keys.js'
+import { withAwakeableTimeout } from './timeout.js'
 
 type StreamEnvelope = {
   readonly type: string
@@ -21,6 +22,21 @@ type StreamEnvelope = {
 export interface Awakeable<T> {
   readonly key: CompletionKey
   readonly promise: Promise<T>
+  withTimeout(durationMs: number): Promise<T>
+}
+
+export interface AwakeableResolution<T> {
+  readonly key: CompletionKey
+  readonly value: T
+  readonly traceContext?: WorkflowTraceContext
+}
+
+export const awakeableResolutionSymbol: unique symbol = Symbol(
+  'fireline.workflow.awakeableResolution',
+)
+
+type InternalAwakeable<T> = Awakeable<T> & {
+  readonly [awakeableResolutionSymbol]: Promise<AwakeableResolution<T>>
 }
 
 /**
@@ -57,14 +73,20 @@ export class WorkflowContext {
   }
 
   awakeable<T>(key: CompletionKey): Awakeable<T> {
-    return {
+    const resolution = waitForAwakeableResolution<T>({
+      stateStreamUrl: this.stateStreamUrl,
+      headers: this.headers,
       key,
-      promise: waitForAwakeable<T>({
-        stateStreamUrl: this.stateStreamUrl,
-        headers: this.headers,
-        key,
-      }),
+    })
+    const awakeable: InternalAwakeable<T> = {
+      key,
+      promise: resolution.then((result) => result.value),
+      withTimeout(durationMs: number): Promise<T> {
+        return withAwakeableTimeout(awakeable, durationMs)
+      },
+      [awakeableResolutionSymbol]: resolution,
     }
+    return awakeable
   }
 
   sessionAwakeable<T>(sessionId: SessionId): Awakeable<T> {
@@ -83,11 +105,11 @@ export function workflowContext(options: WorkflowContextOptions): WorkflowContex
   return new WorkflowContext(options)
 }
 
-async function waitForAwakeable<T>(options: {
+async function waitForAwakeableResolution<T>(options: {
   readonly stateStreamUrl: string
   readonly headers?: Readonly<Record<string, string>>
   readonly key: CompletionKey
-}): Promise<T> {
+}): Promise<AwakeableResolution<T>> {
   const handle = new DurableStream({
     url: options.stateStreamUrl,
     headers: options.headers,
@@ -106,9 +128,8 @@ async function waitForAwakeable<T>(options: {
     offset: '-1',
   })
 
-  return await new Promise<T>((resolve, reject) => {
+  return await new Promise<AwakeableResolution<T>>((resolve, reject) => {
     let settled = false
-    let stopAssigned = false
     let pendingStop = false
     let stop = () => {
       pendingStop = true
@@ -123,11 +144,15 @@ async function waitForAwakeable<T>(options: {
       callback()
     }
 
-    stop = response.subscribeJson((batch) => {
+    stop = response.subscribeJson((batch: JsonBatch<StreamEnvelope>) => {
       for (const row of batch.items) {
         if (matchesResolvedEnvelope(row, options.key)) {
           finish(() => {
-            resolve(row.value?.value as T)
+            resolve({
+              key: options.key,
+              value: row.value?.value as T,
+              traceContext: extractTraceContext(row),
+            })
           })
           return
         }
@@ -153,7 +178,6 @@ async function waitForAwakeable<T>(options: {
         })
       }
     })
-    stopAssigned = true
     if (pendingStop) {
       stop()
     }
@@ -201,4 +225,31 @@ function matchesRejectedEnvelope(
     row.value?.kind === 'awakeable_rejected' &&
     row.key === `${completionKeyStorageKey(key)}:rejected`
   )
+}
+
+function extractTraceContext(
+  row: StreamEnvelope,
+): WorkflowTraceContext | undefined {
+  const meta = row.value?._meta
+  if (!meta || typeof meta !== 'object') {
+    return undefined
+  }
+  const metaRecord = meta as Record<string, unknown>
+
+  const traceContext = {
+    traceparent:
+      typeof metaRecord.traceparent === 'string'
+        ? metaRecord.traceparent
+        : undefined,
+    tracestate:
+      typeof metaRecord.tracestate === 'string'
+        ? metaRecord.tracestate
+        : undefined,
+    baggage:
+      typeof metaRecord.baggage === 'string' ? metaRecord.baggage : undefined,
+  }
+
+  return Object.values(traceContext).some((value) => value !== undefined)
+    ? traceContext
+    : undefined
 }
