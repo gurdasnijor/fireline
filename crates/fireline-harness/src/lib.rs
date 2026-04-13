@@ -6,6 +6,7 @@ pub mod budget;
 pub mod context;
 pub mod durable_subscriber;
 mod host_topology;
+pub mod peer_routing;
 pub mod routes_acp;
 pub mod secrets;
 pub mod shared_terminal;
@@ -26,6 +27,10 @@ pub use durable_subscriber::{
     ActiveSubscriber, CompletionKey, DurableSubscriber, DurableSubscriberDriver, HandlerOutcome,
     PassiveSubscriber, PassiveWaitPolicy, RetryPolicy, StreamEnvelope, SubscriberMode,
     SubscriberRegistration, TraceContext,
+};
+pub use peer_routing::{
+    PEER_DELIVERY_ACK_ENTITY_TYPE, PeerDeliveryAcknowledged, PeerDispatchSuccess,
+    PeerRoutingDispatcher, PeerRoutingEvent, PeerRoutingSubscriber,
 };
 pub use routes_acp::{AcpRouteState, BaseComponentsFactory};
 pub use secrets::{
