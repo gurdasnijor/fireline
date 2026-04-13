@@ -26,11 +26,11 @@ Logs arrive too late, prompt guardrails are suggestions, and most agent sessions
 
 ## See It In Action
 
-**This is the north-star file: one ACP agent, wrapped with tracing, approvals, budgets, secrets, and peer discovery.**
+**This is the working demo spec on current `main`: one ACP agent, wrapped with tracing, approvals, budgets, and peer discovery.**
 
 ```typescript
 import { compose, agent, sandbox, middleware } from '@fireline/client'
-import { approve, budget, peer, secretsProxy, trace } from '@fireline/client/middleware'
+import { approve, budget, peer, trace } from '@fireline/client/middleware'
 import { localPath } from '@fireline/client/resources'
 
 export default compose(
@@ -39,32 +39,32 @@ export default compose(
     trace(),
     approve({ scope: 'tool_calls' }),
     budget({ tokens: 2_000_000 }),
-    secretsProxy({
-      ANTHROPIC_API_KEY: { ref: 'env:ANTHROPIC_API_KEY' },
-      GITHUB_TOKEN: { ref: 'secret:gh-pat', allow: 'api.github.com' },
-    }),
     peer({ peers: ['reviewer'] }),
   ]),
-  agent(['pi-acp']),
+  agent(['npx', '-y', '@agentclientprotocol/claude-agent-acp']),
 )
 ```
 
-**Run it locally. Build it for deployment. Same spec.**
+This is the same shape used in [docs/demos/assets/agent.ts](docs/demos/assets/agent.ts).
 
-```bash
-npx fireline run agent.ts
-#   ✓ fireline ready
-#     sandbox: runtime:59f5ed5a-d624-…
-#     ACP:     ws://127.0.0.1:54896/acp
-#     state:   http://127.0.0.1:7474/v1/stream/fireline-state-runtime-…
+**Actual output today.**
 
-npx fireline build agent.ts --target fly
-#   ✓ fireline build complete
-#     image:     fireline-agent:latest
-#     scaffold:  /path/to/fly.toml
+```text
+$ npx fireline run docs/demos/assets/agent.ts --port 8989
+fireline: reusing fireline-streams at :7474
+
+  ✓ fireline ready
+
+    sandbox:   runtime:f2a2e08a-5cb3-4ecd-abc8-6ff0735a3687
+    ACP:       ws://127.0.0.1:58996/acp
+    state:     http://127.0.0.1:7474/v1/stream/fireline-state-runtime-f2a2e08a-5cb3-4ecd-abc8-6ff0735a3687
+
+  Press Ctrl+C to shut down.
+
+  To interact: npx fireline docs/demos/assets/agent.ts --repl
 ```
 
-This is the shape behind the [pi-acp → OpenClaw](docs/demos/pi-acp-to-openclaw.md) story: start with a local agent, then keep the same authored spec as you add operator-facing visibility, approval gates, and peer workflows.
+This capture is from [docs/demos/recordings/jessica-dryrun-2026-04-13.md](docs/demos/recordings/jessica-dryrun-2026-04-13.md). For the hosted-image path after local boot, use the [Local To Cloud guide](docs/guide/guides/local-to-cloud.md).
 
 ## What You Stop Hand-Building
 
@@ -72,7 +72,35 @@ This is the shape behind the [pi-acp → OpenClaw](docs/demos/pi-acp-to-openclaw
   <img alt="Before and after Fireline" src="assets/before-after.svg" width="100%">
 </picture>
 
-Fireline replaces the usual pile of custom agent plumbing: polling loops, approval callbacks, status merging, restart glue, session tracking, and one-off dashboards.
+Without Fireline, a real agent usually means hand-building and maintaining:
+
+- durable state storage with replay semantics: roughly 300 LOC
+- an approval gate with rebuild-from-log behavior: roughly 150 LOC
+- OpenTelemetry span emission with canonical ACP ids: roughly 200 LOC
+- peer routing and lineage plumbing across agents: roughly 150 LOC
+
+That is roughly **800 LOC of bespoke agent infrastructure** before you build any product UI.
+
+With Fireline, it becomes:
+
+```typescript
+import { compose, agent, sandbox, middleware } from '@fireline/client'
+import { approve, budget, peer, trace } from '@fireline/client/middleware'
+import { localPath } from '@fireline/client/resources'
+
+export default compose(
+  sandbox({ resources: [localPath('.', '/workspace')] }),
+  middleware([
+    trace(),
+    approve({ scope: 'tool_calls' }),
+    budget({ tokens: 2_000_000 }),
+    peer({ peers: ['reviewer'] }),
+  ]),
+  agent(['npx', '-y', '@agentclientprotocol/claude-agent-acp']),
+)
+```
+
+That's it.
 
 ## Why It's Different
 
@@ -98,7 +126,7 @@ Fireline replaces the usual pile of custom agent plumbing: polling loops, approv
       <img alt="Secrets isolation" src="assets/secrets-isolation.svg" width="100%">
       <br>
       <strong>Secrets</strong><br>
-      Inject credentials at call time without handing plaintext tokens to the agent, then audit the use through the same durable surface.
+      The design goal is credential injection without handing plaintext tokens to the agent; the live demo spec currently omits <code>secretsProxy()</code> while that path is finished post-demo.
       <br>
       <a href="docs/guide/middleware.md">Middleware guide</a> · <a href="docs/proposals/secrets-injection-component.md">Design detail</a>
     </td>
@@ -135,8 +163,17 @@ Fireline replaces the usual pile of custom agent plumbing: polling loops, approv
 
 ## Quick Start
 
+Today the honest quick start is from a repo checkout. The public `@fireline/cli` and `@fireline/client` npm packages are not published yet, so start with the repo-local `npx fireline` workflow:
+
 ```bash
-npm install @fireline/client @fireline/cli
+git clone https://github.com/gurdasnijor/fireline.git
+cd fireline
+pnpm install
+pnpm --filter @fireline/cli build
+cargo build --bin fireline --bin fireline-streams
+
+export FIRELINE_BIN="$PWD/target/debug/fireline"
+export FIRELINE_STREAMS_BIN="$PWD/target/debug/fireline-streams"
 ```
 
 ```typescript
@@ -155,7 +192,7 @@ export default compose(
 npx fireline run agent.ts
 ```
 
-If you are running from this repo checkout, the CLI still resolves the local Rust binaries described in the [CLI guide](docs/guide/cli.md). A shorter guided quick start is landing at `docs/guide/quickstart.md`; until then, start with the [Developer Guide](docs/guide/README.md), [CLI guide](docs/guide/cli.md), and [Compose and Start](docs/guide/compose-and-start.md).
+That repo-local path is documented end to end in the [5-minute Quickstart](docs/guide/guides/quickstart.md). For the full CLI surface, use the [CLI guide](docs/guide/cli.md) and [Compose and Start](docs/guide/compose-and-start.md).
 
 ## Examples
 
