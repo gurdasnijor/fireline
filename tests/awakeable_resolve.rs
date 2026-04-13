@@ -376,7 +376,15 @@ async fn resolve_awakeable_cross_process_duplicates_are_semantic_noop_on_replay(
     let observed = race_until_duplicate_resolutions(&stream_server, &key, 16).await?;
 
     assert_eq!(
-        observed.rows.len(),
+        observed
+            .rows
+            .iter()
+            .filter_map(|row| StreamEnvelope::from_json(row.clone()).ok())
+            .filter(|envelope| {
+                envelope.kind() == Some(AWAKEABLE_RESOLVED_KIND)
+                    && envelope.completion_key().as_ref() == Some(&key)
+            })
+            .count(),
         2,
         "DSV-01 regression: the stream-level race must preserve both completion envelopes once the duplicate case is hit"
     );
