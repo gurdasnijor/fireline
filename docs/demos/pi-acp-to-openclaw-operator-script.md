@@ -12,7 +12,7 @@
 | Gate | Status | Blocker | Demo impact |
 |---|---|---|---|
 | T1 `fireline deploy` wrapper | ✓ LANDED | — | Step 5 command set is real |
-| T2 Tier A local Docker smoke | ⚠ partial | session/load after restart broken (`mono-thnc.2.3`) | Step 3 signature moment may downgrade to PRE-STAGED |
+| T2 Tier A local Docker smoke | ⚠ partial | session/load after restart — **fix in flight on w19 per Jeff's analysis `498fff6`** (missing `.live(LiveMode::Off)` + bootstrap state-stream-url forwarding), ETA 2–4h | Step 3 signature moment goes LIVE if fix lands before Rehearsal 1; else PRE-STAGED fallback |
 | T3 peer-to-peer replay | ✓ LANDED `d543eac` | — | Step 6 has driver script ready |
 | T4.1 five OTel spans | ◐ in flight on w25 | — | Pane C / Step 7 fidelity depends on this |
 | T4.2 peer `_meta` propagation | ○ blocked | canonical-ids Phase 4 (`mono-vkpp.6`) | Step 6 trace tree lineage across agents degrades if not green; acceptable fallback |
@@ -181,10 +181,14 @@ npx fireline docs/demos/assets/agent.ts --resume <session-id-shown-in-step-1>
 the agent was doing — midsentence — resumes, because state lives in
 durable-streams, not in the host's RAM."
 
-**DEMO-RISK (open):** `mono-thnc.2.3` — in local-Docker smoke, session/load
-does NOT complete after `docker stop/start` even though durable-stream rows
-persist. If this bug is unresolved by Rehearsal 1, Step 3's live resume path
-does not work. Pre-flight P10 is the concrete go/no-go gate.
+**DEMO-RISK (mitigating):** `mono-thnc.2.3` — in local-Docker smoke,
+session/load does NOT complete after `docker stop/start` even though
+durable-stream rows persist. **Jeff root-caused at `498fff6`**: primary
+cause is missing `.live(LiveMode::Off)` on the read path; secondary is
+bootstrap not forwarding state-stream-url. Fix in flight on w19 (2–4h,
+LOW regression risk, standalone fireline-host + docker diff). If the fix
+lands before Rehearsal 1, this step goes LIVE. If not, fall back per
+below. Pre-flight P10 is the concrete go/no-go gate on the day.
 
 **Fallback:** if `--resume` or post-restart session/load doesn't complete
 (pre-flight P3 or P10), operator uses the lower-level `fireline

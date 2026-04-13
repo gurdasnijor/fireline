@@ -25,3 +25,4 @@ deploy/observability/*.env
 
 # TLC model-checker output
 states/
+deploy/observability/dashboard/saved-view-url.txt
