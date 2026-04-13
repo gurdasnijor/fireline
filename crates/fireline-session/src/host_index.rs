@@ -48,7 +48,7 @@ use anyhow::Result;
 use serde::Deserialize;
 
 use crate::projection::{ChangeOperation, StateEnvelope, StreamProjection};
-use crate::{HostDescriptor, PersistedHostSpec};
+use crate::{HostDescriptor, HostStatus, PersistedHostSpec};
 
 /// The observed lifecycle state of a single `fireline` process on
 /// the shared state stream. Matches the `status` discriminator
@@ -195,6 +195,7 @@ impl HostIndex {
                         return Ok(());
                     };
                     let record: HostInstanceRecord = serde_json::from_value(value.clone())?;
+                    self.apply_instance_status_to_endpoints(&record);
                     self.host_instances
                         .write()
                         .unwrap()
@@ -229,6 +230,20 @@ impl HostIndex {
         }
 
         Ok(())
+    }
+
+    fn apply_instance_status_to_endpoints(&self, record: &HostInstanceRecord) {
+        if !matches!(record.status, HostInstanceStatus::Stopped) {
+            return;
+        }
+
+        let mut endpoints = self.host_endpoints.write().unwrap();
+        for descriptor in endpoints.values_mut() {
+            if descriptor.host_id == record.instance_id {
+                descriptor.status = HostStatus::Stopped;
+                descriptor.updated_at_ms = descriptor.updated_at_ms.max(record.updated_at);
+            }
+        }
     }
 }
 
@@ -499,6 +514,49 @@ mod tests {
         let descriptor = index.endpoints_for("runtime:one").await.unwrap();
         assert_eq!(descriptor.updated_at_ms, 300);
         assert!(matches!(descriptor.status, HostStatus::Stopped));
+    }
+
+    #[tokio::test]
+    async fn runtime_instance_stop_updates_cached_endpoints_status() {
+        let index = HostIndex::new();
+        let endpoints: StateEnvelope = serde_json::from_value(serde_json::json!({
+            "type": "runtime_endpoints",
+            "key": "runtime:one",
+            "headers": { "operation": "update" },
+            "value": {
+                "runtimeKey": "runtime:one",
+                "runtimeId": "fireline:one:abcd",
+                "nodeId": "node:test",
+                "provider": "local",
+                "providerInstanceId": "local:1",
+                "status": "ready",
+                "acp": { "url": "ws://127.0.0.1:9991/acp" },
+                "state": { "url": "http://127.0.0.1:9991/v1/stream/state-one" },
+                "createdAtMs": 100,
+                "updatedAtMs": 200
+            }
+        }))
+        .unwrap();
+        let stopped_instance: StateEnvelope = serde_json::from_value(serde_json::json!({
+            "type": "runtime_instance",
+            "key": "fireline:one:abcd",
+            "headers": { "operation": "update" },
+            "value": {
+                "instanceId": "fireline:one:abcd",
+                "runtimeName": "one",
+                "status": "stopped",
+                "createdAt": 100,
+                "updatedAt": 300
+            }
+        }))
+        .unwrap();
+
+        index.apply(&endpoints).unwrap();
+        index.apply(&stopped_instance).unwrap();
+
+        let descriptor = index.endpoints_for("runtime:one").await.unwrap();
+        assert!(matches!(descriptor.status, HostStatus::Stopped));
+        assert_eq!(descriptor.updated_at_ms, 300);
     }
 
     #[tokio::test]
