@@ -1,6 +1,6 @@
 import { ChildProcess, spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, parse as parsePath, resolve as resolvePath } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -80,6 +80,8 @@ const defaultCliRuntime: CliRuntime = {
 
 const WORKSPACE_ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), '../../..')
 const SPEC_LOADER_TSCONFIG = resolvePath(WORKSPACE_ROOT, 'packages/fireline/tsconfig.loader.json')
+const CLIENT_DIST_ENTRY = resolvePath(WORKSPACE_ROOT, 'packages/client/dist/index.js')
+const STATE_DIST_ENTRY = resolvePath(WORKSPACE_ROOT, 'packages/state/dist/index.js')
 
 const GENERAL_HELP = `
 fireline — run specs locally, build hosted images, deploy them, or install ACP agents
@@ -556,6 +558,7 @@ export interface LoadedSpec {
 }
 
 export async function loadSpec(specPath: string): Promise<LoadedSpec> {
+  await ensureWorkspaceSpecDependenciesBuilt(specPath)
   const parentURL = pathToFileURL(`${dirname(specPath)}/`).href
   const mod = await tsImport(pathToFileURL(specPath).href, {
     parentURL,
@@ -593,6 +596,30 @@ export function unwrapDefaultExport(value: unknown): unknown {
     current = (current as { default?: unknown }).default
   }
   return current
+}
+
+async function ensureWorkspaceSpecDependenciesBuilt(specPath: string): Promise<void> {
+  if (!specPath.startsWith(WORKSPACE_ROOT)) {
+    return
+  }
+
+  const source = await readFile(specPath, 'utf8')
+  const needsClient = source.includes('@fireline/client')
+  const needsState = source.includes('@fireline/state')
+
+  if ((needsClient || needsState) && !existsSync(STATE_DIST_ENTRY)) {
+    await buildWorkspacePackage('@fireline/state')
+  }
+  if (needsClient && !existsSync(CLIENT_DIST_ENTRY)) {
+    await buildWorkspacePackage('@fireline/client')
+  }
+}
+
+async function buildWorkspacePackage(filter: '@fireline/client' | '@fireline/state'): Promise<void> {
+  const exitCode = await runChild('pnpm', ['--filter', filter, 'build'], { cwd: WORKSPACE_ROOT })
+  if (exitCode !== 0) {
+    throw new Error(`failed to build ${filter} for repo-local spec loading`)
+  }
 }
 
 async function isHealthy(url: string): Promise<boolean> {
