@@ -22,6 +22,7 @@ export interface ParsedArgs {
   readonly file: string | null
   readonly passthroughArgs: readonly string[]
   readonly port: number
+  readonly repl: boolean
   readonly streamsPort: number
   readonly stateStream: string | null
   readonly name: string | null
@@ -98,6 +99,7 @@ Usage:
 
 Run flags:
   --port <n>           ACP control-plane port (default: 4440)
+  --repl               Start an interactive REPL after booting the host
   --streams-port <n>   Durable-streams port   (default: 7474)
   --state-stream <s>   Explicit durable state stream name (enables resume)
   --name <s>           Logical agent name     (default: from spec or 'default')
@@ -137,6 +139,7 @@ Usage:
 
 Flags:
   --port <n>           ACP control-plane port (default: 4440)
+  --repl               Start an interactive REPL after booting the host
   --streams-port <n>   Durable-streams port   (default: 7474)
   --state-stream <s>   Explicit durable state stream name (enables resume)
   --name <s>           Logical agent name     (default: from spec or 'default')
@@ -248,6 +251,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     file: null as string | null,
     passthroughArgs: [] as string[],
     port: 4440,
+    repl: false,
     streamsPort: 7474,
     stateStream: null as string | null,
     name: null as string | null,
@@ -315,6 +319,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         seen.port = true
         out.port = parseIntArg(argv[++i], '--port')
         break
+      case '--repl':
+        out.repl = true
+        break
       case '--streams-port':
         seen.streamsPort = true
         out.streamsPort = parseIntArg(argv[++i], '--streams-port')
@@ -336,8 +343,6 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         seen.to = true
         out.to = parseDeployTarget(argv[++i])
         break
-      case '--repl':
-        throw new Error("--repl has been replaced by 'fireline repl [session-id]'")
       default:
         if (arg?.startsWith('--')) throw new Error(`unknown flag: ${arg}`)
         if (out.file) throw new Error(`unexpected argument: ${arg}`)
@@ -360,6 +365,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   if (out.command === 'build' && seen.to) {
     throw new Error('--to is only valid with deploy')
   }
+  if (out.command === 'build' && out.repl) {
+    throw new Error('--repl is only valid with run')
+  }
   if (out.command === 'deploy' && seen.target) {
     throw new Error('--target is only valid with build')
   }
@@ -368,6 +376,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   }
   if (out.command === 'deploy' && seen.streamsPort) {
     throw new Error('--streams-port is only valid with run')
+  }
+  if (out.command === 'deploy' && out.repl) {
+    throw new Error('--repl is only valid with run')
   }
   if (out.command === 'deploy' && !seen.to) {
     throw new Error('deploy requires --to <platform>')
@@ -393,8 +404,21 @@ function helpText(topic: ParsedArgs['helpFor']): string {
   }
 }
 
-async function runReplCommand(args: ParsedArgs): Promise<number> {
-  return await runRepl({ sessionId: args.sessionId })
+export async function runReplCommand(
+  args: ParsedArgs,
+  replRunner: typeof runRepl = runRepl,
+): Promise<number> {
+  if (args.sessionId && looksLikeSpecPath(args.sessionId)) {
+    throw new Error(
+      `${args.sessionId} looks like a spec path, not a session id. Did you mean: fireline run ${args.sessionId} --repl ?`,
+    )
+  }
+
+  try {
+    return await replRunner({ sessionId: args.sessionId })
+  } catch (error) {
+    throw decorateStandaloneReplError(error)
+  }
 }
 
 async function runAgents(args: ParsedArgs): Promise<number> {
@@ -525,7 +549,14 @@ async function run(args: ParsedArgs): Promise<number> {
     const agentHandle = await effectiveSpec.start(startOptions)
     teardown.push(() => destroySandbox(agentHandle.id, args.port))
 
+    if (args.repl) {
+      const exitCode = await runHostedRepl(agentHandle, args)
+      await runTeardown()
+      return exitCode
+    }
+
     printReady(agentHandle, args)
+    printInteractionHint(args.file!)
 
     const signalCode = await waitForShutdown
     await runTeardown()
@@ -791,7 +822,7 @@ function maybeLogBinaryMismatch(
   )
 }
 
-interface PrintedHandle {
+export interface PrintedHandle {
   readonly id: string
   readonly acp: { readonly url: string }
   readonly state: { readonly url: string }
@@ -1035,21 +1066,89 @@ function validatePrintedHandle(handle: PrintedHandle, label: string): void {
   }
 }
 
+export async function runHostedRepl(
+  handle: PrintedHandle,
+  args: ParsedArgs,
+  replRunner: typeof runRepl = runRepl,
+  logger: ReadyLogger = console,
+): Promise<number> {
+  validatePrintedHandle(handle, 'run')
+
+  return await replRunner({
+    acpUrl: handle.acp.url,
+    onSessionReady: async (sessionId: string) => {
+      printReady(handle, args, { logger, sessionId })
+    },
+    serverUrl: `http://127.0.0.1:${args.port}`,
+  })
+}
+
+interface ReadyLogger {
+  log: (...args: unknown[]) => void
+}
+
 function printReady(
   handle: PrintedHandle,
   args: ParsedArgs,
+  options: {
+    readonly logger?: ReadyLogger
+    readonly sessionId?: string | null
+  } = {},
 ): void {
+  const logger = options.logger ?? console
   validatePrintedHandle(handle, 'run')
-  console.log('')
-  console.log('  \x1b[32m✓\x1b[0m fireline ready')
-  console.log('')
-  console.log(`    sandbox:   ${handle.id}`)
-  console.log(`    ACP:       ${handle.acp.url}`)
-  console.log(`    state:     ${handle.state.url}`)
-  if (args.stateStream) console.log(`    stream:    ${args.stateStream}`)
-  console.log('')
-  console.log('  Press Ctrl+C to shut down.')
-  console.log('')
+  logger.log('')
+  logger.log('  \x1b[32m✓\x1b[0m fireline ready')
+  logger.log('')
+  logger.log(`    sandbox:   ${handle.id}`)
+  logger.log(`    ACP:       ${handle.acp.url}`)
+  logger.log(`    state:     ${handle.state.url}`)
+  if (options.sessionId) logger.log(`    session:   ${options.sessionId}`)
+  if (args.stateStream) logger.log(`    stream:    ${args.stateStream}`)
+  logger.log('')
+  logger.log('  Press Ctrl+C to shut down.')
+  logger.log('')
+}
+
+function printInteractionHint(file: string, logger: ReadyLogger = console): void {
+  logger.log(`  To interact: npx fireline ${file} --repl`)
+  logger.log('')
+}
+
+function looksLikeSpecPath(value: string): boolean {
+  return /\.[cm]?[jt]sx?$/i.test(value)
+}
+
+function decorateStandaloneReplError(error: unknown): Error {
+  const failure = error instanceof Error ? error : new Error(String(error))
+  if (!isLikelyMissingReplHost(failure.message)) {
+    return failure
+  }
+
+  return new Error(
+    `no fireline host running on ${formatReplServerLabel(process.env.FIRELINE_URL ?? 'http://127.0.0.1:4440')}. Start one: fireline run <spec>`,
+  )
+}
+
+function isLikelyMissingReplHost(message: string): boolean {
+  return (
+    message.includes('ECONNREFUSED') ||
+    message.includes('Unexpected server response: 404') ||
+    message.includes('Unexpected server response: 503') ||
+    message.includes('socket hang up')
+  )
+}
+
+function formatReplServerLabel(serverUrl: string): string {
+  try {
+    const url = new URL(serverUrl)
+    if ((url.hostname === '127.0.0.1' || url.hostname === 'localhost') && url.port) {
+      return `:${url.port}`
+    }
+    return url.origin
+  } catch {
+    return serverUrl
+  }
 }
 
 function printBuildResult(imageTag: string, scaffoldedFiles: readonly string[]): void {

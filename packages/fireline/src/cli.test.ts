@@ -11,6 +11,8 @@ import {
   deploy,
   loadSpec,
   parseArgs,
+  runHostedRepl,
+  runReplCommand,
   unwrapDefaultExport,
   writeTargetScaffold,
 } from './cli.js'
@@ -80,10 +82,89 @@ test('parseArgs captures an optional repl session id', () => {
   assert.equal(args.sessionId, 'session-123')
 })
 
+test('parseArgs accepts run --repl', () => {
+  const args = parseArgs(['run', 'agent.ts', '--repl'])
+  assert.equal(args.command, 'run')
+  assert.equal(args.file, 'agent.ts')
+  assert.equal(args.repl, true)
+})
+
+test('parseArgs accepts shorthand --repl', () => {
+  const args = parseArgs(['agent.ts', '--repl'])
+  assert.equal(args.command, 'run')
+  assert.equal(args.file, 'agent.ts')
+  assert.equal(args.repl, true)
+})
+
 test('parseArgs preserves agents passthrough arguments', () => {
   const args = parseArgs(['agents', 'add', 'pi-acp'])
   assert.equal(args.command, 'agents')
   assert.deepEqual(args.passthroughArgs, ['add', 'pi-acp'])
+})
+
+test('runReplCommand attaches to an existing session id', async () => {
+  const args = parseArgs(['repl', 'session-123'])
+  let sessionId: string | null | undefined
+
+  const exitCode = await runReplCommand(args, async (options = {}) => {
+    sessionId = options.sessionId
+    return 0
+  })
+
+  assert.equal(exitCode, 0)
+  assert.equal(sessionId, 'session-123')
+})
+
+test('runReplCommand rejects spec-like arguments with a run hint', async () => {
+  const args = parseArgs(['repl', 'docs/demos/assets/agent.ts'])
+
+  await assert.rejects(
+    async () => {
+      await runReplCommand(args, async () => 0)
+    },
+    /looks like a spec path, not a session id\. Did you mean: fireline run docs\/demos\/assets\/agent\.ts --repl \?/,
+  )
+})
+
+test('runReplCommand disambiguates a missing local host', async () => {
+  const args = parseArgs(['repl'])
+
+  await assert.rejects(
+    async () => {
+      await runReplCommand(args, async () => {
+        throw new Error('connect ECONNREFUSED 127.0.0.1:4440')
+      })
+    },
+    /no fireline host running on :4440\. Start one: fireline run <spec>/,
+  )
+})
+
+test('runHostedRepl attaches to the started host and prints the new session id', async () => {
+  const args = parseArgs(['run', 'docs/demos/assets/agent.ts', '--repl'])
+  const lines: string[] = []
+
+  const exitCode = await runHostedRepl(
+    {
+      acp: { url: 'ws://127.0.0.1:4440/acp' },
+      id: 'sandbox-123',
+      state: { url: 'http://127.0.0.1:4440/state' },
+    },
+    args,
+    async (options = {}) => {
+      assert.equal(options.acpUrl, 'ws://127.0.0.1:4440/acp')
+      assert.equal(options.serverUrl, 'http://127.0.0.1:4440')
+      await options.onSessionReady?.('session-123')
+      return 0
+    },
+    {
+      log: (...values: unknown[]) => {
+        lines.push(values.join(' '))
+      },
+    },
+  )
+
+  assert.equal(exitCode, 0)
+  assert.match(lines.join('\n'), /session:\s+session-123/)
 })
 
 test('parseArgs parses deploy target and native passthrough args', () => {

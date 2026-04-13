@@ -98,11 +98,13 @@ export interface ReplConnection {
 }
 
 export interface ReplOptions {
+  readonly acpUrl?: string
   readonly alternateScreen?: boolean
   readonly connect?: (options: ReplConnectOptions) => Promise<ReplConnection>
   readonly cwd?: string
   readonly error?: Writable
   readonly input?: Readable
+  readonly onSessionReady?: (sessionId: string) => void | Promise<void>
   readonly output?: Writable
   readonly serverUrl?: string
   readonly sessionId?: string | null
@@ -114,10 +116,11 @@ export async function runRepl(options: ReplOptions = {}): Promise<number> {
   const error = options.error ?? process.stderr
   const cwd = options.cwd ?? process.cwd()
   const serverUrl = options.serverUrl ?? DEFAULT_SERVER_URL
+  const acpUrl = options.acpUrl ?? resolveAcpUrl(serverUrl)
   let activeSessionId = options.sessionId ?? null
   let controller: ReplController | null = null
   const repl = await (options.connect ?? connectReplAcp)({
-    acpUrl: resolveAcpUrl(serverUrl),
+    acpUrl,
     onSessionUpdate: async (notification) => {
       if (activeSessionId && notification.sessionId !== activeSessionId) {
         return
@@ -144,6 +147,7 @@ export async function runRepl(options: ReplOptions = {}): Promise<number> {
       cwd,
     )
 
+    await options.onSessionReady?.(activeSessionId)
     controller.setSessionId(activeSessionId)
     return await runInkRepl({
       alternateScreen: options.alternateScreen ?? true,
