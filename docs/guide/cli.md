@@ -9,6 +9,7 @@ The currently shipped verbs are:
 - `run` — boot Fireline locally and provision a spec
 - `build` — build a hosted Fireline OCI image from a spec
 - `deploy` — build the image and hand it off to a native platform CLI
+- `repl` — open the interactive ACP client for a running Fireline host
 - `agents` — install ACP agents from the public registry
 
 Authoritative source:
@@ -20,6 +21,14 @@ Authoritative source:
 # Run locally. `run` is optional shorthand.
 npx fireline run agent.ts
 npx fireline agent.ts
+
+# Boot locally, then attach the interactive REPL immediately.
+npx fireline run agent.ts --repl
+npx fireline agent.ts --repl
+
+# Attach the REPL to an already-running host.
+npx fireline repl
+npx fireline repl session-123
 
 # Build the hosted image locally.
 npx fireline build agent.ts
@@ -39,8 +48,18 @@ npx fireline agents add pi-acp
 
 ## `fireline run`
 
-Boots `fireline-streams`, boots the local Fireline host, provisions the
-spec, then prints the sandbox id, ACP URL, and state stream URL.
+`run` boots `fireline-streams`, boots the local Fireline host, provisions
+the spec, then prints the sandbox id, ACP URL, and state stream URL.
+
+Without `--repl`, `run` stays in server mode and prints a follow-up hint:
+
+```bash
+To interact: npx fireline agent.ts --repl
+```
+
+With `--repl`, `run` boots the host, auto-creates a fresh ACP session,
+prints the session id in the ready banner, and then drops straight into
+the Ink REPL.
 
 Usage:
 
@@ -54,17 +73,63 @@ Flags:
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--port <n>` | `4440` | ACP control-plane port |
+| `--repl` | `false` | Attach the interactive REPL after boot |
 | `--streams-port <n>` | `7474` | Durable-streams port |
 | `--state-stream <s>` | auto | Explicit durable state stream name |
 | `--name <s>` | from spec or `default` | Logical agent name |
 | `--provider <p>` | from spec | Override `sandbox.provider` |
-| `--repl` | `false` | Print the ACP URL and wait; interactive REPL is still a stub |
 | `--help` / `-h` | — | Print help |
+
+Examples:
+
+```bash
+fireline run docs/demos/assets/agent.ts
+fireline run docs/demos/assets/agent.ts --repl
+fireline run agent.ts --port 4450 --streams-port 7475
+```
+
+## `fireline repl`
+
+`repl` connects an interactive ACP client to a running Fireline host.
+The current UI is Ink-based: session header, transcript cards, live tool
+status, and an input composer in the terminal.
+
+Usage:
+
+```bash
+fireline repl
+fireline repl <session-id>
+```
+
+Behavior:
+
+- `fireline repl` connects to the host at `$FIRELINE_URL` (default:
+  `http://127.0.0.1:4440`) and starts a new ACP session
+- `fireline repl <session-id>` attaches to an existing session if the
+  host advertises resume or load support
+- `Ctrl+C`, `Ctrl+D`, or `/quit` exits the REPL
+
+Helpful CLI guardrails:
+
+- if the argument looks like a spec path such as `agent.ts`, the CLI
+  points you at `fireline run agent.ts --repl` instead of treating it as
+  a session id
+- if no host is listening on the configured port, the CLI points you at
+  `fireline run <spec>`
+
+Examples:
+
+```bash
+fireline repl
+fireline repl session-123
+FIRELINE_URL=http://127.0.0.1:4450 fireline repl
+```
 
 ## `fireline build`
 
-Builds the hosted Fireline OCI image locally. `build` can also scaffold
-target-native config, but it does not invoke the native deploy tool.
+`build` assembles the hosted Fireline OCI image locally. It can also
+scaffold target-native config, but it does not invoke the native deploy
+tool.
 
 Usage:
 
@@ -85,7 +150,7 @@ Flags:
 Notes:
 
 - `build` shells out to `docker build`
-- the scaffold target names are build-time names; for Cloudflare deploys,
+- scaffold target names are build-time names; for Cloudflare deploys,
   the deploy verb uses `cloudflare-containers`
 
 ## `fireline deploy`
@@ -93,18 +158,6 @@ Notes:
 `deploy` is a thin wrapper: it runs the hosted image build, generates the
 target manifest, then hands off to the native platform CLI. It does not
 call a Fireline-owned deploy API.
-
-Binary resolution order (how `fireline` locates its backing binaries):
-
-1. `$FIRELINE_BIN` / `$FIRELINE_STREAMS_BIN` / `$FIRELINE_AGENTS_BIN`
-   env vars
-2. Platform-specific optional npm dependency
-   (`@fireline/cli-darwin-arm64`, `@fireline/cli-darwin-x64`,
-   `@fireline/cli-linux-arm64`, `@fireline/cli-linux-x64`,
-   `@fireline/cli-win32-x64`). These packages also carry the
-   `fireline-agents` companion binary used by `fireline agents`.
-3. `target/release/<name>` walking up from the CLI's own directory
-4. `target/debug/<name>` walking up from the CLI's own directory
 
 Usage:
 
@@ -159,17 +212,19 @@ the registry install surface.
 
 | Env var | Meaning |
 | --- | --- |
+| `FIRELINE_URL` | Override the host URL used by `fireline repl` |
 | `FIRELINE_BIN` | Override the path to the `fireline` binary |
 | `FIRELINE_STREAMS_BIN` | Override the path to the `fireline-streams` binary |
 | `FIRELINE_AGENTS_BIN` | Override the path to the `fireline-agents` binary |
 
 ## Binary Resolution
 
-The CLI resolves its binaries in this order:
+The CLI resolves its backing binaries in this order:
 
 1. `FIRELINE_BIN`, `FIRELINE_STREAMS_BIN`, `FIRELINE_AGENTS_BIN`
-2. workspace `target/release/<name>`
-3. workspace `target/debug/<name>`
+2. platform-specific package binaries from `@fireline/cli-<platform>`
+3. workspace `target/release/<name>`
+4. workspace `target/debug/<name>`
 
 For repo-local development, build the Rust binaries before invoking the
 CLI:
@@ -194,10 +249,12 @@ with `fireline run`; keep using `npx tsx` directly for those.
 
 ## Known Limits
 
-- the examples under `examples/` still use the imperative `.start()` pattern
-- `--repl` is still a stub. Connect any ACP client (pi-acp, use-acp,
-  claude-code, a custom client) to the printed ACP URL.
-- `deploy` is target-native orchestration only; there is no Fireline-owned deploy endpoint
-- The CLI spawns an HTTP control plane. The longer-term plan is an
-  embedded in-process conductor with stdio transport; see
-  [docs/proposals/declarative-agent-api-design.md](../proposals/declarative-agent-api-design.md).
+- the examples under `examples/` still use the imperative `.start()`
+  pattern
+- the REPL is interactive-terminal oriented; line editing/history polish,
+  completion, and pipe-first modes are not the focus of the current
+  landing
+- `deploy` is target-native orchestration only; there is no Fireline-owned
+  deploy endpoint
+- the CLI still spawns an HTTP control plane; the longer-term plan is an
+  embedded in-process conductor with stdio transport
