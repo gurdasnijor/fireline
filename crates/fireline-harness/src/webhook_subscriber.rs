@@ -391,6 +391,17 @@ impl WebhookDelivered {
                 status_code: Some(status_code),
                 meta: trace,
             },
+            CompletionKey::Session { session_id } => Self {
+                kind: webhook_completion_kind(),
+                target: target.to_string(),
+                session_id,
+                request_id: None,
+                tool_call_id: None,
+                offset,
+                delivered_at_ms: now_ms(),
+                status_code: Some(status_code),
+                meta: trace,
+            },
         })
     }
 
@@ -405,6 +416,7 @@ impl WebhookDelivered {
                 self.session_id.clone(),
                 tool_call_id.clone(),
             )),
+            (None, None) => Some(CompletionKey::session(self.session_id.clone())),
             _ => None,
         }
     }

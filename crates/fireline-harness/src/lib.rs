@@ -28,9 +28,13 @@ pub use context::{
     WorkspaceFileSource,
 };
 pub use durable_subscriber::{
-    ActiveSubscriber, CompletionKey, DurableSubscriber, DurableSubscriberDriver, HandlerOutcome,
-    PassiveSubscriber, PassiveWaitPolicy, RetryPolicy, StreamEnvelope, SubscriberMode,
-    SubscriberRegistration, TraceContext,
+    ActiveSubscriber, AlwaysOnDeploymentSubscriber, CompletionKey, DEPLOYMENT_WAKE_REQUESTED_KIND,
+    DeploymentWakeHandler, DeploymentWakeRequested, DurableSubscriber, DurableSubscriberDriver,
+    HandlerOutcome, PassiveSubscriber, PassiveWaitPolicy, ProvisionedRuntime,
+    ResumeDeploymentWakeHandler, RetryPolicy, SANDBOX_PROVISIONED_KIND, SandboxProvisioned,
+    StreamEnvelope, SubscriberMode, SubscriberRegistration, SystemWakeTimerRuntime,
+    TIMER_FIRED_KIND, TimerFired, TraceContext, WAKE_TIMER_REQUESTED_KIND, WakeTimerRequest,
+    WakeTimerRuntime, WakeTimerSubscriber,
 };
 pub use peer_routing::{
     PEER_DELIVERY_ACK_ENTITY_TYPE, PeerDeliveryAcknowledged, PeerDispatchSuccess,
