@@ -213,7 +213,9 @@ test('unwrapDefaultExport peels nested tsImport default wrappers', () => {
 
 test('loadSpec accepts docs demo assets via the CLI loader', async () => {
   const spec = await loadSpec(resolve(REPO_ROOT, 'docs/demos/assets/agent.ts'))
-  assert.equal(spec.kind, 'harness')
+  // Post-mono-00d compose() emits kind: 'conductor'; the deprecated Harness
+  // alias still emits 'harness'. The `kind` discriminator is slated for
+  // removal (mono-d8x). Load-bearing assertion is that we got a runnable spec.
   assert.equal(typeof spec.start, 'function')
 })
 
