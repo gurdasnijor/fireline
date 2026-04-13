@@ -1,17 +1,26 @@
 # `@fireline/client`
 
 Calling an ACP agent directly gets you a session. It does not give you a
-portable harness, a durable state stream, approval resolution, or a clean way
+portable conductor, a durable state stream, approval resolution, or a clean way
 to run the same agent locally and remotely.
 
 `@fireline/client` is the TypeScript package for that missing layer. You use it
 to:
 
-- declare a Fireline harness with `sandbox(...)`, `middleware(...)`, and `agent(...)`
-- start that harness on a Fireline host with `compose(...).start(...)`
-- connect to the agent over ACP
+- declare a Fireline conductor with `sandbox(...)`, `middleware(...)`, and `agent(...)`
+- connect that conductor to Fireline or ACP transports with `compose(...).connect_to(...)`
 - observe the run through the durable state stream
 - start small multi-agent topologies with `peer(...)`, `fanout(...)`, and `pipe(...)`
+
+## Rename and Deprecation Window
+
+`Harness` / `HarnessSpec` are now renamed to `Conductor` / `ConductorSpec` to
+match ACP SDK vocabulary. `compose(...)` returns a `Conductor`, and the new
+default path is `conductor.connect_to(transport)`.
+
+The older `Harness` name, `compose(...).start(...)`, and `connectAcp(...)`
+still ship as deprecated aliases for one migration window so callers can move
+piecemeal.
 
 ## Package Map
 
@@ -47,30 +56,29 @@ const reviewer = compose(
   agent(['npx', '-y', '@agentclientprotocol/claude-agent-acp']),
 ).as('reviewer')
 
-const handle = await reviewer.start({
-  serverUrl: 'http://127.0.0.1:4440',
+const acp = await reviewer.connect_to({
+  kind: 'hosted',
+  url: 'http://127.0.0.1:4440',
   stateStream: 'demo:reviewer',
+  clientName: 'reviewer-ui',
 })
-
-const acp = await handle.connect('reviewer-ui')
-const db = await fireline.db({ stateStreamUrl: handle.state.url })
 ```
 
-That is the package's main story on current `main`: author a harness once, boot
-it on a Fireline host, talk to it over ACP, and watch the durable stream update
-in real time.
+That is the package's main story on current `main`: author a conductor once and
+terminate it onto a transport in one call. The older `start(...)` path remains
+when your app explicitly needs the `FirelineAgent` handle and sandbox metadata.
 
 ## Root Surface
 
 ### `compose(sandboxConfig, middlewareConfig, agentConfig)`
 
-Builds one runnable harness value. This is the product surface you keep in
+Builds one runnable conductor value. This is the product surface you keep in
 source control and reuse across local dev, demos, and hosted runs.
 
 ```ts
 import { agent, compose, middleware, sandbox } from '@fireline/client'
 
-const harness = compose(
+const conductor = compose(
   sandbox({ provider: 'local' }),
   middleware([]),
   agent(['../../target/debug/fireline-testy-load']),
@@ -123,9 +131,9 @@ const agentConfig = agent(['npx', '-y', '@agentclientprotocol/claude-agent-acp']
 Single-token ACP registry ids such as `agent(['pi-acp'])` are also valid on
 current `main`.
 
-### `harness.as(name)`
+### `conductor.as(name)`
 
-Gives the harness a stable logical name. Use this when you want readable handle
+Gives the conductor a stable logical name. Use this when you want readable handle
 names or when you are composing topologies.
 
 ```ts
@@ -136,9 +144,30 @@ const reviewer = compose(
 ).as('reviewer')
 ```
 
-### `harness.start(options)`
+### `conductor.connect_to(transport)`
 
-Provisions the harness on a Fireline host and returns a live `FirelineAgent`
+Terminates the conductor onto one of four transport kinds:
+
+- hosted: provision on a Fireline control plane, then attach ACP in one call
+- websocket: connect to an existing ACP websocket endpoint
+- stdio: boot `fireline --acp-stdio` and speak native ACP over stdin/stdout
+- stream: attach to an already-open ACP `Stream`
+
+```ts
+const acp = await reviewer.connect_to({
+  kind: 'hosted',
+  url: 'http://127.0.0.1:4440',
+  stateStream: 'demo:reviewer',
+  clientName: 'reviewer-ui',
+})
+```
+
+`connect_to(...)` is now the default path. It collapses the old "start, then
+connect ACP separately" two-call flow into the ACP-native conductor primitive.
+
+### `conductor.start(options)` (deprecated)
+
+Provisions the conductor on a Fireline host and returns a live `FirelineAgent`
 handle with ACP and state endpoints plus runtime methods.
 
 ```ts
@@ -148,8 +177,9 @@ const handle = await reviewer.start({
 })
 ```
 
-`start(...)` is the API most apps should use. It is the landed replacement for
-"provision a sandbox, then manually stitch the rest together."
+`start(...)` remains for the migration window when your app needs the
+`FirelineAgent` handle directly. New code should prefer
+`connect_to({ kind: 'hosted', ... })`.
 
 ### `handle.connect(clientName?)`
 
@@ -190,8 +220,8 @@ await handle.destroy()
 
 ### `connectAcp(endpoint, clientName?)`
 
-Connects directly when you already have an ACP endpoint and do not need a
-`FirelineAgent` handle in hand.
+Connects directly when you already have an ACP websocket endpoint and do not
+need a composed conductor in hand.
 
 ```ts
 import { connectAcp } from '@fireline/client'
@@ -199,8 +229,8 @@ import { connectAcp } from '@fireline/client'
 const acp = await connectAcp('ws://127.0.0.1:4440/acp', 'dashboard')
 ```
 
-Most app code should prefer `handle.connect(...)`, but `connectAcp(...)` is the
-right lower-level helper when you are reconnecting from a saved endpoint.
+`connectAcp(...)` remains as a deprecated lower-level websocket helper during
+the migration window. New code should prefer `conductor.connect_to(...)`.
 
 ### `fireline.db(options?)`
 
@@ -221,7 +251,7 @@ package when you want the collection and type reference directly.
 
 ### `new Sandbox({ serverUrl, token? })`
 
-This is the lower-level client when you already have a serialized harness config
+This is the lower-level client when you already have a serialized conductor config
 and want to provision it yourself.
 
 ```ts
@@ -237,18 +267,18 @@ const handle = await client.provision(
 )
 ```
 
-Most package users should prefer `compose(...).start(...)`. `Sandbox` is the
-escape hatch when you need explicit provisioning control.
+Most package users should prefer `compose(...).connect_to({ kind: 'hosted', ... })`.
+`Sandbox` is the escape hatch when you need explicit provisioning control.
 
 ## Topology Helpers
 
-These helpers start more than one harness for you. They all return objects with
+These helpers start more than one conductor for you. They all return objects with
 their own `.start(...)` method.
 
-### `peer(...harnesses)`
+### `peer(...conductors)`
 
-Starts named harnesses together on one shared `stateStream` and returns a handle
-map keyed by harness name.
+Starts named conductors together on one shared `stateStream` and returns a
+handle map keyed by conductor name.
 
 ```ts
 import { agent, compose, middleware, peer, sandbox } from '@fireline/client'
@@ -272,13 +302,13 @@ const handles = await peer(reviewer, writer).start({
 })
 ```
 
-Important: topology-level `peer(...)` starts the named harnesses together.
+Important: topology-level `peer(...)` starts the named conductors together.
 Middleware-level `peer({ peers: [...] })` is what turns on peer routing inside
-each harness.
+each conductor.
 
-### `fanout(harness, { count })`
+### `fanout(conductor, { count })`
 
-Starts `N` copies of the same harness for parallel work.
+Starts `N` copies of the same conductor for parallel work.
 
 ```ts
 import { fanout } from '@fireline/client'
@@ -299,9 +329,9 @@ const workers = await fanout(
 This returns an array of `FirelineAgent` handles with numbered runtime names
 such as `review-worker-1`, `review-worker-2`, and `review-worker-3`.
 
-### `pipe(...harnesses)`
+### `pipe(...conductors)`
 
-Starts named harnesses sequentially on one shared `stateStream`.
+Starts named conductors sequentially on one shared `stateStream`.
 
 ```ts
 import { pipe } from '@fireline/client'
@@ -371,8 +401,12 @@ const chain = middleware([
 
 The root package exports the runtime and authoring types most app code needs:
 
-- `Harness`
+- `Conductor`
+- `ConductorSpec`
+- `ConductorTransport`
+- `Harness` (deprecated alias)
 - `HarnessHandle`
+- `HarnessSpec` (deprecated alias)
 - `SandboxDefinition`
 - `SandboxHandle`
 - `StartOptions`
@@ -386,7 +420,7 @@ The root package exports the runtime and authoring types most app code needs:
 Example:
 
 ```ts
-import type { FirelineDB, Harness, SessionId } from '@fireline/client'
+import type { Conductor, FirelineDB, SessionId } from '@fireline/client'
 ```
 
 ## Related Docs

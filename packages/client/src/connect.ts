@@ -6,13 +6,20 @@ import {
 } from '@agentclientprotocol/sdk'
 import WebSocket, { type RawData } from 'ws'
 
-import type { Endpoint } from './types.js'
+import type { Endpoint, WebSocketTransport } from './types.js'
 
 const DEFAULT_CLIENT_NAME = '@fireline/client'
 const DEFAULT_CLIENT_VERSION = '0.0.1'
 
 export type ConnectedAcp = ClientSideConnection & {
   close(): Promise<void>
+}
+
+interface SpawnedStdioTransport {
+  readonly command: string
+  readonly args: readonly string[]
+  readonly cwd?: string
+  readonly env?: Readonly<Record<string, string>>
 }
 
 const unsupported = (name: string): never => {
@@ -35,14 +42,34 @@ const defaultClient = {
   extNotification: async () => {},
 } satisfies Client
 
+/**
+ * Low-level websocket ACP connector retained for the migration window.
+ *
+ * @deprecated Prefer `compose(...).connect_to({ kind: 'hosted' | 'websocket' | 'stream' | 'stdio', ... })`.
+ */
 export async function connectAcp(
   endpoint: Endpoint | string,
   clientName = DEFAULT_CLIENT_NAME,
 ): Promise<ConnectedAcp> {
-  const { url, headers } =
-    typeof endpoint === 'string' ? { url: endpoint, headers: undefined } : endpoint
+  const transport =
+    typeof endpoint === 'string'
+      ? { kind: 'websocket' as const, url: endpoint }
+      : {
+          kind: 'websocket' as const,
+          url: endpoint.url,
+          headers: endpoint.headers,
+        }
+  return connectWebSocket(transport, clientName)
+}
 
-  const socket = new WebSocket(url, headers ? { headers } : undefined)
+export async function connectWebSocket(
+  transport: WebSocketTransport,
+  clientName = transport.clientName ?? DEFAULT_CLIENT_NAME,
+): Promise<ConnectedAcp> {
+  const socket = new WebSocket(
+    transport.url,
+    transport.headers ? { headers: transport.headers } : undefined,
+  )
 
   await new Promise<void>((resolve, reject) => {
     const handleOpen = () => {
@@ -104,6 +131,14 @@ export async function connectAcp(
     }),
   }
 
+  return connectStream(stream, clientName, () => closeSocket(socket))
+}
+
+export async function connectStream(
+  stream: Stream,
+  clientName = DEFAULT_CLIENT_NAME,
+  close = () => closeReadableWritable(stream),
+): Promise<ConnectedAcp> {
   const connection = new ClientSideConnection(() => defaultClient, stream)
   await connection.initialize({
     protocolVersion: PROTOCOL_VERSION,
@@ -117,8 +152,41 @@ export async function connectAcp(
   })
 
   return Object.assign(connection, {
-    close: () => closeSocket(socket),
+    close,
   })
+}
+
+export async function connectSpawnedStdio(
+  transport: SpawnedStdioTransport,
+  clientName = DEFAULT_CLIENT_NAME,
+): Promise<ConnectedAcp> {
+  const { spawn } = await import('node:child_process')
+  const child = spawn(transport.command, [...transport.args], {
+    cwd: transport.cwd,
+    env: {
+      ...process.env,
+      ...transport.env,
+    },
+    stdio: ['pipe', 'pipe', 'inherit'],
+  })
+
+  if (!child.stdin || !child.stdout) {
+    throw new Error('spawned stdio transport missing stdin/stdout pipes')
+  }
+
+  const stream = jsonLineStream(child.stdout, child.stdin)
+  const connection = await connectStream(stream, clientName, async () => {
+    await closeReadableWritable(stream)
+    if (!child.killed && child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGTERM')
+    }
+    await new Promise<void>((resolve) => {
+      child.once('exit', () => resolve())
+      setTimeout(resolve, 5_000)
+    })
+  })
+
+  return connection
 }
 
 async function closeSocket(socket: WebSocket): Promise<void> {
@@ -130,6 +198,109 @@ async function closeSocket(socket: WebSocket): Promise<void> {
     socket.once('close', () => resolve())
     socket.close()
   })
+}
+
+async function closeReadableWritable(stream: Stream): Promise<void> {
+  try {
+    const writer = stream.writable.getWriter()
+    try {
+      await writer.close()
+    } finally {
+      writer.releaseLock()
+    }
+  } catch {
+    // Ignore close races on caller-owned transports.
+  }
+
+  try {
+    const reader = stream.readable.getReader()
+    try {
+      await reader.cancel()
+    } finally {
+      reader.releaseLock()
+    }
+  } catch {
+    // Ignore cancellation races on caller-owned transports.
+  }
+}
+
+function jsonLineStream(
+  stdout: NodeJS.ReadableStream,
+  stdin: NodeJS.WritableStream,
+): Stream {
+  let buffer = ''
+
+  return {
+    readable: new ReadableStream({
+      start(controller) {
+        const handleData = (chunk: Buffer | string) => {
+          buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+          while (true) {
+            const newlineIndex = buffer.indexOf('\n')
+            if (newlineIndex === -1) {
+              break
+            }
+            const line = buffer.slice(0, newlineIndex).trim()
+            buffer = buffer.slice(newlineIndex + 1)
+            if (!line) {
+              continue
+            }
+            controller.enqueue(JSON.parse(line))
+          }
+        }
+        const handleEnd = () => {
+          cleanup()
+          controller.close()
+        }
+        const handleError = (error: Error) => {
+          cleanup()
+          controller.error(error)
+        }
+        const cleanup = () => {
+          stdout.off('data', handleData)
+          stdout.off('end', handleEnd)
+          stdout.off('close', handleEnd)
+          stdout.off('error', handleError)
+        }
+
+        stdout.on('data', handleData)
+        stdout.on('end', handleEnd)
+        stdout.on('close', handleEnd)
+        stdout.on('error', handleError)
+      },
+    }),
+    writable: new WritableStream({
+      write(message) {
+        return new Promise<void>((resolve, reject) => {
+          const encoded = `${JSON.stringify(message)}\n`
+          stdin.write(encoded, (error) => {
+            if (error) {
+              reject(error)
+              return
+            }
+            resolve()
+          })
+        })
+      },
+      close() {
+        return new Promise<void>((resolve, reject) => {
+          stdin.end((error?: Error | null) => {
+            if (error) {
+              reject(error)
+              return
+            }
+            resolve()
+          })
+        })
+      },
+      abort() {
+        const destroyable = stdin as NodeJS.WritableStream & {
+          destroy?: (error?: Error) => void
+        }
+        destroyable.destroy?.()
+      },
+    }),
+  }
 }
 
 function decodeRawData(data: RawData): string {
