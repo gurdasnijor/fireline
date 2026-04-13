@@ -12,6 +12,7 @@ cd "$ROOT"
 # Diff-mined sources so far:
 # - 8696cc2  mono-axr.1 Phase 1 Rust trait surface
 # - 4c5b207  mono-axr.9 Phase 2 approval gate ports onto DurableSubscriber
+# - 658d6b3  mono-axr.4 Phase 5 peer-routing subscriber
 #
 # mono-axr.6 (TypeScript middleware surface) is still in progress. Once it
 # lands, extend the hard-fail list with any temporary compat names introduced by
@@ -27,6 +28,7 @@ RG_COMMON_ARGS=(
 SEARCH_PATHS=(
   crates/fireline-harness/src/durable_subscriber.rs
   crates/fireline-harness/src/approval.rs
+  crates/fireline-harness/src/peer_routing.rs
   packages/client/src/middleware.ts
   packages/client/src/types.ts
 )
@@ -56,6 +58,7 @@ cat >"$tmpdir/review-only.patterns" <<'EOF'
 \bPassiveSubscriber\b
 \bActiveSubscriber\b
 \bCompletionKey\b
+\bPeerRoutingSubscriber\b
 \bdurableSubscriber\(
 EOF
 
