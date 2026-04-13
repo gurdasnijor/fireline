@@ -233,6 +233,7 @@ impl LocalRuntimeHarness {
             peer_directory_path: temp_path("fireline-managed-agent-peers"),
             control_plane_url: None,
             topology: TopologySpec::default(),
+            translate_session_cwd_to_mounts: false,
         })
         .await?;
 
@@ -1075,6 +1076,7 @@ impl LocalRuntimeHarness {
             peer_directory_path: temp_path("fireline-managed-agent-peers"),
             control_plane_url: None,
             topology: spec.topology,
+            translate_session_cwd_to_mounts: false,
         })
         .await?;
 

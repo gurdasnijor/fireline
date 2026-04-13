@@ -90,6 +90,7 @@ async fn hosted_runtime_serves_acp_and_emits_state_events() -> Result<()> {
         peer_directory_path: temp_peer_directory(),
         control_plane_url: None,
         topology: TopologySpec::default(),
+        translate_session_cwd_to_mounts: false,
     })
     .await?;
 
@@ -168,6 +169,7 @@ async fn hosted_runtime_rejects_concurrent_attachment_and_recovers_after_disconn
         peer_directory_path: temp_peer_directory(),
         control_plane_url: None,
         topology: TopologySpec::default(),
+        translate_session_cwd_to_mounts: false,
     })
     .await?;
 
@@ -233,6 +235,7 @@ async fn hosted_runtime_allows_immediate_sequential_reattach_after_disconnect() 
         peer_directory_path: temp_peer_directory(),
         control_plane_url: None,
         topology: TopologySpec::default(),
+        translate_session_cwd_to_mounts: false,
     })
     .await?;
 

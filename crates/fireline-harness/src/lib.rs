@@ -10,6 +10,7 @@ pub mod awakeable_race;
 pub mod awakeable_timeout;
 pub mod budget;
 pub mod context;
+mod cwd_mount_rewrite;
 pub mod durable_subscriber;
 mod host_topology;
 pub mod peer_routing;
@@ -46,6 +47,7 @@ pub use context::{
     ContextConfig, ContextInjectionComponent, ContextPlacement, ContextSource, DatetimeSource,
     WorkspaceFileSource,
 };
+pub use cwd_mount_rewrite::CwdMountRewriteComponent;
 pub use durable_subscriber::{
     ActiveSubscriber, AlwaysOnDeploymentSubscriber, CompletionKey, DEPLOYMENT_WAKE_REQUESTED_KIND,
     DeploymentWakeHandler, DeploymentWakeRequested, DurableSubscriber, DurableSubscriberDriver,

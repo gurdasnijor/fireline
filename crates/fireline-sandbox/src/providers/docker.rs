@@ -261,6 +261,7 @@ impl SandboxProvider for DockerProvider {
             "FIRELINE_PROVIDER_KIND=docker".to_string(),
             format!("FIRELINE_ADVERTISED_ACP_URL={advertised_acp_url}"),
             format!("FIRELINE_ADVERTISED_STATE_STREAM_URL={advertised_state_stream_url}"),
+            "FIRELINE_TRANSLATE_SESSION_CWD_TO_MOUNTS=1".to_string(),
         ];
         if let Some(control_plane_url) = connect_control_plane_url {
             env_vars.push(format!("FIRELINE_CONTROL_PLANE_URL={control_plane_url}"));

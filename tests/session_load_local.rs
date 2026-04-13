@@ -116,6 +116,7 @@ async fn session_load_returns_explicit_non_resumable_error_with_durable_record()
         peer_directory_path: temp_peer_directory(),
         control_plane_url: None,
         topology: TopologySpec::default(),
+        translate_session_cwd_to_mounts: false,
     })
     .await?;
 
@@ -186,6 +187,7 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
         peer_directory_path: peer_directory_path.clone(),
         control_plane_url: None,
         topology: TopologySpec::default(),
+        translate_session_cwd_to_mounts: false,
     })
     .await?;
 
@@ -206,6 +208,7 @@ async fn session_load_replays_catalog_after_restart_and_returns_same_durable_rec
         peer_directory_path,
         control_plane_url: None,
         topology: TopologySpec::default(),
+        translate_session_cwd_to_mounts: false,
     })
     .await?;
 
@@ -257,6 +260,7 @@ async fn session_load_reattaches_against_runtime_owned_terminal_when_agent_suppo
         peer_directory_path: temp_peer_directory(),
         control_plane_url: None,
         topology: TopologySpec::default(),
+        translate_session_cwd_to_mounts: false,
     })
     .await?;
 
@@ -304,6 +308,7 @@ async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not
         peer_directory_path: peer_directory_path.clone(),
         control_plane_url: None,
         topology: TopologySpec::default(),
+        translate_session_cwd_to_mounts: false,
     })
     .await?;
 
@@ -324,6 +329,7 @@ async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not
         peer_directory_path,
         control_plane_url: None,
         topology: TopologySpec::default(),
+        translate_session_cwd_to_mounts: false,
     })
     .await?;
 

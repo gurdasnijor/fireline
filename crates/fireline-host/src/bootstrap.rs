@@ -22,8 +22,8 @@ use axum::Router;
 use axum::routing::get;
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, DurableStream, Producer};
 use fireline_harness::{
-    AcpRouteState, AlwaysOnDeploymentSubscriber, ComponentContext, SharedTerminal,
-    TopologyComponentSpec, TopologySpec, WakeTimerSubscriber, audit_stream_names,
+    AcpRouteState, AlwaysOnDeploymentSubscriber, ComponentContext, CwdMountRewriteComponent,
+    SharedTerminal, TopologyComponentSpec, TopologySpec, WakeTimerSubscriber, audit_stream_names,
     build_host_topology_registry, emit_host_instance_started, emit_host_instance_stopped,
     emit_host_spec_persisted, ensure_named_streams, sandbox_provisioned_envelope,
     spawn_active_subscriber_task, timer_fired_envelope,
@@ -60,6 +60,7 @@ pub struct BootstrapConfig {
     pub peer_directory_path: PathBuf,
     pub control_plane_url: Option<String>,
     pub topology: TopologySpec,
+    pub translate_session_cwd_to_mounts: bool,
 }
 
 pub struct BootstrapHandle {
@@ -313,6 +314,7 @@ async fn prepare_runtime(config: BootstrapConfig, bound_port: u16) -> Result<Pre
     let peer_registry: std::sync::Arc<dyn PeerRegistry> = std::sync::Arc::new(
         StreamDeploymentPeerRegistry::new(stream_base_url.clone(), DEFAULT_TENANT_ID),
     );
+    let mounted_resources = config.mounted_resources.clone();
     let topology_registry = build_host_topology_registry(ComponentContext {
         host_key: host_key.clone(),
         host_id: host_id.clone(),
@@ -321,8 +323,9 @@ async fn prepare_runtime(config: BootstrapConfig, bound_port: u16) -> Result<Pre
         state_stream_url: state_stream_url.clone(),
         state_producer: state_producer.clone(),
         peer_registry: peer_registry.clone(),
-        mounted_resources: config.mounted_resources.clone(),
+        mounted_resources: mounted_resources.clone(),
     });
+    let translate_session_cwd_to_mounts = config.translate_session_cwd_to_mounts;
 
     let app_state = AcpRouteState {
         conductor_name: host_name.clone(),
@@ -336,11 +339,19 @@ async fn prepare_runtime(config: BootstrapConfig, bound_port: u16) -> Result<Pre
         base_components_factory: std::sync::Arc::new({
             let session_index = session_index.clone();
             let session_state_stream_url = state_stream_url.clone();
+            let mounted_resources = mounted_resources.clone();
             move || {
-                vec![sacp::DynConnectTo::new(LoadCoordinatorComponent::new(
+                let mut components = Vec::new();
+                if translate_session_cwd_to_mounts && !mounted_resources.is_empty() {
+                    components.push(sacp::DynConnectTo::new(CwdMountRewriteComponent::new(
+                        mounted_resources.clone(),
+                    )));
+                }
+                components.push(sacp::DynConnectTo::new(LoadCoordinatorComponent::new(
                     session_index.clone(),
                     session_state_stream_url.clone(),
-                ))]
+                )));
+                components
             }
         }),
     };
