@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod active_subscriber_task;
 mod agent_observability;
 pub mod approval;
 pub mod audit;
@@ -24,6 +25,7 @@ pub mod wake_timer;
 pub mod webhook_subscriber;
 pub mod workflow_context;
 
+pub use active_subscriber_task::spawn_active_subscriber_task;
 pub use agent_observability::AgentPlaneTracer;
 pub use approval::{
     ApprovalAction, ApprovalConfig, ApprovalGateComponent, ApprovalMatch, ApprovalPolicy,
@@ -50,6 +52,7 @@ pub use durable_subscriber::{
     HandlerOutcome, PassiveSubscriber, PassiveWaitPolicy, ProvisionedRuntime,
     ResumeDeploymentWakeHandler, RetryPolicy, SANDBOX_PROVISIONED_KIND, SandboxProvisioned,
     StreamEnvelope, SubscriberMode, SubscriberRegistration, TraceContext,
+    sandbox_provisioned_envelope,
 };
 pub use peer_routing::{
     PEER_DELIVERY_ACK_ENTITY_TYPE, PeerDeliveryAcknowledged, PeerDispatchSuccess,

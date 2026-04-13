@@ -152,12 +152,9 @@ impl RemoteAnthropicProvider {
             return Err(anyhow!("Anthropic request {path} failed: {status} {body}"));
         }
 
-        Ok(Some(
-            response
-                .json::<T>()
-                .await
-                .with_context(|| format!("decode Anthropic response for {path}"))?,
-        ))
+        Ok(Some(response.json::<T>().await.with_context(|| {
+            format!("decode Anthropic response for {path}")
+        })?))
     }
 
     async fn request_empty(&self, method: Method, path: &str) -> Result<StatusCode> {
@@ -187,7 +184,8 @@ impl RemoteAnthropicProvider {
             ],
             "metadata": config.labels,
         });
-        self.request_json(Method::POST, "/v1/agents", Some(body)).await
+        self.request_json(Method::POST, "/v1/agents", Some(body))
+            .await
     }
 
     async fn create_environment(
@@ -221,7 +219,8 @@ impl RemoteAnthropicProvider {
             },
             "environment_id": environment.id,
         });
-        self.request_json(Method::POST, "/v1/sessions", Some(body)).await
+        self.request_json(Method::POST, "/v1/sessions", Some(body))
+            .await
     }
 
     async fn fetch_session(&self, id: &str) -> Result<Option<AnthropicSessionResource>> {
@@ -257,7 +256,11 @@ impl RemoteAnthropicProvider {
             ]
         });
         let _: Value = self
-            .request_json(Method::POST, &format!("/v1/sessions/{id}/events"), Some(body))
+            .request_json(
+                Method::POST,
+                &format!("/v1/sessions/{id}/events"),
+                Some(body),
+            )
             .await?;
         Ok(())
     }
@@ -280,10 +283,12 @@ impl RemoteAnthropicProvider {
     }
 
     fn state_stream_name(config: &SandboxConfig, session_id: &str) -> String {
-        config
-            .state_stream
-            .clone()
-            .unwrap_or_else(|| format!("anthropic-session-{}", sanitize_state_stream_key(session_id)))
+        config.state_stream.clone().unwrap_or_else(|| {
+            format!(
+                "anthropic-session-{}",
+                sanitize_state_stream_key(session_id)
+            )
+        })
     }
 
     fn state_endpoint(&self, config: &SandboxConfig, session_id: &str) -> Endpoint {
@@ -329,11 +334,7 @@ impl RemoteAnthropicProvider {
         })
     }
 
-    fn relay_session_stream(
-        &self,
-        session_id: String,
-        state_stream_url: String,
-    ) -> JoinHandle<()> {
+    fn relay_session_stream(&self, session_id: String, state_stream_url: String) -> JoinHandle<()> {
         let provider = self.clone();
         tokio::spawn(async move {
             if let Err(error) = provider
@@ -386,9 +387,8 @@ impl RemoteAnthropicProvider {
         let mut event_index: u64 = 0;
 
         while let Some(chunk) = chunks.next().await {
-            let chunk = chunk.with_context(|| {
-                format!("read Anthropic SSE chunk for session {session_id}")
-            })?;
+            let chunk = chunk
+                .with_context(|| format!("read Anthropic SSE chunk for session {session_id}"))?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
             while let Some(newline) = buffer.find('\n') {
@@ -399,13 +399,16 @@ impl RemoteAnthropicProvider {
                         let payload = data_lines.join("\n");
                         data_lines.clear();
                         if payload != "[DONE]" {
-                            let event: Value = serde_json::from_str(&payload).with_context(|| {
-                                format!("decode Anthropic SSE event for session {session_id}")
-                            })?;
+                            let event: Value =
+                                serde_json::from_str(&payload).with_context(|| {
+                                    format!("decode Anthropic SSE event for session {session_id}")
+                                })?;
                             producer.append_json(&AnthropicRelayEnvelope {
                                 entity_type: "anthropic_session_event",
                                 key: format!("{session_id}:{event_index}"),
-                                headers: RelayHeaders { operation: "append" },
+                                headers: RelayHeaders {
+                                    operation: "append",
+                                },
                                 value: AnthropicRelayEvent {
                                     session_id: session_id.to_string(),
                                     provider: ANTHROPIC_PROVIDER_NAME,
@@ -465,10 +468,8 @@ impl SandboxProvider for RemoteAnthropicProvider {
             created_at_ms: now_ms(),
             updated_at_ms: now_ms(),
         };
-        let relay_task = self.relay_session_stream(
-            session.id.clone(),
-            descriptor.state.url.clone(),
-        );
+        let relay_task =
+            self.relay_session_stream(session.id.clone(), descriptor.state.url.clone());
 
         self.sandboxes.lock().await.insert(
             session.id.clone(),
@@ -525,8 +526,7 @@ impl SandboxProvider for RemoteAnthropicProvider {
 
         if self.api_key().is_ok() {
             for session in self.list_sessions().await? {
-                let descriptor =
-                    self.descriptor_from_session(&session, cached.get(&session.id))?;
+                let descriptor = self.descriptor_from_session(&session, cached.get(&session.id))?;
                 if labels_match(&descriptor.labels, labels) {
                     descriptors.push(descriptor);
                 }
@@ -810,9 +810,11 @@ fn labels_match(
         return true;
     };
 
-    expected
-        .iter()
-        .all(|(key, value)| actual.get(key).is_some_and(|actual_value| actual_value == value))
+    expected.iter().all(|(key, value)| {
+        actual
+            .get(key)
+            .is_some_and(|actual_value| actual_value == value)
+    })
 }
 
 fn map_session_status(status: Option<&str>) -> SandboxStatus {
@@ -875,7 +877,8 @@ fn extract_session_errors<'a>(events: impl Iterator<Item = &'a Value>) -> String
         .filter_map(|event| {
             (event.get("type").and_then(Value::as_str) == Some("session.error"))
                 .then(|| {
-                    event.get("error")
+                    event
+                        .get("error")
                         .and_then(|error| error.get("message"))
                         .and_then(Value::as_str)
                         .map(ToOwned::to_owned)
@@ -922,6 +925,7 @@ mod tests {
             resources: Vec::new(),
             durable_streams_url: "http://localhost:8787/v1/stream".to_string(),
             state_stream: None,
+            control_plane_url: None,
             env_vars: HashMap::new(),
             labels: HashMap::new(),
             provider: Some("anthropic".to_string()),
@@ -939,6 +943,7 @@ mod tests {
             resources: Vec::new(),
             durable_streams_url: "http://localhost:8787/v1/stream".to_string(),
             state_stream: None,
+            control_plane_url: None,
             env_vars: HashMap::from([
                 (
                     "FIRELINE_ANTHROPIC_NETWORKING_TYPE".to_string(),

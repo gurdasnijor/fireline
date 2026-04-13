@@ -43,16 +43,25 @@ pub async fn run_host(config: HostConfig) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(bind_addr)
         .await
         .with_context(|| format!("bind host listener on {bind_addr}"))?;
-    let bound_addr = listener.local_addr().context("resolve host bound address")?;
+    let bound_addr = listener
+        .local_addr()
+        .context("resolve host bound address")?;
+    let control_plane_url = format!(
+        "http://{}:{}",
+        connect_host(bound_addr.ip()),
+        bound_addr.port()
+    );
 
     let read_model = Arc::new(HostIndex::new());
-    let local_provider = Arc::new(LocalSubprocessProvider::new(LocalSubprocessProviderConfig {
-        fireline_bin: config.fireline_bin.clone(),
-        host: config.host,
-        default_peer_directory_path: config.peer_directory_path.clone(),
-        startup_timeout: config.startup_timeout,
-        stop_timeout: config.stop_timeout,
-    }));
+    let local_provider = Arc::new(LocalSubprocessProvider::new(
+        LocalSubprocessProviderConfig {
+            fireline_bin: config.fireline_bin.clone(),
+            host: config.host,
+            default_peer_directory_path: config.peer_directory_path.clone(),
+            startup_timeout: config.startup_timeout,
+            stop_timeout: config.stop_timeout,
+        },
+    ));
     let dispatcher = match config.provider {
         ProviderMode::Local => ProviderDispatcher::new(local_provider, read_model),
         ProviderMode::Docker => {
@@ -78,6 +87,7 @@ pub async fn run_host(config: HostConfig) -> Result<()> {
         dispatcher,
         infra: HostInfraConfig {
             durable_streams_url: config.durable_streams_url.clone(),
+            control_plane_url,
         },
     });
 
@@ -98,4 +108,15 @@ fn default_repo_root() -> Result<PathBuf> {
         .parent()
         .context("resolve workspace root")?
         .to_path_buf())
+}
+
+fn connect_host(ip: std::net::IpAddr) -> String {
+    if ip.is_unspecified() {
+        match ip {
+            std::net::IpAddr::V4(_) => "127.0.0.1".to_string(),
+            std::net::IpAddr::V6(_) => "::1".to_string(),
+        }
+    } else {
+        ip.to_string()
+    }
 }

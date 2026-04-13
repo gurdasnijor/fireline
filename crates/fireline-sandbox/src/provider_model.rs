@@ -59,6 +59,8 @@ pub struct SandboxConfig {
     pub durable_streams_url: String,
     pub state_stream: Option<String>,
     #[serde(default)]
+    pub control_plane_url: Option<String>,
+    #[serde(default)]
     pub env_vars: HashMap<String, String>,
     #[serde(default)]
     pub labels: HashMap<String, String>,

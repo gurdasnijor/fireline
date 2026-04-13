@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug)]
 pub struct HostInfraConfig {
     pub durable_streams_url: String,
+    pub control_plane_url: String,
 }
 
 #[derive(Clone)]
@@ -90,6 +91,7 @@ async fn provision_sandbox(
         durable_streams_url: state.infra.durable_streams_url.clone(),
         state_stream: request.state_stream,
         env_vars,
+        control_plane_url: Some(state.infra.control_plane_url.clone()),
         labels: request.labels,
         provider: request.provider,
     };

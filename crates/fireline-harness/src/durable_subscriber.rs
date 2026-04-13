@@ -460,6 +460,16 @@ impl SandboxProvisioned {
     }
 }
 
+pub fn sandbox_provisioned_envelope(completion: SandboxProvisioned) -> Result<StreamEnvelope> {
+    Ok(StreamEnvelope {
+        entity_type: "deployment".to_string(),
+        key: format!("{}:ready", completion.session_id),
+        headers: insert_headers(),
+        source_offset: None,
+        value: Some(serde_json::to_value(completion)?),
+    })
+}
+
 /// Minimal runtime identity surfaced by the wake/provision substrate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvisionedRuntime {
@@ -859,6 +869,10 @@ fn request_id_storage_key(value: &RequestId) -> String {
         RequestId::Str(text) => text.clone(),
     }
 }
+
+fn insert_headers() -> Map<String, Value> {
+    Map::from_iter([("operation".to_string(), Value::String("insert".to_string()))])
+}
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -1239,8 +1253,7 @@ mod tests {
     #[test]
     fn always_on_replay_skips_duplicate_provision_when_completion_already_exists() {
         let wake_handler = RecordingDeploymentWakeHandler::new("runtime-key-1", "runtime-id-1");
-        let subscriber =
-            AlwaysOnDeploymentSubscriber::with_wake_handler(wake_handler.clone());
+        let subscriber = AlwaysOnDeploymentSubscriber::with_wake_handler(wake_handler.clone());
         let mut driver = DurableSubscriberDriver::new();
         driver.register_active(AlwaysOnDeploymentSubscriber::with_wake_handler(
             wake_handler.clone(),
@@ -1255,18 +1268,20 @@ mod tests {
         );
 
         let event = DeploymentWakeRequested::new(SessionId::from("deployment-session"));
-        let replay_log = vec![StreamEnvelope::from_json(serde_json::json!({
-            "type": "deployment",
-            "key": "deployment-session:ready",
-            "headers": {},
-            "value": {
-                "kind": SANDBOX_PROVISIONED_KIND,
-                "sessionId": "deployment-session",
-                "runtimeKey": "runtime-key-1",
-                "runtimeId": "runtime-id-1"
-            }
-        }))
-        .expect("decode sandbox_provisioned envelope")];
+        let replay_log = vec![
+            StreamEnvelope::from_json(serde_json::json!({
+                "type": "deployment",
+                "key": "deployment-session:ready",
+                "headers": {},
+                "value": {
+                    "kind": SANDBOX_PROVISIONED_KIND,
+                    "sessionId": "deployment-session",
+                    "runtimeKey": "runtime-key-1",
+                    "runtimeId": "runtime-id-1"
+                }
+            }))
+            .expect("decode sandbox_provisioned envelope"),
+        ];
 
         assert!(
             subscriber.is_completed(&event, &replay_log),

@@ -22,9 +22,11 @@ use axum::Router;
 use axum::routing::get;
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, DurableStream, Producer};
 use fireline_harness::{
-    AcpRouteState, ComponentContext, SharedTerminal, TopologySpec, audit_stream_names,
+    AcpRouteState, AlwaysOnDeploymentSubscriber, ComponentContext, SharedTerminal,
+    TopologyComponentSpec, TopologySpec, WakeTimerSubscriber, audit_stream_names,
     build_host_topology_registry, emit_host_instance_started, emit_host_instance_stopped,
-    emit_host_spec_persisted, ensure_named_streams,
+    emit_host_spec_persisted, ensure_named_streams, sandbox_provisioned_envelope,
+    spawn_active_subscriber_task, timer_fired_envelope,
 };
 use fireline_orchestration::load_coordinator::LoadCoordinatorComponent;
 use fireline_resources::MountedResource;
@@ -73,6 +75,7 @@ pub struct BootstrapHandle {
     deployment_producer: Producer,
     state_materializer_task: StateMaterializerTask,
     deployment_heartbeat_task: JoinHandle<()>,
+    background_subscriber_tasks: Vec<JoinHandle<()>>,
     shared_terminal: SharedTerminal,
     shutdown_tx: Option<oneshot::Sender<()>>,
     server_task: JoinHandle<Result<()>>,
@@ -89,6 +92,7 @@ struct PreparedRuntime {
     state_producer: Producer,
     deployment_producer: Producer,
     state_materializer_task: StateMaterializerTask,
+    background_subscriber_tasks: Vec<JoinHandle<()>>,
     shared_terminal: SharedTerminal,
     app_state: AcpRouteState,
 }
@@ -97,6 +101,10 @@ impl BootstrapHandle {
     pub async fn shutdown(mut self) -> Result<()> {
         self.deployment_heartbeat_task.abort();
         let _ = self.deployment_heartbeat_task.await;
+        for task in self.background_subscriber_tasks {
+            task.abort();
+            let _ = task.await;
+        }
 
         emit_deployment_event(
             &self.deployment_producer,
@@ -213,6 +221,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         deployment_producer: prepared.deployment_producer,
         state_materializer_task: prepared.state_materializer_task,
         deployment_heartbeat_task,
+        background_subscriber_tasks: prepared.background_subscriber_tasks,
         shared_terminal: prepared.shared_terminal,
         shutdown_tx: Some(shutdown_tx),
         server_task,
@@ -222,17 +231,31 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
 pub async fn run_stdio(config: BootstrapConfig) -> Result<()> {
     let prepared = prepare_runtime(config, 0).await?;
     let result = fireline_harness::routes_acp::serve_stdio(prepared.app_state.clone()).await;
+    let PreparedRuntime {
+        host_id,
+        host_name,
+        host_created_at,
+        state_producer,
+        state_materializer_task,
+        background_subscriber_tasks,
+        shared_terminal,
+        ..
+    } = prepared;
 
-    prepared.state_materializer_task.abort();
+    for task in background_subscriber_tasks {
+        task.abort();
+        let _ = task.await;
+    }
+    state_materializer_task.abort();
     let stop_result = emit_host_instance_stopped(
-        &prepared.state_producer,
-        &prepared.host_id,
-        &prepared.host_name,
-        prepared.host_created_at,
+        &state_producer,
+        &host_id,
+        &host_name,
+        host_created_at,
     )
     .await
     .context("flush host_instance_stopped from stdio bootstrap");
-    let terminal_result = prepared.shared_terminal.shutdown().await;
+    let terminal_result = shared_terminal.shutdown().await;
 
     result?;
     stop_result?;
@@ -257,6 +280,10 @@ async fn prepare_runtime(config: BootstrapConfig, bound_port: u16) -> Result<Pre
     let host_stream_url = deployment_stream_url(&stream_base_url, DEFAULT_TENANT_ID);
     let host_name = config.name.clone();
     let node_id = config.node_id;
+    let control_plane_url = config.control_plane_url.clone();
+    let effective_topology =
+        hosted_boot_topology(config.topology.clone(), control_plane_url.as_deref());
+    let conductor_topology = acp_route_topology(&effective_topology);
 
     let stream_client = DurableStreamsClient::new();
     let mut state_stream_handle = stream_client.stream(&state_stream_url);
@@ -280,7 +307,7 @@ async fn prepare_runtime(config: BootstrapConfig, bound_port: u16) -> Result<Pre
     // consumes the original.
     let agent_command_for_spec = config.agent_command.clone();
     let shared_terminal = SharedTerminal::spawn(config.agent_command).await?;
-    ensure_named_streams(&stream_base_url, &audit_stream_names(&config.topology)?).await?;
+    ensure_named_streams(&stream_base_url, &audit_stream_names(&effective_topology)?).await?;
     ensure_stream_exists(&state_stream_handle).await?;
     ensure_stream_exists(&host_stream_handle).await?;
     let peer_registry: std::sync::Arc<dyn PeerRegistry> = std::sync::Arc::new(
@@ -305,7 +332,7 @@ async fn prepare_runtime(config: BootstrapConfig, bound_port: u16) -> Result<Pre
         state_producer: state_producer.clone(),
         shared_terminal: shared_terminal.clone(),
         topology_registry,
-        topology: config.topology.clone(),
+        topology: conductor_topology.clone(),
         base_components_factory: std::sync::Arc::new({
             let session_index = session_index.clone();
             let session_state_stream_url = state_stream_url.clone();
@@ -339,7 +366,7 @@ async fn prepare_runtime(config: BootstrapConfig, bound_port: u16) -> Result<Pre
             state_stream: Some(state_stream.clone()),
             stream_storage: None,
             peer_directory_path: None,
-            topology: config.topology.clone(),
+            topology: effective_topology.clone(),
         },
     );
     emit_host_spec_persisted(&state_stream_url, &persisted_spec)
@@ -352,6 +379,12 @@ async fn prepare_runtime(config: BootstrapConfig, bound_port: u16) -> Result<Pre
 
     let state_materializer_task = state_materializer.connect(state_stream_url.clone());
     state_materializer_task.preload().await?;
+    let background_subscriber_tasks = spawn_boot_subscriber_tasks(
+        &effective_topology,
+        control_plane_url.as_deref(),
+        &state_stream_url,
+        &state_producer,
+    );
 
     Ok(PreparedRuntime {
         host_id,
@@ -364,9 +397,88 @@ async fn prepare_runtime(config: BootstrapConfig, bound_port: u16) -> Result<Pre
         state_producer,
         deployment_producer,
         state_materializer_task,
+        background_subscriber_tasks,
         shared_terminal,
         app_state,
     })
+}
+
+fn hosted_boot_topology(
+    mut topology: TopologySpec,
+    control_plane_url: Option<&str>,
+) -> TopologySpec {
+    if control_plane_url.is_some()
+        && !topology
+            .components
+            .iter()
+            .any(|component| component.name == "always_on_deployment")
+    {
+        topology.components.push(TopologyComponentSpec {
+            name: "always_on_deployment".to_string(),
+            config: None,
+        });
+    }
+    topology
+}
+
+fn acp_route_topology(topology: &TopologySpec) -> TopologySpec {
+    TopologySpec {
+        components: topology
+            .components
+            .iter()
+            .filter(|component| !is_boot_subscriber_component(&component.name))
+            .cloned()
+            .collect(),
+    }
+}
+
+fn spawn_boot_subscriber_tasks(
+    topology: &TopologySpec,
+    control_plane_url: Option<&str>,
+    state_stream_url: &str,
+    state_producer: &Producer,
+) -> Vec<JoinHandle<()>> {
+    let mut tasks = Vec::new();
+
+    for component in &topology.components {
+        match component.name.as_str() {
+            "always_on_deployment" => {
+                let Some(control_plane_url) = control_plane_url else {
+                    tracing::warn!(
+                        "skipping always_on_deployment boot task because control_plane_url is absent"
+                    );
+                    continue;
+                };
+                tasks.push(spawn_active_subscriber_task(
+                    "always_on_deployment",
+                    AlwaysOnDeploymentSubscriber::new(
+                        reqwest::Client::new(),
+                        control_plane_url.to_string(),
+                        state_stream_url.to_string(),
+                    ),
+                    state_stream_url.to_string(),
+                    state_producer.clone(),
+                    sandbox_provisioned_envelope,
+                ));
+            }
+            "wake_timer" => {
+                tasks.push(spawn_active_subscriber_task(
+                    "wake_timer",
+                    WakeTimerSubscriber::new(),
+                    state_stream_url.to_string(),
+                    state_producer.clone(),
+                    timer_fired_envelope,
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    tasks
+}
+
+fn is_boot_subscriber_component(name: &str) -> bool {
+    matches!(name, "always_on_deployment" | "wake_timer")
 }
 
 fn connect_host(ip: IpAddr) -> String {
@@ -452,4 +564,65 @@ fn chrono_like_now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or(std::time::Duration::ZERO)
         .as_millis() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hosted_boot_topology_adds_always_on_deployment_once() {
+        let topology = TopologySpec::default();
+
+        let effective = hosted_boot_topology(topology, Some("http://127.0.0.1:4440"));
+
+        assert!(
+            effective
+                .components
+                .iter()
+                .any(|component| component.name == "always_on_deployment")
+        );
+        assert_eq!(
+            effective
+                .components
+                .iter()
+                .filter(|component| component.name == "always_on_deployment")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn hosted_boot_topology_preserves_direct_host_topology_without_control_plane() {
+        let topology = TopologySpec::default();
+
+        let effective = hosted_boot_topology(topology.clone(), None);
+
+        assert_eq!(effective, topology);
+    }
+
+    #[test]
+    fn acp_route_topology_filters_boot_only_subscribers() {
+        let topology = TopologySpec {
+            components: vec![
+                TopologyComponentSpec {
+                    name: "peer_mcp".to_string(),
+                    config: None,
+                },
+                TopologyComponentSpec {
+                    name: "always_on_deployment".to_string(),
+                    config: None,
+                },
+                TopologyComponentSpec {
+                    name: "wake_timer".to_string(),
+                    config: None,
+                },
+            ],
+        };
+
+        let filtered = acp_route_topology(&topology);
+
+        assert_eq!(filtered.components.len(), 1);
+        assert_eq!(filtered.components[0].name, "peer_mcp");
+    }
 }

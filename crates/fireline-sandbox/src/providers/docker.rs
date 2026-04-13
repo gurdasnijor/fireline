@@ -201,6 +201,11 @@ impl SandboxProvider for DockerProvider {
             join_stream_url(&config.durable_streams_url, &state_stream_name);
         let connect_durable_streams_url =
             rewrite_loopback_for_container(&config.durable_streams_url)?;
+        let connect_control_plane_url = config
+            .control_plane_url
+            .as_deref()
+            .map(rewrite_loopback_for_container)
+            .transpose()?;
 
         let agent_command = rewrite_agent_command_for_image(&config.agent_command)?;
         let bind_mounts = mounted_resources
@@ -247,7 +252,7 @@ impl SandboxProvider for DockerProvider {
                     "--mounted-resources-json".to_string(),
                     mounted_resources_json,
                 ],
-                );
+            );
         }
 
         let mut env_vars = vec![
@@ -257,6 +262,9 @@ impl SandboxProvider for DockerProvider {
             format!("FIRELINE_ADVERTISED_ACP_URL={advertised_acp_url}"),
             format!("FIRELINE_ADVERTISED_STATE_STREAM_URL={advertised_state_stream_url}"),
         ];
+        if let Some(control_plane_url) = connect_control_plane_url {
+            env_vars.push(format!("FIRELINE_CONTROL_PLANE_URL={control_plane_url}"));
+        }
         env_vars.extend(
             config
                 .env_vars
@@ -460,9 +468,11 @@ fn labels_match(
         return true;
     };
 
-    expected
-        .iter()
-        .all(|(key, value)| actual.get(key).is_some_and(|actual_value| actual_value == value))
+    expected.iter().all(|(key, value)| {
+        actual
+            .get(key)
+            .is_some_and(|actual_value| actual_value == value)
+    })
 }
 
 fn rewrite_agent_command_for_image(agent_command: &[String]) -> Result<Vec<String>> {
