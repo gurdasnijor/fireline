@@ -9,6 +9,7 @@ import {
   type UsageUpdate,
   type Stream,
 } from '@agentclientprotocol/sdk'
+import fireline, { appendApprovalResolved } from '@fireline/client'
 import { render } from 'ink'
 import React from 'react'
 import { once } from 'node:events'
@@ -62,10 +63,18 @@ export interface PlanEntry {
 
 export type TranscriptEntry = MessageEntry | ToolEntry | PlanEntry
 
+export interface PendingApproval {
+  readonly requestId: string | number
+  readonly sessionId: string
+  readonly summary: string
+}
+
 export interface ReplViewState {
   readonly busy: boolean
   readonly entries: readonly TranscriptEntry[]
   readonly pendingTools: number
+  readonly pendingApproval: PendingApproval | null
+  readonly resolvingApproval: boolean
   readonly serverUrl: string
   readonly sessionId: string | null
   readonly usage: UsageSnapshot | null
@@ -73,6 +82,7 @@ export interface ReplViewState {
 
 export interface ReplViewModel {
   getSnapshot(): ReplViewState
+  resolvePendingApproval(allow: boolean): Promise<void>
   subscribe(listener: () => void): () => void
   submit(text: string): Promise<'ignored' | 'quit' | 'sent'>
 }
@@ -108,6 +118,7 @@ export interface ReplOptions {
   readonly output?: Writable
   readonly serverUrl?: string
   readonly sessionId?: string | null
+  readonly stateStreamUrl?: string | null
 }
 
 export async function runRepl(options: ReplOptions = {}): Promise<number> {
@@ -117,8 +128,10 @@ export async function runRepl(options: ReplOptions = {}): Promise<number> {
   const cwd = options.cwd ?? invocationCwd()
   const serverUrl = options.serverUrl ?? DEFAULT_SERVER_URL
   const acpUrl = options.acpUrl ?? resolveAcpUrl(serverUrl)
+  const stateStreamUrl = options.stateStreamUrl ?? process.env.FIRELINE_STREAM_URL ?? null
   let activeSessionId = options.sessionId ?? null
   let controller: ReplController | null = null
+  let approvalWatcher: ApprovalWatcher | null = null
   const repl = await (options.connect ?? connectReplAcp)({
     acpUrl,
     onSessionUpdate: async (notification) => {
@@ -135,6 +148,15 @@ export async function runRepl(options: ReplOptions = {}): Promise<number> {
         prompt: [{ type: 'text', text }],
       })
     },
+    resolveApproval: async (approval, allow) => {
+      await appendApprovalResolved({
+        allow,
+        requestId: approval.requestId,
+        resolvedBy: 'cli-repl',
+        sessionId: approval.sessionId,
+        streamUrl: stateStreamUrl!,
+      })
+    },
     serverUrl,
     sessionId: options.sessionId ?? null,
   })
@@ -149,6 +171,11 @@ export async function runRepl(options: ReplOptions = {}): Promise<number> {
 
     await options.onSessionReady?.(activeSessionId)
     controller.setSessionId(activeSessionId)
+    if (stateStreamUrl) {
+      approvalWatcher = await watchApprovals(stateStreamUrl, activeSessionId, (approval) => {
+        controller?.setPendingApproval(approval)
+      })
+    }
     return await runInkRepl({
       alternateScreen: options.alternateScreen ?? true,
       controller,
@@ -157,6 +184,7 @@ export async function runRepl(options: ReplOptions = {}): Promise<number> {
       output: output as NodeJS.WriteStream,
     })
   } finally {
+    await approvalWatcher?.close()
     await repl.close()
   }
 }
@@ -402,6 +430,100 @@ function invocationCwd(): string {
   return process.env.PWD || process.cwd()
 }
 
+interface ApprovalWatcher {
+  close(): Promise<void>
+}
+
+async function watchApprovals(
+  stateStreamUrl: string,
+  sessionId: string,
+  onPendingApproval: (approval: PendingApproval | null) => void,
+): Promise<ApprovalWatcher> {
+  const restoreConsole = suppressStreamDbConsole()
+  try {
+    const db = await fireline.db({ stateStreamUrl })
+    const subscription = db.permissions.subscribe((rows) => {
+      onPendingApproval(selectPendingApproval(rows, sessionId))
+    })
+
+    return {
+      close: async () => {
+        try {
+          subscription.unsubscribe()
+          db.close()
+        } finally {
+          restoreConsole()
+        }
+      },
+    }
+  }
+  catch (error) {
+    restoreConsole()
+    throw error
+  }
+}
+
+function selectPendingApproval(
+  rows: readonly PendingApprovalRow[],
+  sessionId: string,
+): PendingApproval | null {
+  const pending = rows
+    .filter(
+      (row) =>
+        row.sessionId === sessionId &&
+        row.state === 'pending' &&
+        isApprovalRequestId(row.requestId),
+    )
+    .sort((left, right) => left.createdAt - right.createdAt)[0]
+  if (!pending) {
+    return null
+  }
+
+  const requestId = pending.requestId
+  if (!isApprovalRequestId(requestId)) {
+    return null
+  }
+
+  return {
+    requestId,
+    sessionId: pending.sessionId,
+    summary: pending.title ?? pending.toolCallId ?? `request ${String(requestId)}`,
+  }
+}
+
+function isApprovalRequestId(value: unknown): value is string | number {
+  return typeof value === 'string' || typeof value === 'number'
+}
+
+interface PendingApprovalRow {
+  readonly createdAt: number
+  readonly requestId?: string | number | null
+  readonly sessionId: string
+  readonly state: string
+  readonly title?: string
+  readonly toolCallId?: string
+}
+
+function suppressStreamDbConsole(): () => void {
+  const methods = ['log', 'warn', 'error'] as const
+  const originals = methods.map((name) => [name, console[name].bind(console)] as const)
+
+  for (const [name, original] of originals) {
+    console[name] = ((...args: unknown[]) => {
+      if (typeof args[0] === 'string' && args[0].startsWith('[StreamDB]')) {
+        return
+      }
+      original(...args)
+    }) as typeof console.log
+  }
+
+  return () => {
+    for (const [name, original] of originals) {
+      console[name] = original
+    }
+  }
+}
+
 export class ReplController implements ReplViewModel {
   private readonly listeners = new Set<() => void>()
   private readonly toolIndexes = new Map<string, number>()
@@ -413,6 +535,10 @@ export class ReplController implements ReplViewModel {
   constructor(
     private readonly options: {
       readonly sendPrompt: (text: string) => Promise<void>
+      readonly resolveApproval: (
+        approval: PendingApproval,
+        allow: boolean,
+      ) => Promise<void>
       readonly serverUrl: string
       readonly sessionId: string | null
     },
@@ -421,6 +547,8 @@ export class ReplController implements ReplViewModel {
       busy: false,
       entries: [],
       pendingTools: 0,
+      pendingApproval: null,
+      resolvingApproval: false,
       serverUrl: options.serverUrl,
       sessionId: options.sessionId,
       usage: null,
@@ -438,8 +566,41 @@ export class ReplController implements ReplViewModel {
     }
   }
 
+  async resolvePendingApproval(allow: boolean): Promise<void> {
+    const approval = this.state.pendingApproval
+    if (!approval || this.state.resolvingApproval) {
+      return
+    }
+
+    this.state = { ...this.state, resolvingApproval: true }
+    this.emit()
+
+    try {
+      await this.options.resolveApproval(approval, allow)
+      this.state = {
+        ...this.state,
+        pendingApproval: null,
+        resolvingApproval: false,
+      }
+      this.emit()
+    } catch (error) {
+      this.state = { ...this.state, resolvingApproval: false }
+      this.emit()
+      throw error
+    }
+  }
+
   setSessionId(sessionId: string): void {
     this.state = { ...this.state, sessionId }
+    this.emit()
+  }
+
+  setPendingApproval(approval: PendingApproval | null): void {
+    this.state = {
+      ...this.state,
+      pendingApproval: approval,
+      resolvingApproval: approval ? this.state.resolvingApproval : false,
+    }
     this.emit()
   }
 

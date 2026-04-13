@@ -1084,6 +1084,7 @@ export async function runHostedRepl(
       printReady(handle, args, { logger, sessionId })
     },
     serverUrl: `http://127.0.0.1:${args.port}`,
+    stateStreamUrl: handle.state.url,
   })
 }
 

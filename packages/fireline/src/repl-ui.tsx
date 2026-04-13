@@ -49,6 +49,25 @@ export function FirelineReplApp(props: {
       return
     }
 
+    if (state.pendingApproval) {
+      if (key.ctrl || key.meta || !value) {
+        return
+      }
+
+      if (value.toLowerCase() === 'y') {
+        void props.controller.resolvePendingApproval(true).catch((error: unknown) => {
+          props.onFailure(error instanceof Error ? error : new Error(String(error)))
+          exit()
+        })
+      } else if (value.toLowerCase() === 'n') {
+        void props.controller.resolvePendingApproval(false).catch((error: unknown) => {
+          props.onFailure(error instanceof Error ? error : new Error(String(error)))
+          exit()
+        })
+      }
+      return
+    }
+
     if (state.busy) {
       return
     }
@@ -91,6 +110,12 @@ export function FirelineReplApp(props: {
   return (
     <Box flexDirection="column" paddingX={1}>
       <Header state={state} spinner={spinner} />
+      {state.pendingApproval ? (
+        <ApprovalPrompt
+          pending={state.pendingApproval}
+          resolving={state.resolvingApproval}
+        />
+      ) : null}
       <Box flexDirection="column" marginTop={1}>
         {visibleEntries.length === 0 ? (
           <EmptyState />
@@ -100,7 +125,13 @@ export function FirelineReplApp(props: {
           ))
         )}
       </Box>
-      <Composer busy={state.busy} input={input} spinner={spinner} />
+      <Composer
+        busy={state.busy}
+        input={input}
+        pendingApproval={state.pendingApproval}
+        resolvingApproval={state.resolvingApproval}
+        spinner={spinner}
+      />
     </Box>
   )
 }
@@ -147,6 +178,23 @@ function EmptyState() {
     <Box borderColor="gray" borderStyle="round" flexDirection="column" paddingX={1}>
       <Text color="gray">Connected.</Text>
       <Text color="gray">Type a prompt below and press Enter to send it.</Text>
+    </Box>
+  )
+}
+
+function ApprovalPrompt(props: {
+  readonly pending: ReplViewState['pendingApproval']
+  readonly resolving: boolean
+}) {
+  return (
+    <Box borderColor="yellow" borderStyle="round" flexDirection="column" marginTop={1} paddingX={1}>
+      <Text bold color="yellow">
+        approval pending
+      </Text>
+      <Text>Approve: {props.pending?.summary ?? 'pending action'}</Text>
+      <Text color="gray">
+        {props.resolving ? 'resolving approval...' : 'Press y to allow or n to deny.'}
+      </Text>
     </Box>
   )
 }
@@ -224,22 +272,28 @@ function PlanView(props: { readonly entry: PlanEntry }) {
 function Composer(props: {
   readonly busy: boolean
   readonly input: string
+  readonly pendingApproval: ReplViewState['pendingApproval']
+  readonly resolvingApproval: boolean
   readonly spinner: string
 }) {
   return (
     <Box
-      borderColor={props.busy ? 'yellow' : 'gray'}
+      borderColor={props.busy || props.pendingApproval ? 'yellow' : 'gray'}
       borderStyle="round"
       flexDirection="column"
       marginTop={1}
       paddingX={1}
     >
       <Text color="gray">
-        {props.busy
+        {props.pendingApproval
+          ? props.resolvingApproval
+            ? 'Resolving approval and waiting for the running session...'
+            : 'Approval pending. Press y to allow or n to deny.'
+          : props.busy
           ? `${props.spinner} waiting for the running session...`
           : 'Enter to send, Esc to clear, Ctrl+C or /quit to exit.'}
       </Text>
-      <Text color={props.busy ? 'gray' : 'white'}>
+      <Text color={props.busy || props.pendingApproval ? 'gray' : 'white'}>
         <Text color="cyan">&gt;</Text>{' '}
         {props.input.length > 0 ? props.input : 'Ask the running host something...'}
       </Text>
