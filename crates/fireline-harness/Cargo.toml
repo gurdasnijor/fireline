@@ -29,7 +29,6 @@ toml.workspace = true
 tracing.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
-reqwest.workspace = true
 tracing-opentelemetry.workspace = true
 uuid.workspace = true
 zeroize = "1"
