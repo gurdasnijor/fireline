@@ -3,10 +3,16 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "baseUrl": "../..",
+    "paths": {
+      "@fireline/client": ["packages/client/src/index.ts"],
+      "@fireline/client/*": ["packages/client/src/*"],
+      "@fireline/state": ["packages/state/src/index.ts"],
+      "@fireline/state/*": ["packages/state/src/*"]
+    },
     "lib": ["ES2022"],
     "types": ["node"],
     "outDir": "./dist",
-    "rootDir": "./src",
     "jsx": "react-jsx",
     "strict": true,
     "esModuleInterop": true,
