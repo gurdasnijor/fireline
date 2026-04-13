@@ -6,21 +6,40 @@
 //! durable-streams-server Docker image instead.
 
 use anyhow::{Context, Result};
+use clap::Parser;
+use std::net::IpAddr;
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "fireline-streams",
+    about = "Standalone durable-streams server for local Fireline development"
+)]
+struct Cli {
+    /// Bind port for the durable-streams listener.
+    #[arg(long, env = "PORT", default_value_t = 7474)]
+    port: u16,
+
+    /// Bind address.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let port: u16 = std::env::var("PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(7474);
+    let cli = Cli::parse();
+    let host: IpAddr = cli.host.parse().context("parse durable-streams host")?;
 
     let router = fireline_session::build_stream_router(None)?;
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+    let listener = tokio::net::TcpListener::bind((host, cli.port))
         .await
         .context("bind durable-streams listener")?;
 
     let addr = listener.local_addr()?;
-    eprintln!("durable-streams ready at http://127.0.0.1:{}/v1/stream", addr.port());
+    eprintln!(
+        "durable-streams ready at http://{}:{}/v1/stream",
+        addr.ip(),
+        addr.port()
+    );
 
     axum::serve(listener, router)
         .await

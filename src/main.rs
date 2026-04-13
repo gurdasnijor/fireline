@@ -168,9 +168,8 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _observability = fireline_host::observability::init_tracing()?;
-
     let cli = Cli::parse();
+    let _observability = fireline_host::observability::init_tracing()?;
     if let Some(command) = cli.command.clone() {
         return match command {
             FirelineCommand::PublishResource(args) => run_publish_resource(args).await,
