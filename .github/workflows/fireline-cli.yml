@@ -171,8 +171,9 @@ jobs:
       - name: Stage binaries into platform package
         shell: bash
         run: |
+          ARTIFACT_ROOT="${CARGO_TARGET_DIR:-target}"
           node scripts/stage-fireline-platform-package.mjs \
-            --artifact-dir "target/${{ matrix.rust_target }}/release" \
+            --artifact-dir "${ARTIFACT_ROOT}/${{ matrix.rust_target }}/release" \
             --package-dir "${{ matrix.package_dir }}" \
             --exe-suffix "${{ matrix.exe_suffix }}"
 
