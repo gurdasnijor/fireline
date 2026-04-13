@@ -37,6 +37,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use anyhow::Result as AnyhowResult;
 use durable_streams::Producer;
 use fireline_acp_ids::{RequestId, SessionId, ToolCallId};
 use sacp::schema::{ContentBlock, PromptRequest};
@@ -157,25 +158,8 @@ impl ApprovalGateSubscriber {
         request_id: &RequestId,
         reason: &str,
     ) -> StreamEnvelope {
-        StreamEnvelope {
-            entity_type: "permission".to_string(),
-            key: format!("{session_id}:{}", request_id_key(request_id)),
-            headers: insert_headers(),
-            source_offset: None,
-            value: Some(
-                serde_json::to_value(PermissionEvent {
-                    kind: "permission_request".to_string(),
-                    session_id: session_id.clone(),
-                    request_id: Some(request_id.clone()),
-                    tool_call_id: None,
-                    allow: None,
-                    resolved_by: None,
-                    reason: Some(reason.to_string()),
-                    created_at_ms: now_ms(),
-                })
-                .expect("permission request event must serialize"),
-            ),
-        }
+        permission_request_envelope(session_id.clone(), request_id.clone(), reason.to_string())
+            .expect("permission request event must serialize")
     }
 
     fn decode_permission_event(envelope: &StreamEnvelope) -> Option<PermissionEvent> {
@@ -477,6 +461,53 @@ struct PermissionEvent {
     created_at_ms: i64,
 }
 
+pub fn permission_request_envelope(
+    session_id: SessionId,
+    request_id: RequestId,
+    reason: String,
+) -> AnyhowResult<StreamEnvelope> {
+    Ok(StreamEnvelope {
+        entity_type: "permission".to_string(),
+        key: format!("{session_id}:{}", request_id_key(&request_id)),
+        headers: insert_headers(),
+        source_offset: None,
+        value: Some(serde_json::to_value(PermissionEvent {
+            kind: "permission_request".to_string(),
+            session_id,
+            request_id: Some(request_id),
+            tool_call_id: None,
+            allow: None,
+            resolved_by: None,
+            reason: Some(reason),
+            created_at_ms: now_ms(),
+        })?),
+    })
+}
+
+pub fn approval_resolution_envelope(
+    session_id: SessionId,
+    request_id: RequestId,
+    allow: bool,
+    resolved_by: String,
+) -> AnyhowResult<StreamEnvelope> {
+    Ok(StreamEnvelope {
+        entity_type: "permission".to_string(),
+        key: format!("{session_id}:{}:resolved", request_id_key(&request_id)),
+        headers: insert_headers(),
+        source_offset: None,
+        value: Some(serde_json::to_value(PermissionEvent {
+            kind: "approval_resolved".to_string(),
+            session_id,
+            request_id: Some(request_id),
+            tool_call_id: None,
+            allow: Some(allow),
+            resolved_by: Some(resolved_by),
+            reason: None,
+            created_at_ms: now_ms(),
+        })?),
+    })
+}
+
 impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
     async fn connect_to(self, client: impl ConnectTo<Proxy>) -> Result<(), sacp::Error> {
         let this = self.clone();
@@ -729,22 +760,12 @@ mod tests {
     ) -> Result<()> {
         let session_id = SessionId::from(session_id.to_string());
         let request_id = RequestId::from(request_id.to_string());
-        producer.append_json(&StreamEnvelope {
-            entity_type: "permission".to_string(),
-            key: format!("{session_id}:{}:resolved", request_id_key(&request_id)),
-            headers: insert_headers(),
-            source_offset: None,
-            value: Some(serde_json::to_value(PermissionEvent {
-                kind: "approval_resolved".to_string(),
-                session_id,
-                request_id: Some(request_id),
-                tool_call_id: None,
-                allow: Some(allow),
-                resolved_by: Some("approval-test".to_string()),
-                reason: None,
-                created_at_ms: now_ms(),
-            })?),
-        });
+        producer.append_json(&approval_resolution_envelope(
+            session_id,
+            request_id,
+            allow,
+            "approval-test".to_string(),
+        )?);
         producer
             .flush()
             .await
