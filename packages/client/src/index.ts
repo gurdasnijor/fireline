@@ -41,9 +41,15 @@ export type { SandboxClientOptions } from './sandbox.js'
 export type { ConnectedAcp } from './connect.js'
 export type {
   AgentConfig,
+  AutoApproveMiddleware,
   AttachToolsMiddleware,
   CapabilityRef,
   CredentialRef,
+  DurableSubscriberEventSelector,
+  DurableSubscriberKeyStrategy,
+  DurableSubscriberMiddleware,
+  DurableSubscriberRetryPolicy,
+  DurableSubscriberSecretRef,
   Endpoint,
   Harness,
   HarnessConfig,
@@ -60,7 +66,9 @@ export type {
   SecretBinding,
   SecretsProxyMiddleware,
   StartOptions,
+  TelegramMiddleware,
   ToolAttachment,
   ToolDescriptor,
   TransportRef,
+  WebhookMiddleware,
 } from './types.js'

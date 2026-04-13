@@ -6,6 +6,7 @@ import type {
   CredentialRef,
   Harness,
   HarnessSpec,
+  DurableSubscriberEventSelector,
   MiddlewareChain,
   Middleware,
   SandboxConfig,
@@ -302,7 +303,110 @@ function middlewareToComponents(middleware: Middleware, name: string): TopologyC
           },
         },
       ]
+    case 'webhook':
+      return [
+        {
+          name: 'webhook_subscriber',
+          config: buildWebhookSubscriberConfig(middleware),
+        },
+      ]
+    case 'telegram':
+      return [
+        {
+          name: 'telegram_subscriber',
+          config: cloneDefined({
+            name: middleware.name,
+            target: middleware.target,
+            token:
+              typeof middleware.token === 'string'
+                ? middleware.token
+                : middleware.token
+                  ? { ...middleware.token }
+                  : undefined,
+            chatId: middleware.chatId,
+            events: middleware.events?.map(cloneSubscriberEventSelector),
+            keyBy: middleware.keyBy,
+            retry: middleware.retry ? { ...middleware.retry } : undefined,
+          }),
+        },
+      ]
+    case 'autoApprove':
+      return [
+        {
+          name: 'auto_approve',
+        },
+      ]
   }
+}
+
+function cloneSubscriberEventSelector(
+  selector: DurableSubscriberEventSelector,
+): DurableSubscriberEventSelector {
+  return typeof selector === 'string' ? selector : { ...selector }
+}
+
+function buildWebhookSubscriberConfig(middleware: Extract<Middleware, { kind: 'webhook' }>) {
+  const target = middleware.target ?? middleware.name ?? deriveWebhookTarget(middleware.url)
+  const maxAttempts = middleware.retry?.maxAttempts ?? 1
+  return {
+    target,
+    events: middleware.events.map(normalizeWebhookEventSelector),
+    targetConfig: {
+      url: middleware.url,
+      headers: middleware.headers
+        ? Object.fromEntries(
+            Object.entries(middleware.headers).map(([headerName, ref]) => [
+              headerName,
+              ref.ref,
+            ]),
+          )
+        : {},
+      timeoutMs: 5_000,
+      maxAttempts,
+      cursorStream: `subscribers:webhook:${slugWebhookTarget(target)}`,
+      deadLetterStream: `subscribers:webhook:${slugWebhookTarget(target)}:dead-letter`,
+    },
+    ...(middleware.retry ? { retryPolicy: buildRetryPolicy(middleware.retry) } : {}),
+  }
+}
+
+function normalizeWebhookEventSelector(
+  selector: DurableSubscriberEventSelector,
+) {
+  if (typeof selector === 'string') {
+    return { kind: selector }
+  }
+
+  return {
+    exact: {
+      entityType: selector.type,
+      ...(selector.kind ? { kind: selector.kind } : {}),
+    },
+  }
+}
+
+function buildRetryPolicy(retry: NonNullable<Extract<Middleware, { kind: 'webhook' }>['retry']>) {
+  return cloneDefined({
+    maxAttempts: retry.maxAttempts,
+    initialBackoffMs: retry.initialBackoffMs,
+    maxBackoffMs: retry.maxBackoffMs ?? retry.initialBackoffMs,
+  })
+}
+
+function deriveWebhookTarget(url: string | undefined): string {
+  if (!url) {
+    return 'webhook'
+  }
+
+  try {
+    return new URL(url).host
+  } catch {
+    return 'webhook'
+  }
+}
+
+function slugWebhookTarget(target: string): string {
+  return target.replace(/[^a-zA-Z0-9._-]+/g, '-')
 }
 
 function normalizeCapabilityRef(
