@@ -9,6 +9,109 @@ This page stays on API mechanics. For the observation model, use
 This page does not treat example-local variables such as `AGENT_COMMAND` or
 `REPO_PATH` as product API.
 
+## Environment Variable Catalog
+
+This section is the quick inventory: which env vars belong to Fireline itself,
+which ones are operator-side inputs to examples or deploy helpers, and where
+the checked-in templates live.
+
+### Fireline CLI binary overrides
+
+The CLI binary resolver in
+[`packages/fireline/src/resolve-binary.ts`](../../../packages/fireline/src/resolve-binary.ts)
+honors these variables before it falls back to packaged or `target/{release,debug}`
+binaries:
+
+- `FIRELINE_BIN` — overrides the `fireline` binary path
+- `FIRELINE_STREAMS_BIN` — overrides the `fireline-streams` binary path
+- `FIRELINE_AGENTS_BIN` — overrides the `fireline-agents` binary path
+
+Each must point at an existing file. If set to a missing path, the CLI throws
+instead of silently falling back.
+
+```bash
+FIRELINE_BIN="$PWD/target/debug/fireline" \
+FIRELINE_STREAMS_BIN="$PWD/target/debug/fireline-streams" \
+fireline run agent.ts
+```
+
+### Fireline host and state defaults
+
+- `FIRELINE_URL` — default host URL for `fireline repl`; many examples also use
+  it as their default `serverUrl`
+- `FIRELINE_STREAM_URL` — default state-stream URL read by
+  `fireline.db(...)` when `stateStreamUrl` is omitted in Node
+
+```bash
+FIRELINE_URL=http://127.0.0.1:4440 fireline repl
+FIRELINE_STREAM_URL=http://127.0.0.1:7474/streams/state/demo node monitor.mjs
+```
+
+### Operator-side secret env
+
+- `ANTHROPIC_API_KEY` — commonly resolved through
+  `secretsProxy({ ANTHROPIC_API_KEY: { ref: 'env:ANTHROPIC_API_KEY' } })`
+- `TELEGRAM_BOT_TOKEN` — commonly resolved through
+  `telegram({ token: { ref: 'env:TELEGRAM_BOT_TOKEN' } })`
+
+These are shell env vars owned by the operator or deploy target. In Fireline
+code they usually appear as host-owned refs like `env:ANTHROPIC_API_KEY`,
+not as inline secret values.
+
+```ts
+const mw = secretsProxy({
+  ANTHROPIC_API_KEY: {
+    ref: 'env:ANTHROPIC_API_KEY',
+    allow: 'api.anthropic.com',
+  },
+})
+```
+
+### `deploy/telegram/bridge.env.example`
+
+Checked-in template:
+[deploy/telegram/bridge.env.example](../../../deploy/telegram/bridge.env.example)
+
+This template is for the operator-run Telegram bridge process. It currently
+defines:
+
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `TELEGRAM_ALLOWED_USER_IDS`
+- `BRIDGE_PORT`
+- `BRIDGE_CALLBACK_WEBHOOK_PATH`
+- `FIRELINE_URL`
+- `FIRELINE_STATE_STREAM_URL`
+
+`bridge.env` is local operator state and must not be committed. Note that
+`FIRELINE_STATE_STREAM_URL` in this file is the bridge's durable-streams base
+URL for health and routing checks, not the `fireline.db(...)` fallback variable
+`FIRELINE_STREAM_URL`.
+
+```bash
+cp deploy/telegram/bridge.env.example deploy/telegram/bridge.env
+```
+
+### `deploy/observability/betterstack.env.example`
+
+Checked-in template:
+[deploy/observability/betterstack.env.example](../../../deploy/observability/betterstack.env.example)
+
+This template is for operator-side OTLP export config. Per
+[deploy/observability/README.md](../../../deploy/observability/README.md),
+the Fireline host consumes standard `OTEL_EXPORTER_OTLP_*` env vars. The
+checked-in Betterstack template currently defines:
+
+- `OTEL_EXPORTER_OTLP_ENDPOINT`
+- `OTEL_EXPORTER_OTLP_HEADERS`
+- `OTEL_SERVICE_NAME`
+- `OTEL_RESOURCE_ATTRIBUTES` (commented optional example)
+
+```bash
+cp deploy/observability/betterstack.env.example deploy/observability/betterstack.env
+set -a; source deploy/observability/betterstack.env; set +a
+```
+
 ## Host Connection Config
 
 ### `new Sandbox(options)`
@@ -336,6 +439,18 @@ const mw = secretsProxy({
   },
 })
 ```
+
+Current status note:
+
+- `secretsProxy()` is a real shipped TypeScript surface and remains the right
+  declarative secret-injection API.
+- The stage-side operator docs currently carry one live caveat: the
+  `pi-acp-to-openclaw` demo asset temporarily runs without `secretsProxy()`
+  while `mono-4t4` tracks an `env:*` forwarding bug on that specific spawned
+  process path.
+- Treat that as an operational gap on one demo flow, not as removal of the API
+  itself. The package surface and example surfaces that already use
+  `secretsProxy()` are still the authoritative docs contract.
 
 ### `telegram(options)`
 
