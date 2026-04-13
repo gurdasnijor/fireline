@@ -152,6 +152,7 @@ test('runHostedRepl attaches to the started host and prints the new session id',
     args,
     async (options = {}) => {
       assert.equal(options.acpUrl, 'ws://127.0.0.1:4440/acp')
+      assert.equal(options.runtimeId, 'sandbox-123')
       assert.equal(options.serverUrl, 'http://127.0.0.1:4440')
       assert.equal(options.stateStreamUrl, 'http://127.0.0.1:4440/state')
       await options.onSessionReady?.('session-123')

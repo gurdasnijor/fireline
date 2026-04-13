@@ -66,17 +66,22 @@ export type TranscriptEntry = MessageEntry | ToolEntry | PlanEntry
 export interface PendingApproval {
   readonly requestId: string | number
   readonly sessionId: string
+  readonly reason: string | null
   readonly summary: string
+  readonly toolCallId: string | null
 }
 
 export interface ReplViewState {
+  readonly acpUrl: string
   readonly busy: boolean
   readonly entries: readonly TranscriptEntry[]
   readonly pendingTools: number
   readonly pendingApproval: PendingApproval | null
   readonly resolvingApproval: boolean
+  readonly runtimeId: string | null
   readonly serverUrl: string
   readonly sessionId: string | null
+  readonly stateStreamUrl: string | null
   readonly usage: UsageSnapshot | null
 }
 
@@ -116,6 +121,7 @@ export interface ReplOptions {
   readonly input?: Readable
   readonly onSessionReady?: (sessionId: string) => void | Promise<void>
   readonly output?: Writable
+  readonly runtimeId?: string | null
   readonly serverUrl?: string
   readonly sessionId?: string | null
   readonly stateStreamUrl?: string | null
@@ -142,6 +148,8 @@ export async function runRepl(options: ReplOptions = {}): Promise<number> {
     },
   })
   controller = new ReplController({
+    acpUrl,
+    runtimeId: options.runtimeId ?? null,
     sendPrompt: async (text) => {
       await repl.connection.prompt({
         sessionId: activeSessionId!,
@@ -159,6 +167,7 @@ export async function runRepl(options: ReplOptions = {}): Promise<number> {
     },
     serverUrl,
     sessionId: options.sessionId ?? null,
+    stateStreamUrl,
   })
 
   try {
@@ -486,8 +495,10 @@ function selectPendingApproval(
 
   return {
     requestId,
+    reason: pending.title ?? null,
     sessionId: pending.sessionId,
     summary: pending.title ?? pending.toolCallId ?? `request ${String(requestId)}`,
+    toolCallId: pending.toolCallId ?? null,
   }
 }
 
@@ -534,6 +545,8 @@ export class ReplController implements ReplViewModel {
 
   constructor(
     private readonly options: {
+      readonly acpUrl?: string
+      readonly runtimeId?: string | null
       readonly sendPrompt: (text: string) => Promise<void>
       readonly resolveApproval: (
         approval: PendingApproval,
@@ -541,16 +554,20 @@ export class ReplController implements ReplViewModel {
       ) => Promise<void>
       readonly serverUrl: string
       readonly sessionId: string | null
+      readonly stateStreamUrl?: string | null
     },
   ) {
     this.state = {
+      acpUrl: options.acpUrl ?? resolveAcpUrl(options.serverUrl),
       busy: false,
       entries: [],
       pendingTools: 0,
       pendingApproval: null,
       resolvingApproval: false,
+      runtimeId: options.runtimeId ?? null,
       serverUrl: options.serverUrl,
       sessionId: options.sessionId,
+      stateStreamUrl: options.stateStreamUrl ?? null,
       usage: null,
     }
   }

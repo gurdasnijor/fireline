@@ -9,6 +9,8 @@ test('repl controller submits prompts and renders streamed output', async () => 
   const prompts: string[] = []
 
   const controller = new ReplController({
+    acpUrl: 'ws://127.0.0.1:55371/acp',
+    runtimeId: 'runtime:46ae8df5-5588-482c-a1ea-c85b1b49723d',
     resolveApproval: async () => {},
     sendPrompt: async (text) => {
       prompts.push(text)
@@ -25,6 +27,7 @@ test('repl controller submits prompts and renders streamed output', async () => 
     },
     serverUrl: 'http://127.0.0.1:4440',
     sessionId: 'session-123',
+    stateStreamUrl: 'http://127.0.0.1:7474/v1/stream/fireline-state-runtime-46ae8df5-5588-482c-a1ea-c85b1b49723d',
   })
 
   const result = await controller.submit('Ping the host')
@@ -44,6 +47,9 @@ test('repl controller submits prompts and renders streamed output', async () => 
   assert.match(output, /Ping the host/)
   assert.match(output, /assistant/i)
   assert.match(output, /Hello back from Fireline\./)
+  assert.match(output, /session:session-123/)
+  assert.match(output, /runtime:46ae8df5/)
+  assert.match(output, /acp:55371/)
 })
 
 test('repl controller surfaces pending approvals and resolves them', async () => {
@@ -62,10 +68,13 @@ test('repl controller surfaces pending approvals and resolves them', async () =>
     sessionId: 'session-123',
   })
 
+  await controller.submit('{"command":"write_file","path":"/workspace/test.txt","content":"hello"}')
   controller.setPendingApproval({
     requestId: 'request-123',
+    reason: 'approval fallback: prompt-level gate until tool-call interception lands',
     sessionId: 'session-123',
     summary: 'Write test.txt to /workspace',
+    toolCallId: null,
   })
 
   const output = renderToString(
@@ -80,8 +89,12 @@ test('repl controller surfaces pending approvals and resolves them', async () =>
   )
 
   assert.match(output, /approval pending/i)
-  assert.match(output, /Write test\.txt to \/workspace/)
-  assert.match(output, /Press y to allow or n to deny\./)
+  assert.match(output, /write_file/)
+  assert.match(output, /"path": "\/workspace\/test\.txt"/)
+  assert.match(output, /approval fallback: prompt-level gate until tool-call interception/i)
+  assert.match(output, /lands/i)
+  assert.match(output, /\[y\]/)
+  assert.match(output, /\[n\]/)
 
   await controller.resolvePendingApproval(true)
 
@@ -105,13 +118,16 @@ test('partitionTranscriptEntries commits completed turns and keeps the active tu
   ] as const
 
   const active = partitionTranscriptEntries({
+    acpUrl: 'ws://127.0.0.1:4440/acp',
     busy: true,
     entries: transcript,
     pendingApproval: null,
     pendingTools: 1,
     resolvingApproval: false,
+    runtimeId: 'runtime:demo',
     serverUrl: 'http://127.0.0.1:4440',
     sessionId: 'session-123',
+    stateStreamUrl: 'http://127.0.0.1:7474/v1/stream/demo',
     usage: null,
   })
 
@@ -125,13 +141,16 @@ test('partitionTranscriptEntries commits completed turns and keeps the active tu
   )
 
   const idle = partitionTranscriptEntries({
+    acpUrl: 'ws://127.0.0.1:4440/acp',
     busy: false,
     entries: transcript,
     pendingApproval: null,
     pendingTools: 0,
     resolvingApproval: false,
+    runtimeId: 'runtime:demo',
     serverUrl: 'http://127.0.0.1:4440',
     sessionId: 'session-123',
+    stateStreamUrl: 'http://127.0.0.1:7474/v1/stream/demo',
     usage: null,
   })
 

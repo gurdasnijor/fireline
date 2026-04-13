@@ -12,8 +12,10 @@ import React, {
   useState,
   useSyncExternalStore,
 } from 'react'
+import { REPL_PALETTE } from './repl-palette.js'
 import type {
   MessageEntry,
+  PendingApproval,
   PlanEntry,
   ReplViewModel,
   ReplViewState,
@@ -117,6 +119,7 @@ export function FirelineReplApp(props: {
           <ApprovalPrompt
             pending={state.pendingApproval}
             resolving={state.resolvingApproval}
+            state={state}
           />
         ) : null}
         <Box flexDirection="column" marginTop={1}>
@@ -135,6 +138,7 @@ export function FirelineReplApp(props: {
           resolvingApproval={state.resolvingApproval}
           spinner={spinner}
         />
+        <StatusBar state={state} />
       </Box>
     </>
   )
@@ -144,34 +148,42 @@ function Header(props: {
   readonly state: ReplViewState
   readonly spinner: string
 }) {
+  const statusColor = props.state.pendingApproval
+    ? REPL_PALETTE.pending
+    : props.state.busy
+      ? REPL_PALETTE.streaming
+      : props.state.pendingTools > 0
+        ? REPL_PALETTE.pending
+        : REPL_PALETTE.resolvedAllow
+
   return (
-    <Box borderColor="cyan" borderStyle="round" flexDirection="column" paddingX={1}>
+    <Box borderColor={REPL_PALETTE.assistant} borderStyle="round" flexDirection="column" paddingX={1}>
       <Box>
-        <Text bold color="cyan">
+        <Text bold color={REPL_PALETTE.assistant}>
           Fireline REPL
         </Text>
         <Spacer />
-        <Text color={props.state.busy ? 'yellow' : props.state.pendingTools > 0 ? 'magenta' : 'green'}>
-          {props.state.busy || props.state.pendingTools > 0
+        <Text color={statusColor}>
+          {props.state.busy || props.state.pendingTools > 0 || props.state.pendingApproval
             ? `${props.spinner} live`
             : 'ready'}
         </Text>
       </Box>
       <Box>
-        <Text color="gray">
+        <Text color={REPL_PALETTE.subdued}>
           session {props.state.sessionId ?? 'connecting'}
         </Text>
         <Spacer />
-        <Text color="gray">
+        <Text color={REPL_PALETTE.subdued}>
           {hostLabel(props.state.serverUrl)}
         </Text>
       </Box>
       <Box>
-        <Text color="gray">
+        <Text color={REPL_PALETTE.subdued}>
           active tools {props.state.pendingTools}
         </Text>
         <Spacer />
-        <Text color="gray">{renderUsage(props.state)}</Text>
+        <Text color={REPL_PALETTE.subdued}>{renderUsage(props.state)}</Text>
       </Box>
     </Box>
   )
@@ -179,25 +191,57 @@ function Header(props: {
 
 function EmptyState() {
   return (
-    <Box borderColor="gray" borderStyle="round" flexDirection="column" paddingX={1}>
-      <Text color="gray">Connected.</Text>
-      <Text color="gray">Type a prompt below and press Enter to send it.</Text>
+    <Box borderColor={REPL_PALETTE.subdued} borderStyle="round" flexDirection="column" paddingX={1}>
+      <Text color={REPL_PALETTE.subdued}>Connected.</Text>
+      <Text color={REPL_PALETTE.subdued}>Type a prompt below and press Enter to send it.</Text>
     </Box>
   )
 }
 
 function ApprovalPrompt(props: {
-  readonly pending: ReplViewState['pendingApproval']
+  readonly pending: PendingApproval
   readonly resolving: boolean
+  readonly state: ReplViewState
 }) {
+  const card = buildApprovalCard(props.pending, props.state.entries)
+
   return (
-    <Box borderColor="yellow" borderStyle="round" flexDirection="column" marginTop={1} paddingX={1}>
-      <Text bold color="yellow">
+    <Box
+      borderColor={REPL_PALETTE.pending}
+      borderStyle="round"
+      flexDirection="column"
+      marginTop={1}
+      paddingX={1}
+    >
+      <Text bold color={REPL_PALETTE.pending}>
         approval pending
       </Text>
-      <Text>Approve: {props.pending?.summary ?? 'pending action'}</Text>
-      <Text color="gray">
-        {props.resolving ? 'resolving approval...' : 'Press y to allow or n to deny.'}
+      <Text bold>{card.toolName}</Text>
+      <Text color={REPL_PALETTE.subdued}>
+        request {String(props.pending.requestId)}
+        {props.pending.toolCallId ? `  tool ${props.pending.toolCallId}` : ''}
+      </Text>
+      <Box flexDirection="column" marginTop={1}>
+        <Text color={REPL_PALETTE.subdued}>arguments</Text>
+        {card.argumentLines.map((line: string, index: number) => (
+          <Text key={`approval-arg:${index}`}>  {line}</Text>
+        ))}
+      </Box>
+      <Text color={REPL_PALETTE.subdued} italic>
+        reason: {card.reason}
+      </Text>
+      <Text>
+        {props.resolving ? (
+          <Text color={REPL_PALETTE.streaming}>resolving approval...</Text>
+        ) : (
+          <>
+            <Text color={REPL_PALETTE.pending}>[y]</Text>
+            <Text color={REPL_PALETTE.resolvedAllow}> approve</Text>
+            <Text color={REPL_PALETTE.subdued}> / </Text>
+            <Text color={REPL_PALETTE.pending}>[n]</Text>
+            <Text color={REPL_PALETTE.resolvedDeny}> deny</Text>
+          </>
+        )}
       </Text>
     </Box>
   )
@@ -217,10 +261,10 @@ function EntryView(props: { readonly entry: TranscriptEntry }) {
 function MessageView(props: { readonly entry: MessageEntry }) {
   const color =
     props.entry.role === 'assistant'
-      ? 'cyan'
+      ? REPL_PALETTE.assistant
       : props.entry.role === 'thought'
-        ? 'yellow'
-        : 'magenta'
+        ? REPL_PALETTE.streaming
+        : REPL_PALETTE.user
   const title =
     props.entry.role === 'assistant'
       ? 'assistant'
@@ -248,11 +292,11 @@ function ToolView(props: { readonly entry: ToolEntry }) {
           tool {props.entry.status}
         </Text>
         <Spacer />
-        <Text color="gray">{props.entry.toolKind ?? 'operation'}</Text>
+        <Text color={REPL_PALETTE.subdued}>{props.entry.toolKind ?? 'operation'}</Text>
       </Box>
       <Text>{props.entry.title}</Text>
       {props.entry.detail ? (
-        <Text color="gray">{props.entry.detail}</Text>
+        <Text color={REPL_PALETTE.subdued}>{props.entry.detail}</Text>
       ) : null}
     </Box>
   )
@@ -260,12 +304,12 @@ function ToolView(props: { readonly entry: ToolEntry }) {
 
 function PlanView(props: { readonly entry: PlanEntry }) {
   return (
-    <Box borderColor="blue" borderStyle="round" flexDirection="column" marginBottom={1} paddingX={1}>
-      <Text bold color="blue">
+    <Box borderColor={REPL_PALETTE.streaming} borderStyle="round" flexDirection="column" marginBottom={1} paddingX={1}>
+      <Text bold color={REPL_PALETTE.streaming}>
         plan
       </Text>
       {props.entry.items.map((item: string, index: number) => (
-        <Text color="gray" key={`${props.entry.id}:${index}`}>
+        <Text color={REPL_PALETTE.subdued} key={`${props.entry.id}:${index}`}>
           - {item}
         </Text>
       ))}
@@ -280,29 +324,151 @@ function Composer(props: {
   readonly resolvingApproval: boolean
   readonly spinner: string
 }) {
+  const borderColor = props.pendingApproval
+    ? REPL_PALETTE.pending
+    : props.busy
+      ? REPL_PALETTE.streaming
+      : REPL_PALETTE.subdued
+
   return (
     <Box
-      borderColor={props.busy || props.pendingApproval ? 'yellow' : 'gray'}
+      borderColor={borderColor}
       borderStyle="round"
       flexDirection="column"
       marginTop={1}
       paddingX={1}
     >
-      <Text color="gray">
+      <Text color={REPL_PALETTE.subdued}>
         {props.pendingApproval
           ? props.resolvingApproval
             ? 'Resolving approval and waiting for the running session...'
             : 'Approval pending. Press y to allow or n to deny.'
           : props.busy
-          ? `${props.spinner} waiting for the running session...`
-          : 'Enter to send, Esc to clear, Ctrl+C or /quit to exit.'}
+            ? `${props.spinner} waiting for the running session...`
+            : 'Enter to send, Esc to clear, Ctrl+C or /quit to exit.'}
       </Text>
-      <Text color={props.busy || props.pendingApproval ? 'gray' : 'white'}>
-        <Text color="cyan">&gt;</Text>{' '}
+      <Text color={props.busy || props.pendingApproval ? REPL_PALETTE.subdued : 'white'}>
+        <Text color={REPL_PALETTE.assistant}>&gt;</Text>{' '}
         {props.input.length > 0 ? props.input : 'Ask the running host something...'}
       </Text>
     </Box>
   )
+}
+
+function StatusBar(props: { readonly state: ReplViewState }) {
+  return (
+    <Box marginTop={1}>
+      <Text color={REPL_PALETTE.subdued} dimColor>
+        {`session:${shortIdentifier(props.state.sessionId)}  runtime:${shortRuntimeId(props.state.runtimeId)}  acp:${acpPort(props.state.acpUrl)}  stream:${shortStreamLabel(props.state.stateStreamUrl)}`}
+      </Text>
+    </Box>
+  )
+}
+
+function buildApprovalCard(
+  pending: PendingApproval,
+  entries: readonly TranscriptEntry[],
+): {
+  readonly argumentLines: readonly string[]
+  readonly reason: string
+  readonly toolName: string
+} {
+  const latestTool = findLatestTool(entries, pending.toolCallId)
+  const latestUser = findLatestUserMessage(entries)
+  const parsedPrompt = parsePromptArguments(latestUser?.text)
+  const argumentSource =
+    parsedPrompt.argumentsValue ??
+    (latestTool?.detail ? { detail: latestTool.detail } : { prompt: pending.summary })
+
+  return {
+    argumentLines: prettyJsonLines(argumentSource),
+    reason: pending.reason ?? 'awaiting operator decision',
+    toolName:
+      latestTool?.title ??
+      parsedPrompt.toolName ??
+      pending.toolCallId ??
+      'prompt approval',
+  }
+}
+
+function findLatestTool(
+  entries: readonly TranscriptEntry[],
+  toolCallId: string | null,
+): ToolEntry | null {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index]
+    if (entry.kind !== 'tool') {
+      continue
+    }
+    if (!toolCallId || entry.toolCallId === toolCallId) {
+      return entry
+    }
+  }
+
+  return null
+}
+
+function findLatestUserMessage(entries: readonly TranscriptEntry[]): MessageEntry | null {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index]
+    if (entry.kind === 'message' && entry.role === 'user') {
+      return entry
+    }
+  }
+
+  return null
+}
+
+function parsePromptArguments(text: string | undefined): {
+  readonly argumentsValue: unknown
+  readonly toolName: string | null
+} {
+  if (!text) {
+    return {
+      argumentsValue: { prompt: '' },
+      toolName: null,
+    }
+  }
+
+  const trimmed = text.trim()
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>
+      const toolName = firstString(record.command, record.tool, record.name)
+      if (toolName) {
+        const { command: _command, name: _name, tool: _tool, ...rest } = record
+        return {
+          argumentsValue: Object.keys(rest).length > 0 ? rest : record,
+          toolName,
+        }
+      }
+
+      return {
+        argumentsValue: record,
+        toolName: null,
+      }
+    }
+  } catch {}
+
+  return {
+    argumentsValue: { prompt: trimmed },
+    toolName: null,
+  }
+}
+
+function firstString(...values: Array<unknown>): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.length > 0) {
+      return value
+    }
+  }
+
+  return null
+}
+
+function prettyJsonLines(value: unknown): readonly string[] {
+  return JSON.stringify(value, null, 2).split('\n')
 }
 
 function hostLabel(serverUrl: string): string {
@@ -325,17 +491,66 @@ function renderUsage(state: ReplViewState): string {
   return `ctx [${bar}] ${state.usage.used}/${state.usage.size}`
 }
 
+function shortIdentifier(value: string | null): string {
+  if (!value) {
+    return 'unknown'
+  }
+
+  const candidate = value.includes(':') ? value.split(':').at(-1) ?? value : value
+  if (candidate.length <= 12) {
+    return candidate
+  }
+
+  return candidate.slice(0, 8)
+}
+
+function shortRuntimeId(value: string | null): string {
+  return shortIdentifier(value)
+}
+
+function acpPort(acpUrl: string): string {
+  try {
+    const url = new URL(acpUrl)
+    return url.port || (url.protocol === 'wss:' ? '443' : '80')
+  } catch {
+    return '?'
+  }
+}
+
+function shortStreamLabel(stateStreamUrl: string | null): string {
+  if (!stateStreamUrl) {
+    return 'unknown'
+  }
+
+  try {
+    const url = new URL(stateStreamUrl)
+    const tail = url.pathname.split('/').filter(Boolean).at(-1) ?? url.pathname
+    return `${url.host}/${truncateMiddle(tail, 28)}`
+  } catch {
+    return truncateMiddle(stateStreamUrl, 36)
+  }
+}
+
+function truncateMiddle(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value
+  }
+
+  const side = Math.max(4, Math.floor((maxLength - 1) / 2))
+  return `${value.slice(0, side)}…${value.slice(-side)}`
+}
+
 function toolStatusColor(status: ToolCallStatus): string {
   switch (status) {
     case 'completed':
-      return 'green'
+      return REPL_PALETTE.resolvedAllow
     case 'failed':
-      return 'red'
+      return REPL_PALETTE.error
     case 'in_progress':
-      return 'yellow'
+      return REPL_PALETTE.streaming
     case 'pending':
     default:
-      return 'magenta'
+      return REPL_PALETTE.pending
   }
 }
 
