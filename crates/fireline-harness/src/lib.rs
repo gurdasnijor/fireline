@@ -3,6 +3,7 @@
 pub mod approval;
 pub mod audit;
 pub mod auto_approve;
+pub mod awakeable;
 pub mod budget;
 pub mod context;
 pub mod durable_subscriber;
@@ -16,6 +17,7 @@ pub mod telegram_subscriber;
 pub mod topology;
 pub mod trace;
 pub mod webhook_subscriber;
+pub mod workflow_context;
 
 pub use approval::{
     ApprovalAction, ApprovalConfig, ApprovalGateComponent, ApprovalMatch, ApprovalPolicy,
@@ -23,6 +25,11 @@ pub use approval::{
 };
 pub use audit::{AuditConfig, AuditDirection, AuditRecord, AuditSink, AuditTracer};
 pub use auto_approve::{AutoApproveConfig, AutoApproveSubscriber, AutoApproveSubscriberComponent};
+pub use awakeable::{
+    AWAKEABLE_RESOLVED_KIND, AWAKEABLE_WAITING_KIND, AwakeableFuture, AwakeableKey,
+    AwakeableResolved, AwakeableSubscriber, AwakeableWaiting, awakeable_resolution_envelope,
+    awakeable_waiting_envelope,
+};
 pub use budget::{BudgetAction, BudgetComponent, BudgetConfig};
 pub use context::{
     ContextConfig, ContextInjectionComponent, ContextPlacement, ContextSource, DatetimeSource,
@@ -66,3 +73,4 @@ pub use webhook_subscriber::{
     WebhookDispatchResult, WebhookEventSelector, WebhookSkipReason, WebhookSubscriber,
     WebhookSubscriberConfig, WebhookTargetConfig, append_webhook_completion,
 };
+pub use workflow_context::WorkflowContext;
