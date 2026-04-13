@@ -292,9 +292,10 @@ test('findBinary honors env overrides before target lookup', async () => {
   }
 })
 
-test('createDockerBuildPlan wires embedded spec build arg', () => {
-  const plan = createDockerBuildPlan({
-    buildContext: '/repo',
+test('createDockerBuildPlan materializes the requested spec and wires ARG SPEC', async () => {
+  const buildContext = await mkdtemp(join(tmpdir(), 'fireline-build-context-'))
+  const plan = await createDockerBuildPlan({
+    buildContext,
     dockerfile: '/repo/docker/fireline-host.Dockerfile',
     imageTag: 'fireline-reviewer:latest',
     spec: {
@@ -308,7 +309,14 @@ test('createDockerBuildPlan wires embedded spec build arg', () => {
   assert.equal(plan.command, 'docker')
   assert.equal(plan.dockerfile, '/repo/docker/fireline-host.Dockerfile')
   assert.equal(plan.imageTag, 'fireline-reviewer:latest')
-  assert.match(plan.buildArg, /^FIRELINE_EMBEDDED_SPEC=\{/)
+  assert.match(plan.buildArg, /^SPEC=\.tmp\/fireline-embedded-spec-/)
+  assert.match(plan.embeddedSpecRelativePath, /^\.tmp\/fireline-embedded-spec-.*\/spec\.json$/)
+  assert.deepEqual(JSON.parse(await readFile(plan.embeddedSpecPath, 'utf8')), {
+    name: 'reviewer',
+    sandbox: { provider: 'docker' },
+    middleware: [],
+    agent: { kind: 'process', argv: ['echo', 'hi'] },
+  })
   assert.deepEqual(plan.args, [
     'build',
     '--file',
@@ -317,7 +325,7 @@ test('createDockerBuildPlan wires embedded spec build arg', () => {
     'fireline-reviewer:latest',
     '--build-arg',
     plan.buildArg,
-    '/repo',
+    buildContext,
   ])
 })
 
