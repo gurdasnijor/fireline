@@ -97,6 +97,7 @@ fn build_tracer_provider(config: &ObservabilityConfig) -> Result<SdkTracerProvid
         ExporterConfig::Otlp { endpoint, headers } => {
             let exporter = opentelemetry_otlp::SpanExporter::builder()
                 .with_http()
+                .with_http_client(reqwest::Client::new())
                 .with_endpoint(endpoint.clone())
                 .with_headers(headers.clone())
                 .build()
