@@ -15,9 +15,10 @@ use crate::durable_subscriber::{StreamEnvelope, TraceContext};
 
 /// Thin imperative resolver for passive awakeables.
 ///
-/// The durable stream remains the sole source of truth for whether a key has
-/// already been resolved. The local mutex only serializes in-process writers so
-/// concurrent callers do not append duplicate completions within one process.
+/// Per Jeff's PR #28 review and DSV-01 FirstResolutionWins, the durable stream
+/// remains the sole source of truth for whether a key has already been
+/// resolved. The local mutex only serializes in-process writers; it is not
+/// replay state and it does not coordinate across processes or restarts.
 #[derive(Clone)]
 pub struct AwakeableResolver {
     state_stream_url: String,
@@ -49,6 +50,8 @@ impl AwakeableResolver {
     where
         T: Serialize,
     {
+        // Process-local coordination only. DSV-01 still depends on the durable
+        // `has_resolution(...)` read below, not on this mutex.
         let _guard = self.resolve_guard.lock().await;
         if self
             .has_resolution(&key)
@@ -90,6 +93,8 @@ impl AwakeableResolver {
     where
         E: Serialize,
     {
+        // Process-local coordination only. DSV-01 still depends on the durable
+        // `has_resolution(...)` read below, not on this mutex.
         let _guard = self.resolve_guard.lock().await;
         if self
             .has_resolution(&key)
