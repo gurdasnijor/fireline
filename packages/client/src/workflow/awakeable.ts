@@ -131,6 +131,16 @@ async function waitForAwakeable<T>(options: {
           })
           return
         }
+        if (matchesRejectedEnvelope(row, options.key)) {
+          finish(() => {
+            reject(
+              new Error(
+                `awakeable '${completionKeyStorageKey(options.key)}' rejected: ${JSON.stringify(row.value?.error ?? null)}`,
+              ),
+            )
+          })
+          return
+        }
       }
 
       if (batch.streamClosed && batch.upToDate) {
@@ -179,5 +189,16 @@ function matchesResolvedEnvelope(
     row.type === 'awakeable' &&
     row.value?.kind === 'awakeable_resolved' &&
     row.key === `${completionKeyStorageKey(key)}:resolved`
+  )
+}
+
+function matchesRejectedEnvelope(
+  row: StreamEnvelope,
+  key: CompletionKey,
+): boolean {
+  return (
+    row.type === 'awakeable' &&
+    row.value?.kind === 'awakeable_rejected' &&
+    row.key === `${completionKeyStorageKey(key)}:rejected`
   )
 }

@@ -44,6 +44,21 @@ export interface ResolveAwakeableOptions<T> {
 }
 
 /**
+ * Options for appending a generic awakeable rejection envelope.
+ *
+ * @example `await rejectAwakeable({ streamUrl, key, error: { reason: 'denied' } })`
+ *
+ * @remarks Anthropic primitive: Session.
+ */
+export interface RejectAwakeableOptions<E> {
+  readonly streamUrl: string
+  readonly key: CompletionKey
+  readonly error: E
+  readonly traceContext?: WorkflowTraceContext
+  readonly headers?: Readonly<Record<string, string>>
+}
+
+/**
  * Appends the canonical `awakeable_resolved` envelope for a completion key.
  *
  * The durable stream remains the source of truth for whether a key has already
@@ -57,7 +72,7 @@ export interface ResolveAwakeableOptions<T> {
 export async function resolveAwakeable<T>(
   options: ResolveAwakeableOptions<T>,
 ): Promise<void> {
-  if (await hasResolution(options.streamUrl, options.key, options.headers)) {
+  if (await hasTerminalCompletion(options.streamUrl, options.key, options.headers)) {
     throw new AwakeableAlreadyResolvedError(options.key)
   }
 
@@ -68,6 +83,35 @@ export async function resolveAwakeable<T>(
   })
 
   await handle.append(JSON.stringify(awakeableResolutionEnvelope(options)), {
+    contentType: 'application/json',
+  })
+}
+
+/**
+ * Appends the canonical `awakeable_rejected` envelope for a completion key.
+ *
+ * The durable stream remains the source of truth for whether a key has already
+ * been completed. Rejections and resolutions share the same first-wins
+ * terminality.
+ *
+ * @example `await rejectAwakeable({ streamUrl, key, error: { reason: 'denied' } })`
+ *
+ * @remarks Anthropic primitive: Session.
+ */
+export async function rejectAwakeable<E>(
+  options: RejectAwakeableOptions<E>,
+): Promise<void> {
+  if (await hasTerminalCompletion(options.streamUrl, options.key, options.headers)) {
+    throw new AwakeableAlreadyResolvedError(options.key)
+  }
+
+  const handle = new DurableStream({
+    url: options.streamUrl,
+    headers: options.headers,
+    contentType: 'application/json',
+  })
+
+  await handle.append(JSON.stringify(awakeableRejectionEnvelope(options)), {
     contentType: 'application/json',
   })
 }
@@ -101,7 +145,36 @@ export function awakeableResolutionEnvelope<T>(
   }
 }
 
-async function hasResolution(
+export function awakeableRejectionEnvelope<E>(
+  options: RejectAwakeableOptions<E>,
+): StreamEnvelope {
+  const baseValue: Record<string, unknown> = {
+    kind: 'awakeable_rejected',
+    sessionId: options.key.sessionId,
+    error: options.error,
+    rejectedAtMs: Date.now(),
+  }
+
+  if (options.key.kind === 'prompt') {
+    baseValue.requestId = options.key.requestId
+  } else if (options.key.kind === 'tool') {
+    baseValue.toolCallId = options.key.toolCallId
+  }
+
+  const meta = traceContextMeta(options.traceContext)
+  if (meta) {
+    baseValue._meta = meta
+  }
+
+  return {
+    type: 'awakeable',
+    key: `${completionKeyStorageKey(options.key)}:rejected`,
+    headers: { operation: 'insert' },
+    value: baseValue,
+  }
+}
+
+async function hasTerminalCompletion(
   streamUrl: string,
   key: CompletionKey,
   headers?: Readonly<Record<string, string>>,
@@ -114,7 +187,7 @@ async function hasResolution(
     offset: '-1',
   })
   const rows = await response.json()
-  return rows.some((row) => matchesResolvedEnvelope(row, key))
+  return rows.some((row) => matchesResolvedEnvelope(row, key) || matchesRejectedEnvelope(row, key))
 }
 
 function matchesResolvedEnvelope(
@@ -125,6 +198,17 @@ function matchesResolvedEnvelope(
     row.type === 'awakeable' &&
     row.value?.kind === 'awakeable_resolved' &&
     row.key === `${completionKeyStorageKey(key)}:resolved`
+  )
+}
+
+function matchesRejectedEnvelope(
+  row: StreamEnvelope,
+  key: CompletionKey,
+): boolean {
+  return (
+    row.type === 'awakeable' &&
+    row.value?.kind === 'awakeable_rejected' &&
+    row.key === `${completionKeyStorageKey(key)}:rejected`
   )
 }
 

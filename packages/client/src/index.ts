@@ -6,8 +6,10 @@ import { Sandbox, agent, compose, middleware, sandbox } from './sandbox.js'
 import { fanout, peer, pipe } from './topology.js'
 import {
   WorkflowContext,
+  awakeableRejectionEnvelope,
   completionKeyStorageKey,
   promptCompletionKey,
+  rejectAwakeable,
   resolveAwakeable,
   sessionCompletionKey,
   toolCompletionKey,
@@ -28,6 +30,8 @@ const fireline = {
   appendApprovalResolved,
   WorkflowContext,
   workflowContext,
+  awakeableRejectionEnvelope,
+  rejectAwakeable,
   resolveAwakeable,
   promptCompletionKey,
   toolCompletionKey,
@@ -46,8 +50,10 @@ export { connectAcp } from './connect.js'
 export {
   AwakeableAlreadyResolvedError,
   WorkflowContext,
+  awakeableRejectionEnvelope,
   completionKeyStorageKey,
   promptCompletionKey,
+  rejectAwakeable,
   resolveAwakeable,
   sessionCompletionKey,
   toolCompletionKey,
@@ -69,6 +75,7 @@ export type {
   Awakeable,
   AwakeableKey,
   CompletionKey,
+  RejectAwakeableOptions,
   ResolveAwakeableOptions,
   WorkflowContextOptions,
   WorkflowTraceContext,

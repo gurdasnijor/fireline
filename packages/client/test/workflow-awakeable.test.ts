@@ -29,6 +29,7 @@ vi.mock('@durable-streams/client', () => {
 
 import {
   AwakeableAlreadyResolvedError,
+  rejectAwakeable,
   promptCompletionKey,
   resolveAwakeable,
   workflowContext,
@@ -169,6 +170,101 @@ describe('workflow awakeable surface', () => {
       key: 'prompt:session-a:request-a:resolved',
       value: {
         kind: 'awakeable_resolved',
+        _meta: {
+          traceparent:
+            '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01',
+          tracestate: 'vendor=value',
+          baggage: 'scope=review',
+        },
+      },
+    })
+  })
+
+  it('ctx.awakeable rejects on the matching canonical rejection envelope', async () => {
+    appendMock.mockResolvedValue()
+    const unsubscribe = vi.fn()
+    streamMock.mockResolvedValue({
+      subscribeJson(
+        subscriber: (
+          batch: JsonBatch<{
+            readonly type: string
+            readonly key: string
+            readonly value?: Record<string, unknown>
+          }>,
+        ) => void,
+      ) {
+        subscriber({
+          items: [
+            {
+              type: 'awakeable',
+              key: 'prompt:session-a:request-a:rejected',
+              value: {
+                kind: 'awakeable_rejected',
+                sessionId: 'session-a',
+                requestId: 'request-a',
+                error: { reason: 'policy denied' },
+                rejectedAtMs: 1,
+              },
+            },
+          ],
+          offset: '1',
+          upToDate: true,
+          streamClosed: false,
+        })
+        return unsubscribe
+      },
+    })
+
+    const ctx = workflowContext({
+      stateStreamUrl: 'http://127.0.0.1:7474/v1/stream/state',
+    })
+    const key = promptCompletionKey({
+      sessionId: 'session-a' as SessionId,
+      requestId: 'request-a' as RequestId,
+    })
+
+    await expect(ctx.awakeable<{ approved: boolean }>(key).promise).rejects.toThrow(
+      'policy denied',
+    )
+    expect(unsubscribe).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejectAwakeable writes W3C trace context onto the canonical rejection envelope', async () => {
+    streamMock.mockResolvedValue({
+      async json() {
+        return []
+      },
+    })
+    appendMock.mockResolvedValue()
+
+    await rejectAwakeable({
+      streamUrl: 'http://127.0.0.1:7474/v1/stream/state',
+      key: promptCompletionKey({
+        sessionId: 'session-a' as SessionId,
+        requestId: 'request-a' as RequestId,
+      }),
+      error: { reason: 'policy denied' },
+      traceContext: {
+        traceparent: '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01',
+        tracestate: 'vendor=value',
+        baggage: 'scope=review',
+      },
+    })
+
+    const rejectedEnvelope = JSON.parse(String(appendMock.mock.calls[0]?.[0])) as {
+      readonly type: string
+      readonly key: string
+      readonly value: {
+        readonly kind: string
+        readonly _meta?: Record<string, string>
+      }
+    }
+
+    expect(rejectedEnvelope).toMatchObject({
+      type: 'awakeable',
+      key: 'prompt:session-a:request-a:rejected',
+      value: {
+        kind: 'awakeable_rejected',
         _meta: {
           traceparent:
             '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01',
