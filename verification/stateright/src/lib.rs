@@ -13,6 +13,8 @@
 //! The refinement mapping that ties these models back to the executable tests
 //! lives at `verification/docs/refinement-matrix.md`.
 
+mod durable_subscriber;
+
 use std::collections::BTreeSet;
 
 use fireline_semantics::{
