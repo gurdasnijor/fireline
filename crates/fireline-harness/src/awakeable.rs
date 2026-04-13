@@ -325,7 +325,10 @@ where
                         )
                     })?;
                 if AwakeableSubscriber::has_completion_for_key(&key_for_wait, &replay_log) {
-                    return AwakeableSubscriber::completion_for_key::<T>(&key_for_wait, &replay_log);
+                    return AwakeableSubscriber::completion_record_for_key::<T>(
+                        &key_for_wait,
+                        &replay_log,
+                    );
                 }
                 if !AwakeableSubscriber::has_waiting_for_key(&key_for_wait, &replay_log) {
                     append_waiting_event(&state_stream_url, &wait_event)

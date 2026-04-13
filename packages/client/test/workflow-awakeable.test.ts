@@ -395,20 +395,29 @@ describe('workflow awakeable surface', () => {
         }>,
       ) => void
     > = []
-    streamMock.mockResolvedValue({
-      subscribeJson(
-        subscriber: (
-          batch: JsonBatch<{
-            readonly type: string
-            readonly key: string
-            readonly value?: Record<string, unknown>
-          }>,
-        ) => void,
-      ) {
-        subscribers.push(subscriber)
-        return vi.fn()
-      },
-    })
+    streamMock.mockImplementation(
+      async (options?: { readonly live?: boolean }) =>
+        options?.live
+          ? {
+              subscribeJson(
+                subscriber: (
+                  batch: JsonBatch<{
+                    readonly type: string
+                    readonly key: string
+                    readonly value?: Record<string, unknown>
+                  }>,
+                ) => void,
+              ) {
+                subscribers.push(subscriber)
+                return vi.fn()
+              },
+            }
+          : {
+              async json() {
+                return []
+              },
+            },
+    )
 
     const ctx = workflowContext({
       stateStreamUrl: 'http://127.0.0.1:7474/v1/stream/state',
@@ -426,9 +435,9 @@ describe('workflow awakeable surface', () => {
       }),
     )
 
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(subscribers).toHaveLength(2)
+    await vi.waitFor(() => {
+      expect(subscribers).toHaveLength(2)
+    })
 
     const raced = raceAwakeables([first, second])
 
@@ -494,11 +503,20 @@ describe('workflow awakeable surface', () => {
 
   it('awakeable.withTimeout stays signature-only until DS Phase 6 lands', async () => {
     appendMock.mockResolvedValue()
-    streamMock.mockResolvedValue({
-      subscribeJson() {
-        return vi.fn()
-      },
-    })
+    streamMock.mockImplementation(
+      async (options?: { readonly live?: boolean }) =>
+        options?.live
+          ? {
+              subscribeJson() {
+                return vi.fn()
+              },
+            }
+          : {
+              async json() {
+                return []
+              },
+            },
+    )
 
     const ctx = workflowContext({
       stateStreamUrl: 'http://127.0.0.1:7474/v1/stream/state',
