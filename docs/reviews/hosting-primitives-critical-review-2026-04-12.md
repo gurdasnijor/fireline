@@ -333,3 +333,17 @@ The debt is real but not a disaster. Canonical-ids Phase 8 closes the refactor; 
 - `crates/fireline-harness/src/trace.rs`
 - [alignment-check-2026-04-12.md](./alignment-check-2026-04-12.md)
 - [state-projector-audit-review-2026-04-12.md](./state-projector-audit-review-2026-04-12.md)
+
+---
+
+## 6. Correction (2026-04-12, post-review pushback)
+
+R1 retracted. `bootstrap.rs` (data plane) and `control_plane.rs` (control plane) are not variants of the same boot — they serve different planes, own different resources, and talk to different audiences. Actual shared surface is ~30 lines of listener+router+serve plumbing, not a HostCore.
+
+**Revised recommendations:**
+
+- **R1'**: instead of unifying, SPLIT. Rename or extract: `fireline-agent-host` (data plane — `bootstrap.rs`) + `fireline-control-plane` (control plane — `control_plane.rs` + `router.rs`). Stop pretending they're two variants of the same primitive.
+- **R2-R6**: stand, now scoped to the data-plane crate.
+- **R7 (new)**: Make the two-views-of-host-truth boundary explicit. Control plane's HostIndex is provision-driven; data-plane's deployment-discovery stream is self-registration-driven. Document the split or unify via a stream-backed read model.
+
+Remaining smells (layering inversion, load-bearing ordering, event redundancy, unstructured shutdown, dead fields) are unchanged — all orthogonal to the boot-path count.
