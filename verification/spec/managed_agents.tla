@@ -1208,4 +1208,14 @@ ApprovalKeyedByCanonicalRequestId ==
          /\ req \in PermissionRequestIds
          /\ pendingApprovals[req].sessionId \in Sessions
 
+ConcurrentApprovalsRemainSessionScoped ==
+  \A s1, s2 \in Sessions :
+    /\ s1 # s2
+    /\ blockedRequests[s1] # NoRequest
+    /\ blockedRequests[s2] # NoRequest
+    /\ blockedRequests[s1] = blockedRequests[s2]
+    => LET req == blockedRequests[s1]
+       IN /\ pendingApprovals[req].sessionId = s1
+          /\ pendingApprovals[req].sessionId = s2
+
 =============================================================================

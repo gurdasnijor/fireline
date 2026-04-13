@@ -205,3 +205,61 @@ The five checked-in canonical-id invariants in `ManagedAgentsCanonicalIds.cfg` a
 2. re-key approval state by `(session_id, request_id)` instead of `request_id` alone.
 
 Without one of those, the current spec allows a cross-session approval collision even though the five narrower canonical-id invariants all pass.
+
+## R1 Addendum: Checked-In Widened Re-Run For `ConcurrentApprovalsRemainSessionScoped`
+
+The earlier widened evidence in this review was gathered from a temporary QA-only config. For `mono-c80`, that scenario is now formalized in the checked-in spec surface:
+
+- invariant operator added to `verification/spec/managed_agents.tla`:
+  `ConcurrentApprovalsRemainSessionScoped`
+- focused sibling cfg added at
+  [ManagedAgentsConcurrentApprovals.cfg](../../verification/spec/ManagedAgentsConcurrentApprovals.cfg)
+
+That cfg intentionally widens the model to the smallest cross-session collision case:
+
+- `Sessions = {"s1", "s2"}`
+- `RequestIds = {"r1"}`
+- both sessions may issue `RequestApproval(..., "r1", ...)`
+
+Command rerun:
+
+```sh
+/opt/homebrew/opt/openjdk/bin/java \
+  -cp /tmp/fireline-tla/tla2tools.jar \
+  tlc2.TLC verification/spec/managed_agents.tla \
+  -config verification/spec/ManagedAgentsConcurrentApprovals.cfg \
+  -metadir /tmp/fireline-tla/qa/metadir-ManagedAgentsConcurrentApprovals
+```
+
+Result:
+
+```text
+Error: Invariant ConcurrentApprovalsRemainSessionScoped is violated.
+...
+State 3: <RequestApproval ...>
+/\ sessionLog = [s1 |-> <<[... request_id |-> "r1", kind |-> "permission_requested"]>>,
+                 s2 |-> <<[... request_id |-> "r1", kind |-> "permission_requested"]>>]
+/\ pendingApprovals = [r1 |-> [sessionId |-> "s2", toolCallId |-> "tc1", state |-> "pending"]]
+/\ blockedRequests = [s1 |-> "r1", s2 |-> "r1"]
+...
+110 states generated, 95 distinct states found, 89 states left on queue.
+The depth of the complete state graph search is 3.
+Finished in 00s
+```
+
+This closes the vacuity concern for the concurrent-approval case:
+
+- the bad cross-session state is reachable under a checked-in config
+- the invariant fails immediately and therefore is not vacuous
+- the failure is specifically caused by `pendingApprovals` being keyed only by `RequestId`
+
+Why this proves `(session_id, request_id)` keying is required:
+
+- after `s1` requests approval for `r1`, the model stores
+  `pendingApprovals["r1"].sessionId = "s1"`
+- after `s2` requests approval for the same `r1`, the second write overwrites that slot with
+  `pendingApprovals["r1"].sessionId = "s2"`
+- both `blockedRequests["s1"]` and `blockedRequests["s2"]` still point at `"r1"`
+- there is no way for a `RequestId -> PendingApproval` map to represent both pending approvals simultaneously
+
+So the widened re-run confirms the architect's earlier read: `ConcurrentApprovalsRemainSessionScoped` is meaningfully exercised, and it only survives if the abstract approval state is re-keyed by `(session_id, request_id)` or if the model enforces global `RequestId` uniqueness across sessions.
