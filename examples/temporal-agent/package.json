@@ -1,0 +1,12 @@
+{
+  "name": "temporal-agent-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test test/smoke.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
