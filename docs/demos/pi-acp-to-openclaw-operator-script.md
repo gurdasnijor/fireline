@@ -22,6 +22,7 @@
 | `.6.2` `--resume` CLI verify | ○ blocked | canonical-ids Phase 5 (`mono-vkpp.7`) | see Step 3 fallback |
 | Telegram signature (SIGNATURE MOMENT) | ○ `mono-axr.11` TelegramSubscriber as DS active profile | DS Phase 2 (`mono-axr.9`) + Phase 3 (`mono-axr.3` webhook reference) land first; ~6–8h total to demo-ready | Steps 3/4/5 center on composing `telegram()` middleware into agent.ts; bridge-as-example (`mono-thnc.6.3.3–.9`) superseded and closed 2026-04-12 |
 | Telegram adapter library reference | ✓ LANDED `d283392` | — | `examples/telegram-bridge/` retained as reference for `@chat-adapter/telegram` imports + adapter boot pattern; reused inside TelegramSubscriber impl |
+| **Runtime: pi-acp provisioning** | ⚠ P0 bug on PM-A lane (`mono-dls`) | ACP socket closes immediately on first attach after `fireline run --repl`; PM-A's w13 running Jeff's 10-second categorization experiment | **Fallback staged**: swap `docs/demos/assets/agent.ts` → `docs/demos/assets/agent-testy-load.ts` (identical middleware chain, deterministic `fireline-testy-load` agent). Narrative holds ("same 15-line spec"); only the real-model beat degrades |
 >
 > Every step must be labeled with its honesty class:
 >
@@ -78,6 +79,7 @@ Operator runs through this in the dressing room, not on stage:
 | P10 | Step 3 restart/resume gate check | Run `docs/demos/scripts/replay-peer-to-peer.sh` through to the kill-and-resume phase | session continues post-restart. **If it does not** (per `mono-thnc.2.3` open bug, w19 fix in flight at `498fff6`), Step 3 restart beat downgrades to PRE-STAGED recording before showtime |
 | P11 | Telegram bot reachable | `source deploy/telegram/bridge.env && curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getMe" \| jq -r '.ok,.result.username'` | prints `true` and `Jessica_fireline_bot`. **If not**, Step 3/4/5 downgrade to `webhook()`-profile fallback or PRE-STAGED |
 | P12 | Telegram tokens sourced in operator env | `echo $TELEGRAM_BOT_TOKEN \| head -c 10` | `TELEGRAM_BOT_TOKEN` has a value (10+ chars visible), loaded from `deploy/telegram/bridge.env` (gitignored). `TELEGRAM_CHAT_ID` optional; not needed for DM-driven DS profile. |
+| P13 | pi-acp provisioning sanity check (USED IF `mono-dls` P0 bug not fixed) | `npx fireline run docs/demos/assets/agent.ts --repl`, then send one prompt from REPL; verify ACP socket stays open for the reply | If ACP socket closes immediately on attach (the `mono-dls` failure mode), **swap to `docs/demos/assets/agent-testy-load.ts` fallback** before going live. All downstream steps continue against the fallback spec (same middleware, deterministic echo agent). |
 
 **If any pre-flight fails, the owning step must be downgraded to PRE-STAGED or
 cut before going live.**
@@ -261,7 +263,19 @@ restart — Jeff root-caused at `498fff6`; two fixes LANDED on w19 branch
 state-stream forwarding). Awaiting CI clear + merge. Once on main,
 pre-flight P10 flips green.
 
-**Fallbacks (three layers):**
+**Fallbacks (four layers):**
+
+0. **Runtime fallback (pi-acp `mono-dls` P0 bug)**: if pre-flight P13
+   fails — `agent(['pi-acp'])` ACP socket closes immediately on attach —
+   swap the spec to `docs/demos/assets/agent-testy-load.ts` (identical
+   middleware chain; `fireline-testy-load` deterministic echo agent
+   instead of pi-acp). Narrative preserved ("same 15-line spec,
+   same middleware array, only the model behind it changes") — only
+   the real-model beat degrades to canned echoes. All subsequent
+   Telegram/approval/peer steps continue against the fallback spec
+   unmodified. Label in narration if asked: "We're running a
+   deterministic stand-in agent today so the demo is reproducible;
+   the middleware and substrate path are identical."
 1. If the `telegram()` middleware is buggy post-`mono-axr.11` landing →
    downgrade narration to Step 4-only mode (approval card renders on
    Telegram via the same profile, but the initial prompt runs via a local
