@@ -39,6 +39,11 @@ The simplest user-facing rule:
 - use passive when another system will make the decision
 - use active when Fireline should deliver or act automatically
 
+If you want imperative sugar over the passive half of this model, read
+[Awakeables](./awakeables.md). That guide covers `ctx.awakeable<T>(key)` and
+`resolveAwakeable(...)`, which reuse the same canonical completion-key substrate
+instead of inventing a second workflow primitive.
+
 ## Fastest Way To See The Model
 
 The easiest replay on `main` is still the approval capture, because it shows the passive half of the model clearly:
@@ -217,6 +222,8 @@ What happens here:
 
 ## Which Guide To Read Next
 
+- [Awakeables](./awakeables.md)
+  Read this if you want imperative `await`-style sugar over passive durable waits.
 - [Approvals](./approvals.md)
   Start here if your workflow waits for a human or external decision.
 - [Telegram](./telegram.md)

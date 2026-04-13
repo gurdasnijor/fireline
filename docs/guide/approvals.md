@@ -196,4 +196,5 @@ If you want the low-level design detail behind those delivery profiles, see:
 - [docs/demos/fqa-approval-demo-capture.md](../demos/fqa-approval-demo-capture.md)
 - [examples/approval-workflow/README.md](../../examples/approval-workflow/README.md)
 - [docs/guide/middleware.md](./middleware.md)
-- [docs/proposals/durable-promises.md](../proposals/durable-promises.md) for the future awakeable-style ergonomics on top of the same durable mechanism
+- [Awakeables](./awakeables.md) for the shipped `ctx.awakeable<T>(...)` / `resolveAwakeable(...)` surface layered on the same durable mechanism
+- [docs/proposals/durable-promises.md](../proposals/durable-promises.md) for the broader design and future additive sugar

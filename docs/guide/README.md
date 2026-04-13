@@ -22,6 +22,8 @@ These guides describe the code that exists in this repository today. Where the p
   How to use `@fireline/state`, live collections, subscriptions, and the prebuilt query builders.
 - [Approvals](./approvals.md)
   End-to-end approval flow: `approve(...)`, `permission_request`, durable waiting, and `approval_resolved`.
+- [Awakeables](./awakeables.md)
+  Imperative durable waits with `workflowContext()`, `ctx.awakeable<T>(...)`, and `resolveAwakeable(...)`.
 - [Resources](./resources.md)
   Resource refs, mount timing, and the current discovery story.
 - [Providers](./providers.md)
@@ -53,5 +55,5 @@ design that is stabilizing underneath them, see:
   The upcoming framework-level durable workflow primitive, including the
   webhook delivery profile in §5.2.
 - [Durable Promises](../proposals/durable-promises.md)
-  The planned imperative awakeable sugar layered on top of durable
-  subscribers.
+  The broader target design beyond the now-live awakeable surface,
+  including future step-scoped sugar.
