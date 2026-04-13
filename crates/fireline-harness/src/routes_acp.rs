@@ -30,7 +30,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 use crate::{
-    TopologyRegistry, TopologySpec,
+    AgentPlaneTracer, TopologyRegistry, TopologySpec,
     shared_terminal::{AttachError, SharedTerminal, SharedTerminalAttachment},
     trace::{BoxedTraceWriter, CompositeTraceWriter, DurableStreamTracer},
 };
@@ -83,6 +83,7 @@ async fn acp_websocket_handler(
         components.extend(resolved_topology.proxy_components);
 
         let mut trace_writers = Vec::with_capacity(1 + resolved_topology.trace_writers.len());
+        trace_writers.push(Box::new(AgentPlaneTracer::new()) as BoxedTraceWriter);
         trace_writers.push(Box::new(DurableStreamTracer::new_with_host_context(
             app.state_producer.clone(),
             app.host_key.clone(),

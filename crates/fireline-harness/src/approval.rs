@@ -51,6 +51,11 @@ use crate::{
     TraceContext,
 };
 
+use crate::agent_observability::{
+    clear_approval_requested_span, emit_approval_resolved_span, ensure_prompt_request_span,
+    start_approval_requested_span,
+};
+
 #[derive(Clone, Default)]
 pub struct ApprovalConfig {
     pub policies: Vec<ApprovalPolicy>,
@@ -121,6 +126,16 @@ impl ApprovalConfig {
         self.policies
             .iter()
             .find(|p| p.match_rule.matches_prompt(prompt_text))
+    }
+}
+
+impl ApprovalPolicy {
+    pub fn policy_id(&self) -> String {
+        match &self.match_rule {
+            ApprovalMatch::PromptContains { needle } => format!("prompt_contains:{needle}"),
+            ApprovalMatch::Tool { name } => format!("tool:{name}"),
+            ApprovalMatch::ToolPrefix { prefix } => format!("tool_prefix:{prefix}"),
+        }
     }
 }
 
@@ -218,6 +233,11 @@ impl PassiveSubscriber for ApprovalGateSubscriber {
             timeout: self.approval_timeout,
         }
     }
+}
+
+struct ApprovalResolution {
+    allow: bool,
+    resolved_by: String,
 }
 
 impl ApprovalGateComponent {
@@ -344,13 +364,6 @@ impl ApprovalGateComponent {
         request_id: &RequestId,
         reason: &str,
     ) -> Result<(), sacp::Error> {
-        let approval_emit_span = tracing::info_span!(
-            "fireline.approval.emit",
-            session_id = %session_id,
-            request_id = %request_id,
-        );
-        let _approval_emit_guard = approval_emit_span.enter();
-
         let Some(producer) = self.state_producer.as_ref() else {
             return Err(sacp::util::internal_error(
                 "approval gate has no state producer; cannot emit permission_request",
@@ -370,22 +383,14 @@ impl ApprovalGateComponent {
     }
 
     /// Block until an `approval_resolved` event with a matching
-    /// `request_id` appears on the state stream. Returns `Ok(true)`
-    /// if the request was approved, `Ok(false)` if explicitly
-    /// denied, or an error if the gate timeout elapses or the
-    /// stream terminates.
+    /// `request_id` appears on the state stream. Returns the
+    /// resolved approval outcome, or an error if the gate timeout
+    /// elapses or the stream terminates.
     async fn wait_for_approval(
         &self,
         session_id: &SessionId,
         request_id: &RequestId,
-    ) -> Result<bool, sacp::Error> {
-        let approval_wait_span = tracing::info_span!(
-            "fireline.approval.wait",
-            session_id = %session_id,
-            request_id = %request_id,
-        );
-        let _approval_wait_guard = approval_wait_span.enter();
-
+    ) -> Result<ApprovalResolution, sacp::Error> {
         let state_stream_url = self
             .state_stream_url
             .as_deref()
@@ -417,17 +422,12 @@ impl ApprovalGateComponent {
                 )
             })?;
 
-        let allow = resolution.allow.unwrap_or(false);
-        let resolved_by = resolution.resolved_by.as_deref().unwrap_or("unknown");
-        tracing::info_span!(
-            "fireline.approval.resolve",
-            session_id = %session_id,
-            request_id = %request_id,
-            allow,
-            resolved_by = %resolved_by,
-        )
-        .in_scope(|| {});
-        Ok(allow)
+        Ok(ApprovalResolution {
+            allow: resolution.allow.unwrap_or(false),
+            resolved_by: resolution
+                .resolved_by
+                .unwrap_or_else(|| "external_approval".to_string()),
+        })
     }
 
     fn is_session_approved(&self, session_id: &SessionId) -> bool {
@@ -543,13 +543,12 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                         }
 
                         let policy_match = this.config.policies.iter().find_map(|policy| {
-                            policy
-                                .match_rule
-                                .matches_prompt(&prompt_text)
-                                .then(|| (policy.action, policy.reason.clone()))
+                            policy.match_rule.matches_prompt(&prompt_text).then(|| {
+                                (policy.action, policy.reason.clone(), policy.policy_id())
+                            })
                         });
 
-                        let Some((action, reason)) = policy_match else {
+                        let Some((action, reason, policy_id)) = policy_match else {
                             return cx
                                 .send_request_to(Agent, request)
                                 .forward_response_to(responder);
@@ -570,6 +569,7 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                                         ),
                                     ));
                                 };
+                                ensure_prompt_request_span(&session_id, &request_id, Some("session/prompt"));
                                 let should_emit = {
                                     let mut pending_sessions = this
                                         .pending_sessions
@@ -589,10 +589,17 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                                     should_emit
                                 };
                                 if should_emit {
+                                    start_approval_requested_span(
+                                        &session_id,
+                                        &request_id,
+                                        &policy_id,
+                                        &reason,
+                                    );
                                     if let Err(error) =
                                         this.emit_permission_request(&session_id, &request_id, &reason)
                                             .await
                                     {
+                                        clear_approval_requested_span(&session_id, &request_id);
                                         this.pending_sessions
                                             .lock()
                                             .expect("approval state poisoned")
@@ -600,10 +607,11 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                                         return responder.respond_with_error(error);
                                     }
                                 }
-                                let allowed =
+                                let resolution =
                                     match this.wait_for_approval(&session_id, &request_id).await {
-                                        Ok(allowed) => allowed,
+                                        Ok(resolution) => resolution,
                                         Err(error) => {
+                                            clear_approval_requested_span(&session_id, &request_id);
                                             this.pending_sessions
                                                 .lock()
                                                 .expect("approval state poisoned")
@@ -611,11 +619,17 @@ impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
                                             return responder.respond_with_error(error);
                                         }
                                     };
+                                emit_approval_resolved_span(
+                                    &session_id,
+                                    &request_id,
+                                    resolution.allow,
+                                    &resolution.resolved_by,
+                                );
                                 this.pending_sessions
                                     .lock()
                                     .expect("approval state poisoned")
                                     .remove(&session_id);
-                                if !allowed {
+                                if !resolution.allow {
                                     return responder.respond_with_error(sacp::util::internal_error(
                                         format!("approval_gate denied by approver: {reason}"),
                                     ));
@@ -947,7 +961,7 @@ mod tests {
             .context("session A waiter did not resolve after matching approval")?
             .context("session A waiter panicked")??;
         assert!(
-            allow_a,
+            allow_a.allow,
             "INVARIANT (ApprovalGate): matching approval_resolved must release the corresponding waiter"
         );
 
@@ -964,7 +978,7 @@ mod tests {
             .context("session B waiter did not resolve after its own approval")?
             .context("session B waiter panicked")??;
         assert!(
-            allow_b,
+            allow_b.allow,
             "INVARIANT (ApprovalGate): session B must release once its own approval_resolved arrives"
         );
 
