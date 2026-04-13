@@ -32,6 +32,13 @@ impl SessionIndex {
         self.sessions.read().unwrap().values().cloned().collect()
     }
 
+    pub async fn upsert(&self, record: SessionRecord) {
+        self.sessions
+            .write()
+            .unwrap()
+            .insert(record.session_id.to_string(), record);
+    }
+
     fn apply_envelope(&self, envelope: &StateEnvelope) -> Result<()> {
         let Some(operation) = envelope.change_operation() else {
             return Ok(());
