@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "description": "Fireline CLI native binaries for macOS x64",
   "license": "MIT OR Apache-2.0",
-  "repository": "https://github.com/fireline/fireline",
+  "repository": "https://github.com/gurdasnijor/fireline",
   "os": ["darwin"],
   "cpu": ["x64"],
   "files": [
