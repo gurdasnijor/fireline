@@ -414,8 +414,10 @@ lines), right half the Telegram chat + trace tree.
 
 **Narration close:** "Everything you just saw — Telegram bidirectional
 chat, approvals, unkillable restart, peer lineage — started from 15
-lines of agent spec plus a Chat SDK bridge. Fireline is the foundation;
-you ship whatever OpenClaw-style product you want on top."
+lines of agent spec plus a Chat SDK bridge. The same durable stream also
+powers the new `ctx.awakeable()` / `resolveAwakeable()` surface for
+long-lived waits. Fireline is the foundation; you ship whatever
+OpenClaw-style product you want on top."
 
 Skip if running over time.
 

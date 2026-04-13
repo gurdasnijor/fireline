@@ -126,9 +126,9 @@ Fireline replaces the usual pile of custom agent plumbing: polling loops, approv
       <img alt="Durable wait" src="assets/durable-wait.svg" width="100%">
       <br>
       <strong>Durable waits</strong><br>
-      Keep long human pauses and external completions on the stream instead of in a process-local callback. Today the shipped public surface is approvals; the next ergonomic layer is <a href="docs/guide/awakeables.md">awakeables</a>.
+      Keep long human pauses and external completions on the stream instead of in a process-local callback. The shipped public surface now includes both approval gates and <a href="docs/guide/awakeables.md">awakeables</a> over the same canonical completion-key substrate.
       <br>
-      <a href="docs/guide/durable-subscriber.md">Durable subscriber guide</a> · <a href="docs/guide/awakeables.md">Awakeables status</a>
+      <a href="docs/guide/durable-subscriber.md">Durable subscriber guide</a> · <a href="docs/guide/awakeables.md">Awakeables guide</a>
     </td>
   </tr>
 </table>

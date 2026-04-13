@@ -277,6 +277,7 @@ Still proposal-level today:
 
 - step-scoped awakeables derived from durable stream offsets
 - durable `sleep(...)` and timeout helpers
+- a dedicated `rejectAwakeable()` helper; for now, rejection is modeled in the resolved value shape
 - the fuller Promise-composition ergonomics described in `docs/proposals/durable-promises.md`
 
 The guide above is limited to what has actually landed in `packages/client/src/workflow/`.
