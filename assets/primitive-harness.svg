@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300">
+  <defs>
+    <linearGradient id="flameGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ff6b35;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#ff3d00;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="300" fill="#0b0b0d" rx="8"/>
+  <g transform="translate(40, 40)">
+    <!-- Control Loop -->
+    <path d="M160 20 Q280 20 280 110 Q280 200 160 200 Q40 200 40 110 Q40 20 160 20" fill="none" stroke="#334155" stroke-width="2" stroke-dasharray="8,4"/>
+    
+    <!-- Model Call -->
+    <g transform="translate(130, 0)">
+      <rect x="0" y="0" width="60" height="40" rx="4" fill="#161b22" stroke="#ff6b35" stroke-width="1.5"/>
+      <text x="30" y="25" text-anchor="middle" fill="#ff6b35" font-family="Inter" font-size="10" font-weight="600">Model</text>
+    </g>
+
+    <!-- Middleware Stations -->
+    <!-- trace -->
+    <g transform="translate(250, 90)">
+      <circle cx="0" cy="0" r="15" fill="#161b22" stroke="#3b82f6" stroke-width="1"/>
+      <text x="0" y="25" text-anchor="middle" fill="#3b82f6" font-family="monospace" font-size="7">trace()</text>
+    </g>
+    <!-- approve -->
+    <g transform="translate(160, 185)">
+      <circle cx="0" cy="0" r="15" fill="#161b22" stroke="#ff6b35" stroke-width="1"/>
+      <text x="0" y="25" text-anchor="middle" fill="#ff6b35" font-family="monospace" font-size="7">approve()</text>
+    </g>
+    <!-- budget -->
+    <g transform="translate(70, 90)">
+      <circle cx="0" cy="0" r="15" fill="#161b22" stroke="#ef4444" stroke-width="1"/>
+      <text x="0" y="25" text-anchor="middle" fill="#ef4444" font-family="monospace" font-size="7">budget()</text>
+    </g>
+
+    <!-- Tool Call Outbound -->
+    <g transform="translate(145, 120)">
+      <path d="M15 0 L15 30" fill="none" stroke="#ff6b35" stroke-width="1" stroke-dasharray="4,2"/>
+      <rect x="-15" y="30" width="60" height="25" rx="4" fill="#161b22" stroke="#30363d"/>
+      <text x="15" y="46" text-anchor="middle" fill="#8b949e" font-family="Inter" font-size="8">Tool Call</text>
+    </g>
+
+    <!-- Loop Direction Arrows -->
+    <path d="M210 20 L220 20" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow-loop)"/>
+    <path d="M40 130 L40 120" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow-loop)"/>
+  </g>
+  <defs>
+    <marker id="arrow-loop" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="4" markerHeight="4" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155" />
+    </marker>
+  </defs>
+</svg>

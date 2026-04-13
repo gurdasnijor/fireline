@@ -8,6 +8,9 @@
       <feGaussianBlur stdDeviation="5" result="blur" />
       <feComposite in="SourceGraphic" in2="blur" operator="over" />
     </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#ff6b35" />
+    </marker>
   </defs>
 
   <rect width="1600" height="900" fill="#0b0b0d" rx="12"/>
@@ -46,7 +49,6 @@
   <!-- The Through-line: Durable Stream -->
   <g transform="translate(100, 550)">
     <rect width="1400" height="250" rx="12" fill="#0b0b0d" stroke="#ff6b35" stroke-width="2" stroke-opacity="0.3"/>
-    <text x="700" y="40" text-anchor="middle" fill="#ff6b35" font-family="Inter, sans-serif" font-size="24" font-weight="600" letter-spacing="4">DURABLE STREAM (THE SPINE)</text>
     
     <line x1="50" y1="150" x2="1350" y2="150" stroke="#ff6b35" stroke-width="4" stroke-dasharray="16,12"/>
     
@@ -59,10 +61,4 @@
     <text x="710" y="0" fill="#8b949e" font-family="Inter, sans-serif" font-size="12">Peer hops project</text>
     <text x="1210" y="0" fill="#8b949e" font-family="Inter, sans-serif" font-size="12">Dashboards subscribe</text>
   </g>
-
-  <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#ff6b35" />
-    </marker>
-  </defs>
 </svg>
