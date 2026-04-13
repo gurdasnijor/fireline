@@ -33,9 +33,9 @@
     }
   },
   "scripts": {
-    "build": "tsc",
-    "test": "vitest run",
-    "lint": "tsc --noEmit"
+    "build": "pnpm --filter @fireline/state build && tsc",
+    "test": "pnpm --filter @fireline/state build && vitest run",
+    "lint": "pnpm --filter @fireline/state build && tsc --noEmit"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.18.1",
