@@ -266,13 +266,14 @@ jobs:
 
           for (const [name, envVar] of binaries) {
             const resolved = resolveBinary({ name, envVar })
+            const normalizedPath = resolved.path.replaceAll('\\', '/')
             if (resolved.source !== 'package') {
               throw new Error(`expected ${name} to resolve from a platform package, got ${resolved.source}`)
             }
             if (basename(resolved.path) !== name) {
               throw new Error(`expected ${name} to resolve to an extensionless packaged binary, got ${resolved.path}`)
             }
-            if (!resolved.path.includes('@fireline/cli-')) {
+            if (!normalizedPath.includes('@fireline/cli-')) {
               throw new Error(`expected ${name} to resolve from a platform package, got ${resolved.path}`)
             }
           }
