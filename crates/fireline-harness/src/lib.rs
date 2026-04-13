@@ -4,6 +4,7 @@ pub mod approval;
 pub mod audit;
 pub mod budget;
 pub mod context;
+pub mod durable_subscriber;
 mod host_topology;
 pub mod routes_acp;
 pub mod secrets;
@@ -21,11 +22,16 @@ pub use context::{
     ContextConfig, ContextInjectionComponent, ContextPlacement, ContextSource, DatetimeSource,
     WorkspaceFileSource,
 };
+pub use durable_subscriber::{
+    ActiveSubscriber, CompletionKey, DurableSubscriber, DurableSubscriberDriver, HandlerOutcome,
+    PassiveSubscriber, PassiveWaitPolicy, RetryPolicy, StreamEnvelope, SubscriberMode,
+    SubscriberRegistration, TraceContext,
+};
+pub use routes_acp::{AcpRouteState, BaseComponentsFactory};
 pub use secrets::{
     CredentialResolver, CredentialResolverError, InjectionRule, InjectionScope, InjectionTarget,
     LocalCredentialResolver, SecretValue, SecretsInjectionComponent,
 };
-pub use routes_acp::{AcpRouteState, BaseComponentsFactory};
 pub use shared_terminal::{AttachError, SharedTerminal, SharedTerminalAttachment};
 pub use topology::{
     ComponentContext, ProxyComponentInstance, ResolvedTopology, TopologyComponentSpec,
