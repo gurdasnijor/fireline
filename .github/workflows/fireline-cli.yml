@@ -9,6 +9,7 @@ on:
       - pnpm-workspace.yaml
       - packages/fireline/**
       - packages/fireline-*/**
+      - scripts/fireline-cli-target-matrix.mjs
       - scripts/stage-fireline-platform-package.mjs
       - .github/workflows/fireline-cli.yml
   push:
@@ -23,6 +24,7 @@ on:
       - pnpm-workspace.yaml
       - packages/fireline/**
       - packages/fireline-*/**
+      - scripts/fireline-cli-target-matrix.mjs
       - scripts/stage-fireline-platform-package.mjs
       - .github/workflows/fireline-cli.yml
   workflow_dispatch:
@@ -40,21 +42,15 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
-      - name: Derive target matrix from Cargo metadata
+      - name: Derive target matrix from Cargo metadata block
         id: matrix
-        shell: bash
         run: |
-          cargo metadata --no-deps --format-version 1 > /tmp/fireline-cli-metadata.json
-          MATRIX=$(node <<'EOF'
-          const fs = require('node:fs')
-          const metadata = JSON.parse(fs.readFileSync('/tmp/fireline-cli-metadata.json', 'utf8'))
-          const platforms = metadata.workspace_metadata.fireline_cli.platforms
-          process.stdout.write(JSON.stringify({ include: platforms }))
-          EOF
-          )
+          MATRIX=$(node scripts/fireline-cli-target-matrix.mjs)
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
   lint-test:
