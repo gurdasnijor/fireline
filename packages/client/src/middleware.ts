@@ -1,50 +1,15 @@
 import type {
   AttachToolsMiddleware,
-  ApproveMiddleware,
   BudgetMiddleware,
   CapabilityRef,
-  ContextInjectionMiddleware,
   ContextSourceSpec,
+  ContextInjectionMiddleware,
   PeerMiddleware,
   SecretBinding,
   SecretsProxyMiddleware,
   ToolAttachment,
-  TraceMiddleware,
 } from './types.js'
-
-/**
- * Builds a trace middleware spec that emits ACP traffic into a durable audit stream.
- *
- * @example `const mw = trace({ streamName: 'audit:demo' })`
- *
- * @remarks Anthropic primitive: Middleware.
- */
-export function trace(options: {
-  readonly streamName?: string
-  readonly includeMethods?: readonly string[]
-} = {}): TraceMiddleware {
-  return {
-    kind: 'trace',
-    ...cloneDefined(options),
-  }
-}
-
-/**
- * Builds an approval middleware spec for prompt- or tool-scoped approval gates.
- *
- * @example `const mw = approve({ scope: 'tool_calls', timeoutMs: 60_000 })`
- *
- * @remarks Anthropic primitive: Middleware.
- */
-export function approve(options: {
-  readonly scope: 'tool_calls' | 'all'
-  readonly timeoutMs?: number
-}): ApproveMiddleware {
-  return {
-    kind: 'approve',
-    ...cloneDefined(options),
-  }
-}
+export * from './middleware/index.js'
 
 /**
  * Builds a budget middleware spec that caps harness token usage.

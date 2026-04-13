@@ -315,6 +315,165 @@ export interface SecretsProxyMiddleware {
 }
 
 /**
+ * Declarative completion-key strategy for durable subscriber middleware.
+ *
+ * These map directly onto the Rust `CompletionKey` enum and intentionally
+ * exclude user-supplied string keys.
+ *
+ * @example `const keyBy: DurableSubscriberKeyStrategy = 'session_request'`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export type DurableSubscriberKeyStrategy =
+  | 'session'
+  | 'session_request'
+  | 'session_tool_call'
+
+/**
+ * Selector used by active durable subscribers to match agent-plane envelopes.
+ *
+ * String selectors match `value.kind` first and then fall back to envelope
+ * `type`, matching the webhook profile shape described in
+ * `docs/proposals/durable-subscriber.md`.
+ *
+ * @example `const events: DurableSubscriberEventSelector[] = ['permission_request', { type: 'permission', kind: 'approval_resolved' }]`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export type DurableSubscriberEventSelector =
+  | string
+  | {
+      readonly type: string
+      readonly kind?: string
+    }
+
+/**
+ * Host-resolved secret reference used by durable subscriber profiles.
+ *
+ * The TypeScript surface stays declarative: subscriber middleware points at a
+ * host-owned secret reference instead of embedding plaintext credentials.
+ *
+ * @example `const token: DurableSubscriberSecretRef = { ref: 'secret:telegram-bot' }`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export interface DurableSubscriberSecretRef {
+  /** Host-owned secret or environment reference such as `secret:foo` or `env:BAR`. */
+  readonly ref: string
+}
+
+/**
+ * Bounded retry policy for active durable subscriber profiles.
+ *
+ * @example `const retry: DurableSubscriberRetryPolicy = { maxAttempts: 5, initialBackoffMs: 1_000 }`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export interface DurableSubscriberRetryPolicy {
+  /** Maximum delivery attempts before dead-lettering in the infrastructure plane. */
+  readonly maxAttempts?: number
+  /** Initial retry backoff in milliseconds. */
+  readonly initialBackoffMs?: number
+  /** Optional maximum retry backoff in milliseconds. */
+  readonly maxBackoffMs?: number
+}
+
+/**
+ * Middleware spec for the active `WebhookSubscriber` durable-subscriber profile.
+ *
+ * This is declarative config only. The Rust side lowers it onto an
+ * `ActiveSubscriber`; no custom completion keys are accepted in userland.
+ *
+ * Today the live Rust substrate requires a concrete `url`; host-owned target
+ * aliases can still be carried for naming, but target-only delivery remains a
+ * follow-on host-wiring step.
+ *
+ * @example `const mw: WebhookMiddleware = { kind: 'webhook', url: 'https://hooks.slack.com/services/demo', events: ['permission_request'], keyBy: 'session_request' }`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export interface WebhookMiddleware {
+  /** Stable discriminator for webhook durable-subscriber middleware. */
+  readonly kind: 'webhook'
+  /** Optional human-readable profile name used in logs and diagnostics. */
+  readonly name?: string
+  /** Preferred host-owned webhook target alias. */
+  readonly target?: string
+  /** Direct delivery URL used by the current Rust `WebhookSubscriberConfig`. */
+  readonly url?: string
+  /** Event selectors consumed by the Rust `WebhookSubscriber` profile. */
+  readonly events: readonly DurableSubscriberEventSelector[]
+  /** Canonical completion-key strategy; raw string keys are intentionally unsupported. */
+  readonly keyBy?: Exclude<DurableSubscriberKeyStrategy, 'session'>
+  /** Optional host-resolved secret headers forwarded on delivery. */
+  readonly headers?: Readonly<Record<string, DurableSubscriberSecretRef>>
+  /** Optional bounded retry policy owned by the infrastructure plane. */
+  readonly retry?: DurableSubscriberRetryPolicy
+}
+
+/**
+ * Middleware spec for a Telegram-flavored active durable-subscriber profile.
+ *
+ * This mirrors the webhook profile shape while keeping the outbound token and
+ * routing config declarative and host-resolved.
+ *
+ * @example `const mw: TelegramMiddleware = { kind: 'telegram', token: { ref: 'secret:telegram-bot' }, events: ['permission_request'] }`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export interface TelegramMiddleware {
+  /** Stable discriminator for telegram durable-subscriber middleware. */
+  readonly kind: 'telegram'
+  /** Optional human-readable profile name used in logs and diagnostics. */
+  readonly name?: string
+  /** Optional host-owned target alias for production routing. */
+  readonly target?: string
+  /** Optional token reference for local/dev parity. */
+  readonly token?: string | DurableSubscriberSecretRef
+  /** Optional Telegram chat/channel routing identifier. */
+  readonly chatId?: string
+  /** Events observed by the future Telegram `ActiveSubscriber` profile. */
+  readonly events?: readonly DurableSubscriberEventSelector[]
+  /** Canonical completion-key strategy; raw string keys are intentionally unsupported. */
+  readonly keyBy?: Exclude<DurableSubscriberKeyStrategy, 'session'>
+  /** Optional bounded retry policy owned by the infrastructure plane. */
+  readonly retry?: DurableSubscriberRetryPolicy
+}
+
+/**
+ * Middleware spec for the `AutoApproveSubscriber` active profile.
+ *
+ * This profile shares the same canonical approval completion path as the
+ * passive approval gate introduced earlier in the rollout.
+ *
+ * @example `const mw: AutoApproveMiddleware = { kind: 'autoApprove' }`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export interface AutoApproveMiddleware {
+  /** Stable discriminator for auto-approve durable-subscriber middleware. */
+  readonly kind: 'autoApprove'
+  /** Optional human-readable profile name used in logs and diagnostics. */
+  readonly name?: string
+  /** Optional event selectors; defaults to `permission_request`. */
+  readonly events?: readonly DurableSubscriberEventSelector[]
+  /** Optional bounded retry policy owned by the infrastructure plane. */
+  readonly retry?: DurableSubscriberRetryPolicy
+}
+
+/**
+ * Union of declarative durable-subscriber profile configs exposed to TypeScript.
+ *
+ * @example `const profile: DurableSubscriberMiddleware = webhook({ target: 'slack-approvals', events: ['permission_request'] })`
+ *
+ * @remarks Anthropic primitive: Middleware.
+ */
+export type DurableSubscriberMiddleware =
+  | WebhookMiddleware
+  | TelegramMiddleware
+  | AutoApproveMiddleware
+
+/**
  * Union of every serializable middleware spec accepted by `compose()`.
  *
  * @example `const chain: Middleware[] = [trace(), budget({ tokens: 20_000 })]`
@@ -329,6 +488,7 @@ export type Middleware =
   | PeerMiddleware
   | AttachToolsMiddleware
   | SecretsProxyMiddleware
+  | DurableSubscriberMiddleware
 
 /**
  * Serializable middleware chain accepted by `compose()`.
