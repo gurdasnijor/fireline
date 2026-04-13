@@ -204,6 +204,13 @@ mod tests {
     }
 
     fn prompt_peer_envelope(raw_input: Value, meta: Map<String, Value>) -> StreamEnvelope {
+        let update = serde_json::to_value(SessionUpdate::ToolCall(
+            ToolCall::new("tool-1", "Prompt peer")
+                .raw_input(raw_input)
+                .meta(meta),
+        ))
+        .expect("serialize tool call update");
+
         StreamEnvelope::from_json(serde_json::json!({
             "type": "chunk_v2",
             "key": "session-a:req-1:tool-1:0",
@@ -212,13 +219,7 @@ mod tests {
                 "sessionId": "session-a",
                 "requestId": "req-1",
                 "toolCallId": "tool-1",
-                "update": {
-                    "sessionUpdate": "toolCall",
-                    "toolCallId": "tool-1",
-                    "title": "Prompt peer",
-                    "rawInput": raw_input,
-                    "_meta": meta,
-                },
+                "update": update,
                 "createdAt": 123
             }
         }))
