@@ -69,7 +69,7 @@ Both tiers: durable-streams state plane is the truth for session/permission/chun
 
 - Zero new API surface.
 - Matches user's OCI-first framing exactly: "deploying is just `wrangler deploy` / `fly deploy` / `kubectl apply` — target-native tooling."
-- `alwaysOn` lives IN the embedded spec; target-platform's own keepalive / replica / machine-class policy satisfies it.
+- Hosted deploys stay warm by default via the `AlwaysOnDeploymentSubscriber` substrate; cold-start opt-out is not in scope for the initial ship.
 - Limitation: one spec per image; changing spec = rebuild + redeploy.
 - Tradeoff acceptable: single-spec is the dominant MVP case and matches the `docs/demos/pi-acp-to-openclaw.md` narrative ("same 15-line file moves from local to cloud").
 
@@ -111,14 +111,14 @@ Rescoped to match the tiered model. No CLI verb implies a new HTTP protocol.
 - `fireline deploy agent.ts --target production` where `production` implies a Fireline-owned control plane — gone. The `--target` in `fireline deploy` now means a platform name (`cloudflare`, `fly`, `kubernetes`), not a Fireline deployment slot.
 - Any CLI verb that `PUT`s a spec at a Fireline HTTP endpoint — never lands.
 
-## `lifecycle.alwaysOn` Placement
+## Warm-By-Default Placement
 
-Answer: **spec metadata, consumed by whichever subscriber applies.**
+Answer: **hosted deploys stay warm by default via the `AlwaysOnDeploymentSubscriber` substrate; cold-start opt-out is not in scope for the initial ship.**
 
-- Tier A: field on the spec embedded in the image. Host reads on boot. Target platform's keepalive / replica configuration is the enforcement substrate (`fly.toml [services.http_checks]`, CF Containers keepalive, K8s `replicas: 1`).
-- Tier C: field on the spec resource envelope. `AlwaysOnDeploymentSubscriber` (already specified) observes it, materializes and keeps sandbox alive per the wake invariants.
+- Tier A: the host boots from the embedded spec and the target platform enforces the warm-by-default runtime posture through its own keepalive and replica mechanisms.
+- Tier C: `AlwaysOnDeploymentSubscriber` observes the durable deployment input and materializes the same warm-by-default behavior through the existing wake/provision substrate.
 
-Not in ACP `_meta` (ACP is runtime, not deployment). Not a separate field. Spec-level metadata, read by the appropriate subscriber.
+This is not ACP `_meta`, not a new CLI lifecycle switch, and not a separate deployment protocol. It is default hosted-deploy behavior enforced by the substrate already chosen for wake and materialization.
 
 ## Impact on Existing Proposals
 
