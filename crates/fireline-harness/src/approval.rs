@@ -37,12 +37,17 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use durable_streams::{Client as DurableStreamsClient, LiveMode, Offset, Producer};
+use durable_streams::Producer;
 use fireline_acp_ids::{RequestId, SessionId, ToolCallId};
 use sacp::schema::{ContentBlock, PromptRequest};
 use sacp::{Agent, Client, ConnectTo, Proxy};
-use serde::Serialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+use crate::{
+    CompletionKey, DurableSubscriber, DurableSubscriberDriver, PassiveSubscriber,
+    PassiveWaitPolicy, StreamEnvelope,
+};
 
 #[derive(Clone, Default)]
 pub struct ApprovalConfig {
@@ -122,7 +127,8 @@ pub struct ApprovalGateComponent {
     config: Arc<ApprovalConfig>,
     state_stream_url: Option<String>,
     state_producer: Option<Producer>,
-    approval_timeout: Option<Duration>,
+    subscriber_driver: Arc<DurableSubscriberDriver>,
+    approval_subscriber: ApprovalGateSubscriber,
     approved_sessions: Arc<Mutex<HashSet<SessionId>>>,
     pending_sessions: Arc<Mutex<HashMap<SessionId, PendingApproval>>>,
 }
@@ -131,6 +137,101 @@ pub struct ApprovalGateComponent {
 struct PendingApproval {
     request_id: RequestId,
     reason: String,
+}
+
+#[derive(Clone)]
+struct ApprovalGateSubscriber {
+    approval_timeout: Option<Duration>,
+}
+
+impl ApprovalGateSubscriber {
+    const NAME: &'static str = "approval_gate";
+
+    fn new(approval_timeout: Option<Duration>) -> Self {
+        Self { approval_timeout }
+    }
+
+    fn permission_request_envelope(
+        &self,
+        session_id: &SessionId,
+        request_id: &RequestId,
+        reason: &str,
+    ) -> StreamEnvelope {
+        StreamEnvelope {
+            entity_type: "permission".to_string(),
+            key: format!("{session_id}:{}", request_id_key(request_id)),
+            headers: insert_headers(),
+            value: Some(
+                serde_json::to_value(PermissionEvent {
+                    kind: "permission_request".to_string(),
+                    session_id: session_id.clone(),
+                    request_id: Some(request_id.clone()),
+                    tool_call_id: None,
+                    allow: None,
+                    resolved_by: None,
+                    reason: Some(reason.to_string()),
+                    created_at_ms: now_ms(),
+                })
+                .expect("permission request event must serialize"),
+            ),
+        }
+    }
+
+    fn decode_permission_event(envelope: &StreamEnvelope) -> Option<PermissionEvent> {
+        (envelope.entity_type == "permission")
+            .then(|| envelope.value_as::<PermissionEvent>())
+            .flatten()
+    }
+
+    fn completion_event_for(
+        &self,
+        request_event: &PermissionEvent,
+        log: &[StreamEnvelope],
+    ) -> Option<PermissionEvent> {
+        log.iter().find_map(|envelope| {
+            let event = Self::decode_permission_event(envelope)?;
+            (event.kind == "approval_resolved"
+                && event.session_id == request_event.session_id
+                && event.request_id == request_event.request_id)
+                .then_some(event)
+        })
+    }
+}
+
+impl DurableSubscriber for ApprovalGateSubscriber {
+    type Event = PermissionEvent;
+    type Completion = PermissionEvent;
+
+    fn name(&self) -> &str {
+        Self::NAME
+    }
+
+    fn matches(&self, envelope: &StreamEnvelope) -> Option<Self::Event> {
+        let event = Self::decode_permission_event(envelope)?;
+        (event.kind == "permission_request" && event.request_id.is_some()).then_some(event)
+    }
+
+    fn completion_key(&self, event: &Self::Event) -> CompletionKey {
+        CompletionKey::prompt(
+            event.session_id.clone(),
+            event
+                .request_id
+                .clone()
+                .expect("approval permission_request must carry request_id"),
+        )
+    }
+
+    fn is_completed(&self, event: &Self::Event, log: &[StreamEnvelope]) -> bool {
+        self.completion_event_for(event, log).is_some()
+    }
+}
+
+impl PassiveSubscriber for ApprovalGateSubscriber {
+    fn wait_policy(&self) -> PassiveWaitPolicy {
+        PassiveWaitPolicy {
+            timeout: self.approval_timeout,
+        }
+    }
 }
 
 impl ApprovalGateComponent {
@@ -152,11 +253,15 @@ impl ApprovalGateComponent {
         state_producer: Option<Producer>,
         approval_timeout: Option<Duration>,
     ) -> Self {
+        let approval_subscriber = ApprovalGateSubscriber::new(approval_timeout);
+        let mut subscriber_driver = DurableSubscriberDriver::new();
+        subscriber_driver.register_passive(approval_subscriber.clone());
         Self {
             config: Arc::new(config),
             state_stream_url,
             state_producer,
-            approval_timeout,
+            subscriber_driver: Arc::new(subscriber_driver),
+            approval_subscriber,
             approved_sessions: Arc::new(Mutex::new(HashSet::new())),
             pending_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -186,74 +291,40 @@ impl ApprovalGateComponent {
             return Ok(());
         };
 
-        let client = DurableStreamsClient::new();
-        let stream = client.stream(state_stream_url);
-        let mut reader = stream
-            .read()
-            .offset(durable_streams::Offset::Beginning)
-            .live(LiveMode::Off)
-            .build()
+        let log = self
+            .subscriber_driver
+            .replay_log(state_stream_url)
+            .await
             .map_err(|error| {
                 sacp::util::internal_error(format!("approval log rebuild: {error}"))
             })?;
 
         let mut pending = None;
         let mut approved = false;
-        while let Some(chunk) = reader
-            .next_chunk()
-            .await
-            .map_err(|error| sacp::util::internal_error(format!("approval log rebuild: {error}")))?
-        {
-            if chunk.data.is_empty() {
-                if chunk.up_to_date {
-                    break;
-                }
+        for envelope in &log {
+            let Some(event) = ApprovalGateSubscriber::decode_permission_event(envelope) else {
+                continue;
+            };
+            if event.session_id != *session_id {
                 continue;
             }
 
-            let events: Vec<Value> = serde_json::from_slice(&chunk.data).map_err(|error| {
-                sacp::util::internal_error(format!("approval log parse: {error}"))
-            })?;
-            for event in events {
-                let Some(value) = event.get("value") else {
-                    continue;
-                };
-                let Some(event_session_id) = value.get("sessionId").and_then(session_id_from_value)
-                else {
-                    continue;
-                };
-                if event_session_id != *session_id {
-                    continue;
+            match event.kind.as_str() {
+                "permission_request" => {
+                    let Some(request_id) = event.request_id else {
+                        continue;
+                    };
+                    let Some(reason) = event.reason else {
+                        continue;
+                    };
+                    approved = false;
+                    pending = Some(PendingApproval { request_id, reason });
                 }
-
-                match value.get("kind").and_then(Value::as_str) {
-                    Some("permission_request") => {
-                        let Some(request_id) = value
-                            .get("requestId")
-                            .and_then(request_id_from_value)
-                        else {
-                            continue;
-                        };
-                        let Some(reason) = value
-                            .get("reason")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                        else {
-                            continue;
-                        };
-                        approved = false;
-                        pending = Some(PendingApproval { request_id, reason });
-                    }
-                    Some("approval_resolved") => {
-                        pending = None;
-                        approved = value.get("allow").and_then(Value::as_bool).unwrap_or(false);
-                    }
-                    _ => {}
+                "approval_resolved" => {
+                    pending = None;
+                    approved = event.allow.unwrap_or(false);
                 }
-            }
-
-            if chunk.up_to_date {
-                break;
+                _ => {}
             }
         }
 
@@ -300,23 +371,11 @@ impl ApprovalGateComponent {
             ));
         };
 
-        producer.append_json(&StateEnvelope {
-            entity_type: "permission",
-            key: format!("{session_id}:{}", request_id_key(request_id)),
-            headers: StateHeaders {
-                operation: "insert",
-            },
-            value: PermissionEvent {
-                kind: "permission_request",
-                session_id: session_id.clone(),
-                request_id: Some(request_id.clone()),
-                tool_call_id: None,
-                allow: None,
-                resolved_by: None,
-                reason: Some(reason.to_string()),
-                created_at_ms: now_ms(),
-            },
-        });
+        producer.append_json(
+            &self
+                .approval_subscriber
+                .permission_request_envelope(session_id, request_id, reason),
+        );
         producer
             .flush()
             .await
@@ -346,95 +405,43 @@ impl ApprovalGateComponent {
             .as_deref()
             .ok_or_else(|| sacp::util::internal_error("approval gate has no state stream URL"))?;
 
-        let client = DurableStreamsClient::new();
-        let stream = client.stream(state_stream_url);
-        let mut reader = stream
-            .read()
-            .offset(Offset::Beginning)
-            .live(LiveMode::Sse)
-            .build()
-            .map_err(|error| {
-                sacp::util::internal_error(format!("approval stream reader: {error}"))
+        let request_envelope = self
+            .approval_subscriber
+            .permission_request_envelope(session_id, request_id, "pending");
+        let request_event = self
+            .approval_subscriber
+            .matches(&request_envelope)
+            .expect("approval request envelope must match the approval subscriber");
+        let log = self
+            .subscriber_driver
+            .wait_for_passive_completion(
+                self.approval_subscriber.name(),
+                &request_envelope,
+                state_stream_url,
+            )
+            .await
+            .map_err(|error| map_wait_error(session_id, error))?;
+
+        let resolution = self
+            .approval_subscriber
+            .completion_event_for(&request_event, &log)
+            .ok_or_else(|| {
+                sacp::util::internal_error(
+                    "approval stream closed before the permission was resolved",
+                )
             })?;
 
-        let deadline = self
-            .approval_timeout
-            .map(|timeout| tokio::time::Instant::now() + timeout);
-
-        loop {
-            let next = if let Some(deadline) = deadline {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    return Err(approval_timeout_error(session_id));
-                }
-                match tokio::time::timeout(remaining, reader.next_chunk()).await {
-                    Ok(chunk_result) => chunk_result,
-                    Err(_) => return Err(approval_timeout_error(session_id)),
-                }
-            } else {
-                reader.next_chunk().await
-            };
-
-            match next {
-                Ok(Some(chunk)) => {
-                    if chunk.data.is_empty() {
-                        continue;
-                    }
-                    let events: Vec<Value> =
-                        serde_json::from_slice(&chunk.data).map_err(|error| {
-                            sacp::util::internal_error(format!("approval parse: {error}"))
-                        })?;
-                    for event in events {
-                        let Some(value) = event.get("value") else {
-                            continue;
-                        };
-                        if value.get("kind").and_then(Value::as_str) != Some("approval_resolved") {
-                            continue;
-                        }
-                        let Some(event_session_id) =
-                            value.get("sessionId").and_then(session_id_from_value)
-                        else {
-                            continue;
-                        };
-                        if event_session_id != *session_id {
-                            continue;
-                        }
-                        let Some(event_request_id) =
-                            value.get("requestId").and_then(request_id_from_value)
-                        else {
-                            continue;
-                        };
-                        if event_request_id != *request_id {
-                            continue;
-                        }
-                        let allow = value.get("allow").and_then(Value::as_bool).unwrap_or(false);
-                        let resolved_by = value
-                            .get("resolvedBy")
-                            .and_then(Value::as_str)
-                            .unwrap_or("unknown");
-                        tracing::info_span!(
-                            "fireline.approval.resolve",
-                            session_id = %session_id,
-                            request_id = %request_id,
-                            allow,
-                            resolved_by = %resolved_by,
-                        )
-                        .in_scope(|| {});
-                        return Ok(allow);
-                    }
-                }
-                Ok(None) => {
-                    return Err(sacp::util::internal_error(
-                        "approval stream closed before the permission was resolved",
-                    ));
-                }
-                Err(error) => {
-                    return Err(sacp::util::internal_error(format!(
-                        "approval stream read error: {error}"
-                    )));
-                }
-            }
-        }
+        let allow = resolution.allow.unwrap_or(false);
+        let resolved_by = resolution.resolved_by.as_deref().unwrap_or("unknown");
+        tracing::info_span!(
+            "fireline.approval.resolve",
+            session_id = %session_id,
+            request_id = %request_id,
+            allow,
+            resolved_by = %resolved_by,
+        )
+        .in_scope(|| {});
+        Ok(allow)
     }
 
     fn is_session_approved(&self, session_id: &SessionId) -> bool {
@@ -451,10 +458,10 @@ fn approval_timeout_error(session_id: &SessionId) -> sacp::Error {
     ))
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PermissionEvent {
-    kind: &'static str,
+    kind: String,
     session_id: SessionId,
     #[serde(skip_serializing_if = "Option::is_none")]
     request_id: Option<RequestId>,
@@ -467,20 +474,6 @@ struct PermissionEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
     created_at_ms: i64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct StateHeaders {
-    operation: &'static str,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct StateEnvelope<T> {
-    #[serde(rename = "type")]
-    entity_type: &'static str,
-    key: String,
-    headers: StateHeaders,
-    value: T,
 }
 
 impl ConnectTo<sacp::Conductor> for ApprovalGateComponent {
@@ -616,8 +609,21 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn session_id_from_value(value: &Value) -> Option<SessionId> {
-    value.as_str().map(|text| SessionId::from(text.to_string()))
+fn insert_headers() -> Map<String, Value> {
+    let mut headers = Map::new();
+    headers.insert("operation".to_string(), Value::String("insert".to_string()));
+    headers
+}
+
+fn map_wait_error(session_id: &SessionId, error: anyhow::Error) -> sacp::Error {
+    let error_text = error.to_string();
+    if error_text.contains("timed out waiting for passive durable subscriber completion") {
+        approval_timeout_error(session_id)
+    } else if error_text.contains("stream closed before completion") {
+        sacp::util::internal_error("approval stream closed before the permission was resolved")
+    } else {
+        sacp::util::internal_error(format!("approval stream read error: {error_text}"))
+    }
 }
 
 fn request_id_from_value(value: &Value) -> Option<RequestId> {
@@ -634,10 +640,10 @@ fn request_id_key(request_id: &RequestId) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use anyhow::{Context, Result};
     use axum::Router;
-    use super::*;
-    use durable_streams::CreateOptions;
+    use durable_streams::{Client as DurableStreamsClient, CreateOptions};
     use tokio::sync::oneshot;
 
     struct TestStreamServer {
@@ -722,14 +728,12 @@ mod tests {
     ) -> Result<()> {
         let session_id = SessionId::from(session_id.to_string());
         let request_id = RequestId::from(request_id.to_string());
-        producer.append_json(&StateEnvelope {
-            entity_type: "permission",
+        producer.append_json(&StreamEnvelope {
+            entity_type: "permission".to_string(),
             key: format!("{session_id}:{}:resolved", request_id_key(&request_id)),
-            headers: StateHeaders {
-                operation: "insert",
-            },
-            value: PermissionEvent {
-                kind: "approval_resolved",
+            headers: insert_headers(),
+            value: Some(serde_json::to_value(PermissionEvent {
+                kind: "approval_resolved".to_string(),
                 session_id,
                 request_id: Some(request_id),
                 tool_call_id: None,
@@ -737,7 +741,7 @@ mod tests {
                 resolved_by: Some("approval-test".to_string()),
                 reason: None,
                 created_at_ms: now_ms(),
-            },
+            })?),
         });
         producer
             .flush()
@@ -747,14 +751,12 @@ mod tests {
     }
 
     async fn seed_permission_stream(producer: &Producer) -> Result<()> {
-        producer.append_json(&StateEnvelope {
-            entity_type: "permission",
+        producer.append_json(&StreamEnvelope {
+            entity_type: "permission".to_string(),
             key: "bootstrap".to_string(),
-            headers: StateHeaders {
-                operation: "insert",
-            },
-            value: PermissionEvent {
-                kind: "permission_request",
+            headers: insert_headers(),
+            value: Some(serde_json::to_value(PermissionEvent {
+                kind: "permission_request".to_string(),
                 session_id: SessionId::from("bootstrap-session"),
                 request_id: Some(RequestId::from("bootstrap-request".to_string())),
                 tool_call_id: None,
@@ -762,7 +764,7 @@ mod tests {
                 resolved_by: None,
                 reason: Some("bootstrap".to_string()),
                 created_at_ms: now_ms(),
-            },
+            })?),
         });
         producer
             .flush()
@@ -860,7 +862,10 @@ mod tests {
 
     #[test]
     fn request_id_from_value_rejects_non_json_rpc_ids() {
-        assert_eq!(request_id_from_value(&serde_json::json!({"bad": "id"})), None);
+        assert_eq!(
+            request_id_from_value(&serde_json::json!({"bad": "id"})),
+            None
+        );
     }
 
     #[tokio::test]
@@ -882,11 +887,7 @@ mod tests {
             async move {
                 let session_id = SessionId::from("session-a");
                 let request_id = RequestId::from("request-a".to_string());
-                gate.wait_for_approval(
-                    &session_id,
-                    &request_id,
-                )
-                .await
+                gate.wait_for_approval(&session_id, &request_id).await
             }
         });
         let mut waiter_b = tokio::spawn({
@@ -894,11 +895,7 @@ mod tests {
             async move {
                 let session_id = SessionId::from("session-b");
                 let request_id = RequestId::from("request-b".to_string());
-                gate.wait_for_approval(
-                    &session_id,
-                    &request_id,
-                )
-                .await
+                gate.wait_for_approval(&session_id, &request_id).await
             }
         });
 

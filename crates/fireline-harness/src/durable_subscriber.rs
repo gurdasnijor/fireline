@@ -6,9 +6,11 @@
 use std::fmt;
 use std::time::Duration;
 
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use durable_streams::{Client as DurableStreamsClient, LiveMode, Offset};
 use fireline_acp_ids::{PromptRequestRef, RequestId, SessionId, ToolCallId, ToolInvocationRef};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// Canonical completion identity for agent-bound durable subscribers.
@@ -350,6 +352,46 @@ impl DurableSubscriberDriver {
             .map(|entry| entry.snapshot())
             .collect()
     }
+
+    pub async fn replay_log(&self, state_stream_url: &str) -> Result<Vec<StreamEnvelope>> {
+        collect_stream_log(state_stream_url, LiveMode::Off, None, |_| false).await
+    }
+
+    pub async fn wait_for_passive_completion(
+        &self,
+        subscriber_name: &str,
+        event: &StreamEnvelope,
+        state_stream_url: &str,
+    ) -> Result<Vec<StreamEnvelope>> {
+        let registration = self
+            .find_passive_registration(subscriber_name)
+            .ok_or_else(|| {
+                anyhow!("no passive durable subscriber registered as '{subscriber_name}'")
+            })?;
+
+        if !registration.passive_matches(event) {
+            return Err(anyhow!(
+                "subscriber '{subscriber_name}' does not match the provided event envelope"
+            ));
+        }
+
+        let timeout = registration
+            .passive_wait_policy()
+            .map(|policy| policy.timeout)
+            .unwrap_or_default();
+
+        collect_stream_log(state_stream_url, LiveMode::Sse, timeout, |log| {
+            registration.passive_is_completed(event, log)
+        })
+        .await
+    }
+
+    fn find_passive_registration(&self, subscriber_name: &str) -> Option<&dyn ErasedRegistration> {
+        self.registrations.iter().find_map(|entry| {
+            (entry.snapshot().name == subscriber_name && entry.passive_wait_policy().is_some())
+                .then_some(entry.as_ref())
+        })
+    }
 }
 
 impl fmt::Debug for DurableSubscriberDriver {
@@ -362,6 +404,18 @@ impl fmt::Debug for DurableSubscriberDriver {
 
 trait ErasedRegistration: Send + Sync {
     fn snapshot(&self) -> SubscriberRegistration;
+
+    fn passive_matches(&self, _envelope: &StreamEnvelope) -> bool {
+        false
+    }
+
+    fn passive_is_completed(&self, _event: &StreamEnvelope, _log: &[StreamEnvelope]) -> bool {
+        false
+    }
+
+    fn passive_wait_policy(&self) -> Option<PassiveWaitPolicy> {
+        None
+    }
 }
 
 struct PassiveRegistration<S> {
@@ -374,6 +428,21 @@ where
 {
     fn snapshot(&self) -> SubscriberRegistration {
         SubscriberRegistration::new(self.subscriber.name(), SubscriberMode::Passive)
+    }
+
+    fn passive_matches(&self, envelope: &StreamEnvelope) -> bool {
+        self.subscriber.matches(envelope).is_some()
+    }
+
+    fn passive_is_completed(&self, event: &StreamEnvelope, log: &[StreamEnvelope]) -> bool {
+        self.subscriber
+            .matches(event)
+            .map(|decoded| self.subscriber.is_completed(&decoded, log))
+            .unwrap_or(false)
+    }
+
+    fn passive_wait_policy(&self) -> Option<PassiveWaitPolicy> {
+        Some(self.subscriber.wait_policy())
     }
 }
 
@@ -410,6 +479,78 @@ fn tool_call_id_from_value(value: &Value) -> Option<ToolCallId> {
     value
         .as_str()
         .map(|text| ToolCallId::from(text.to_string()))
+}
+
+async fn collect_stream_log(
+    state_stream_url: &str,
+    live_mode: LiveMode,
+    timeout: Option<Duration>,
+    mut done: impl FnMut(&[StreamEnvelope]) -> bool,
+) -> Result<Vec<StreamEnvelope>> {
+    let client = DurableStreamsClient::new();
+    let stream = client.stream(state_stream_url);
+    let is_replay_only = live_mode == LiveMode::Off;
+    let mut reader = stream
+        .read()
+        .offset(Offset::Beginning)
+        .live(live_mode)
+        .build()
+        .with_context(|| format!("build durable subscriber reader for '{state_stream_url}'"))?;
+
+    let deadline = timeout.map(|duration| tokio::time::Instant::now() + duration);
+    let mut log = Vec::new();
+
+    loop {
+        let next_chunk = if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(anyhow!(
+                    "timed out waiting for passive durable subscriber completion on '{state_stream_url}'"
+                ));
+            }
+            match tokio::time::timeout(remaining, reader.next_chunk()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    return Err(anyhow!(
+                        "timed out waiting for passive durable subscriber completion on '{state_stream_url}'"
+                    ));
+                }
+            }
+        } else {
+            reader.next_chunk().await
+        }
+        .with_context(|| format!("read durable subscriber stream '{state_stream_url}'"))?;
+
+        let Some(chunk) = next_chunk else {
+            return if is_replay_only {
+                Ok(log)
+            } else {
+                Err(anyhow!(
+                    "durable subscriber stream closed before completion on '{state_stream_url}'"
+                ))
+            };
+        };
+
+        if !chunk.data.is_empty() {
+            log.extend(parse_chunk_envelopes(&chunk.data)?);
+            if done(&log) {
+                return Ok(log);
+            }
+        }
+
+        if is_replay_only && chunk.up_to_date {
+            return Ok(log);
+        }
+    }
+}
+
+fn parse_chunk_envelopes(bytes: &[u8]) -> Result<Vec<StreamEnvelope>> {
+    let events: Vec<Value> =
+        serde_json::from_slice(bytes).context("parse durable subscriber stream chunk as JSON")?;
+    events
+        .into_iter()
+        .map(|event| StreamEnvelope::from_json(event).context("decode durable subscriber envelope"))
+        .collect()
 }
 
 #[cfg(test)]
