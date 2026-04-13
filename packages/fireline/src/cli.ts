@@ -1,8 +1,8 @@
 import { ChildProcess, spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, parse as parsePath, resolve as resolvePath } from 'node:path'
+import { dirname, parse as parsePath, relative, resolve as resolvePath, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { tsImport } from 'tsx/esm/api'
 import {
@@ -861,10 +861,10 @@ function serializeHarnessSpec(spec: LoadedSpec): SerializedHarnessSpec {
 export function createDockerBuildPlan(options: {
   readonly buildContext: string
   readonly dockerfile: string
+  readonly embeddedSpecPath: string
   readonly imageTag: string
-  readonly spec: SerializedHarnessSpec
 }): DockerBuildPlan {
-  const buildArg = `FIRELINE_EMBEDDED_SPEC=${JSON.stringify(options.spec)}`
+  const buildArg = `SPEC=${options.embeddedSpecPath}`
   return {
     command: 'docker',
     args: [
@@ -878,6 +878,30 @@ export function createDockerBuildPlan(options: {
     buildContext: options.buildContext,
     dockerfile: options.dockerfile,
     imageTag: options.imageTag,
+  }
+}
+
+export interface MaterializedDockerEmbeddedSpec {
+  readonly filePath: string
+  readonly directory: string
+  readonly dockerPath: string
+}
+
+export async function materializeDockerEmbeddedSpec(
+  buildContext: string,
+  spec: SerializedHarnessSpec,
+): Promise<MaterializedDockerEmbeddedSpec> {
+  const tempRoot = resolvePath(buildContext, '.tmp')
+  await mkdir(tempRoot, { recursive: true })
+
+  const directory = await mkdtemp(resolvePath(tempRoot, 'fireline-build-'))
+  const filePath = resolvePath(directory, 'embedded-spec.json')
+  await writeFile(filePath, JSON.stringify(spec, null, 2))
+
+  return {
+    filePath,
+    directory,
+    dockerPath: relative(buildContext, filePath).split(sep).join('/'),
   }
 }
 
@@ -1194,11 +1218,12 @@ async function executeHostedBuild(
 
   const dockerfile = findWorkspacePath('docker/fireline-host.Dockerfile')
   const buildContext = dirname(dirname(dockerfile))
+  const embeddedSpec = await materializeDockerEmbeddedSpec(buildContext, effectiveSpec)
   const plan = createDockerBuildPlan({
     buildContext,
     dockerfile,
+    embeddedSpecPath: embeddedSpec.dockerPath,
     imageTag,
-    spec: effectiveSpec,
   })
 
   const scaffoldTarget = options.scaffoldTarget === undefined ? args.target : options.scaffoldTarget
@@ -1211,30 +1236,34 @@ async function executeHostedBuild(
       })
     : null
 
-  console.log(`fireline: building ${plan.imageTag}`)
-  const exitCode = await runtime.runChild(plan.command, plan.args, { cwd: buildContext })
-  if (exitCode !== 0) {
+  try {
+    console.log(`fireline: building ${plan.imageTag}`)
+    const exitCode = await runtime.runChild(plan.command, plan.args, { cwd: buildContext })
+    if (exitCode !== 0) {
+      return {
+        exitCode,
+        imageTag,
+        scaffoldPlan,
+      }
+    }
+
+    const scaffoldedFiles: string[] = []
+    if (scaffoldPlan) {
+      await runtime.writeTargetScaffold(scaffoldPlan)
+      scaffoldedFiles.push(scaffoldPlan.filePath)
+    }
+
+    if (options.printResult ?? true) {
+      printBuildResult(plan.imageTag, scaffoldedFiles)
+    }
+
     return {
-      exitCode,
+      exitCode: 0,
       imageTag,
       scaffoldPlan,
     }
-  }
-
-  const scaffoldedFiles: string[] = []
-  if (scaffoldPlan) {
-    await runtime.writeTargetScaffold(scaffoldPlan)
-    scaffoldedFiles.push(scaffoldPlan.filePath)
-  }
-
-  if (options.printResult ?? true) {
-    printBuildResult(plan.imageTag, scaffoldedFiles)
-  }
-
-  return {
-    exitCode: 0,
-    imageTag,
-    scaffoldPlan,
+  } finally {
+    await rm(embeddedSpec.directory, { recursive: true, force: true })
   }
 }
 

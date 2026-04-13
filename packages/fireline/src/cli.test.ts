@@ -10,6 +10,7 @@ import {
   createTargetScaffoldPlan,
   deploy,
   loadSpec,
+  materializeDockerEmbeddedSpec,
   parseArgs,
   runHostedRepl,
   runReplCommand,
@@ -273,19 +274,14 @@ test('createDockerBuildPlan wires embedded spec build arg', () => {
   const plan = createDockerBuildPlan({
     buildContext: '/repo',
     dockerfile: '/repo/docker/fireline-host.Dockerfile',
+    embeddedSpecPath: '.tmp/fireline-build-123/embedded-spec.json',
     imageTag: 'fireline-reviewer:latest',
-    spec: {
-      name: 'reviewer',
-      sandbox: { provider: 'docker' },
-      middleware: [],
-      agent: { kind: 'process', argv: ['echo', 'hi'] },
-    },
   })
 
   assert.equal(plan.command, 'docker')
   assert.equal(plan.dockerfile, '/repo/docker/fireline-host.Dockerfile')
   assert.equal(plan.imageTag, 'fireline-reviewer:latest')
-  assert.match(plan.buildArg, /^FIRELINE_EMBEDDED_SPEC=\{/)
+  assert.equal(plan.buildArg, 'SPEC=.tmp/fireline-build-123/embedded-spec.json')
   assert.deepEqual(plan.args, [
     'build',
     '--file',
@@ -296,6 +292,23 @@ test('createDockerBuildPlan wires embedded spec build arg', () => {
     plan.buildArg,
     '/repo',
   ])
+})
+
+test('materializeDockerEmbeddedSpec writes a docker-copyable temp file under the build context', async () => {
+  const buildContext = await mkdtemp(join(tmpdir(), 'fireline-build-context-'))
+  const materialized = await materializeDockerEmbeddedSpec(buildContext, {
+    name: 'reviewer',
+    sandbox: { provider: 'docker' },
+    middleware: [],
+    agent: { kind: 'process', argv: ['echo', 'hi'] },
+  })
+
+  const raw = await readFile(materialized.filePath, 'utf8')
+  const parsed = JSON.parse(raw)
+
+  assert.equal(parsed.name, 'reviewer')
+  assert.match(materialized.dockerPath, /^\.tmp\/fireline-build-[^/]+\/embedded-spec\.json$/)
+  assert.equal(materialized.filePath, join(buildContext, materialized.dockerPath))
 })
 
 test('createDeployExecutionPlan maps fly target to flyctl deploy', () => {
