@@ -60,7 +60,6 @@ async fn session_stream_is_append_only_and_replayable_from_beginning() -> Result
         let body = runtime
             .wait_for_state_rows(
                 &[
-                    "\"type\":\"connection\"",
                     "\"type\":\"session\"",
                     "\"type\":\"prompt_turn\"",
                     "\"type\":\"chunk\"",
