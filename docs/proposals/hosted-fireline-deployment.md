@@ -238,6 +238,7 @@ They do not change the Fireline runtime model.
 ## 6. Security
 
 - Inbound TLS terminates at the target platform edge or load balancer.
+- ACP browser and mobile clients should speak `wss://` to the platform edge, while the Rust `/acp` process stays plain HTTP/WebSocket behind that proxy boundary.
 - Credentials enter the hosted runtime through target-managed secret injection and are consumed by `secretsProxy`, not raw application env passthrough.
 - Tenant isolation applies at three layers:
   - API auth and deployment ownership
@@ -248,6 +249,56 @@ They do not change the Fireline runtime model.
   - provider provisioning attempts
   - approval resolution actions
   - secret binding changes
+
+### 6.1 ACP ingress contract
+
+Hosted ACP access keeps TLS and origin policy at the ingress layer, not inside the Rust process:
+
+- terminate TLS at the platform edge, ingress, or reverse proxy
+- forward `Upgrade`, `Connection`, and `Sec-WebSocket-*` headers through unchanged
+- set `FIRELINE_ACP_TOKEN` to require `Authorization: Bearer <token>` before the WebSocket upgrade
+- set `FIRELINE_ACP_CORS_ORIGINS=https://app.example.com,https://admin.example.com` for browser or mobile ACP clients
+- leave `FIRELINE_ACP_CORS_ORIGINS` unset only for local-dev style permissive origin reflection
+
+Example Nginx:
+
+```nginx
+location /acp {
+    proxy_pass http://127.0.0.1:4440/acp;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Authorization $http_authorization;
+    proxy_set_header Origin $http_origin;
+}
+```
+
+Example Caddy:
+
+```caddy
+app.example.com {
+    reverse_proxy /acp 127.0.0.1:4440 {
+        header_up Authorization {header.Authorization}
+        header_up Origin {header.Origin}
+    }
+}
+```
+
+Example Traefik dynamic config:
+
+```yaml
+http:
+  routers:
+    fireline-acp:
+      rule: Host(`app.example.com`) && Path(`/acp`)
+      service: fireline-acp
+      tls: {}
+  services:
+    fireline-acp:
+      loadBalancer:
+        servers:
+          - url: http://fireline:4440
+```
 
 ## 7. Phased Rollout
 

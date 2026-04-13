@@ -15,17 +15,19 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{
-    State,
+    Request, State,
     ws::{Message, WebSocket, WebSocketUpgrade},
 };
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use durable_streams::Producer;
 use fireline_tools::peer::{extract_remote_trace_context, install_prompt_trace_context_resolver};
 use futures::{SinkExt, StreamExt};
 use sacp::{Agent, Client, Conductor, DynConnectTo, Lines};
 use sacp_conductor::{ConductorImpl, McpBridgeMode, trace::WriteEvent};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
@@ -37,6 +39,13 @@ use crate::{
 };
 
 pub type BaseComponentsFactory = Arc<dyn Fn() -> Vec<DynConnectTo<Conductor>> + Send + Sync>;
+
+const FIRELINE_ACP_CORS_ORIGINS_ENV: &str = "FIRELINE_ACP_CORS_ORIGINS";
+const FIRELINE_ACP_TOKEN_ENV: &str = "FIRELINE_ACP_TOKEN";
+const SEC_WEBSOCKET_EXTENSIONS: HeaderName = HeaderName::from_static("sec-websocket-extensions");
+const SEC_WEBSOCKET_KEY: HeaderName = HeaderName::from_static("sec-websocket-key");
+const SEC_WEBSOCKET_PROTOCOL: HeaderName = HeaderName::from_static("sec-websocket-protocol");
+const SEC_WEBSOCKET_VERSION: HeaderName = HeaderName::from_static("sec-websocket-version");
 
 #[derive(Clone)]
 pub struct AcpRouteState {
@@ -51,13 +60,182 @@ pub struct AcpRouteState {
     pub base_components_factory: BaseComponentsFactory,
 }
 
+#[derive(Clone, Debug)]
+struct AcpAccessPolicy {
+    cors: AcpCorsPolicy,
+    bearer_token: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+enum AcpCorsPolicy {
+    MirrorRequest,
+    Explicit(Vec<HeaderValue>),
+    Disabled,
+}
+
+impl AcpAccessPolicy {
+    fn from_env() -> Self {
+        let bearer_token = std::env::var(FIRELINE_ACP_TOKEN_ENV)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let cors = std::env::var(FIRELINE_ACP_CORS_ORIGINS_ENV)
+            .ok()
+            .and_then(|raw| parse_cors_policy(&raw))
+            .unwrap_or_else(|| {
+                if bearer_token.is_some() {
+                    tracing::warn!(
+                        "{} is unset while {} is configured; ACP browsers stay same-host only until explicit origins are set",
+                        FIRELINE_ACP_CORS_ORIGINS_ENV,
+                        FIRELINE_ACP_TOKEN_ENV,
+                    );
+                    AcpCorsPolicy::Disabled
+                } else {
+                    AcpCorsPolicy::MirrorRequest
+                }
+            });
+
+        Self { cors, bearer_token }
+    }
+
+    #[cfg(test)]
+    fn local_dev() -> Self {
+        Self {
+            cors: AcpCorsPolicy::MirrorRequest,
+            bearer_token: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn hosted(token: &str, origins: &[&str]) -> Self {
+        Self {
+            cors: parse_cors_policy(&origins.join(",")).unwrap_or(AcpCorsPolicy::Disabled),
+            bearer_token: Some(token.to_string()),
+        }
+    }
+}
+
 pub fn router(state: AcpRouteState) -> Router {
+    let access_policy = AcpAccessPolicy::from_env();
     install_prompt_trace_context_resolver(Arc::new(|session_id| {
         crate::agent_observability::active_prompt_trace_context_for_session(session_id)
     }));
-    Router::new()
-        .route("/acp", get(acp_websocket_handler))
-        .with_state(state)
+    apply_acp_route_policy(
+        Router::<AcpRouteState>::new().route("/acp", get(acp_websocket_handler)),
+        access_policy,
+    )
+    .with_state(state)
+}
+
+fn apply_acp_route_policy<S>(router: Router<S>, policy: AcpAccessPolicy) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router
+        .route_layer(middleware::from_fn_with_state(
+            policy.clone(),
+            enforce_acp_access,
+        ))
+        .route_layer(build_acp_cors_layer(&policy))
+}
+
+fn build_acp_cors_layer(policy: &AcpAccessPolicy) -> CorsLayer {
+    let layer = CorsLayer::new()
+        .allow_credentials(true)
+        .allow_methods([Method::GET])
+        .allow_headers(acp_allowed_headers());
+
+    match &policy.cors {
+        AcpCorsPolicy::MirrorRequest => layer.allow_origin(AllowOrigin::mirror_request()),
+        AcpCorsPolicy::Explicit(origins) => layer.allow_origin(AllowOrigin::list(origins.clone())),
+        AcpCorsPolicy::Disabled => layer,
+    }
+}
+
+fn acp_allowed_headers() -> Vec<HeaderName> {
+    vec![
+        header::AUTHORIZATION,
+        header::CONNECTION,
+        header::COOKIE,
+        header::ORIGIN,
+        header::UPGRADE,
+        SEC_WEBSOCKET_EXTENSIONS,
+        SEC_WEBSOCKET_KEY,
+        SEC_WEBSOCKET_PROTOCOL,
+        SEC_WEBSOCKET_VERSION,
+    ]
+}
+
+fn parse_cors_policy(raw: &str) -> Option<AcpCorsPolicy> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed == "*" {
+        return Some(AcpCorsPolicy::MirrorRequest);
+    }
+
+    let origins = trimmed
+        .split(',')
+        .filter_map(|origin| {
+            let origin = origin.trim();
+            if origin.is_empty() {
+                return None;
+            }
+            match HeaderValue::from_str(origin) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    tracing::warn!(origin, %error, "ignoring invalid ACP CORS origin");
+                    None
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    if origins.is_empty() {
+        None
+    } else {
+        Some(AcpCorsPolicy::Explicit(origins))
+    }
+}
+
+async fn enforce_acp_access(
+    State(policy): State<AcpAccessPolicy>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Err(response) = authorize_acp_request(&policy, request.headers()) {
+        return response;
+    }
+    next.run(request).await
+}
+
+fn authorize_acp_request(policy: &AcpAccessPolicy, headers: &HeaderMap) -> Result<(), Response> {
+    let Some(expected) = &policy.bearer_token else {
+        return Ok(());
+    };
+
+    let Some(value) = headers.get(header::AUTHORIZATION) else {
+        return Err(acp_unauthorized_response("missing_bearer_token"));
+    };
+    let Ok(value) = value.to_str() else {
+        return Err(acp_unauthorized_response("invalid_authorization_header"));
+    };
+    let Some(token) = value.strip_prefix("Bearer ") else {
+        return Err(acp_unauthorized_response("expected_bearer_token"));
+    };
+    if token.trim() != expected {
+        return Err(acp_unauthorized_response("invalid_bearer_token"));
+    }
+
+    Ok(())
+}
+
+fn acp_unauthorized_response(reason: &'static str) -> Response {
+    let mut response = (StatusCode::UNAUTHORIZED, reason).into_response();
+    response
+        .headers_mut()
+        .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    response
 }
 
 #[derive(Debug)]
@@ -449,5 +627,155 @@ fn emit_request_span(line: &str) {
                 .in_scope(|| {});
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::{Context, Result};
+    use axum::http::StatusCode;
+    use tokio::sync::oneshot;
+    use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
+
+    struct TestServer {
+        base_http_url: String,
+        base_ws_url: String,
+        shutdown_tx: Option<oneshot::Sender<()>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl TestServer {
+        async fn spawn(policy: AcpAccessPolicy) -> Result<Self> {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .context("bind ACP test listener")?;
+            let addr = listener.local_addr().context("resolve ACP test listener")?;
+            let (shutdown_tx, shutdown_rx) = oneshot::channel();
+            let router = Router::new().route("/acp", get(test_websocket_handler));
+            let router = apply_acp_route_policy(router, policy);
+            let task = tokio::spawn(async move {
+                let _ = axum::serve(listener, router)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await;
+            });
+
+            Ok(Self {
+                base_http_url: format!("http://127.0.0.1:{}", addr.port()),
+                base_ws_url: format!("ws://127.0.0.1:{}", addr.port()),
+                shutdown_tx: Some(shutdown_tx),
+                task,
+            })
+        }
+
+        async fn shutdown(mut self) {
+            if let Some(tx) = self.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+            let _ = self.task.await;
+        }
+    }
+
+    async fn test_websocket_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
+        ws.on_upgrade(|mut socket| async move {
+            let _ = socket.close().await;
+        })
+    }
+
+    #[tokio::test]
+    async fn local_dev_browser_handshake_returns_101_and_reflects_origin() -> Result<()> {
+        let server = TestServer::spawn(AcpAccessPolicy::local_dev()).await?;
+        let origin = "https://client.fireline.local";
+        let mut request = format!("{}/acp", server.base_ws_url).into_client_request()?;
+        request
+            .headers_mut()
+            .insert(header::ORIGIN, HeaderValue::from_static(origin));
+
+        let (_socket, response) = connect_async(request).await?;
+
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|value| value.to_str().ok()),
+            Some(origin),
+        );
+
+        server.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hosted_mode_rejects_missing_bearer_before_upgrade() -> Result<()> {
+        let server = TestServer::spawn(AcpAccessPolicy::hosted(
+            "hosted-secret",
+            &["https://acp.fireline.dev"],
+        ))
+        .await?;
+        let origin = "https://acp.fireline.dev";
+        let response = reqwest::Client::new()
+            .get(format!("{}/acp", server.base_http_url))
+            .header(header::ORIGIN, origin)
+            .header(header::CONNECTION, "upgrade")
+            .header(header::UPGRADE, "websocket")
+            .header(SEC_WEBSOCKET_KEY.as_str(), "dGhlIHNhbXBsZSBub25jZQ==")
+            .header(SEC_WEBSOCKET_VERSION.as_str(), "13")
+            .send()
+            .await
+            .context("send hosted ACP handshake without bearer")?;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|value| value.to_str().ok()),
+            Some(origin),
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer"),
+        );
+
+        server.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hosted_mode_accepts_configured_origin_and_bearer() -> Result<()> {
+        let server = TestServer::spawn(AcpAccessPolicy::hosted(
+            "hosted-secret",
+            &["https://acp.fireline.dev"],
+        ))
+        .await?;
+        let origin = "https://acp.fireline.dev";
+        let mut request = format!("{}/acp", server.base_ws_url).into_client_request()?;
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer hosted-secret"),
+        );
+        request
+            .headers_mut()
+            .insert(header::ORIGIN, HeaderValue::from_static(origin));
+
+        let (_socket, response) = connect_async(request).await?;
+
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|value| value.to_str().ok()),
+            Some(origin),
+        );
+
+        server.shutdown().await;
+        Ok(())
     }
 }
