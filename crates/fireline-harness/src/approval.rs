@@ -191,6 +191,7 @@ impl ApprovalGateComponent {
         let mut reader = stream
             .read()
             .offset(durable_streams::Offset::Beginning)
+            .live(LiveMode::Off)
             .build()
             .map_err(|error| {
                 sacp::util::internal_error(format!("approval log rebuild: {error}"))
