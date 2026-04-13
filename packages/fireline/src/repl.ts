@@ -9,12 +9,25 @@ import {
   type UsageUpdate,
   type Stream,
 } from '@agentclientprotocol/sdk'
-import fireline, { appendApprovalResolved } from '@fireline/client'
+import fireline, { appendApprovalResolved, type FirelineDB } from '@fireline/client'
+import { SandboxAdmin } from '@fireline/client/admin'
+import type {
+  PermissionRow,
+  PromptRequestRow,
+  SessionRow,
+} from '@fireline/state'
 import { render } from 'ink'
 import React from 'react'
 import { once } from 'node:events'
 import type { Readable, Writable } from 'node:stream'
 import WebSocket, { type RawData } from 'ws'
+import {
+  createAcpEventAdapter,
+  createControlEventBus,
+  createDurableEventAdapter,
+  EventStreamStore,
+  type EventStreamViewModel,
+} from './repl-pane-events.js'
 import { logReplDebug } from './repl-debug.js'
 import { FirelineReplApp } from './repl-ui.js'
 
@@ -72,23 +85,44 @@ export interface PendingApproval {
   readonly toolCallId: string | null
 }
 
+export interface SessionTab {
+  readonly activePrompts: number
+  readonly attached: boolean
+  readonly pendingApprovals: number
+  readonly sessionId: string
+  readonly state: string | null
+}
+
 export interface ReplViewState {
   readonly acpUrl: string
+  readonly adminBusy: boolean
+  readonly adminMessage: string | null
   readonly busy: boolean
+  readonly db: FirelineDB | null
   readonly entries: readonly TranscriptEntry[]
   readonly pendingTools: number
   readonly pendingApproval: PendingApproval | null
   readonly resolvingApproval: boolean
   readonly runtimeId: string | null
+  readonly runtimeStatus: string | null
+  readonly selectedSessionId: string | null
   readonly serverUrl: string
   readonly sessionId: string | null
+  readonly sessionTabs: readonly SessionTab[]
   readonly stateStreamUrl: string | null
+  readonly supportsRuntimeRestart: boolean
+  readonly supportsSessionAttach: boolean
   readonly usage: UsageSnapshot | null
 }
 
 export interface ReplViewModel {
+  attachSelectedSession(): Promise<void>
   getSnapshot(): ReplViewState
+  restartRuntime(): Promise<void>
   resolvePendingApproval(allow: boolean): Promise<void>
+  selectNextSession(): void
+  selectPreviousSession(): void
+  stopRuntime(): Promise<void>
   subscribe(listener: () => void): () => void
   submit(text: string): Promise<'ignored' | 'quit' | 'sent'>
 }
@@ -120,6 +154,7 @@ export interface ReplOptions {
   readonly cwd?: string
   readonly error?: Writable
   readonly input?: Readable
+  readonly onRuntimeRestart?: (runtimeId: string) => Promise<ReplRuntimeHandle>
   readonly onSessionReady?: (sessionId: string) => void | Promise<void>
   readonly output?: Writable
   readonly runtimeId?: string | null
@@ -128,81 +163,305 @@ export interface ReplOptions {
   readonly stateStreamUrl?: string | null
 }
 
+export interface ReplRuntimeHandle {
+  readonly acp: { readonly url: string }
+  readonly id: string
+  readonly state: { readonly url: string }
+}
+
+export interface ReplSessionAttachResult {
+  readonly mode: 'load' | 'noop' | 'resume'
+}
+
+export interface ReplRuntimeRestartResult {
+  readonly acpUrl: string
+  readonly runtimeId: string | null
+  readonly serverUrl: string
+  readonly sessionId: string
+  readonly stateStreamUrl: string | null
+}
+
 export async function runRepl(options: ReplOptions = {}): Promise<number> {
   const input = options.input ?? process.stdin
   const output = options.output ?? process.stdout
   const error = options.error ?? process.stderr
   const cwd = options.cwd ?? invocationCwd()
-  const serverUrl = options.serverUrl ?? DEFAULT_SERVER_URL
-  const acpUrl = options.acpUrl ?? resolveAcpUrl(serverUrl)
-  const stateStreamUrl = options.stateStreamUrl ?? process.env.FIRELINE_STREAM_URL ?? null
+  let serverUrl = options.serverUrl ?? DEFAULT_SERVER_URL
+  let acpUrl = options.acpUrl ?? resolveAcpUrl(serverUrl)
+  let stateStreamUrl = options.stateStreamUrl ?? process.env.FIRELINE_STREAM_URL ?? null
+  let runtimeId = options.runtimeId ?? null
   logReplDebug('repl.start', {
     acpUrl,
-    runtimeId: options.runtimeId ?? null,
+    runtimeId,
     serverUrl,
     sessionId: options.sessionId ?? null,
     stateStreamUrl,
   })
   let activeSessionId = options.sessionId ?? null
   let controller: ReplController | null = null
-  let approvalWatcher: ApprovalWatcher | null = null
-  const repl = await (options.connect ?? connectReplAcp)({
-    acpUrl,
-    onSessionUpdate: async (notification) => {
-      if (activeSessionId && notification.sessionId !== activeSessionId) {
-        return
-      }
-      controller?.receiveNotification(notification)
-    },
-  })
+  let db: FirelineDB | null = null
+  let dbConsoleRestore: (() => void) | null = null
+  let dbSubscriptions: Array<{ unsubscribe(): void }> = []
+  let durableEvents: { close(): void } | null = null
+  let latestSessions: SessionRow[] = []
+  let latestPermissions: PermissionRow[] = []
+  let latestPromptRequests: PromptRequestRow[] = []
+  let repl: ReplConnection | null = null
+  let replConnection: ReplSessionConnection | null = null
+  let initializeResponse: InitializeResponse | null = null
+  const eventStore = new EventStreamStore()
+  const controlEvents = createControlEventBus(eventStore)
+
+  const refreshSessionCatalog = () => {
+    controller?.setSessionTabs(
+      buildSessionTabs(
+        latestSessions,
+        latestPermissions,
+        latestPromptRequests,
+        controller?.getSnapshot().sessionId ?? activeSessionId,
+      ),
+    )
+  }
+
+  const refreshPendingApproval = () => {
+    if (!controller) {
+      return
+    }
+    const sessionId = controller.getSnapshot().sessionId
+    controller.setPendingApproval(
+      sessionId ? selectPendingApproval(latestPermissions, sessionId) : null,
+    )
+  }
+
+  const closeStateSurface = async () => {
+    durableEvents?.close()
+    durableEvents = null
+    for (const subscription of dbSubscriptions) {
+      subscription.unsubscribe()
+    }
+    dbSubscriptions = []
+    latestSessions = []
+    latestPermissions = []
+    latestPromptRequests = []
+    controller?.setStateDb(null)
+    controller?.setSessionTabs([])
+    controller?.setPendingApproval(null)
+    db?.close()
+    db = null
+    dbConsoleRestore?.()
+    dbConsoleRestore = null
+  }
+
+  const attachStateSurface = async (nextStateStreamUrl: string | null) => {
+    await closeStateSurface()
+    if (!nextStateStreamUrl) {
+      return
+    }
+    const restoreConsole = suppressStreamDbConsole()
+    try {
+      db = await fireline.db({ stateStreamUrl: nextStateStreamUrl })
+      dbConsoleRestore = restoreConsole
+      controller?.setStateDb(db)
+      dbSubscriptions = [
+        db.sessions.subscribe((rows: SessionRow[]) => {
+          latestSessions = [...rows]
+          refreshSessionCatalog()
+        }),
+        db.permissions.subscribe((rows: PermissionRow[]) => {
+          latestPermissions = [...rows]
+          refreshSessionCatalog()
+          refreshPendingApproval()
+        }),
+        db.promptRequests.subscribe((rows: PromptRequestRow[]) => {
+          latestPromptRequests = [...rows]
+          refreshSessionCatalog()
+        }),
+      ]
+      durableEvents = await createDurableEventAdapter({
+        sink: eventStore,
+        stateStreamUrl: nextStateStreamUrl,
+      })
+    } catch (error) {
+      restoreConsole()
+      throw error
+    }
+  }
+
+  const closeReplConnection = async () => {
+    const active = repl
+    repl = null
+    replConnection = null
+    initializeResponse = null
+    if (active) {
+      await active.close()
+    }
+  }
+
+  const openReplConnection = async (nextAcpUrl: string) => {
+    repl = await (options.connect ?? connectReplAcp)({
+      acpUrl: nextAcpUrl,
+      onSessionUpdate: async (notification) => {
+        eventStore.append({
+          timestamp: Date.now(),
+          source: 'acp',
+          name: 'session_update',
+          payload: 'dir=in notification',
+          requestId:
+            notification.update.sessionUpdate === 'usage_update'
+              ? null
+              : extractNotificationRequestId(notification),
+          sessionId: notification.sessionId,
+        })
+        if (activeSessionId && notification.sessionId !== activeSessionId) {
+          return
+        }
+        controller?.receiveNotification(notification)
+      },
+    })
+    initializeResponse = repl.initializeResponse
+    replConnection = createAcpEventAdapter({
+      connection: repl.connection,
+      sink: eventStore,
+    }).connection as ReplSessionConnection
+  }
+
+  await openReplConnection(acpUrl)
   controller = new ReplController({
     acpUrl,
-    runtimeId: options.runtimeId ?? null,
+    runtimeId,
+    attachSession: async (sessionId) => {
+      if (!replConnection || !initializeResponse) {
+        throw new Error('ACP session connection is not available')
+      }
+      if (sessionId === activeSessionId) {
+        return { mode: 'noop' }
+      }
+      const mode = await attachExistingSession(
+        replConnection,
+        initializeResponse,
+        sessionId,
+        cwd,
+      )
+      activeSessionId = sessionId
+      refreshPendingApproval()
+      controlEvents.emit({
+        name: 'session.attach',
+        payload: `mode=${mode} session=${sessionId}`,
+        sessionId,
+      })
+      return { mode }
+    },
     sendPrompt: async (text) => {
-      await repl.connection.prompt({
+      if (!replConnection || !activeSessionId) {
+        throw new Error('ACP session connection is not available')
+      }
+      await replConnection.prompt({
         sessionId: activeSessionId!,
         prompt: [{ type: 'text', text }],
       })
     },
     resolveApproval: async (approval, allow) => {
+      if (!stateStreamUrl) {
+        throw new Error('state stream is required for approval resolution')
+      }
       await appendApprovalResolved({
         allow,
         requestId: approval.requestId,
         resolvedBy: 'cli-repl',
         sessionId: approval.sessionId,
-        streamUrl: stateStreamUrl!,
+        streamUrl: stateStreamUrl,
       })
     },
+    restartRuntime: options.onRuntimeRestart && runtimeId
+      ? async () => {
+          controlEvents.emit({
+            name: 'runtime.restart.requested',
+            payload: `runtime=${runtimeId}`,
+            sessionId: activeSessionId,
+          })
+          await closeReplConnection()
+          const nextHandle = await options.onRuntimeRestart!(runtimeId!)
+          runtimeId = nextHandle.id
+          acpUrl = nextHandle.acp.url
+          stateStreamUrl = nextHandle.state.url
+          await openReplConnection(acpUrl)
+          const preferredSessionId =
+            controller?.getSnapshot().selectedSessionId ?? activeSessionId
+          try {
+            activeSessionId = preferredSessionId
+              ? await ensureSession(replConnection!, initializeResponse!, preferredSessionId, cwd)
+              : await ensureSession(replConnection!, initializeResponse!, null, cwd)
+          } catch {
+            activeSessionId = await ensureSession(
+              replConnection!,
+              initializeResponse!,
+              null,
+              cwd,
+            )
+          }
+          await attachStateSurface(stateStreamUrl)
+          refreshPendingApproval()
+          controlEvents.emit({
+            name: 'runtime.restarted',
+            payload: `runtime=${runtimeId}`,
+            sessionId: activeSessionId,
+          })
+          return {
+            acpUrl,
+            runtimeId,
+            serverUrl,
+            sessionId: activeSessionId,
+            stateStreamUrl,
+          }
+        }
+      : undefined,
     serverUrl,
     sessionId: options.sessionId ?? null,
     stateStreamUrl,
+    stopRuntime: runtimeId
+      ? async () => {
+          controlEvents.emit({
+            name: 'runtime.stop.requested',
+            payload: `runtime=${runtimeId}`,
+            sessionId: activeSessionId,
+          })
+          const admin = new SandboxAdmin({ serverUrl })
+          await admin.destroy(runtimeId!)
+          await closeReplConnection()
+          controlEvents.emit({
+            name: 'runtime.stopped',
+            payload: `runtime=${runtimeId}`,
+            sessionId: activeSessionId,
+            severity: 'warning',
+          })
+        }
+      : undefined,
   })
 
   try {
     activeSessionId = await ensureSession(
-      repl.connection,
-      repl.initializeResponse,
+      replConnection!,
+      initializeResponse!,
       activeSessionId,
       cwd,
     )
 
     await options.onSessionReady?.(activeSessionId)
     controller.setSessionId(activeSessionId)
-    if (stateStreamUrl) {
-      approvalWatcher = await watchApprovals(stateStreamUrl, activeSessionId, (approval) => {
-        controller?.setPendingApproval(approval)
-      })
-    }
+    controller.setRuntimeStatus(runtimeId ? await readRuntimeStatus(serverUrl, runtimeId) : null)
+    await attachStateSurface(stateStreamUrl)
+    refreshPendingApproval()
     return await runInkRepl({
       alternateScreen: options.alternateScreen ?? true,
       controller,
+      events: eventStore,
       error: error as NodeJS.WriteStream,
       input: input as NodeJS.ReadStream,
       output: output as NodeJS.WriteStream,
     })
   } finally {
-    await approvalWatcher?.close()
-    await repl.close()
+    await closeStateSurface()
+    await closeReplConnection()
   }
 }
 
@@ -246,6 +505,7 @@ export function resolveAcpUrl(serverUrl: string): string {
 async function runInkRepl(options: {
   readonly alternateScreen: boolean
   readonly controller: ReplController
+  readonly events: EventStreamViewModel
   readonly error: NodeJS.WriteStream
   readonly input: NodeJS.ReadStream
   readonly output: NodeJS.WriteStream
@@ -255,6 +515,7 @@ async function runInkRepl(options: {
   const app = render(
     React.createElement(FirelineReplApp, {
       controller: options.controller,
+      events: options.events,
       onExitRequest: (code) => {
         exitCode = code
       },
@@ -310,6 +571,51 @@ async function ensureSession(
   throw new Error(
     `session '${sessionId}' was provided, but the agent does not advertise session resume or load support`,
   )
+}
+
+async function attachExistingSession(
+  connection: ReplSessionConnection,
+  initializeResponse: InitializeResponse,
+  sessionId: string,
+  cwd: string,
+): Promise<'load' | 'resume'> {
+  const capabilities = initializeResponse.agentCapabilities
+  if (capabilities?.sessionCapabilities?.resume) {
+    await connection.unstable_resumeSession({ cwd, sessionId, mcpServers: [] })
+    return 'resume'
+  }
+  if (capabilities?.loadSession) {
+    await connection.loadSession({ cwd, sessionId, mcpServers: [] })
+    return 'load'
+  }
+  throw new Error(
+    `session '${sessionId}' cannot be attached because the agent does not advertise session resume or load support`,
+  )
+}
+
+async function readRuntimeStatus(
+  serverUrl: string,
+  runtimeId: string,
+): Promise<string | null> {
+  try {
+    const admin = new SandboxAdmin({ serverUrl })
+    return await admin.status(runtimeId)
+  } catch {
+    return null
+  }
+}
+
+function extractNotificationRequestId(
+  notification: SessionNotification,
+): string | number | null {
+  const update = notification.update as Record<string, unknown>
+  if (typeof update.requestId === 'string' || typeof update.requestId === 'number') {
+    return update.requestId
+  }
+  if (typeof update.id === 'string' || typeof update.id === 'number') {
+    return update.id
+  }
+  return null
 }
 
 function createClientHandler(
@@ -554,6 +860,10 @@ export class ReplController implements ReplViewModel {
   constructor(
     private readonly options: {
       readonly acpUrl?: string
+      readonly attachSession?: (
+        sessionId: string,
+      ) => Promise<ReplSessionAttachResult>
+      readonly restartRuntime?: () => Promise<ReplRuntimeRestartResult>
       readonly runtimeId?: string | null
       readonly sendPrompt: (text: string) => Promise<void>
       readonly resolveApproval: (
@@ -563,19 +873,36 @@ export class ReplController implements ReplViewModel {
       readonly serverUrl: string
       readonly sessionId: string | null
       readonly stateStreamUrl?: string | null
+      readonly stopRuntime?: () => Promise<void>
     },
   ) {
     this.state = {
       acpUrl: options.acpUrl ?? resolveAcpUrl(options.serverUrl),
+      adminBusy: false,
+      adminMessage: null,
       busy: false,
+      db: null,
       entries: [],
       pendingTools: 0,
       pendingApproval: null,
       resolvingApproval: false,
       runtimeId: options.runtimeId ?? null,
+      runtimeStatus: null,
+      selectedSessionId: options.sessionId,
       serverUrl: options.serverUrl,
       sessionId: options.sessionId,
+      sessionTabs: options.sessionId
+        ? [{
+            activePrompts: 0,
+            attached: true,
+            pendingApprovals: 0,
+            sessionId: options.sessionId,
+            state: null,
+          }]
+        : [],
       stateStreamUrl: options.stateStreamUrl ?? null,
+      supportsRuntimeRestart: Boolean(options.restartRuntime),
+      supportsSessionAttach: Boolean(options.attachSession),
       usage: null,
     }
   }
@@ -588,6 +915,107 @@ export class ReplController implements ReplViewModel {
     this.listeners.add(listener)
     return () => {
       this.listeners.delete(listener)
+    }
+  }
+
+  selectNextSession(): void {
+    this.shiftSelectedSession(1)
+  }
+
+  selectPreviousSession(): void {
+    this.shiftSelectedSession(-1)
+  }
+
+  async attachSelectedSession(): Promise<void> {
+    const selectedSessionId = this.state.selectedSessionId
+    if (!selectedSessionId) {
+      this.setAdminMessage('No session is selected.')
+      return
+    }
+    if (!this.options.attachSession) {
+      this.setAdminMessage('Session attach is unavailable for this REPL attachment.')
+      return
+    }
+    if (selectedSessionId === this.state.sessionId) {
+      this.setAdminMessage(`Already attached to ${selectedSessionId}.`)
+      return
+    }
+
+    this.setAdminBusy(true)
+    try {
+      const result = await this.options.attachSession(selectedSessionId)
+      this.replaceAttachedSession(
+        selectedSessionId,
+        result.mode === 'noop'
+          ? `Already attached to ${selectedSessionId}.`
+          : `${result.mode === 'resume' ? 'Resumed' : 'Loaded'} ${selectedSessionId}.`,
+      )
+    } catch (error) {
+      this.setAdminBusy(false)
+      this.setAdminMessage(formatAdminError('Session attach failed', error))
+      throw error
+    }
+  }
+
+  async stopRuntime(): Promise<void> {
+    if (!this.options.stopRuntime || !this.state.runtimeId) {
+      this.setAdminMessage('Runtime stop is unavailable for this REPL attachment.')
+      return
+    }
+
+    this.setAdminBusy(true)
+    try {
+      await this.options.stopRuntime()
+      this.state = {
+        ...this.state,
+        adminBusy: false,
+        adminMessage: `Stopped runtime ${this.state.runtimeId}.`,
+        runtimeStatus: 'stopped',
+      }
+      this.emit()
+    } catch (error) {
+      this.setAdminBusy(false)
+      this.setAdminMessage(formatAdminError('Runtime stop failed', error))
+      throw error
+    }
+  }
+
+  async restartRuntime(): Promise<void> {
+    if (!this.options.restartRuntime) {
+      this.setAdminMessage('Runtime restart is unavailable for this REPL attachment.')
+      return
+    }
+
+    this.setAdminBusy(true)
+    try {
+      const result = await this.options.restartRuntime()
+      this.state = {
+        ...this.state,
+        acpUrl: result.acpUrl,
+        adminBusy: false,
+        adminMessage: `Restarted runtime ${result.runtimeId ?? 'unknown'} and reattached ${result.sessionId}.`,
+        busy: false,
+        entries: [],
+        pendingApproval: null,
+        pendingTools: 0,
+        resolvingApproval: false,
+        runtimeId: result.runtimeId,
+        runtimeStatus: 'ready',
+        selectedSessionId: result.sessionId,
+        serverUrl: result.serverUrl,
+        sessionId: result.sessionId,
+        stateStreamUrl: result.stateStreamUrl,
+        usage: null,
+      }
+      this.toolIndexes.clear()
+      this.toolStatuses.clear()
+      this.currentChunkEntryId = null
+      this.appendMessage('thought', `Restarted runtime and reattached ${result.sessionId}.`)
+      this.emit()
+    } catch (error) {
+      this.setAdminBusy(false)
+      this.setAdminMessage(formatAdminError('Runtime restart failed', error))
+      throw error
     }
   }
 
@@ -636,7 +1064,39 @@ export class ReplController implements ReplViewModel {
   }
 
   setSessionId(sessionId: string): void {
-    this.state = { ...this.state, sessionId }
+    this.state = {
+      ...this.state,
+      selectedSessionId: sessionId,
+      sessionId,
+      sessionTabs: mergeAttachedTab(this.state.sessionTabs, sessionId),
+    }
+    this.emit()
+  }
+
+  setSessionTabs(sessionTabs: readonly SessionTab[]): void {
+    const selectedSessionId =
+      this.state.selectedSessionId &&
+      sessionTabs.some((tab) => tab.sessionId === this.state.selectedSessionId)
+        ? this.state.selectedSessionId
+        : this.state.sessionId &&
+            sessionTabs.some((tab) => tab.sessionId === this.state.sessionId)
+          ? this.state.sessionId
+          : sessionTabs[0]?.sessionId ?? this.state.selectedSessionId
+    this.state = {
+      ...this.state,
+      selectedSessionId,
+      sessionTabs: mergeAttachedTabs(sessionTabs, this.state.sessionId),
+    }
+    this.emit()
+  }
+
+  setRuntimeStatus(runtimeStatus: string | null): void {
+    this.state = { ...this.state, runtimeStatus }
+    this.emit()
+  }
+
+  setStateDb(db: FirelineDB | null): void {
+    this.state = { ...this.state, db }
     this.emit()
   }
 
@@ -663,6 +1123,16 @@ export class ReplController implements ReplViewModel {
     if (trimmed === '/quit') {
       return 'quit'
     }
+    if (
+      this.state.selectedSessionId &&
+      this.state.sessionId &&
+      this.state.selectedSessionId !== this.state.sessionId
+    ) {
+      this.setAdminMessage(
+        `Selected session ${this.state.selectedSessionId} is not attached. Press l to load or resume it first.`,
+      )
+      return 'ignored'
+    }
 
     this.appendMessage('user', text)
     this.setBusy(true)
@@ -674,6 +1144,58 @@ export class ReplController implements ReplViewModel {
     }
 
     return 'sent'
+  }
+
+  private shiftSelectedSession(delta: -1 | 1): void {
+    if (this.state.sessionTabs.length === 0) {
+      return
+    }
+    const currentIndex = Math.max(
+      0,
+      this.state.sessionTabs.findIndex(
+        (tab) => tab.sessionId === this.state.selectedSessionId,
+      ),
+    )
+    const nextIndex =
+      (currentIndex + delta + this.state.sessionTabs.length) %
+      this.state.sessionTabs.length
+    this.state = {
+      ...this.state,
+      adminMessage: `Selected ${this.state.sessionTabs[nextIndex]!.sessionId}.`,
+      selectedSessionId: this.state.sessionTabs[nextIndex]!.sessionId,
+    }
+    this.emit()
+  }
+
+  private replaceAttachedSession(sessionId: string, message: string): void {
+    this.toolIndexes.clear()
+    this.toolStatuses.clear()
+    this.currentChunkEntryId = null
+    this.state = {
+      ...this.state,
+      adminBusy: false,
+      adminMessage: message,
+      busy: false,
+      entries: [],
+      pendingApproval: null,
+      pendingTools: 0,
+      resolvingApproval: false,
+      selectedSessionId: sessionId,
+      sessionId,
+      sessionTabs: mergeAttachedTab(this.state.sessionTabs, sessionId),
+      usage: null,
+    }
+    this.appendMessage('thought', message)
+  }
+
+  private setAdminBusy(adminBusy: boolean): void {
+    this.state = { ...this.state, adminBusy }
+    this.emit()
+  }
+
+  private setAdminMessage(adminMessage: string | null): void {
+    this.state = { ...this.state, adminMessage }
+    this.emit()
   }
 
   receiveNotification(notification: SessionNotification): void {
@@ -850,6 +1372,89 @@ export class ReplController implements ReplViewModel {
       listener()
     }
   }
+}
+
+function buildSessionTabs(
+  sessions: readonly SessionRow[],
+  permissions: readonly PermissionRow[],
+  promptRequests: readonly PromptRequestRow[],
+  attachedSessionId: string | null,
+): SessionTab[] {
+  const approvalCounts = new Map<string, number>()
+  for (const permission of permissions) {
+    if (permission.state !== 'pending') {
+      continue
+    }
+    approvalCounts.set(
+      permission.sessionId,
+      (approvalCounts.get(permission.sessionId) ?? 0) + 1,
+    )
+  }
+
+  const activePromptCounts = new Map<string, number>()
+  for (const promptRequest of promptRequests) {
+    if (
+      promptRequest.state !== 'active' &&
+      promptRequest.state !== 'queued' &&
+      promptRequest.state !== 'cancel_requested'
+    ) {
+      continue
+    }
+    activePromptCounts.set(
+      promptRequest.sessionId,
+      (activePromptCounts.get(promptRequest.sessionId) ?? 0) + 1,
+    )
+  }
+
+  const tabs = sessions
+    .slice()
+    .sort((left, right) => (right.lastSeenAt ?? right.updatedAt) - (left.lastSeenAt ?? left.updatedAt))
+    .map((row) => ({
+      activePrompts: activePromptCounts.get(row.sessionId) ?? 0,
+      attached: row.sessionId === attachedSessionId,
+      pendingApprovals: approvalCounts.get(row.sessionId) ?? 0,
+      sessionId: row.sessionId,
+      state: row.state,
+    }))
+
+  return mergeAttachedTabs(tabs, attachedSessionId)
+}
+
+function mergeAttachedTabs(
+  tabs: readonly SessionTab[],
+  attachedSessionId: string | null,
+): SessionTab[] {
+  if (!attachedSessionId) {
+    return [...tabs]
+  }
+  const existing = tabs.find((tab) => tab.sessionId === attachedSessionId)
+  if (!existing) {
+    return [
+      {
+        activePrompts: 0,
+        attached: true,
+        pendingApprovals: 0,
+        sessionId: attachedSessionId,
+        state: null,
+      },
+      ...tabs,
+    ]
+  }
+  return tabs.map((tab) =>
+    tab.sessionId === attachedSessionId ? { ...tab, attached: true } : { ...tab, attached: false },
+  )
+}
+
+function mergeAttachedTab(
+  tabs: readonly SessionTab[],
+  attachedSessionId: string | null,
+): SessionTab[] {
+  return mergeAttachedTabs(tabs, attachedSessionId)
+}
+
+function formatAdminError(prefix: string, error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  return `${prefix}: ${message}`
 }
 
 function countPendingTools(

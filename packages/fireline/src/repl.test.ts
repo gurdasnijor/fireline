@@ -9,6 +9,7 @@ import type {
   PromptRequestRow,
   SessionRow,
 } from '@fireline/state'
+import { EventStreamStore } from './repl-pane-events.js'
 import { FirelineReplApp, partitionTranscriptEntries } from './repl-ui.js'
 import { SessionStatePane } from './repl-pane-state.js'
 import { ReplController } from './repl.js'
@@ -42,6 +43,7 @@ test('repl controller submits prompts and renders streamed output', async () => 
   const output = renderToString(
     React.createElement(FirelineReplApp, {
       controller,
+      events: new EventStreamStore(),
       onExitRequest: (_code: number) => {},
       onFailure: (error: Error) => {
         throw error
@@ -55,7 +57,7 @@ test('repl controller submits prompts and renders streamed output', async () => 
   assert.match(output, /Ping the host/)
   assert.match(output, /assistant/i)
   assert.match(output, /Hello back from Fireline\./)
-  assert.match(output, /session:session-123/)
+  assert.match(output, /attached:session-123/)
   assert.match(output, /runtime:46ae8df5/)
   assert.match(output, /acp:55371/)
 })
@@ -88,6 +90,7 @@ test('repl controller surfaces pending approvals and resolves them', async () =>
   const output = renderToString(
     React.createElement(FirelineReplApp, {
       controller,
+      events: new EventStreamStore(),
       onExitRequest: (_code: number) => {},
       onFailure: (error: Error) => {
         throw error
@@ -98,12 +101,15 @@ test('repl controller surfaces pending approvals and resolves them', async () =>
 
   assert.match(output, /Tool Approval/i)
   assert.match(output, /write_file/)
-  assert.match(output, /"path": "\/workspace\/test\.txt"/)
-  assert.match(output, /approval fallback: prompt-level gate until tool-call interception/i)
+  assert.match(output, /workspace\/test\.txt/)
+  assert.match(output, /approval fallback/i)
+  assert.match(output, /tool-call interception/i)
   assert.match(output, /lands/i)
   assert.match(output, /Accept/)
   assert.match(output, /Decline/)
-  assert.match(output, /Composer is locked; resolve the approval card first\./)
+  assert.match(output, /Approval pending/i)
+  assert.match(output, /locked; resolve the approval/i)
+  assert.match(output, /card first/i)
 
   await controller.resolvePendingApproval(true)
 
@@ -117,6 +123,82 @@ test('repl controller surfaces pending approvals and resolves them', async () =>
   assert.equal(controller.getSnapshot().pendingApproval, null)
 })
 
+test('repl controller switches selected sessions and attaches the chosen tab', async () => {
+  const attached: string[] = []
+  const controller = new ReplController({
+    attachSession: async (sessionId) => {
+      attached.push(sessionId)
+      return { mode: 'resume' }
+    },
+    resolveApproval: async () => {},
+    sendPrompt: async () => {},
+    serverUrl: 'http://127.0.0.1:4440',
+    sessionId: 'session-1',
+  })
+
+  controller.setSessionTabs([
+    {
+      activePrompts: 0,
+      attached: true,
+      pendingApprovals: 0,
+      sessionId: 'session-1',
+      state: 'idle',
+    },
+    {
+      activePrompts: 1,
+      attached: false,
+      pendingApprovals: 2,
+      sessionId: 'session-2',
+      state: 'active',
+    },
+  ])
+
+  controller.selectNextSession()
+  assert.equal(controller.getSnapshot().selectedSessionId, 'session-2')
+
+  await controller.attachSelectedSession()
+
+  assert.deepEqual(attached, ['session-2'])
+  assert.equal(controller.getSnapshot().sessionId, 'session-2')
+  assert.equal(controller.getSnapshot().selectedSessionId, 'session-2')
+  assert.match(controller.getSnapshot().entries.at(-1)?.kind ?? '', /message/)
+})
+
+test('repl controller exposes runtime stop and restart admin state', async () => {
+  let stopped = false
+  let restarted = false
+  const controller = new ReplController({
+    resolveApproval: async () => {},
+    restartRuntime: async () => {
+      restarted = true
+      return {
+        acpUrl: 'ws://127.0.0.1:5555/acp',
+        runtimeId: 'sandbox-2',
+        serverUrl: 'http://127.0.0.1:4440',
+        sessionId: 'session-2',
+        stateStreamUrl: 'http://127.0.0.1:7474/v1/stream/restarted',
+      }
+    },
+    runtimeId: 'sandbox-1',
+    sendPrompt: async () => {},
+    serverUrl: 'http://127.0.0.1:4440',
+    sessionId: 'session-1',
+    stopRuntime: async () => {
+      stopped = true
+    },
+  })
+
+  await controller.stopRuntime()
+  assert.equal(stopped, true)
+  assert.equal(controller.getSnapshot().runtimeStatus, 'stopped')
+
+  await controller.restartRuntime()
+  assert.equal(restarted, true)
+  assert.equal(controller.getSnapshot().runtimeId, 'sandbox-2')
+  assert.equal(controller.getSnapshot().sessionId, 'session-2')
+  assert.equal(controller.getSnapshot().supportsRuntimeRestart, true)
+})
+
 test('partitionTranscriptEntries commits completed turns and keeps the active turn live', () => {
   const transcript = [
     { id: 1, kind: 'message', role: 'assistant', text: 'startup banner' },
@@ -128,15 +210,23 @@ test('partitionTranscriptEntries commits completed turns and keeps the active tu
 
   const active = partitionTranscriptEntries({
     acpUrl: 'ws://127.0.0.1:4440/acp',
+    adminBusy: false,
+    adminMessage: null,
     busy: true,
+    db: null,
     entries: transcript,
     pendingApproval: null,
     pendingTools: 1,
     resolvingApproval: false,
     runtimeId: 'runtime:demo',
+    runtimeStatus: 'ready',
+    selectedSessionId: 'session-123',
     serverUrl: 'http://127.0.0.1:4440',
     sessionId: 'session-123',
+    sessionTabs: [],
     stateStreamUrl: 'http://127.0.0.1:7474/v1/stream/demo',
+    supportsRuntimeRestart: false,
+    supportsSessionAttach: false,
     usage: null,
   })
 
@@ -151,15 +241,23 @@ test('partitionTranscriptEntries commits completed turns and keeps the active tu
 
   const idle = partitionTranscriptEntries({
     acpUrl: 'ws://127.0.0.1:4440/acp',
+    adminBusy: false,
+    adminMessage: null,
     busy: false,
+    db: null,
     entries: transcript,
     pendingApproval: null,
     pendingTools: 0,
     resolvingApproval: false,
     runtimeId: 'runtime:demo',
+    runtimeStatus: 'ready',
+    selectedSessionId: 'session-123',
     serverUrl: 'http://127.0.0.1:4440',
     sessionId: 'session-123',
+    sessionTabs: [],
     stateStreamUrl: 'http://127.0.0.1:7474/v1/stream/demo',
+    supportsRuntimeRestart: false,
+    supportsSessionAttach: false,
     usage: null,
   })
 

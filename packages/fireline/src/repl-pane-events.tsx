@@ -112,6 +112,7 @@ export interface EventStreamPaneProps {
   readonly controller: EventStreamViewModel
   readonly focused?: boolean
   readonly maxVisibleRows?: number
+  readonly sessionId?: string | null
   readonly title?: string
 }
 
@@ -123,9 +124,16 @@ export function EventStreamPane(props: EventStreamPaneProps) {
   const [filterText, setFilterText] = useState('')
   const [scrollOffset, setScrollOffset] = useState(0)
   const maxVisibleRows = props.maxVisibleRows ?? DEFAULT_VISIBLE_ROWS
+  const sessionScopedEvents = useMemo(
+    () =>
+      props.sessionId
+        ? state.events.filter((event) => event.sessionId === props.sessionId)
+        : [...state.events],
+    [props.sessionId, state.events],
+  )
   const filteredEvents = useMemo(
-    () => filterEventStreamEvents(state.events, filterText),
-    [state.events, filterText],
+    () => filterEventStreamEvents(sessionScopedEvents, filterText),
+    [filterText, sessionScopedEvents],
   )
   const visibleEvents = useMemo(
     () => selectVisibleEvents(filteredEvents, scrollOffset, maxVisibleRows),
@@ -208,7 +216,7 @@ export function EventStreamPane(props: EventStreamPaneProps) {
         </Text>
       </Box>
       <Text color={REPL_PALETTE.subdued}>
-        filter {filterText || '(type acp:, durable:, control:)'}
+        filter {filterText || '(type acp:, durable:, control:)'}  session {props.sessionId ?? 'all'}
       </Text>
       {state.controlSurfaceNote ? (
         <Text color={REPL_PALETTE.user} wrap="truncate-end">

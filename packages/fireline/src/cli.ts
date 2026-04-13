@@ -546,16 +546,28 @@ async function run(args: ParsedArgs): Promise<number> {
       ? { ...spec, sandbox: { ...spec.sandbox, provider: args.providerOverride } }
       : spec
 
-    const agentHandle = await effectiveSpec.start(startOptions)
-    teardown.push(() => destroySandbox(agentHandle.id, args.port))
+    let currentHandle = await effectiveSpec.start(startOptions)
+    teardown.push(() => destroySandbox(currentHandle.id, args.port))
 
     if (args.repl) {
-      const exitCode = await runHostedRepl(agentHandle, args)
+      const exitCode = await runHostedRepl(
+        currentHandle,
+        args,
+        runRepl,
+        console,
+        {
+          restartRuntime: async (runtimeId: string) => {
+            await destroySandbox(runtimeId, args.port)
+            currentHandle = await effectiveSpec.start(startOptions)
+            return currentHandle
+          },
+        },
+      )
       await runTeardown()
       return exitCode
     }
 
-    printReady(agentHandle, args)
+    printReady(currentHandle, args)
     printInteractionHint(args.file!)
 
     const signalCode = await waitForShutdown
@@ -1075,11 +1087,15 @@ export async function runHostedRepl(
   args: ParsedArgs,
   replRunner: typeof runRepl = runRepl,
   logger: ReadyLogger = console,
+  options: {
+    readonly restartRuntime?: (runtimeId: string) => Promise<{ readonly id: string; readonly acp: { readonly url: string }; readonly state: { readonly url: string } }>
+  } = {},
 ): Promise<number> {
   validatePrintedHandle(handle, 'run')
 
   return await replRunner({
     acpUrl: handle.acp.url,
+    onRuntimeRestart: options.restartRuntime,
     onSessionReady: async (sessionId: string) => {
       printReady(handle, args, { logger, sessionId })
     },
