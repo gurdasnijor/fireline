@@ -2,6 +2,11 @@ import { readFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 
 import { compose } from '../../packages/client/src/sandbox.ts'
+import {
+  buildDirectHostArgs,
+  type LoweredProvisionRequest,
+  validateLoweredSpec,
+} from '../../packages/fireline/src/embedded-spec-bootstrap.ts'
 
 type JsonRecord = Record<string, unknown>
 
@@ -14,21 +19,8 @@ type EmbeddedHarnessSpec = {
   readonly agent: JsonRecord
 }
 
-type LoweredProvisionRequest = {
-  readonly name: string
-  readonly agentCommand: readonly string[]
-  readonly topology: unknown
-  readonly resources?: readonly unknown[]
-  readonly envVars?: Readonly<Record<string, string>>
-  readonly labels?: Readonly<Record<string, string>>
-  readonly provider?: string
-  readonly image?: string
-  readonly model?: string
-  readonly stateStream?: string
-}
-
 const SPEC_ENV = 'FIRELINE_EMBEDDED_SPEC_PATH'
-const FIRELINE_BIN = '/usr/local/bin/fireline'
+const FIRELINE_BIN = process.env.FIRELINE_BIN ?? '/usr/local/bin/fireline'
 
 async function main(): Promise<void> {
   const specPath = process.env[SPEC_ENV]
@@ -40,7 +32,7 @@ async function main(): Promise<void> {
   const lowered = await lowerSpec(spec)
   validateLoweredSpec(lowered)
 
-  const args = buildDirectHostArgs(lowered)
+  const args = await buildDirectHostArgs(lowered)
   console.log(
     `fireline: booting embedded spec '${lowered.name}' from ${specPath} via existing compose()->start lowering`,
   )
@@ -120,73 +112,6 @@ async function lowerSpec(spec: EmbeddedHarnessSpec): Promise<LoweredProvisionReq
     throw new Error('compose()->start() lowering did not emit a provision request')
   }
   return lowered
-}
-
-function validateLoweredSpec(spec: LoweredProvisionRequest): void {
-  if (spec.provider && spec.provider !== 'local') {
-    throw new Error(
-      `embedded-spec boot only supports local/direct-host lowering today; got provider='${spec.provider}'`,
-    )
-  }
-  if (spec.image) {
-    throw new Error('embedded-spec boot does not support docker image overrides')
-  }
-  if (spec.model) {
-    throw new Error('embedded-spec boot does not support anthropic model lowering')
-  }
-  if ((spec.resources?.length ?? 0) > 0) {
-    throw new Error('embedded-spec boot does not support resource mounts')
-  }
-  if (spec.envVars && Object.keys(spec.envVars).length > 0) {
-    throw new Error('embedded-spec boot does not support sandbox env vars')
-  }
-  if (spec.labels && Object.keys(spec.labels).length > 0) {
-    throw new Error('embedded-spec boot does not support sandbox labels')
-  }
-  if (!Array.isArray(spec.agentCommand) || spec.agentCommand.length === 0) {
-    throw new Error('embedded-spec boot requires a non-empty agent command')
-  }
-}
-
-function buildDirectHostArgs(spec: LoweredProvisionRequest): string[] {
-  const host = process.env.FIRELINE_HOST ?? '0.0.0.0'
-  const port = process.env.FIRELINE_PORT ?? '4440'
-  const durableStreamsUrl = process.env.FIRELINE_DURABLE_STREAMS_URL
-  if (!durableStreamsUrl) {
-    throw new Error('FIRELINE_DURABLE_STREAMS_URL must be set for embedded-spec boot')
-  }
-  const advertisedStateStreamUrl = process.env.FIRELINE_ADVERTISED_STATE_STREAM_URL
-    ?? (spec.stateStream ? `${durableStreamsUrl.replace(/\/+$/, '')}/${spec.stateStream}` : null)
-
-  const args = [
-    '--host', host,
-    '--port', port,
-    '--name', spec.name,
-    '--durable-streams-url', durableStreamsUrl,
-  ]
-
-  if (spec.stateStream) {
-    args.push('--state-stream', spec.stateStream)
-  }
-
-  if (advertisedStateStreamUrl) {
-    args.push('--advertised-state-stream-url', advertisedStateStreamUrl)
-  }
-
-  if (hasTopologyComponents(spec.topology)) {
-    args.push('--topology-json', JSON.stringify(spec.topology))
-  }
-
-  args.push('--', ...spec.agentCommand)
-  return args
-}
-
-function hasTopologyComponents(topology: unknown): boolean {
-  if (!topology || typeof topology !== 'object') {
-    return false
-  }
-  const components = (topology as { readonly components?: unknown }).components
-  return Array.isArray(components) && components.length > 0
 }
 
 main().catch((error) => {

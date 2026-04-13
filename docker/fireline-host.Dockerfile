@@ -15,6 +15,7 @@ WORKDIR /opt/fireline-bootstrap
 
 COPY docker/bin ./docker/bin
 COPY packages/client/src ./packages/client/src
+COPY packages/fireline/src ./packages/fireline/src
 
 RUN npm init -y \
     && npm install --no-package-lock --omit=dev \

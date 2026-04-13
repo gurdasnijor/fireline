@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -16,6 +16,7 @@ import {
   unwrapDefaultExport,
   writeTargetScaffold,
 } from './cli.js'
+import { buildDirectHostArgs } from './embedded-spec-bootstrap.js'
 import { findBinary } from './resolve-binary.js'
 
 const TEST_FILE = fileURLToPath(import.meta.url)
@@ -296,6 +297,69 @@ test('createDockerBuildPlan wires embedded spec build arg', () => {
     plan.buildArg,
     '/repo',
   ])
+})
+
+test('embedded-spec bootstrap lowers localPath resources into mounted resource args', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'fireline-embedded-spec-'))
+  const workspace = join(cwd, 'workspace')
+  await mkdir(workspace, { recursive: true })
+  await writeFile(join(workspace, 'README.md'), 'hello\n')
+  const resolvedWorkspace = await realpath(workspace)
+
+  const args = await buildDirectHostArgs(
+    {
+      name: 'reviewer',
+      agentCommand: ['echo', 'hi'],
+      topology: {},
+      resources: [
+        {
+          source_ref: { kind: 'localPath', host_id: 'local', path: './workspace' },
+          mount_path: '/workspace',
+        },
+      ],
+    },
+    {
+      cwd,
+      env: {
+        FIRELINE_DURABLE_STREAMS_URL: 'http://127.0.0.1:7474/v1/stream',
+      },
+    },
+  )
+
+  const mountedResourcesIndex = args.indexOf('--mounted-resources-json')
+  assert.ok(mountedResourcesIndex >= 0)
+  assert.deepEqual(JSON.parse(args[mountedResourcesIndex + 1] ?? 'null'), [
+    {
+      host_path: resolvedWorkspace,
+      mount_path: '/workspace',
+      read_only: true,
+    },
+  ])
+})
+
+test('embedded-spec bootstrap rejects non-local resource kinds', async () => {
+  await assert.rejects(
+    () => buildDirectHostArgs(
+      {
+        name: 'reviewer',
+        agentCommand: ['echo', 'hi'],
+        topology: {},
+        resources: [
+          {
+            source_ref: { kind: 'gitRepo', url: 'https://github.com/example/repo', ref: 'main', path: '/' },
+            mount_path: '/workspace',
+          },
+        ],
+      },
+      {
+        cwd: '/tmp',
+        env: {
+          FIRELINE_DURABLE_STREAMS_URL: 'http://127.0.0.1:7474/v1/stream',
+        },
+      },
+    ),
+    /only supports localPath resource mounts today/,
+  )
 })
 
 test('createDeployExecutionPlan maps fly target to flyctl deploy', () => {
