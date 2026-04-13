@@ -13,6 +13,7 @@ pub mod shared_terminal;
 pub mod state_projector;
 pub mod topology;
 pub mod trace;
+pub mod webhook_subscriber;
 
 pub use approval::{
     ApprovalAction, ApprovalConfig, ApprovalGateComponent, ApprovalMatch, ApprovalPolicy,
@@ -46,4 +47,10 @@ pub use topology::{
 pub use trace::{
     BoxedTraceWriter, CompositeTraceWriter, DurableStreamTracer, emit_host_endpoints_persisted,
     emit_host_instance_started, emit_host_instance_stopped, emit_host_spec_persisted,
+};
+pub use webhook_subscriber::{
+    DurableWebhookCursorStore, DurableWebhookDeadLetterSink, WebhookCursorRecord,
+    WebhookDeadLetterRecord, WebhookDelivered, WebhookDeliveryPayload, WebhookDispatchOutcome,
+    WebhookDispatchResult, WebhookEventSelector, WebhookSkipReason, WebhookSubscriber,
+    WebhookSubscriberConfig, WebhookTargetConfig, append_webhook_completion,
 };

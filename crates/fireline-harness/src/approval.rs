@@ -161,6 +161,7 @@ impl ApprovalGateSubscriber {
             entity_type: "permission".to_string(),
             key: format!("{session_id}:{}", request_id_key(request_id)),
             headers: insert_headers(),
+            source_offset: None,
             value: Some(
                 serde_json::to_value(PermissionEvent {
                     kind: "permission_request".to_string(),
@@ -732,6 +733,7 @@ mod tests {
             entity_type: "permission".to_string(),
             key: format!("{session_id}:{}:resolved", request_id_key(&request_id)),
             headers: insert_headers(),
+            source_offset: None,
             value: Some(serde_json::to_value(PermissionEvent {
                 kind: "approval_resolved".to_string(),
                 session_id,
@@ -755,6 +757,7 @@ mod tests {
             entity_type: "permission".to_string(),
             key: "bootstrap".to_string(),
             headers: insert_headers(),
+            source_offset: None,
             value: Some(serde_json::to_value(PermissionEvent {
                 kind: "permission_request".to_string(),
                 session_id: SessionId::from("bootstrap-session"),

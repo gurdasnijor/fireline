@@ -55,6 +55,20 @@ impl CompletionKey {
     }
 
     #[must_use]
+    pub fn storage_key(&self) -> String {
+        match self {
+            Self::Prompt {
+                session_id,
+                request_id,
+            } => format!("prompt:{session_id}:{}", request_id_storage_key(request_id)),
+            Self::Tool {
+                session_id,
+                tool_call_id,
+            } => format!("tool:{session_id}:{tool_call_id}"),
+        }
+    }
+
+    #[must_use]
     pub fn prompt_ref(&self) -> Option<PromptRequestRef> {
         match self {
             Self::Prompt {
@@ -148,6 +162,10 @@ pub struct StreamEnvelope {
     pub key: String,
     #[serde(default)]
     pub headers: Map<String, Value>,
+    /// Reader-local offset metadata used by active subscriber delivery.
+    /// This is not an agent-plane field and is not expected on persisted rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_offset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<Value>,
 }
@@ -165,6 +183,23 @@ impl StreamEnvelope {
         self.value
             .clone()
             .and_then(|value| serde_json::from_value(value).ok())
+    }
+
+    #[must_use]
+    pub fn with_source_offset(mut self, offset: Offset) -> Self {
+        self.source_offset = Some(offset.to_string());
+        self
+    }
+
+    #[must_use]
+    pub fn offset(&self) -> Option<Offset> {
+        self.source_offset.as_deref().map(Offset::parse)
+    }
+
+    #[must_use]
+    pub fn without_source_offset(mut self) -> Self {
+        self.source_offset = None;
+        self
     }
 
     #[must_use]
@@ -298,6 +333,26 @@ impl Default for RetryPolicy {
             initial_backoff: Duration::ZERO,
             max_backoff: Duration::ZERO,
         }
+    }
+}
+
+impl RetryPolicy {
+    #[must_use]
+    pub fn backoff_for_attempt(&self, attempt: u32) -> Option<Duration> {
+        if attempt >= self.max_attempts {
+            return None;
+        }
+        if self.initial_backoff.is_zero() {
+            return Some(Duration::ZERO);
+        }
+
+        let shift = attempt.saturating_sub(1).min(31);
+        let multiplier = 1_u32 << shift;
+        Some(
+            self.initial_backoff
+                .saturating_mul(multiplier)
+                .min(self.max_backoff),
+        )
     }
 }
 
@@ -553,6 +608,13 @@ fn parse_chunk_envelopes(bytes: &[u8]) -> Result<Vec<StreamEnvelope>> {
         .collect()
 }
 
+fn request_id_storage_key(value: &RequestId) -> String {
+    match value {
+        RequestId::Null => "null".to_string(),
+        RequestId::Number(number) => number.to_string(),
+        RequestId::Str(text) => text.clone(),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,6 +711,8 @@ mod tests {
                 tool_call_id: ToolCallId::from("tool-1".to_string()),
             })
         );
+        assert_eq!(prompt_key.storage_key(), "prompt:session-1:request-1");
+        assert_eq!(tool_key.storage_key(), "tool:session-2:tool-1");
     }
 
     #[test]
@@ -743,5 +807,55 @@ mod tests {
                 max_backoff: Duration::ZERO,
             }
         );
+        assert_eq!(RetryPolicy::default().backoff_for_attempt(1), None);
+    }
+
+    #[test]
+    fn stream_envelope_tracks_reader_offset_out_of_band() {
+        let envelope = StreamEnvelope::from_json(serde_json::json!({
+            "type": "permission",
+            "key": "session-1:request-1",
+            "headers": {},
+            "value": {
+                "kind": "permission_request",
+                "sessionId": "session-1",
+                "requestId": "request-1"
+            }
+        }))
+        .expect("decode stream envelope")
+        .with_source_offset(Offset::at("0000000000000001_0000000000000002"));
+
+        assert_eq!(
+            envelope.offset(),
+            Some(Offset::at("0000000000000001_0000000000000002"))
+        );
+        assert_eq!(envelope.clone().without_source_offset().source_offset, None);
+    }
+
+    #[test]
+    fn retry_policy_backoff_caps_at_maximum() {
+        let policy = RetryPolicy {
+            max_attempts: 5,
+            initial_backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_millis(250),
+        };
+
+        assert_eq!(
+            policy.backoff_for_attempt(1),
+            Some(Duration::from_millis(100))
+        );
+        assert_eq!(
+            policy.backoff_for_attempt(2),
+            Some(Duration::from_millis(200))
+        );
+        assert_eq!(
+            policy.backoff_for_attempt(3),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(
+            policy.backoff_for_attempt(4),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(policy.backoff_for_attempt(5), None);
     }
 }
