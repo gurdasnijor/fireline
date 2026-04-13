@@ -9,11 +9,13 @@
 //! - session append/replay/dedupe
 //! - live and cold `resume(session_id)` behavior
 //! - approval-gate release under retries and duplicate resolutions
+//! - canonical ACP identifier scoping and replay preservation
 //!
 //! The refinement mapping that ties these models back to the executable tests
 //! lives at `verification/docs/refinement-matrix.md`.
 
 mod durable_subscriber;
+mod canonical_ids;
 
 use std::collections::BTreeSet;
 
@@ -683,7 +685,7 @@ mod tests {
 
     use super::{
         ApprovalProtocolModel, RegistryLivenessModel, ResumeProtocolModel, SessionProtocolModel,
-        StreamTruthModel,
+        StreamTruthModel, canonical_ids::CanonicalIdsModel,
     };
 
     #[test]
@@ -710,6 +712,24 @@ mod tests {
             .checker()
             .spawn_bfs()
             .join();
+        checker.assert_properties();
+    }
+
+    #[test]
+    fn canonical_ids_model_checks_concurrent_approval_scoping() {
+        let checker = CanonicalIdsModel.checker().spawn_bfs().join();
+        checker.assert_properties();
+    }
+
+    #[test]
+    fn canonical_ids_model_checks_replay_preserves_identifier_invariants() {
+        let checker = CanonicalIdsModel.checker().spawn_bfs().join();
+        checker.assert_properties();
+    }
+
+    #[test]
+    fn canonical_ids_model_rejects_duplicate_prompt_request_ref_per_session() {
+        let checker = CanonicalIdsModel.checker().spawn_bfs().join();
         checker.assert_properties();
     }
 
