@@ -201,9 +201,11 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         topology: config.topology.clone(),
         base_components_factory: std::sync::Arc::new({
             let session_index = session_index.clone();
+            let session_state_stream_url = state_stream_url.clone();
             move || {
                 vec![sacp::DynConnectTo::new(LoadCoordinatorComponent::new(
                     session_index.clone(),
+                    session_state_stream_url.clone(),
                 ))]
             }
         }),

@@ -11,6 +11,9 @@ use anyhow::Result;
 use durable_streams::{Client as DsClient, Offset};
 use fireline_harness::TopologySpec;
 use fireline_host::bootstrap::{BootstrapConfig, start};
+use fireline_sandbox::{
+    LocalSubprocessProvider, LocalSubprocessProviderConfig, SandboxConfig, SandboxProvider,
+};
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::sync::Arc;
@@ -81,6 +84,10 @@ fn resumable_testy_bin() -> String {
     PathBuf::from(env!("CARGO_BIN_EXE_fireline-testy-load"))
         .display()
         .to_string()
+}
+
+fn fireline_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_fireline"))
 }
 
 fn temp_peer_directory() -> PathBuf {
@@ -332,6 +339,82 @@ async fn session_load_after_restart_forwards_and_surfaces_downstream_session_not
             .and_then(|data| data.get("sessionId"))
             .and_then(Value::as_str),
         Some(session_id.as_str())
+    );
+
+    restarted.shutdown().await?;
+    stream_server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_load_finds_provider_created_session_from_fresh_direct_host() -> Result<()> {
+    let state_stream = format!("fireline-session-load-provider-{}", Uuid::new_v4());
+    let peer_directory_path = temp_peer_directory();
+    let cwd = repo_root();
+    let stream_server = stream_server::TestStreamServer::spawn().await?;
+    let provider = LocalSubprocessProvider::new(LocalSubprocessProviderConfig {
+        fireline_bin: fireline_bin(),
+        host: "127.0.0.1".parse::<IpAddr>()?,
+        default_peer_directory_path: Some(peer_directory_path.clone()),
+        startup_timeout: Duration::from_secs(20),
+        stop_timeout: Duration::from_secs(10),
+    });
+
+    let sandbox = provider
+        .create(&SandboxConfig {
+            name: "session-load-provider".to_string(),
+            agent_command: vec![testy_bin()],
+            topology: TopologySpec::default(),
+            resources: Vec::new(),
+            durable_streams_url: stream_server.base_url.clone(),
+            state_stream: Some(state_stream.clone()),
+            env_vars: std::collections::HashMap::new(),
+            labels: std::collections::HashMap::new(),
+            provider: None,
+        })
+        .await?;
+
+    let session_id = create_session(&sandbox.acp.url, &cwd).await?;
+    wait_for_session_row(&sandbox.state.url, &session_id).await?;
+    assert!(
+        provider.destroy(&sandbox.id).await?,
+        "provider-created sandbox should destroy cleanly before the direct-host handoff"
+    );
+
+    let restarted = start(BootstrapConfig {
+        host: "127.0.0.1".parse::<IpAddr>()?,
+        port: 0,
+        name: "session-load-provider-direct".to_string(),
+        host_key: format!("runtime:{}", Uuid::new_v4()),
+        node_id: "node:test-session-load".to_string(),
+        agent_command: vec![testy_bin()],
+        mounted_resources: Vec::new(),
+        state_stream: Some(state_stream),
+        durable_streams_url: stream_server.base_url.clone(),
+        peer_directory_path,
+        control_plane_url: None,
+        topology: TopologySpec::default(),
+    })
+    .await?;
+
+    let load_result = load_session(&restarted.acp_url, &session_id, &cwd).await?;
+    let error = load_result.expect_err(
+        "fresh direct host should find the provider-created durable session row and report explicit non-resumable state",
+    );
+
+    assert_eq!(error.message, "session_not_resumable");
+    assert_eq!(i32::from(error.code), -32050);
+    assert_eq!(
+        error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("_meta"))
+            .and_then(|meta| meta.get("fireline"))
+            .and_then(|fireline| fireline.get("sessionRecord"))
+            .and_then(|record| record.get("sessionId"))
+            .and_then(Value::as_str),
+        Some(session_id.as_str()),
+        "provider-created session rows must survive the handoff from a managed local sandbox to a fresh direct host",
     );
 
     restarted.shutdown().await?;
