@@ -7,7 +7,7 @@ Fireline already has the hard part of durable waiting: the durable-subscriber su
 
 Durable promises exist because that substrate is host-shaped, not workflow-shaped.
 
-`DurableSubscriber::Passive` is the right primitive when you are defining how Fireline observes events, keys completions, and rebuilds progress from the durable log. `ctx.awakeable<T>()` is the right primitive when you are writing application logic and need to say, plainly, "pause here until this resolves."
+`DurableSubscriber::Passive` is the right primitive when you are defining how Fireline observes events, keys completions, and rebuilds progress from the durable log. `workflowContext({ stateStreamUrl })` plus `ctx.awakeable<T>(key)` is the right primitive when you are writing application logic and need to say, plainly, "pause here until this resolves."
 
 That is the core decision:
 
@@ -74,7 +74,10 @@ The point of durable promises is not novelty. The point is that some workflows a
 This:
 
 ```ts
-const approval = ctx.awakeable<boolean>({ kind: 'prompt', sessionId, requestId })
+const ctx = workflowContext({ stateStreamUrl })
+const approval = ctx.awakeable<boolean>(
+  promptCompletionKey({ sessionId, requestId }),
+)
 await sendApprovalCard(approval.key)
 
 if (!(await approval.promise)) {
@@ -156,6 +159,19 @@ Many real workflows use both:
 - an awakeable gives the workflow a clean imperative place to wait for the answer
 
 That pairing is not accidental. It is the point of the design.
+
+## Landed TypeScript Surface
+
+On current `main`, the workflow-facing TypeScript API is deliberately small:
+
+- `workflowContext({ stateStreamUrl, headers? })`
+- `ctx.awakeable<T>(key)`
+- `promptCompletionKey(...)`, `toolCompletionKey(...)`, and `sessionCompletionKey(...)`
+- `resolveAwakeable({ streamUrl, key, value, traceContext?, headers? })`
+
+That is a good example of the architectural boundary holding.
+
+The user-facing surface helps authors express durable waits imperatively, but it still routes through the same completion-key contract and the same append/read path the subscriber substrate already owns.
 
 ## References
 
