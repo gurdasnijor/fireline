@@ -58,6 +58,7 @@ fi
 
 if [[ -n "${FIRELINE_EMBEDDED_SPEC_PATH:-}" ]]; then
   export FIRELINE_DURABLE_STREAMS_URL="http://127.0.0.1:${FIRELINE_STREAMS_INTERNAL_PORT}/v1/stream"
+  export FIRELINE_TRANSLATE_SESSION_CWD_TO_MOUNTS=1
 
   if [[ -z "${FIRELINE_ADVERTISED_STATE_STREAM_URL:-}" ]]; then
     embedded_state_stream="$(node -e "const fs=require('fs'); const p=process.env.FIRELINE_EMBEDDED_SPEC_PATH; try { const raw=fs.readFileSync(p, 'utf8'); const parsed=JSON.parse(raw); process.stdout.write(typeof parsed.stateStream === 'string' ? parsed.stateStream : ''); } catch { process.stdout.write(''); }")"

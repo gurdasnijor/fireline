@@ -93,6 +93,7 @@ async fn update_rust_state_fixture_snapshot() -> Result<()> {
         peer_directory_path: peer_directory_path.clone(),
         control_plane_url: None,
         topology: TopologySpec::default(),
+        translate_session_cwd_to_mounts: false,
     })
     .await?;
 
@@ -109,6 +110,7 @@ async fn update_rust_state_fixture_snapshot() -> Result<()> {
         peer_directory_path,
         control_plane_url: None,
         topology: TopologySpec::default(),
+        translate_session_cwd_to_mounts: false,
     })
     .await?;
 

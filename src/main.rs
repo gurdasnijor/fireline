@@ -164,6 +164,10 @@ struct Cli {
     #[arg(long, hide = true)]
     mounted_resources_json: Option<String>,
 
+    /// Rewrite session/new and session/load cwd values onto mounted resource paths.
+    #[arg(long, env = "FIRELINE_TRANSLATE_SESSION_CWD_TO_MOUNTS", hide = true)]
+    translate_session_cwd_to_mounts: bool,
+
     /// Optional file to write the bound listener address to after binding.
     /// Useful for tests that bind on port 0 and need to learn the bound port.
     #[arg(long, hide = true)]
@@ -362,6 +366,7 @@ async fn run_direct_host(
         peer_directory_path,
         control_plane_url: None,
         topology,
+        translate_session_cwd_to_mounts: cli.translate_session_cwd_to_mounts,
     })
     .await?;
     wait_for_runtime_listener_ready(&handle.health_url).await?;
@@ -411,6 +416,7 @@ async fn run_stdio_host(
         peer_directory_path,
         control_plane_url: None,
         topology,
+        translate_session_cwd_to_mounts: false,
     })
     .await
 }
@@ -439,6 +445,7 @@ async fn run_managed_runtime(
         peer_directory_path,
         control_plane_url: cli.control_plane_url.clone(),
         topology,
+        translate_session_cwd_to_mounts: cli.translate_session_cwd_to_mounts,
     })
     .await?;
     wait_for_runtime_listener_ready(&handle.health_url).await?;

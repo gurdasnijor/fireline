@@ -157,6 +157,7 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
         peer_directory_path: peer_directory_path.clone(),
         control_plane_url: None,
         topology: TopologySpec::default(),
+        translate_session_cwd_to_mounts: false,
     })
     .await?;
 
@@ -173,6 +174,7 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
         peer_directory_path: peer_directory_path.clone(),
         control_plane_url: None,
         topology: TopologySpec::default(),
+        translate_session_cwd_to_mounts: false,
     })
     .await?;
 
@@ -324,6 +326,7 @@ async fn peer_trace_context_propagates_across_prompt_peer() -> Result<()> {
         peer_directory_path: peer_directory_path.clone(),
         control_plane_url: None,
         topology: TopologySpec::default(),
+        translate_session_cwd_to_mounts: false,
     })
     .await?;
 
@@ -340,6 +343,7 @@ async fn peer_trace_context_propagates_across_prompt_peer() -> Result<()> {
         peer_directory_path: peer_directory_path.clone(),
         control_plane_url: None,
         topology: TopologySpec::default(),
+        translate_session_cwd_to_mounts: false,
     })
     .await?;
 
