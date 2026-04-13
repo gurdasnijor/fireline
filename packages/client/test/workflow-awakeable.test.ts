@@ -47,7 +47,12 @@ describe('workflow awakeable surface', () => {
   it('ctx.awakeable resolves on the matching canonical completion and preserves T inference', async () => {
     appendMock.mockResolvedValue()
     const unsubscribe = vi.fn()
-    streamMock.mockResolvedValue({
+    streamMock.mockResolvedValueOnce({
+      async json() {
+        return []
+      },
+    })
+    streamMock.mockResolvedValueOnce({
       subscribeJson(
         subscriber: (
           batch: JsonBatch<{
@@ -107,6 +112,103 @@ describe('workflow awakeable surface', () => {
         requestId: 'request-a',
       },
     })
+  })
+
+  it('ctx.awakeable reuses an already-resolved durable completion without appending a waiting row', async () => {
+    streamMock.mockResolvedValueOnce({
+      async json() {
+        return [
+          {
+            type: 'awakeable',
+            key: 'prompt:session-r:request-r:resolved',
+            value: {
+              kind: 'awakeable_resolved',
+              sessionId: 'session-r',
+              requestId: 'request-r',
+              value: { approved: true },
+              resolvedAtMs: 1,
+            },
+          },
+        ]
+      },
+    })
+
+    const ctx = workflowContext({
+      stateStreamUrl: 'http://127.0.0.1:7474/v1/stream/state',
+    })
+    const key = promptCompletionKey({
+      sessionId: 'session-r' as SessionId,
+      requestId: 'request-r' as RequestId,
+    })
+
+    await expect(ctx.awakeable<{ approved: boolean }>(key).promise).resolves.toEqual({
+      approved: true,
+    })
+    expect(appendMock).not.toHaveBeenCalled()
+    expect(streamMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('ctx.awakeable reuses an existing waiting row on replay instead of appending a duplicate', async () => {
+    const unsubscribe = vi.fn()
+    streamMock.mockResolvedValueOnce({
+      async json() {
+        return [
+          {
+            type: 'awakeable',
+            key: 'prompt:session-p:request-p:waiting',
+            value: {
+              kind: 'awakeable_waiting',
+              sessionId: 'session-p',
+              requestId: 'request-p',
+              createdAtMs: 1,
+            },
+          },
+        ]
+      },
+    })
+    streamMock.mockResolvedValueOnce({
+      subscribeJson(
+        subscriber: (
+          batch: JsonBatch<{
+            readonly type: string
+            readonly key: string
+            readonly value?: Record<string, unknown>
+          }>,
+        ) => void,
+      ) {
+        subscriber({
+          items: [
+            {
+              type: 'awakeable',
+              key: 'prompt:session-p:request-p:resolved',
+              value: {
+                kind: 'awakeable_resolved',
+                sessionId: 'session-p',
+                requestId: 'request-p',
+                value: true,
+                resolvedAtMs: 2,
+              },
+            },
+          ],
+          offset: '2',
+          upToDate: true,
+          streamClosed: false,
+        })
+        return unsubscribe
+      },
+    })
+
+    const ctx = workflowContext({
+      stateStreamUrl: 'http://127.0.0.1:7474/v1/stream/state',
+    })
+    const key = promptCompletionKey({
+      sessionId: 'session-p' as SessionId,
+      requestId: 'request-p' as RequestId,
+    })
+
+    await expect(ctx.awakeable<boolean>(key).promise).resolves.toBe(true)
+    expect(appendMock).not.toHaveBeenCalled()
+    expect(unsubscribe).toHaveBeenCalledTimes(1)
   })
 
   it('resolveAwakeable rejects duplicate completions for the same canonical key', async () => {
@@ -185,7 +287,12 @@ describe('workflow awakeable surface', () => {
   it('ctx.awakeable rejects on the matching canonical rejection envelope', async () => {
     appendMock.mockResolvedValue()
     const unsubscribe = vi.fn()
-    streamMock.mockResolvedValue({
+    streamMock.mockResolvedValueOnce({
+      async json() {
+        return []
+      },
+    })
+    streamMock.mockResolvedValueOnce({
       subscribeJson(
         subscriber: (
           batch: JsonBatch<{
@@ -288,20 +395,29 @@ describe('workflow awakeable surface', () => {
         }>,
       ) => void
     > = []
-    streamMock.mockResolvedValue({
-      subscribeJson(
-        subscriber: (
-          batch: JsonBatch<{
-            readonly type: string
-            readonly key: string
-            readonly value?: Record<string, unknown>
-          }>,
-        ) => void,
-      ) {
-        subscribers.push(subscriber)
-        return vi.fn()
-      },
-    })
+    streamMock.mockImplementation(
+      async (options?: { readonly live?: boolean }) =>
+        options?.live
+          ? {
+              subscribeJson(
+                subscriber: (
+                  batch: JsonBatch<{
+                    readonly type: string
+                    readonly key: string
+                    readonly value?: Record<string, unknown>
+                  }>,
+                ) => void,
+              ) {
+                subscribers.push(subscriber)
+                return vi.fn()
+              },
+            }
+          : {
+              async json() {
+                return []
+              },
+            },
+    )
 
     const ctx = workflowContext({
       stateStreamUrl: 'http://127.0.0.1:7474/v1/stream/state',
@@ -319,9 +435,9 @@ describe('workflow awakeable surface', () => {
       }),
     )
 
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(subscribers).toHaveLength(2)
+    await vi.waitFor(() => {
+      expect(subscribers).toHaveLength(2)
+    })
 
     const raced = raceAwakeables([first, second])
 
@@ -387,11 +503,20 @@ describe('workflow awakeable surface', () => {
 
   it('awakeable.withTimeout stays signature-only until DS Phase 6 lands', async () => {
     appendMock.mockResolvedValue()
-    streamMock.mockResolvedValue({
-      subscribeJson() {
-        return vi.fn()
-      },
-    })
+    streamMock.mockImplementation(
+      async (options?: { readonly live?: boolean }) =>
+        options?.live
+          ? {
+              subscribeJson() {
+                return vi.fn()
+              },
+            }
+          : {
+              async json() {
+                return []
+              },
+            },
+    )
 
     const ctx = workflowContext({
       stateStreamUrl: 'http://127.0.0.1:7474/v1/stream/state',

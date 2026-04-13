@@ -62,6 +62,11 @@ jobs:
           else
             echo "run_acp_test=false" >> "${GITHUB_OUTPUT}"
           fi
+          if printf '%s\n' "${changed_files}" | grep -Eq '^packages/client/src/workflow/|^packages/client/test/workflow-awakeable.integration.test.ts$'; then
+            echo "run_workflow_replay_integration=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "run_workflow_replay_integration=false" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Build @fireline/state
         run: pnpm --filter @fireline/state build
@@ -81,3 +86,7 @@ jobs:
       - name: Test @fireline/client ACP integration when touched
         if: steps.targets.outputs.run_acp_test == 'true'
         run: pnpm --filter @fireline/client test -- acp.test.ts
+
+      - name: Test @fireline/client workflow replay integration when touched
+        if: steps.targets.outputs.run_workflow_replay_integration == 'true'
+        run: pnpm --filter @fireline/client test -- workflow-awakeable.integration.test.ts

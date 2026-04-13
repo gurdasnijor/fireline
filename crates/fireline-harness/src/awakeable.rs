@@ -4,6 +4,7 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
+use durable_streams::Client as DurableStreamsClient;
 use fireline_acp_ids::{RequestId, SessionId, ToolCallId};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
@@ -248,6 +249,23 @@ impl AwakeableSubscriber {
     {
         Self::completion_record_for_key(key, log).map(|resolved| resolved.value)
     }
+
+    #[must_use]
+    pub fn has_completion_for_key(key: &AwakeableKey, log: &[StreamEnvelope]) -> bool {
+        log.iter().any(|envelope| {
+            (envelope.kind() == Some(AWAKEABLE_RESOLVED_KIND)
+                || envelope.kind() == Some(AWAKEABLE_REJECTED_KIND))
+                && envelope.completion_key().as_ref() == Some(key)
+        })
+    }
+
+    #[must_use]
+    pub fn has_waiting_for_key(key: &AwakeableKey, log: &[StreamEnvelope]) -> bool {
+        log.iter().any(|envelope| {
+            envelope.kind() == Some(AWAKEABLE_WAITING_KIND)
+                && envelope.completion_key().as_ref() == Some(key)
+        })
+    }
 }
 
 impl DurableSubscriber for AwakeableSubscriber {
@@ -297,6 +315,32 @@ where
         let key_for_wait = key.clone();
         let inner = match awakeable_waiting_envelope(key.clone()) {
             Ok(wait_event) => Box::pin(async move {
+                let replay_log = subscriber_driver
+                    .replay_log(&state_stream_url)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "replay awakeable state for '{}'",
+                            key_for_wait.storage_key()
+                        )
+                    })?;
+                if AwakeableSubscriber::has_completion_for_key(&key_for_wait, &replay_log) {
+                    return AwakeableSubscriber::completion_record_for_key::<T>(
+                        &key_for_wait,
+                        &replay_log,
+                    );
+                }
+                if !AwakeableSubscriber::has_waiting_for_key(&key_for_wait, &replay_log) {
+                    append_waiting_event(&state_stream_url, &wait_event)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "append initial awakeable wait declaration for '{}'",
+                                key_for_wait.storage_key()
+                            )
+                        })?;
+                }
+
                 let log = subscriber_driver
                     .wait_for_passive_completion(
                         AwakeableSubscriber::NAME,
@@ -432,6 +476,22 @@ fn completion_key_from_parts(
 
 fn insert_headers() -> Map<String, Value> {
     Map::from_iter([("operation".to_string(), Value::String("insert".to_string()))])
+}
+
+async fn append_waiting_event(state_stream_url: &str, wait_event: &StreamEnvelope) -> Result<()> {
+    let client = DurableStreamsClient::new();
+    let mut stream = client.stream(state_stream_url);
+    stream.set_content_type("application/json");
+    let producer = stream
+        .producer(format!("awakeable-wait-{}", now_ms()))
+        .content_type("application/json")
+        .build();
+    producer.append_json(wait_event);
+    producer
+        .flush()
+        .await
+        .with_context(|| format!("flush awakeable wait declaration to '{state_stream_url}'"))?;
+    Ok(())
 }
 
 fn now_ms() -> i64 {

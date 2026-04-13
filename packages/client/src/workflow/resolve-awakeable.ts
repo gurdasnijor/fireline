@@ -10,6 +10,40 @@ type StreamEnvelope = {
   readonly value?: Record<string, unknown>
 }
 
+class ResolveGuard {
+  private locked = false
+  private readonly waiters: Array<() => void> = []
+
+  async acquire(): Promise<void> {
+    if (!this.locked) {
+      this.locked = true
+      return
+    }
+
+    await new Promise<void>((resolve) => {
+      this.waiters.push(resolve)
+    })
+  }
+
+  release(): void {
+    const next = this.waiters.shift()
+    if (next) {
+      next()
+      return
+    }
+
+    this.locked = false
+  }
+
+  isIdle(): boolean {
+    return !this.locked && this.waiters.length === 0
+  }
+}
+
+// Process-local coordination only; the durable stream remains the source of
+// truth via `hasTerminalCompletion(...)`.
+const resolveGuards = new Map<string, ResolveGuard>()
+
 /**
  * Error returned when an awakeable completion already exists on the durable
  * stream for the same canonical completion key.
@@ -72,18 +106,20 @@ export interface RejectAwakeableOptions<E> {
 export async function resolveAwakeable<T>(
   options: ResolveAwakeableOptions<T>,
 ): Promise<void> {
-  if (await hasTerminalCompletion(options.streamUrl, options.key, options.headers)) {
-    throw new AwakeableAlreadyResolvedError(options.key)
-  }
+  await withResolveGuard(options.streamUrl, options.key, async () => {
+    if (await hasTerminalCompletion(options.streamUrl, options.key, options.headers)) {
+      throw new AwakeableAlreadyResolvedError(options.key)
+    }
 
-  const handle = new DurableStream({
-    url: options.streamUrl,
-    headers: options.headers,
-    contentType: 'application/json',
-  })
+    const handle = new DurableStream({
+      url: options.streamUrl,
+      headers: options.headers,
+      contentType: 'application/json',
+    })
 
-  await handle.append(JSON.stringify(awakeableResolutionEnvelope(options)), {
-    contentType: 'application/json',
+    await handle.append(JSON.stringify(awakeableResolutionEnvelope(options)), {
+      contentType: 'application/json',
+    })
   })
 }
 
@@ -101,18 +137,20 @@ export async function resolveAwakeable<T>(
 export async function rejectAwakeable<E>(
   options: RejectAwakeableOptions<E>,
 ): Promise<void> {
-  if (await hasTerminalCompletion(options.streamUrl, options.key, options.headers)) {
-    throw new AwakeableAlreadyResolvedError(options.key)
-  }
+  await withResolveGuard(options.streamUrl, options.key, async () => {
+    if (await hasTerminalCompletion(options.streamUrl, options.key, options.headers)) {
+      throw new AwakeableAlreadyResolvedError(options.key)
+    }
 
-  const handle = new DurableStream({
-    url: options.streamUrl,
-    headers: options.headers,
-    contentType: 'application/json',
-  })
+    const handle = new DurableStream({
+      url: options.streamUrl,
+      headers: options.headers,
+      contentType: 'application/json',
+    })
 
-  await handle.append(JSON.stringify(awakeableRejectionEnvelope(options)), {
-    contentType: 'application/json',
+    await handle.append(JSON.stringify(awakeableRejectionEnvelope(options)), {
+      contentType: 'application/json',
+    })
   })
 }
 
@@ -224,4 +262,27 @@ function traceContextMeta(
   ) as Record<string, string>
 
   return Object.keys(meta).length > 0 ? meta : undefined
+}
+
+async function withResolveGuard<T>(
+  streamUrl: string,
+  key: CompletionKey,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const guardKey = `${streamUrl}::${completionKeyStorageKey(key)}`
+  let guard = resolveGuards.get(guardKey)
+  if (!guard) {
+    guard = new ResolveGuard()
+    resolveGuards.set(guardKey, guard)
+  }
+
+  await guard.acquire()
+  try {
+    return await operation()
+  } finally {
+    guard.release()
+    if (guard.isIdle()) {
+      resolveGuards.delete(guardKey)
+    }
+  }
 }

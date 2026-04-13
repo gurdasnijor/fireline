@@ -110,15 +110,31 @@ async function waitForAwakeableResolution<T>(options: {
   readonly headers?: Readonly<Record<string, string>>
   readonly key: CompletionKey
 }): Promise<AwakeableResolution<T>> {
+  const snapshot = await readSnapshot(options.stateStreamUrl, options.headers)
+  const terminal = findTerminalEnvelope(snapshot, options.key)
+  if (terminal?.value?.kind === 'awakeable_resolved') {
+    return {
+      key: options.key,
+      value: terminal.value.value as T,
+      traceContext: extractTraceContext(terminal),
+    }
+  }
+  if (terminal?.value?.kind === 'awakeable_rejected') {
+    throw new Error(
+      `awakeable '${completionKeyStorageKey(options.key)}' rejected: ${JSON.stringify(terminal.value.error)}`,
+    )
+  }
   const handle = new DurableStream({
     url: options.stateStreamUrl,
     headers: options.headers,
     contentType: 'application/json',
   })
 
-  await handle.append(JSON.stringify(awakeableWaitingEnvelope(options.key)), {
-    contentType: 'application/json',
-  })
+  if (!snapshot.some((row) => matchesWaitingEnvelope(row, options.key))) {
+    await handle.append(JSON.stringify(awakeableWaitingEnvelope(options.key)), {
+      contentType: 'application/json',
+    })
+  }
 
   const response = await stream<StreamEnvelope>({
     url: options.stateStreamUrl,
@@ -184,6 +200,20 @@ async function waitForAwakeableResolution<T>(options: {
   })
 }
 
+async function readSnapshot(
+  stateStreamUrl: string,
+  headers?: Readonly<Record<string, string>>,
+): Promise<StreamEnvelope[]> {
+  const response = await stream<StreamEnvelope>({
+    url: stateStreamUrl,
+    headers,
+    json: true,
+    live: false,
+    offset: '-1',
+  })
+  return await response.json()
+}
+
 function awakeableWaitingEnvelope(key: CompletionKey): StreamEnvelope {
   const baseValue: Record<string, unknown> = {
     kind: 'awakeable_waiting',
@@ -224,6 +254,26 @@ function matchesRejectedEnvelope(
     row.type === 'awakeable' &&
     row.value?.kind === 'awakeable_rejected' &&
     row.key === `${completionKeyStorageKey(key)}:rejected`
+  )
+}
+
+function matchesWaitingEnvelope(
+  row: StreamEnvelope,
+  key: CompletionKey,
+): boolean {
+  return (
+    row.type === 'awakeable' &&
+    row.value?.kind === 'awakeable_waiting' &&
+    row.key === `${completionKeyStorageKey(key)}:waiting`
+  )
+}
+
+function findTerminalEnvelope(
+  rows: readonly StreamEnvelope[],
+  key: CompletionKey,
+): StreamEnvelope | undefined {
+  return rows.find(
+    (row) => matchesResolvedEnvelope(row, key) || matchesRejectedEnvelope(row, key),
   )
 }
 
