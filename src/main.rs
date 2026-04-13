@@ -84,6 +84,10 @@ struct Cli {
     #[arg(long)]
     control_plane: bool,
 
+    /// Run ACP over process stdio instead of the hosted WebSocket route.
+    #[arg(long, hide = true)]
+    acp_stdio: bool,
+
     /// Base URL for the external durable-streams service, e.g. `http://127.0.0.1:8787/v1/stream`.
     #[arg(long)]
     durable_streams_url: Option<String>,
@@ -186,6 +190,9 @@ async fn main() -> Result<()> {
         None => Vec::new(),
     };
     if cli.control_plane {
+        if cli.acp_stdio {
+            anyhow::bail!("--acp-stdio cannot be combined with --control-plane");
+        }
         if cli.host_key.is_some() || cli.node_id.is_some() {
             anyhow::bail!("--control-plane cannot be combined with --runtime-key/--node-id");
         }
@@ -207,6 +214,13 @@ async fn main() -> Result<()> {
         .context("--durable-streams-url is required unless --control-plane is set")?;
     let managed_host_key = cli.host_key.clone();
     let managed_node_id = cli.node_id.clone();
+
+    if cli.acp_stdio {
+        if managed_host_key.is_some() || managed_node_id.is_some() {
+            anyhow::bail!("--acp-stdio does not support --runtime-key/--node-id");
+        }
+        return run_stdio_host(cli, host, topology, mounted_resources, durable_streams_url).await;
+    }
 
     match (managed_host_key, managed_node_id) {
         (Some(host_key), Some(node_id)) => {
@@ -365,6 +379,33 @@ async fn run_direct_host(
     log_runtime_started(&descriptor);
     tokio::signal::ctrl_c().await.ok();
     handle.shutdown().await
+}
+
+async fn run_stdio_host(
+    cli: Cli,
+    host: IpAddr,
+    topology: TopologySpec,
+    mounted_resources: Vec<MountedResource>,
+    durable_streams_url: String,
+) -> Result<()> {
+    let host_key = format!("runtime:{}", Uuid::new_v4());
+    let node_id = default_node_id(host);
+    let peer_directory_path = cli.peer_directory_path.unwrap_or_default();
+    bootstrap::run_stdio(BootstrapConfig {
+        host,
+        port: cli.port,
+        name: cli.name,
+        host_key,
+        node_id,
+        agent_command: cli.agent_command,
+        mounted_resources,
+        state_stream: cli.state_stream,
+        durable_streams_url,
+        peer_directory_path,
+        control_plane_url: None,
+        topology,
+    })
+    .await
 }
 
 async fn run_managed_runtime(

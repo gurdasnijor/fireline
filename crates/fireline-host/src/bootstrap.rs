@@ -78,6 +78,21 @@ pub struct BootstrapHandle {
     server_task: JoinHandle<Result<()>>,
 }
 
+struct PreparedRuntime {
+    host_id: String,
+    state_stream: String,
+    state_stream_url: String,
+    host_key: String,
+    host_name: String,
+    node_id: String,
+    host_created_at: i64,
+    state_producer: Producer,
+    deployment_producer: Producer,
+    state_materializer_task: StateMaterializerTask,
+    shared_terminal: SharedTerminal,
+    app_state: AcpRouteState,
+}
+
 impl BootstrapHandle {
     pub async fn shutdown(mut self) -> Result<()> {
         self.deployment_heartbeat_task.abort();
@@ -130,14 +145,6 @@ impl BootstrapHandle {
 }
 
 pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
-    let host_uuid = Uuid::new_v4();
-    let host_key = config.host_key;
-    let host_id = format!("fireline:{}:{host_uuid}", config.name);
-    let host_created_at = chrono_like_now_ms();
-    let state_stream = config
-        .state_stream
-        .unwrap_or_else(|| format!("fireline-state-{host_uuid}"));
-
     let listener = TcpListener::bind(SocketAddr::new(config.host, config.port)).await?;
     let local_addr = listener
         .local_addr()
@@ -145,10 +152,111 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     let connect_host_name = connect_host(local_addr.ip());
     let health_url = format!("http://{connect_host_name}:{}/healthz", local_addr.port());
     let acp_url = format!("ws://{connect_host_name}:{}/acp", local_addr.port());
+    let prepared = prepare_runtime(config, local_addr.port()).await?;
+
+    let app =
+        Router::new()
+            .route("/healthz", get(healthz))
+            .merge(fireline_harness::routes_acp::router(
+                prepared.app_state.clone(),
+            ));
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .map_err(anyhow::Error::from)
+    });
+    emit_deployment_event(
+        &prepared.deployment_producer,
+        &DeploymentDiscoveryEvent::HostRegistered {
+            host_id: prepared.host_id.clone(),
+            acp_url: acp_url.clone(),
+            state_stream_url: prepared.state_stream_url.clone(),
+            capabilities: host_capabilities(),
+            registered_at_ms: prepared.host_created_at,
+            node_info: host_node_info(&prepared.node_id),
+        },
+    )
+    .await
+    .context("flush host_registered from bootstrap")?;
+    emit_deployment_event(
+        &prepared.deployment_producer,
+        &DeploymentDiscoveryEvent::HostProvisioned {
+            host_id: prepared.host_id.clone(),
+            host_key: prepared.host_key.clone(),
+            acp_url: acp_url.clone(),
+            agent_name: prepared.host_name.clone(),
+            provisioned_at_ms: prepared.host_created_at,
+        },
+    )
+    .await
+    .context("flush host_provisioned from bootstrap")?;
+    let deployment_heartbeat_task = tokio::spawn(run_host_heartbeat_loop(
+        prepared.deployment_producer.clone(),
+        prepared.host_id.clone(),
+    ));
+
+    Ok(BootstrapHandle {
+        host_id: prepared.host_id,
+        state_stream: prepared.state_stream,
+        health_url,
+        acp_url,
+        state_stream_url: prepared.state_stream_url,
+        host_key: prepared.host_key,
+        host_name: prepared.host_name,
+        host_created_at: prepared.host_created_at,
+        state_producer: prepared.state_producer,
+        deployment_producer: prepared.deployment_producer,
+        state_materializer_task: prepared.state_materializer_task,
+        deployment_heartbeat_task,
+        shared_terminal: prepared.shared_terminal,
+        shutdown_tx: Some(shutdown_tx),
+        server_task,
+    })
+}
+
+pub async fn run_stdio(config: BootstrapConfig) -> Result<()> {
+    let prepared = prepare_runtime(config, 0).await?;
+    let result = fireline_harness::routes_acp::serve_stdio(prepared.app_state.clone()).await;
+
+    prepared.state_materializer_task.abort();
+    let stop_result = emit_host_instance_stopped(
+        &prepared.state_producer,
+        &prepared.host_id,
+        &prepared.host_name,
+        prepared.host_created_at,
+    )
+    .await
+    .context("flush host_instance_stopped from stdio bootstrap");
+    let terminal_result = prepared.shared_terminal.shutdown().await;
+
+    result?;
+    stop_result?;
+    terminal_result?;
+    Ok(())
+}
+
+async fn healthz() -> &'static str {
+    "ok"
+}
+
+async fn prepare_runtime(config: BootstrapConfig, bound_port: u16) -> Result<PreparedRuntime> {
+    let host_uuid = Uuid::new_v4();
+    let host_key = config.host_key;
+    let host_id = format!("fireline:{}:{host_uuid}", config.name);
+    let host_created_at = chrono_like_now_ms();
+    let state_stream = config
+        .state_stream
+        .unwrap_or_else(|| format!("fireline-state-{host_uuid}"));
     let stream_base_url = config.durable_streams_url.trim_end_matches('/').to_string();
     let state_stream_url = format!("{stream_base_url}/{state_stream}");
     let host_stream_url = deployment_stream_url(&stream_base_url, DEFAULT_TENANT_ID);
     let host_name = config.name.clone();
+    let node_id = config.node_id;
 
     let stream_client = DurableStreamsClient::new();
     let mut state_stream_handle = stream_client.stream(&state_stream_url);
@@ -163,14 +271,10 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         .producer(format!("deployment-discovery-{host_uuid}"))
         .content_type("application/json")
         .build();
-    let node_id = config.node_id;
+
     let session_index = SessionIndex::new();
-    let state_materializer = StateMaterializer::new(vec![std::sync::Arc::new(
-        session_index.clone(),
-    )]);
-    // Keep a clone of the agent command around so we can thread it into
-    // the `host_spec` envelope further down — SharedTerminal::spawn
-    // consumes the original.
+    let state_materializer =
+        StateMaterializer::new(vec![std::sync::Arc::new(session_index.clone())]);
     let agent_command_for_spec = config.agent_command.clone();
     let shared_terminal = SharedTerminal::spawn(config.agent_command).await?;
     ensure_named_streams(&stream_base_url, &audit_stream_names(&config.topology)?).await?;
@@ -209,25 +313,6 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
         }),
     };
 
-    let app = Router::new()
-        .route("/healthz", get(healthz))
-        .merge(fireline_harness::routes_acp::router(app_state));
-
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let server_task = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                let _ = shutdown_rx.await;
-            })
-            .await
-            .map_err(anyhow::Error::from)
-    });
-
-    // Emit stream events BEFORE the materializer preloads, so
-    // the stream has content when the materializer subscribes.
-    // Without this ordering, preload connects to an empty stream,
-    // the worker finds nothing to replay, and exits — causing
-    // "state materializer worker exited before preload completed."
     let persisted_spec = PersistedHostSpec::new(
         host_key.clone(),
         node_id.clone(),
@@ -236,7 +321,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
             node_id: Some(node_id.clone()),
             provider: SandboxProviderRequest::Local,
             host: config.host,
-            port: local_addr.port(),
+            port: bound_port,
             name: host_name.clone(),
             agent_command: agent_command_for_spec,
             durable_streams_url: stream_base_url.clone(),
@@ -249,7 +334,7 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
     );
     emit_host_spec_persisted(&state_stream_url, &persisted_spec)
         .await
-        .context("emit host_spec_persisted from direct-host bootstrap")?;
+        .context("emit host_spec_persisted from bootstrap")?;
 
     emit_host_instance_started(&state_producer, &host_id, &host_name, host_created_at)
         .await
@@ -257,57 +342,21 @@ pub async fn start(config: BootstrapConfig) -> Result<BootstrapHandle> {
 
     let state_materializer_task = state_materializer.connect(state_stream_url.clone());
     state_materializer_task.preload().await?;
-    emit_deployment_event(
-        &deployment_producer,
-        &DeploymentDiscoveryEvent::HostRegistered {
-            host_id: host_id.clone(),
-            acp_url: acp_url.clone(),
-            state_stream_url: state_stream_url.clone(),
-            capabilities: host_capabilities(),
-            registered_at_ms: host_created_at,
-            node_info: host_node_info(&node_id),
-        },
-    )
-    .await
-    .context("flush host_registered from bootstrap")?;
-    emit_deployment_event(
-        &deployment_producer,
-        &DeploymentDiscoveryEvent::HostProvisioned {
-            host_id: host_id.clone(),
-            host_key: host_key.clone(),
-            acp_url: acp_url.clone(),
-            agent_name: host_name.clone(),
-            provisioned_at_ms: host_created_at,
-        },
-    )
-    .await
-    .context("flush host_provisioned from bootstrap")?;
-    let deployment_heartbeat_task = tokio::spawn(run_host_heartbeat_loop(
-        deployment_producer.clone(),
-        host_id.clone(),
-    ));
 
-    Ok(BootstrapHandle {
+    Ok(PreparedRuntime {
         host_id,
         state_stream,
-        health_url,
-        acp_url,
         state_stream_url,
         host_key,
         host_name,
+        node_id,
         host_created_at,
         state_producer,
         deployment_producer,
         state_materializer_task,
-        deployment_heartbeat_task,
         shared_terminal,
-        shutdown_tx: Some(shutdown_tx),
-        server_task,
+        app_state,
     })
-}
-
-async fn healthz() -> &'static str {
-    "ok"
 }
 
 fn connect_host(ip: IpAddr) -> String {

@@ -9,6 +9,7 @@
 //! conductor — it's the explicit "developer wires HTTP into the substrate"
 //! point that the rivet HTTP server pattern advocates.
 
+use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -59,49 +60,70 @@ pub fn router(state: AcpRouteState) -> Router {
         .with_state(state)
 }
 
+#[derive(Debug)]
+pub enum WireConductorError {
+    Attach(AttachError),
+    Topology(anyhow::Error),
+}
+
+impl fmt::Display for WireConductorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Attach(AttachError::Busy) => f.write_str("runtime busy"),
+            Self::Attach(AttachError::Closed) => f.write_str("runtime closed"),
+            Self::Topology(error) => write!(f, "failed to build host topology components: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for WireConductorError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Attach(error) => Some(error),
+            Self::Topology(error) => Some(error.root_cause()),
+        }
+    }
+}
+
+pub async fn wire_conductor(
+    app: &AcpRouteState,
+    connection_id: String,
+) -> Result<ConductorImpl<Agent>, WireConductorError> {
+    let terminal_attachment = attach_terminal_with_grace_period(&app.shared_terminal)
+        .await
+        .map_err(WireConductorError::Attach)?;
+    wire_conductor_with_terminal_attachment(app, connection_id, terminal_attachment)
+}
+
+pub async fn serve_stdio(app: AcpRouteState) -> anyhow::Result<()> {
+    let connection_id = format!("stdio:{}", Uuid::new_v4());
+    let conductor = wire_conductor(&app, connection_id)
+        .await
+        .map_err(anyhow::Error::new)?;
+    sacp::ConnectTo::<Agent>::connect_to(sacp_tokio::Stdio::new(), conductor).await?;
+    Ok(())
+}
+
 async fn acp_websocket_handler(
     State(app): State<AcpRouteState>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    let terminal_attachment = match attach_terminal_with_grace_period(&app.shared_terminal).await {
-        Ok(attachment) => attachment,
-        Err(AttachError::Busy) => {
+    let connection_id = format!("conn:{}", Uuid::new_v4());
+    let conductor = match wire_conductor(&app, connection_id).await {
+        Ok(conductor) => conductor,
+        Err(WireConductorError::Attach(AttachError::Busy)) => {
             return (StatusCode::CONFLICT, "runtime_busy").into_response();
         }
-        Err(AttachError::Closed) => {
+        Err(WireConductorError::Attach(AttachError::Closed)) => {
             return (StatusCode::SERVICE_UNAVAILABLE, "runtime_closed").into_response();
+        }
+        Err(WireConductorError::Topology(error)) => {
+            tracing::warn!(error = %error, "failed to build host topology components");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
 
     ws.on_upgrade(move |socket| async move {
-        let connection_id = format!("conn:{}", Uuid::new_v4());
-        let mut components = (app.base_components_factory)();
-        let resolved_topology = match app.topology_registry.build(&app.topology) {
-            Ok(resolved_topology) => resolved_topology,
-            Err(error) => {
-                tracing::warn!(error = %error, "failed to build host topology components");
-                return;
-            }
-        };
-        components.extend(resolved_topology.proxy_components);
-
-        let mut trace_writers = Vec::with_capacity(1 + resolved_topology.trace_writers.len());
-        trace_writers.push(Box::new(AgentPlaneTracer::new()) as BoxedTraceWriter);
-        trace_writers.push(Box::new(DurableStreamTracer::new_with_host_context(
-            app.state_producer.clone(),
-            app.host_key.clone(),
-            app.host_id.clone(),
-            app.node_id.clone(),
-            connection_id,
-        )) as BoxedTraceWriter);
-        trace_writers.extend(resolved_topology.trace_writers);
-        let conductor = build_conductor_with_terminal(
-            app.conductor_name.clone(),
-            components,
-            DynConnectTo::<Client>::new(terminal_attachment),
-            CompositeTraceWriter::new(trace_writers),
-        );
-
         if let Err(error) = handle_upgrade(conductor, socket).await {
             tracing::warn!(error = %error, "ACP session ended");
         }
@@ -154,6 +176,37 @@ fn build_conductor_with_terminal(
         McpBridgeMode::default(),
     )
     .trace_to(trace_writer)
+}
+
+fn wire_conductor_with_terminal_attachment(
+    app: &AcpRouteState,
+    connection_id: String,
+    terminal_attachment: SharedTerminalAttachment,
+) -> Result<ConductorImpl<Agent>, WireConductorError> {
+    let mut components = (app.base_components_factory)();
+    let resolved_topology = app
+        .topology_registry
+        .build(&app.topology)
+        .map_err(WireConductorError::Topology)?;
+    components.extend(resolved_topology.proxy_components);
+
+    let mut trace_writers = Vec::with_capacity(1 + resolved_topology.trace_writers.len());
+    trace_writers.push(Box::new(AgentPlaneTracer::new()) as BoxedTraceWriter);
+    trace_writers.push(Box::new(DurableStreamTracer::new_with_host_context(
+        app.state_producer.clone(),
+        app.host_key.clone(),
+        app.host_id.clone(),
+        app.node_id.clone(),
+        connection_id,
+    )) as BoxedTraceWriter);
+    trace_writers.extend(resolved_topology.trace_writers);
+
+    Ok(build_conductor_with_terminal(
+        app.conductor_name.clone(),
+        components,
+        DynConnectTo::<Client>::new(terminal_attachment),
+        CompositeTraceWriter::new(trace_writers),
+    ))
 }
 
 async fn handle_upgrade(conductor: ConductorImpl<Agent>, socket: WebSocket) -> anyhow::Result<()> {
