@@ -230,8 +230,13 @@ Flags:
 Notes:
 
 - `build` shells out to `docker build`
+- hosted deploy scaffolds now build the quickstart image so the generated manifests
+  have bundled durable-streams boot behavior instead of a host-only container
 - scaffold target names are build-time names; for Cloudflare deploys,
   the deploy verb uses `cloudflare-containers`
+- the Cloudflare scaffold writes `wrangler.toml` and, when no remote deploy image
+  is configured, a `Dockerfile.fireline` wrapper so `wrangler deploy` can publish
+  the built image
 
 ## `fireline deploy`
 
@@ -260,12 +265,12 @@ Flags:
 
 Current native CLI mapping:
 
-| `--to` value | Native command |
+| `--to` value | Native command | Wrapper behavior |
 | --- | --- |
-| `fly` | `flyctl deploy` |
-| `cloudflare-containers` | `wrangler deploy` |
-| `docker-compose` | `docker compose up -d` |
-| `k8s` | `kubectl apply -f <generated>` |
+| `fly` | `flyctl deploy` | `flyctl auth docker`, `docker tag`, `docker push`, then `flyctl deploy --image <registry.fly.io/...>` |
+| `cloudflare-containers` | `wrangler deploy` | writes `wrangler.toml` plus `Dockerfile.fireline` when needed so Wrangler can publish the built image |
+| `docker-compose` | `docker compose up -d` | writes a durable single-service quickstart manifest with `/var/lib/fireline` volume + healthcheck |
+| `k8s` | `kubectl apply -f <generated>` | requires a pullable image ref, writes PVC-backed quickstart manifest, then `docker push` + `kubectl apply` |
 
 Example:
 
@@ -343,6 +348,13 @@ the registry install surface.
 | `FLY_API_TOKEN` | Fly deploy auth token |
 | `CLOUDFLARE_API_TOKEN` | Cloudflare Containers deploy auth token |
 | `FIRELINE_TOKEN` | Generic deploy auth fallback when no target-specific env is present |
+| `FIRELINE_DEPLOY_IMAGE` | Fully qualified image ref to tag/push before `deploy` |
+| `FIRELINE_DEPLOY_REGISTRY` | Registry prefix used to synthesize `fireline-<app>:latest` deploy refs |
+| `FIRELINE_FLY_PRIMARY_REGION` | Override the generated Fly `primary_region` |
+| `FIRELINE_FLY_VOLUME` | Add a Fly mount at `/var/lib/fireline` in the scaffolded `fly.toml` |
+| `FIRELINE_K8S_IMAGE_PULL_SECRET` | Add `imagePullSecrets` to the scaffolded Kubernetes Deployment |
+| `FIRELINE_K8S_STORAGE_CLASS` | Set the scaffolded Kubernetes PVC `storageClassName` |
+| `FIRELINE_K8S_STORAGE_SIZE` | Override the scaffolded Kubernetes PVC size (default `5Gi`) |
 
 ## Binary Resolution
 
