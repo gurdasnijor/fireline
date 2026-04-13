@@ -15,15 +15,23 @@ import type {
 function makeState(overrides: Partial<ReplViewState> = {}): ReplViewState {
   return {
     acpUrl: 'ws://127.0.0.1:4440/acp',
+    adminBusy: false,
+    adminMessage: null,
     busy: false,
+    db: null,
     entries: [],
     pendingApproval: null,
     pendingTools: 0,
     resolvingApproval: false,
     runtimeId: 'runtime:demo-runtime',
+    runtimeStatus: 'ready',
+    selectedSessionId: 'session-123',
     serverUrl: 'http://127.0.0.1:4440',
     sessionId: 'session-123',
+    sessionTabs: [],
     stateStreamUrl: 'http://127.0.0.1:7474/v1/stream/demo-stream',
+    supportsRuntimeRestart: false,
+    supportsSessionAttach: false,
     usage: null,
     ...overrides,
   }

@@ -57,7 +57,7 @@ test('repl controller submits prompts and renders streamed output', async () => 
   assert.match(output, /Ping the host/)
   assert.match(output, /assistant/i)
   assert.match(output, /Hello back from Fireline\./)
-  assert.match(output, /attached:session-123/)
+  assert.match(output, /session:session-123/)
   assert.match(output, /runtime:46ae8df5/)
   assert.match(output, /acp:55371/)
 })
