@@ -416,6 +416,7 @@ async fn run_stdio_host(
         peer_directory_path,
         control_plane_url: None,
         topology,
+        translate_session_cwd_to_mounts: false,
     })
     .await
 }
