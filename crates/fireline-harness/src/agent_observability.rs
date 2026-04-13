@@ -3,6 +3,7 @@ use std::io;
 use std::sync::{LazyLock, Mutex};
 
 use fireline_acp_ids::{RequestId, SessionId, ToolCallId};
+use fireline_tools::peer::PromptTraceContext;
 use opentelemetry::trace::Status;
 use sacp::schema::SessionUpdate;
 use sacp_conductor::trace::{
@@ -15,6 +16,8 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 type PromptKey = String;
 
 static PROMPT_SPANS: LazyLock<Mutex<HashMap<PromptKey, Span>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static PROMPT_REQUEST_IDS: LazyLock<Mutex<HashMap<PromptKey, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static ACTIVE_PROMPTS_BY_SESSION: LazyLock<Mutex<HashMap<String, PromptKey>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -75,6 +78,7 @@ impl AgentPlaneTracer {
             else {
                 return;
             };
+            record_current_session_id(&session_id);
             let span = tracing::info_span!(
                 "fireline.session.created",
                 fireline.session_id = %session_id,
@@ -138,6 +142,7 @@ pub(crate) fn ensure_prompt_request_span(
     method: Option<&str>,
 ) -> PromptKey {
     let prompt_key = prompt_key(session_id, request_id);
+    record_current_session_id(session_id);
     let mut prompt_spans = PROMPT_SPANS.lock().expect("prompt span state poisoned");
     if !prompt_spans.contains_key(&prompt_key) {
         let span = match method {
@@ -157,6 +162,10 @@ pub(crate) fn ensure_prompt_request_span(
         };
         prompt_spans.insert(prompt_key.clone(), span);
     }
+    PROMPT_REQUEST_IDS
+        .lock()
+        .expect("prompt span state poisoned")
+        .insert(prompt_key.clone(), request_id_key(request_id));
     ACTIVE_PROMPTS_BY_SESSION
         .lock()
         .expect("prompt span state poisoned")
@@ -245,11 +254,31 @@ fn active_prompt_key_for_session(session_id: &str) -> Option<PromptKey> {
         .cloned()
 }
 
+pub(crate) fn active_prompt_trace_context_for_session(
+    session_id: &str,
+) -> Option<PromptTraceContext> {
+    let prompt_key = active_prompt_key_for_session(session_id)?;
+    let prompt_span = prompt_span(&prompt_key)?;
+    let request_id = PROMPT_REQUEST_IDS
+        .lock()
+        .expect("prompt span state poisoned")
+        .get(&prompt_key)
+        .cloned()?;
+    Some(PromptTraceContext {
+        prompt_span,
+        request_id,
+    })
+}
+
 fn finish_prompt_request_span(prompt_key: &str) {
     ACTIVE_PROMPTS_BY_SESSION
         .lock()
         .expect("prompt span state poisoned")
         .retain(|_, active_key| active_key != prompt_key);
+    PROMPT_REQUEST_IDS
+        .lock()
+        .expect("prompt span state poisoned")
+        .remove(prompt_key);
     APPROVAL_SPANS
         .lock()
         .expect("approval span state poisoned")
@@ -323,6 +352,10 @@ fn tool_span_key(prompt_key: &str, tool_call_id: &ToolCallId) -> String {
 
 fn prompt_key(session_id: &SessionId, request_id: &RequestId) -> PromptKey {
     format!("{}:{}", session_id, request_id_key(request_id))
+}
+
+fn record_current_session_id(session_id: &SessionId) {
+    Span::current().record("fireline.session_id", tracing::field::display(session_id));
 }
 
 fn request_id_from_json_value(value: &Value) -> Option<RequestId> {

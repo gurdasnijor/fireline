@@ -116,11 +116,7 @@ pub fn extract_remote_trace_context(line: &str) -> Option<OtelContext> {
     let extractor = JsonMetaExtractor(&meta);
     let context = TraceContextPropagator::new().extract(&extractor);
     let context = BaggagePropagator::new().extract_with_context(&context, &extractor);
-    context
-        .span()
-        .span_context()
-        .is_valid()
-        .then_some(context)
+    context.span().span_context().is_valid().then_some(context)
 }
 
 fn jsonrpc_meta(line: &str) -> Option<Map<String, Value>> {
@@ -282,4 +278,153 @@ fn initialize_request(
 
     init = init.meta(trace_context.into_meta());
     init
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use agent_client_protocol::{AgentCapabilities, InitializeResponse, ProtocolVersion};
+    use anyhow::Result;
+    use futures::{sink, stream};
+    use opentelemetry::trace::TraceContextExt as _;
+    use serde_json::json;
+    use tokio::sync::mpsc;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn dispatch_peer_call_injects_w3c_trace_context_into_initialize_meta() -> Result<()> {
+        let transport = CaptureInitializeTransport::default();
+        let capture = transport.capture.clone();
+
+        sacp::Client
+            .builder()
+            .name("peer-capture")
+            .connect_with(transport, async move |cx| {
+                cx.send_request(initialize_request(Some(TraceContextCarrier {
+                    traceparent: "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
+                        .to_string(),
+                    tracestate: Some("vendor=value".to_string()),
+                    baggage: Some("demo=true".to_string()),
+                })))
+                .block_task()
+                .await?;
+                Ok(())
+            })
+            .await?;
+
+        let line = capture
+            .lock()
+            .expect("capture state poisoned")
+            .clone()
+            .expect("capture initialize request");
+        let payload: Value = serde_json::from_str(&line)?;
+        let meta = payload
+            .get("params")
+            .and_then(|params| params.get("_meta"))
+            .and_then(Value::as_object)
+            .expect("initialize request _meta");
+
+        assert_eq!(
+            meta.get("traceparent").and_then(Value::as_str),
+            Some("00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01")
+        );
+        assert_eq!(
+            meta.get("tracestate").and_then(Value::as_str),
+            Some("vendor=value")
+        );
+        assert_eq!(
+            meta.get("baggage").and_then(Value::as_str),
+            Some("demo=true")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn extract_remote_trace_context_reads_root_meta_keys() {
+        let line = json!({
+            "jsonrpc": "2.0",
+            "id": "req-1",
+            "method": "initialize",
+            "params": {
+                "_meta": {
+                    "traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
+                    "tracestate": "vendor=value",
+                    "baggage": "demo=true"
+                }
+            }
+        })
+        .to_string();
+
+        let context = extract_remote_trace_context(&line).expect("extract trace context");
+        let span = context.span();
+        let span_context = span.span_context();
+
+        assert!(span_context.is_valid(), "trace context should be valid");
+        assert_eq!(
+            span_context.trace_id().to_string(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(span_context.span_id().to_string(), "bbbbbbbbbbbbbbbb");
+        assert!(
+            span_context.is_remote(),
+            "extracted context should be remote"
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct CaptureInitializeTransport {
+        capture: Arc<Mutex<Option<String>>>,
+    }
+
+    impl sacp::ConnectTo<sacp::Client> for CaptureInitializeTransport {
+        async fn connect_to(
+            self,
+            client: impl sacp::ConnectTo<sacp::Agent>,
+        ) -> Result<(), sacp::Error> {
+            let capture = self.capture.clone();
+            let (response_tx, response_rx) =
+                mpsc::unbounded_channel::<Result<String, std::io::Error>>();
+
+            let outgoing = sink::unfold(response_tx, move |response_tx, line: String| {
+                let capture = capture.clone();
+                async move {
+                    if capture.lock().expect("capture state poisoned").is_none() {
+                        *capture.lock().expect("capture state poisoned") = Some(line.clone());
+                        let request_id = serde_json::from_str::<Value>(&line)
+                            .ok()
+                            .and_then(|value| value.get("id").cloned())
+                            .ok_or_else(|| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "initialize request missing id",
+                                )
+                            })?;
+                        let response = json!({
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "result": InitializeResponse::new(ProtocolVersion::LATEST)
+                                .agent_capabilities(AgentCapabilities::new()),
+                        })
+                        .to_string();
+                        response_tx
+                            .send(Ok(response))
+                            .map_err(std::io::Error::other)?;
+                    }
+                    Ok::<_, std::io::Error>(response_tx)
+                }
+            });
+
+            let incoming = stream::unfold(response_rx, |mut response_rx| async move {
+                response_rx.recv().await.map(|line| (line, response_rx))
+            });
+
+            sacp::ConnectTo::<sacp::Client>::connect_to(
+                sacp::Lines::new(outgoing, incoming),
+                client,
+            )
+            .await
+        }
+    }
 }

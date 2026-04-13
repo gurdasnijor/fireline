@@ -10,7 +10,7 @@ use fireline_harness::TopologySpec;
 use fireline_host::bootstrap::{BootstrapConfig, start};
 use futures::{SinkExt, StreamExt};
 use opentelemetry::global;
-use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::trace::{SpanId, TracerProvider as _};
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
 use serde_json::Value;
@@ -127,7 +127,11 @@ fn telemetry_capture() -> &'static TelemetryCapture {
         let tracer = tracer_provider.tracer("fireline-mesh-baseline");
         global::set_tracer_provider(tracer_provider);
         tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer().with_test_writer().without_time())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_test_writer()
+                    .without_time(),
+            )
             .with(tracing_opentelemetry::layer().with_tracer(tracer))
             .try_init()
             .expect("initialize mesh baseline tracing");
@@ -275,8 +279,9 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
         body_b.contains("\"type\":\"prompt_request\""),
         "remote peer runtime should record the cross-runtime prompt as a prompt_request: {body_b}"
     );
-    let parent_prompt = find_prompt_request(&body_a, |text| text.contains("\"tool\":\"prompt_peer\""))
-        .expect("missing parent prompt_request in runtime A");
+    let parent_prompt =
+        find_prompt_request(&body_a, |text| text.contains("\"tool\":\"prompt_peer\""))
+            .expect("missing parent prompt_request in runtime A");
     let child_prompt = find_prompt_request(&body_b, |text| text.contains("hello across mesh"))
         .expect("missing child prompt_request in runtime B");
     assert_ne!(
@@ -365,8 +370,7 @@ async fn peer_trace_context_propagates_across_prompt_peer() -> Result<()> {
         let body_a = read_stream_body(&stream_a).await?;
         let body_b = read_stream_body(&stream_b).await?;
 
-        let parent =
-            find_prompt_request(&body_a, |text| text.contains("\"tool\":\"prompt_peer\""));
+        let parent = find_prompt_request(&body_a, |text| text.contains("\"tool\":\"prompt_peer\""));
         let child = find_prompt_request(&body_b, |text| text.contains("trace propagation"));
 
         if let (Some(parent), Some(child)) = (parent, child) {
@@ -381,27 +385,79 @@ async fn peer_trace_context_propagates_across_prompt_peer() -> Result<()> {
     };
 
     let spans = wait_for_spans(telemetry, Duration::from_secs(5), |spans| {
-        let outbound = find_named_span(spans, "fireline.peer_call.outbound");
-        let inbound = find_named_span(spans, "fireline.peer_call.inbound");
-        let child_prompt_span = spans.iter().find(|span| {
-            span.name == "fireline.session.prompt"
-                && span_attribute_eq(span, "session_id", &child_prompt.session_id)
+        let parent_prompt_span = spans.iter().find(|span| {
+            span.name == "fireline.prompt.request"
+                && span_attribute_eq(span, "fireline.session_id", &parent_prompt.session_id)
+                && span_attribute_eq(span, "fireline.request_id", &parent_prompt.request_id)
         });
-        outbound.is_some() && inbound.is_some() && child_prompt_span.is_some()
+        let outbound = find_named_span(spans, "fireline.peer.call.out");
+        let inbound = find_named_span(spans, "fireline.peer.call.in");
+        let child_prompt_span = spans.iter().find(|span| {
+            span.name == "fireline.prompt.request"
+                && span_attribute_eq(span, "fireline.session_id", &child_prompt.session_id)
+        });
+        parent_prompt_span.is_some()
+            && outbound.is_some()
+            && inbound.is_some()
+            && child_prompt_span.is_some()
     })
     .await?;
 
-    let outbound = find_named_span(&spans, "fireline.peer_call.outbound")
-        .expect("missing fireline.peer_call.outbound span");
-    let inbound = find_named_span(&spans, "fireline.peer_call.inbound")
-        .expect("missing fireline.peer_call.inbound span");
+    let parent_prompt_span = spans
+        .iter()
+        .find(|span| {
+            span.name == "fireline.prompt.request"
+                && span_attribute_eq(span, "fireline.session_id", &parent_prompt.session_id)
+                && span_attribute_eq(span, "fireline.request_id", &parent_prompt.request_id)
+        })
+        .expect("missing parent fireline.prompt.request span");
+    let outbound = find_named_span(&spans, "fireline.peer.call.out")
+        .expect("missing fireline.peer.call.out span");
+    let inbound = find_named_span(&spans, "fireline.peer.call.in")
+        .expect("missing fireline.peer.call.in span");
     let child_prompt_span = spans
         .iter()
         .find(|span| {
-            span.name == "fireline.session.prompt"
-                && span_attribute_eq(span, "session_id", &child_prompt.session_id)
+            span.name == "fireline.prompt.request"
+                && span_attribute_eq(span, "fireline.session_id", &child_prompt.session_id)
         })
-        .expect("missing child fireline.session.prompt span");
+        .expect("missing child fireline.prompt.request span");
+
+    assert!(
+        span_attribute_eq(outbound, "fireline.session_id", &parent_prompt.session_id),
+        "peer outbound span should carry the caller session id"
+    );
+    assert!(
+        span_attribute_eq(outbound, "fireline.request_id", &parent_prompt.request_id),
+        "peer outbound span should carry the caller request id"
+    );
+    assert!(
+        span_attribute_eq(outbound, "rpc.system", "jsonrpc")
+            && span_attribute_eq(outbound, "rpc.method", "initialize"),
+        "peer outbound span should describe the outbound ACP initialize request"
+    );
+    assert_eq!(
+        outbound.parent_span_id,
+        parent_prompt_span.span_context.span_id(),
+        "peer outbound span should hang off the caller prompt.request span"
+    );
+    assert!(
+        span_attribute_eq(inbound, "fireline.session_id", &child_prompt.session_id),
+        "peer inbound span should record the callee session id"
+    );
+    assert!(
+        span_attribute_eq(inbound, "rpc.system", "jsonrpc")
+            && span_attribute_eq(inbound, "rpc.method", "initialize"),
+        "peer inbound span should describe the inbound ACP initialize request"
+    );
+    assert!(
+        span_attribute_eq(
+            child_prompt_span,
+            "fireline.request_id",
+            &child_prompt.request_id
+        ),
+        "child prompt.request span should carry the child request id"
+    );
 
     assert_eq!(
         inbound.span_context.trace_id(),
@@ -422,17 +478,29 @@ async fn peer_trace_context_propagates_across_prompt_peer() -> Result<()> {
         outbound.span_context.trace_id(),
         "child session/prompt span should stay on the propagated trace"
     );
-    assert_eq!(
+    assert_ne!(
         child_prompt_span.parent_span_id,
-        inbound.span_context.span_id(),
-        "child session/prompt span should hang off the inbound peer span"
+        SpanId::INVALID,
+        "child prompt.request span should remain attached to the propagated trace tree"
+    );
+    let child_prompt_parent = spans
+        .iter()
+        .find(|span| span.span_context.span_id() == child_prompt_span.parent_span_id)
+        .expect("child prompt.request parent span");
+    assert_eq!(
+        child_prompt_parent.span_context.trace_id(),
+        outbound.span_context.trace_id(),
+        "child prompt.request parent span should stay on the propagated trace"
     );
     assert_ne!(
         parent_prompt.session_id, child_prompt.session_id,
         "peer call should expose a distinct child session id without lookup-side synthetic state"
     );
     assert!(
-        has_session_record(&read_stream_body(&stream_b).await?, &child_prompt.session_id),
+        has_session_record(
+            &read_stream_body(&stream_b).await?,
+            &child_prompt.session_id
+        ),
         "remote stream should carry the child session row without lookup-side synthetic state"
     );
     assert_ne!(
@@ -530,7 +598,7 @@ fn find_named_span<'a>(spans: &'a [SpanData], name: &str) -> Option<&'a SpanData
 }
 
 fn span_attribute_eq(span: &SpanData, key: &str, expected: &str) -> bool {
-    span.attributes.iter().any(|attribute| {
-        attribute.key.as_str() == key && attribute.value.to_string() == expected
-    })
+    span.attributes
+        .iter()
+        .any(|attribute| attribute.key.as_str() == key && attribute.value.to_string() == expected)
 }

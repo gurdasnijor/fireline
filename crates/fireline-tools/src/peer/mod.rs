@@ -17,18 +17,23 @@ pub(crate) mod mcp_server;
 pub(crate) mod transport;
 
 pub use mcp_server::tool_descriptors;
-pub use transport::extract_remote_trace_context;
 pub use stream::{
-    DEFAULT_TENANT_ID, DeploymentDiscoveryEvent, DeploymentIndex, HostEntry,
-    ProvisionedHostEntry,
+    DEFAULT_TENANT_ID, DeploymentDiscoveryEvent, DeploymentIndex, HostEntry, ProvisionedHostEntry,
     StreamDeploymentPeerRegistry, deployment_stream_url,
 };
+pub use transport::extract_remote_trace_context;
 
 use std::sync::{Arc, OnceLock};
 
 use sacp::{Client, ConnectTo, Proxy};
+use tracing::Span;
 
 use self::mcp_server::build_peer_mcp_server;
+
+type PromptTraceContextResolver =
+    dyn Fn(&str) -> Option<PromptTraceContext> + Send + Sync + 'static;
+
+static PROMPT_TRACE_CONTEXT_RESOLVER: OnceLock<Arc<PromptTraceContextResolver>> = OnceLock::new();
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct Peer {
@@ -38,6 +43,22 @@ pub struct Peer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_stream_url: Option<String>,
     pub registered_at_ms: i64,
+}
+
+#[derive(Clone)]
+pub struct PromptTraceContext {
+    pub prompt_span: Span,
+    pub request_id: String,
+}
+
+pub fn install_prompt_trace_context_resolver(resolver: Arc<PromptTraceContextResolver>) {
+    let _ = PROMPT_TRACE_CONTEXT_RESOLVER.get_or_init(|| resolver);
+}
+
+pub(crate) fn resolve_prompt_trace_context(session_id: &str) -> Option<PromptTraceContext> {
+    PROMPT_TRACE_CONTEXT_RESOLVER
+        .get()
+        .and_then(|resolver| resolver(session_id))
 }
 
 #[async_trait]
@@ -71,10 +92,8 @@ impl ConnectTo<sacp::Conductor> for PeerComponent {
                     let peer_registry = peer_registry.clone();
                     async move |request: sacp::schema::NewSessionRequest, responder, cx| {
                         let session_binding = Arc::new(OnceLock::new());
-                        let mcp_server = build_peer_mcp_server(
-                            peer_registry.clone(),
-                            session_binding.clone(),
-                        );
+                        let mcp_server =
+                            build_peer_mcp_server(peer_registry.clone(), session_binding.clone());
                         cx.build_session_from(request)
                             .with_mcp_server(mcp_server)?
                             .on_proxy_session_start(responder, async move |session_id| {

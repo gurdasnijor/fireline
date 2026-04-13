@@ -21,8 +21,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use durable_streams::Producer;
+use fireline_tools::peer::{extract_remote_trace_context, install_prompt_trace_context_resolver};
 use futures::{SinkExt, StreamExt};
-use fireline_tools::peer::extract_remote_trace_context;
 use sacp::{Agent, Client, Conductor, DynConnectTo, Lines};
 use sacp_conductor::{ConductorImpl, McpBridgeMode, trace::WriteEvent};
 use tracing::Instrument as _;
@@ -51,6 +51,9 @@ pub struct AcpRouteState {
 }
 
 pub fn router(state: AcpRouteState) -> Router {
+    install_prompt_trace_context_resolver(Arc::new(|session_id| {
+        crate::agent_observability::active_prompt_trace_context_for_session(session_id)
+    }));
     Router::new()
         .route("/acp", get(acp_websocket_handler))
         .with_state(state)
@@ -171,20 +174,16 @@ async fn handle_upgrade(conductor: ConductorImpl<Agent>, socket: WebSocket) -> a
     );
 
     let first_line = read_initial_line(&mut read, &debug).await?;
-    let inbound_context = first_line
-        .as_deref()
-        .and_then(extract_remote_trace_context);
+    let inbound_context = first_line.as_deref().and_then(extract_remote_trace_context);
 
     let incoming_debug = debug.clone();
     let remaining_incoming = StreamExt::filter_map(read, move |message| {
         let debug = incoming_debug.clone();
         async move { stream_message_to_line(message, &debug) }
     });
-    let incoming = futures::stream::once(async move {
-        first_line.map(Ok::<_, std::io::Error>)
-    })
-    .filter_map(|item| async move { item })
-    .chain(remaining_incoming);
+    let incoming = futures::stream::once(async move { first_line.map(Ok::<_, std::io::Error>) })
+        .filter_map(|item| async move { item })
+        .chain(remaining_incoming);
 
     let serve_connection = async move {
         sacp::ConnectTo::<Agent>::connect_to(Lines::new(outgoing, incoming), conductor).await?;
@@ -192,7 +191,12 @@ async fn handle_upgrade(conductor: ConductorImpl<Agent>, socket: WebSocket) -> a
     };
 
     let result = if let Some(parent_context) = inbound_context {
-        let inbound_span = tracing::info_span!("fireline.peer_call.inbound");
+        let inbound_span = tracing::info_span!(
+            "fireline.peer.call.in",
+            fireline.session_id = tracing::field::Empty,
+            rpc.system = "jsonrpc",
+            rpc.method = "initialize",
+        );
         let _ = inbound_span.set_parent(parent_context);
         serve_connection.instrument(inbound_span).await
     } else {
@@ -231,7 +235,11 @@ fn stream_message_to_line(
             .ok()
             .and_then(|text| normalized_line(&text, debug)),
         Ok(Message::Close(frame)) => {
-            debug.log_close_frame(frame.as_ref().map(|frame| (frame.code, frame.reason.as_str())));
+            debug.log_close_frame(
+                frame
+                    .as_ref()
+                    .map(|frame| (frame.code, frame.reason.as_str())),
+            );
             Some(Err(std::io::Error::new(
                 std::io::ErrorKind::ConnectionAborted,
                 "websocket closed",
@@ -382,6 +390,8 @@ fn emit_request_span(line: &str) {
                 .and_then(|params| params.get("sessionId"))
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("unknown");
+            tracing::Span::current()
+                .record("fireline.session_id", tracing::field::display(session_id));
             tracing::info_span!("fireline.session.prompt", session_id = %session_id)
                 .in_scope(|| {});
         }
