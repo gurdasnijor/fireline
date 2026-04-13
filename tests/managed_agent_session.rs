@@ -528,7 +528,7 @@ async fn session_materialized_state_agrees_with_raw_stream() -> Result<()> {
         // Wait until the baseline session envelope has landed in the raw stream
         // before we materialize. This ensures both oracles see the same prefix.
         runtime
-            .wait_for_state_rows(&["\"type\":\"session\""], DEFAULT_TIMEOUT)
+            .wait_for_state_rows(&["\"type\":\"session_v2\""], DEFAULT_TIMEOUT)
             .await
             .context("INVARIANT (Session): a session envelope must land before materialization")?;
 

@@ -1803,7 +1803,7 @@ impl StateEnvelope {
         let value = self.value().cloned();
 
         match entity_type {
-            "session" => value
+            "session_v2" => value
                 .as_ref()
                 .and_then(|v| serde_json::from_value::<SessionRecord>(v.clone()).ok())
                 .map(DecodedStateEntity::Session)
@@ -1851,7 +1851,7 @@ impl StateEnvelope {
     }
 
     /// Convenience: decode into `SessionRecord` if this envelope is a
-    /// session entity with a full value. Returns `None` otherwise.
+/// session_v2 entity with a full value. Returns `None` otherwise.
     pub(crate) fn as_session_record(&self) -> Option<SessionRecord> {
         match self.decode()? {
             DecodedStateEntity::Session(record) => Some(record),
