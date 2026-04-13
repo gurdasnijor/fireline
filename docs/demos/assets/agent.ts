@@ -8,11 +8,7 @@ export default compose(
     trace(),
     approve({ scope: 'tool_calls' }),
     budget({ tokens: 2_000_000 }),
-    secretsProxy({
-      ANTHROPIC_API_KEY: { ref: 'env:ANTHROPIC_API_KEY' },
-      GITHUB_TOKEN: { ref: 'secret:gh-pat', allow: 'api.github.com' },
-    }),
     peer({ peers: ['reviewer'] }),
   ]),
-  agent(['pi-acp']),
+  agent(['npx', '-y', '@agentclientprotocol/claude-agent-acp']),
 )
