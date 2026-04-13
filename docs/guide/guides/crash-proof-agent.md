@@ -197,9 +197,7 @@ session before printing the final JSON summary.
 
 Current implementation detail:
 
-- the example uses `waitForRows(...)` from
-  [`examples/shared/wait.ts`](../../../examples/shared/wait.ts)
-- that helper is subscribe-based, not polling
+- the example waits on `db.promptRequests.subscribe(...)`, not polling
 - if you are adapting this pattern into app code, prefer direct
   `db.promptRequests.subscribe(...)` or `useLiveQuery(...)` so the observation
   flow stays explicit

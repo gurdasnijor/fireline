@@ -25,5 +25,5 @@
       "@agentclientprotocol/sdk": ["../packages/client/node_modules/@agentclientprotocol/sdk"]
     }
   },
-  "include": ["./*/index.ts", "./shared/**/*.ts"]
+  "include": ["./*/index.ts"]
 }
