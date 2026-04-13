@@ -54,14 +54,11 @@ Tier C needs a CLI verb, but not for Phase 1. Once `DeploymentSpecSubscriber` ex
 
 The flag exists, but it does not connect to ACP or provide an interactive prompt loop. The current behavior is only "print the ACP URL and wait."
 
-### 2.6 `alwaysOn`
+### 2.6 Warm-By-Default Hosted Behavior
 
-`alwaysOn` is no longer a CLI lifecycle flag. It belongs in compose-spec metadata and flows through whichever tier consumes the spec:
+Hosted deploys stay warm by default via the `AlwaysOnDeploymentSubscriber` substrate. Cold-start opt-out is not in scope for the initial ship.
 
-- Tier A: embedded in the OCI image and read on boot
-- Tier C: appended as part of the spec resource and read by `DeploymentSpecSubscriber`
-
-The CLI should pass that metadata through. It should not grow a separate lifecycle surface for it.
+For the CLI, that means the deploy surface passes hosted-deploy intent through to the tier that consumes it and does not grow a separate lifecycle switch for warmth behavior.
 
 ## 3. Proposed Design
 
@@ -140,17 +137,17 @@ Initial resolution should stay explicit:
 - use durable-streams auth, not a Fireline deploy token
 - defer named targets in `fireline.config.ts` until Tier C is live
 
-### 3.4 `alwaysOn` treatment
+### 3.4 Warm-By-Default Treatment
 
-`alwaysOn` is part of spec metadata, not a CLI lifecycle bit.
+Hosted deploys stay warm by default via the `AlwaysOnDeploymentSubscriber` substrate. Cold-start opt-out is not in scope for the initial ship.
 
 That means:
 
-- `fireline build` embeds whatever the compose spec declares
-- `fireline deploy --to <platform>` passes that embedded metadata through unchanged
-- `fireline push` appends the same metadata in the Tier C resource envelope
+- `fireline build` emits the hosted deployment artifact without inventing a separate warmth flag
+- `fireline deploy --to <platform>` hands that artifact to the target platform unchanged
+- `fireline push` appends the Tier C deployment input without adding a second CLI lifecycle contract
 
-If the CLI later offers a convenience override, it must rewrite spec metadata before build or push. It must not invent a second lifecycle contract.
+The CLI surface should describe this default behavior plainly rather than pretending it is a user-toggled runtime bit.
 
 ### 3.5 Platform binary packaging
 
@@ -248,7 +245,7 @@ This phase stays last because it sits on top of already-working local, build, de
 - [ ] `fireline deploy --to <platform>` is documented as a thin wrapper over target-native tooling
 - [ ] `fireline push` is documented as a Tier C durable-streams append, not a deploy API
 - [ ] No Fireline deploy HTTP endpoints remain in this proposal
-- [ ] `alwaysOn` is treated as spec metadata, not a CLI lifecycle flag
+- [ ] Warm-by-default hosted behavior is described as substrate-owned default behavior, not a CLI lifecycle flag
 - [ ] platform packages make `npx fireline` work without a local Rust build
 - [ ] `--repl` opens an ACP session instead of printing a stub message
 - [ ] `packages/fireline/README.md` and [docs/guide/cli.md](../guide/cli.md) are updated when phases land
@@ -258,7 +255,7 @@ This phase stays last because it sits on top of already-working local, build, de
 - [ ] Does `build` stay a codegen step rather than becoming a second configuration language?
 - [ ] Does `deploy --to <platform>` stay a thin wrapper over target-native tooling?
 - [ ] Does `push` remain an honest durable-streams append rather than a hidden control plane?
-- [ ] Is `alwaysOn` clearly treated as spec metadata rather than CLI lifecycle state?
+- [ ] Is warm-by-default hosted behavior clearly treated as substrate-owned default behavior rather than CLI lifecycle state?
 - [ ] Does platform packaging still match the already-shipped `resolve-binary.ts` lookup contract?
 - [ ] Does `--repl` remain a debug shell, not a large terminal subsystem?
 - [ ] Do the staged CLI phases stay consistent with [hosted-fireline-deployment.md](./hosted-fireline-deployment.md)?
