@@ -5,7 +5,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -14,8 +14,6 @@ use fireline_acp_ids::{PromptRequestRef, RequestId, SessionId, ToolCallId, ToolI
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 
-pub const WAKE_TIMER_REQUESTED_KIND: &str = "wake_timer_requested";
-pub const TIMER_FIRED_KIND: &str = "timer_fired";
 pub const DEPLOYMENT_WAKE_REQUESTED_KIND: &str = "deployment_wake_requested";
 pub const SANDBOX_PROVISIONED_KIND: &str = "sandbox_provisioned";
 
@@ -382,207 +380,6 @@ impl RetryPolicy {
                 .saturating_mul(multiplier)
                 .min(self.max_backoff),
         )
-    }
-}
-
-/// Timer runtime abstraction used by the prompt-bound wake timer profile.
-#[async_trait]
-pub trait WakeTimerRuntime: Send + Sync {
-    fn now_ms(&self) -> i64;
-
-    async fn sleep(&self, duration: Duration);
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SystemWakeTimerRuntime;
-
-#[async_trait]
-impl WakeTimerRuntime for SystemWakeTimerRuntime {
-    fn now_ms(&self) -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64
-    }
-
-    async fn sleep(&self, duration: Duration) {
-        tokio::time::sleep(duration).await;
-    }
-}
-
-/// Agent-bound deferred wake request keyed by canonical prompt identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WakeTimerRequest {
-    pub kind: String,
-    pub session_id: SessionId,
-    pub request_id: RequestId,
-    pub fire_at_ms: i64,
-    #[serde(
-        default,
-        rename = "_meta",
-        skip_serializing_if = "TraceContext::is_empty"
-    )]
-    pub trace_context: TraceContext,
-}
-
-impl WakeTimerRequest {
-    #[must_use]
-    pub fn new(session_id: SessionId, request_id: RequestId, fire_at_ms: i64) -> Self {
-        Self {
-            kind: WAKE_TIMER_REQUESTED_KIND.to_string(),
-            session_id,
-            request_id,
-            fire_at_ms,
-            trace_context: TraceContext::default(),
-        }
-    }
-
-    #[must_use]
-    pub fn with_trace_context(mut self, trace_context: TraceContext) -> Self {
-        self.trace_context = trace_context;
-        self
-    }
-
-    #[must_use]
-    pub fn completion_key(&self) -> CompletionKey {
-        CompletionKey::prompt(self.session_id.clone(), self.request_id.clone())
-    }
-
-    #[must_use]
-    pub fn remaining_delay(&self, now_ms: i64) -> Duration {
-        let remaining_ms = self.fire_at_ms.saturating_sub(now_ms);
-        if remaining_ms <= 0 {
-            Duration::ZERO
-        } else {
-            Duration::from_millis(remaining_ms as u64)
-        }
-    }
-
-    #[must_use]
-    pub fn completion(&self, fired_at_ms: i64) -> TimerFired {
-        TimerFired::new(
-            self.session_id.clone(),
-            self.request_id.clone(),
-            fired_at_ms.max(self.fire_at_ms),
-        )
-        .with_trace_context(self.trace_context.clone())
-    }
-}
-
-/// Completion appended when a prompt-bound timer fires.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TimerFired {
-    pub kind: String,
-    pub session_id: SessionId,
-    pub request_id: RequestId,
-    pub fired_at_ms: i64,
-    #[serde(
-        default,
-        rename = "_meta",
-        skip_serializing_if = "TraceContext::is_empty"
-    )]
-    pub trace_context: TraceContext,
-}
-
-impl TimerFired {
-    #[must_use]
-    pub fn new(session_id: SessionId, request_id: RequestId, fired_at_ms: i64) -> Self {
-        Self {
-            kind: TIMER_FIRED_KIND.to_string(),
-            session_id,
-            request_id,
-            fired_at_ms,
-            trace_context: TraceContext::default(),
-        }
-    }
-
-    #[must_use]
-    pub fn with_trace_context(mut self, trace_context: TraceContext) -> Self {
-        self.trace_context = trace_context;
-        self
-    }
-}
-
-/// Active subscriber that waits until a prompt-bound wake deadline then
-/// appends a `timer_fired` completion on the same canonical key.
-pub struct WakeTimerSubscriber<R = SystemWakeTimerRuntime> {
-    name: String,
-    runtime: R,
-    retry_policy: RetryPolicy,
-}
-
-impl WakeTimerSubscriber<SystemWakeTimerRuntime> {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::with_runtime(SystemWakeTimerRuntime)
-    }
-}
-
-impl Default for WakeTimerSubscriber<SystemWakeTimerRuntime> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<R> WakeTimerSubscriber<R> {
-    #[must_use]
-    pub fn with_runtime(runtime: R) -> Self {
-        Self {
-            name: "wake_timer".to_string(),
-            runtime,
-            retry_policy: RetryPolicy::default(),
-        }
-    }
-
-    #[must_use]
-    pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
-        self.retry_policy = retry_policy;
-        self
-    }
-}
-
-impl<R> DurableSubscriber for WakeTimerSubscriber<R>
-where
-    R: WakeTimerRuntime,
-{
-    type Event = WakeTimerRequest;
-    type Completion = TimerFired;
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn matches(&self, envelope: &StreamEnvelope) -> Option<Self::Event> {
-        let event: WakeTimerRequest = envelope.value_as()?;
-        (event.kind == WAKE_TIMER_REQUESTED_KIND).then_some(event)
-    }
-
-    fn completion_key(&self, event: &Self::Event) -> CompletionKey {
-        event.completion_key()
-    }
-
-    fn is_completed(&self, event: &Self::Event, log: &[StreamEnvelope]) -> bool {
-        log_contains_completion(log, TIMER_FIRED_KIND, &event.completion_key())
-    }
-}
-
-#[async_trait]
-impl<R> ActiveSubscriber for WakeTimerSubscriber<R>
-where
-    R: WakeTimerRuntime,
-{
-    async fn handle(&self, event: Self::Event) -> HandlerOutcome<Self::Completion> {
-        let remaining = event.remaining_delay(self.runtime.now_ms());
-        if !remaining.is_zero() {
-            self.runtime.sleep(remaining).await;
-        }
-        HandlerOutcome::Completed(event.completion(self.runtime.now_ms()))
-    }
-
-    fn retry_policy(&self) -> RetryPolicy {
-        self.retry_policy
     }
 }
 
@@ -1136,37 +933,6 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct RecordingWakeTimerRuntime {
-        now_ms: Arc<Mutex<i64>>,
-        sleeps: Arc<Mutex<Vec<Duration>>>,
-    }
-
-    impl RecordingWakeTimerRuntime {
-        fn new(now_ms: i64) -> Self {
-            Self {
-                now_ms: Arc::new(Mutex::new(now_ms)),
-                sleeps: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-
-        fn sleeps(&self) -> Vec<Duration> {
-            self.sleeps.lock().unwrap().clone()
-        }
-    }
-
-    #[async_trait]
-    impl WakeTimerRuntime for RecordingWakeTimerRuntime {
-        fn now_ms(&self) -> i64 {
-            *self.now_ms.lock().unwrap()
-        }
-
-        async fn sleep(&self, duration: Duration) {
-            self.sleeps.lock().unwrap().push(duration);
-            *self.now_ms.lock().unwrap() += duration.as_millis() as i64;
-        }
-    }
-
-    #[derive(Clone)]
     struct RecordingDeploymentWakeHandler {
         runtime: ProvisionedRuntime,
         sessions: Arc<Mutex<Vec<String>>>,
@@ -1400,72 +1166,6 @@ mod tests {
             Some(Duration::from_millis(250))
         );
         assert_eq!(policy.backoff_for_attempt(5), None);
-    }
-
-    #[tokio::test]
-    async fn wake_timer_subscriber_replay_restores_pending_wait_using_remaining_delay() {
-        let runtime = RecordingWakeTimerRuntime::new(1_250);
-        let subscriber = WakeTimerSubscriber::with_runtime(runtime.clone());
-        let event = WakeTimerRequest::new(
-            SessionId::from("session-1"),
-            RequestId::from("request-1".to_string()),
-            1_600,
-        )
-        .with_trace_context(TraceContext {
-            traceparent: Some("00-trace-01".to_string()),
-            tracestate: None,
-            baggage: None,
-        });
-
-        let outcome = subscriber.handle(event).await;
-        let completion = match outcome {
-            HandlerOutcome::Completed(completion) => completion,
-            HandlerOutcome::RetryTransient(error) | HandlerOutcome::Failed(error) => {
-                panic!("unexpected wake timer failure: {error:#}")
-            }
-        };
-
-        assert_eq!(runtime.sleeps(), vec![Duration::from_millis(350)]);
-        assert_eq!(
-            completion,
-            TimerFired::new(
-                SessionId::from("session-1"),
-                RequestId::from("request-1".to_string()),
-                1_600
-            )
-            .with_trace_context(TraceContext {
-                traceparent: Some("00-trace-01".to_string()),
-                tracestate: None,
-                baggage: None,
-            }),
-            "DSV-02 ReplayIdempotent: replayed wake timer waits must converge to the same timer_fired completion as the live path"
-        );
-    }
-
-    #[test]
-    fn wake_timer_subscriber_detects_existing_completion() {
-        let subscriber = WakeTimerSubscriber::new();
-        let event = WakeTimerRequest::new(
-            SessionId::from("session-1"),
-            RequestId::from("request-1".to_string()),
-            1_600,
-        );
-        let log = vec![
-            StreamEnvelope::from_json(serde_json::json!({
-                "type": "completion",
-                "key": "session-1:request-1:timer",
-                "headers": {},
-                "value": {
-                    "kind": TIMER_FIRED_KIND,
-                    "sessionId": "session-1",
-                    "requestId": "request-1",
-                    "firedAtMs": 1600
-                }
-            }))
-            .expect("decode timer completion envelope"),
-        ];
-
-        assert!(subscriber.is_completed(&event, &log));
     }
 
     #[tokio::test]
