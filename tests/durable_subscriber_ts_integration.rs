@@ -21,8 +21,8 @@ use fireline_harness::{
     ActiveSubscriber, AlwaysOnDeploymentSubscriber, AutoApproveConfig, AutoApproveSubscriber,
     CompletionKey, DeploymentWakeHandler, DeploymentWakeRequested, DurableSubscriber,
     HandlerOutcome, PEER_DELIVERY_ACK_ENTITY_TYPE, PeerDispatchSuccess, PeerRoutingDispatcher,
-    PeerRoutingEvent, PeerRoutingSubscriber, ProvisionedRuntime, StreamEnvelope,
-    TelegramParseMode, TelegramScope, TelegramSubscriber, TelegramSubscriberConfig, TraceContext,
+    PeerRoutingEvent, PeerRoutingSubscriber, ProvisionedRuntime, StreamEnvelope, TelegramParseMode,
+    TelegramScope, TelegramSubscriber, TelegramSubscriberConfig, TraceContext,
     WebhookEventSelector, WebhookSubscriber, WebhookSubscriberConfig, WebhookTargetConfig,
     append_telegram_approval_resolution, append_webhook_completion,
 };
@@ -98,12 +98,8 @@ struct TelegramComponentConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 enum WebhookEventSelectorWire {
-    Kind {
-        kind: String,
-    },
-    Exact {
-        exact: WebhookExactSelectorWire,
-    },
+    Kind { kind: String },
+    Exact { exact: WebhookExactSelectorWire },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -149,7 +145,9 @@ impl TestWebhookServer {
         }
 
         let state = WebhookServerState::default();
-        let router = Router::new().route("/hooks/durable-subscriber", post(handler)).with_state(state.clone());
+        let router = Router::new()
+            .route("/hooks/durable-subscriber", post(handler))
+            .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
         let addr = listener.local_addr()?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -463,22 +461,30 @@ async fn auto_approve_round_trip(stream_server: &stream_server::TestStreamServer
     );
 
     let producer = json_producer(&state_stream_url, "auto-approve");
-    producer.append_json(&fireline_harness::approval::approval_resolution_envelope_with_trace(
-        SessionId::from("session-1"),
-        RequestId::from("req-1".to_string()),
-        true,
-        "auto_approve".to_string(),
-        Some(trace_context()),
-    )?);
+    producer.append_json(
+        &fireline_harness::approval::approval_resolution_envelope_with_trace(
+            SessionId::from("session-1"),
+            RequestId::from("req-1".to_string()),
+            true,
+            "auto_approve".to_string(),
+            Some(trace_context()),
+        )?,
+    );
     producer.flush().await?;
 
     let stored = read_first_envelope(&state_stream_url).await?;
     assert_eq!(stored.entity_type, "permission");
-    assert_eq!(stored.completion_key(), Some(CompletionKey::prompt(
-        SessionId::from("session-1"),
-        RequestId::from("req-1".to_string()),
-    )));
-    assert_traceparent(&stored, "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01");
+    assert_eq!(
+        stored.completion_key(),
+        Some(CompletionKey::prompt(
+            SessionId::from("session-1"),
+            RequestId::from("req-1".to_string()),
+        ))
+    );
+    assert_traceparent(
+        &stored,
+        "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
+    );
     Ok(())
 }
 
@@ -552,11 +558,17 @@ async fn webhook_round_trip(
     append_webhook_completion(&producer, &completion).await?;
     let stored = read_first_envelope(&state_stream_url).await?;
     assert_eq!(stored.entity_type, "webhook_delivery");
-    assert_eq!(stored.completion_key(), Some(CompletionKey::prompt(
-        SessionId::from("session-1"),
-        RequestId::from("req-1".to_string()),
-    )));
-    assert_traceparent(&stored, "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01");
+    assert_eq!(
+        stored.completion_key(),
+        Some(CompletionKey::prompt(
+            SessionId::from("session-1"),
+            RequestId::from("req-1".to_string()),
+        ))
+    );
+    assert_traceparent(
+        &stored,
+        "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
+    );
     Ok(())
 }
 
@@ -591,6 +603,9 @@ async fn telegram_round_trip(
         poll_timeout: Duration::ZERO,
         parse_mode: TelegramParseMode::Html,
         scope: TelegramScope::ToolCalls,
+        cursor_stream: None,
+        dead_letter_stream: None,
+        retry_policy: None,
     });
 
     let request = subscriber
@@ -644,11 +659,17 @@ async fn telegram_round_trip(
     append_telegram_approval_resolution(&producer, &completion).await?;
     let stored = read_first_envelope(&state_stream_url).await?;
     assert_eq!(stored.entity_type, "permission");
-    assert_eq!(stored.completion_key(), Some(CompletionKey::prompt(
-        SessionId::from("session-1"),
-        RequestId::from("req-1".to_string()),
-    )));
-    assert_traceparent(&stored, "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01");
+    assert_eq!(
+        stored.completion_key(),
+        Some(CompletionKey::prompt(
+            SessionId::from("session-1"),
+            RequestId::from("req-1".to_string()),
+        ))
+    );
+    assert_traceparent(
+        &stored,
+        "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
+    );
 
     let methods = telegram_server.captured_methods().await;
     assert!(
@@ -690,11 +711,17 @@ async fn peer_routing_round_trip(
 
     let stored = read_first_envelope(&state_stream_url).await?;
     assert_eq!(stored.entity_type, PEER_DELIVERY_ACK_ENTITY_TYPE);
-    assert_eq!(stored.completion_key(), Some(CompletionKey::tool(
-        SessionId::from("session-a"),
-        ToolCallId::from("tool-1".to_string()),
-    )));
-    assert_traceparent(&stored, "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01");
+    assert_eq!(
+        stored.completion_key(),
+        Some(CompletionKey::tool(
+            SessionId::from("session-a"),
+            ToolCallId::from("tool-1".to_string()),
+        ))
+    );
+    assert_traceparent(
+        &stored,
+        "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
+    );
     Ok(())
 }
 
@@ -727,10 +754,16 @@ async fn wake_deployment_round_trip(
 
     let stored = read_first_envelope(&state_stream_url).await?;
     assert_eq!(stored.entity_type, "deployment");
-    assert_eq!(stored.completion_key(), Some(CompletionKey::session(
-        SessionId::from("deployment-session"),
-    )));
-    assert_traceparent(&stored, "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01");
+    assert_eq!(
+        stored.completion_key(),
+        Some(CompletionKey::session(SessionId::from(
+            "deployment-session"
+        ),))
+    );
+    assert_traceparent(
+        &stored,
+        "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
+    );
     Ok(())
 }
 
@@ -905,9 +938,7 @@ async fn read_all_rows(stream_url: &str) -> Result<Vec<Value>> {
 
 fn assert_traceparent(envelope: &StreamEnvelope, expected: &str) {
     assert_eq!(
-        envelope
-            .trace_context()
-            .and_then(|trace| trace.traceparent),
+        envelope.trace_context().and_then(|trace| trace.traceparent),
         Some(expected.to_string()),
         "completion envelope should preserve canonical trace lineage",
     );

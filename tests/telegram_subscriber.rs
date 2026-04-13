@@ -13,9 +13,8 @@ use axum::{
 use durable_streams::{Client as DurableStreamsClient, CreateOptions, LiveMode, Offset, Producer};
 use fireline_harness::{
     ActiveSubscriber, DurableSubscriber, DurableSubscriberDriver, HandlerOutcome, StreamEnvelope,
-    SubscriberMode, SubscriberRegistration, TelegramParseMode, TelegramScope, TelegramSubscriber,
-    TelegramSubscriberConfig,
-    TelegramApprovalResolution,
+    SubscriberMode, SubscriberRegistration, TelegramApprovalResolution, TelegramParseMode,
+    TelegramScope, TelegramSubscriber, TelegramSubscriberConfig,
     append_telegram_approval_resolution,
 };
 use serde_json::{Value, json};
@@ -194,6 +193,9 @@ async fn telegram_subscriber_posts_card_and_appends_approval_resolution() -> Res
         poll_timeout: Duration::ZERO,
         parse_mode: TelegramParseMode::Html,
         scope: TelegramScope::ToolCalls,
+        cursor_stream: None,
+        dead_letter_stream: None,
+        retry_policy: None,
     });
 
     let event = permission_request_event()?;
@@ -343,6 +345,9 @@ async fn telegram_replay_skips_duplicate_post_when_resolution_already_exists() -
         poll_timeout: Duration::ZERO,
         parse_mode: TelegramParseMode::Html,
         scope: TelegramScope::ToolCalls,
+        cursor_stream: None,
+        dead_letter_stream: None,
+        retry_policy: None,
     });
     let mut driver = DurableSubscriberDriver::new();
     driver.register_active(subscriber.clone());

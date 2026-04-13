@@ -1,24 +1,31 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use durable_streams::Producer;
+use durable_streams::{
+    Client as DurableStreamsClient, CreateOptions, LiveMode, Offset, Producer, StreamError,
+};
 use fireline_acp_ids::{RequestId, SessionId};
-use reqwest::header::{HeaderName, HeaderValue};
+use reqwest::{
+    StatusCode,
+    header::{HeaderName, HeaderValue},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex;
 
 use crate::durable_subscriber::{
-    ActiveSubscriber, CompletionKey, DurableSubscriber, HandlerOutcome, StreamEnvelope,
-    TraceContext,
+    ActiveSubscriber, CompletionKey, DurableSubscriber, HandlerOutcome, RetryPolicy,
+    StreamEnvelope, TraceContext,
 };
 
 const TELEGRAM_SUBSCRIBER_NAME: &str = "telegram";
 const TELEGRAM_APPROVE_CALLBACK_DATA: &str = "approve";
 const TELEGRAM_DENY_CALLBACK_DATA: &str = "deny";
+const TELEGRAM_CURSOR_TYPE: &str = "telegram_cursor";
+const TELEGRAM_DEAD_LETTER_TYPE: &str = "telegram_dead_letter";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TelegramScope {
@@ -63,6 +70,14 @@ pub struct TelegramSubscriberConfig {
     pub poll_timeout: Duration,
     pub parse_mode: TelegramParseMode,
     pub scope: TelegramScope,
+    /// DSV-03/04 infrastructure-plane cursor stream used to persist Telegram
+    /// polling offsets and the current in-flight approval card checkpoint.
+    pub cursor_stream: Option<String>,
+    /// DSV-04 infrastructure-plane dead-letter stream used for terminal
+    /// Telegram delivery failures.
+    pub dead_letter_stream: Option<String>,
+    /// DSV-03 bounded retry policy for transient Telegram API failures.
+    pub retry_policy: Option<RetryPolicy>,
 }
 
 impl TelegramSubscriberConfig {
@@ -70,13 +85,22 @@ impl TelegramSubscriberConfig {
     pub fn normalized_api_base_url(&self) -> String {
         self.api_base_url.trim_end_matches('/').to_string()
     }
+
+    #[must_use]
+    pub fn retry_policy(&self) -> RetryPolicy {
+        self.retry_policy.unwrap_or(RetryPolicy {
+            max_attempts: 3,
+            initial_backoff: Duration::from_millis(250),
+            max_backoff: Duration::from_secs(5),
+        })
+    }
 }
 
 #[derive(Clone)]
 pub struct TelegramSubscriber {
     config: TelegramSubscriberConfig,
     http_client: reqwest::Client,
-    state: Arc<Mutex<TelegramSubscriberState>>,
+    state: Arc<Mutex<TelegramCursorRecord>>,
     poll_serial: Arc<Mutex<()>>,
 }
 
@@ -86,7 +110,7 @@ impl TelegramSubscriber {
         Self {
             config,
             http_client: reqwest::Client::new(),
-            state: Arc::new(Mutex::new(TelegramSubscriberState::default())),
+            state: Arc::new(Mutex::new(TelegramCursorRecord::default())),
             poll_serial: Arc::new(Mutex::new(())),
         }
     }
@@ -96,15 +120,123 @@ impl TelegramSubscriber {
         &self.config
     }
 
+    /// DSV-01/03/04 durable dispatch path for Telegram approvals.
+    ///
+    /// It uses the canonical completion key to suppress duplicate sends on
+    /// replay, persists the polling cursor in infra storage, and transitions to
+    /// a dead-letter record after the bounded retry budget is exhausted.
+    async fn dispatch_with_retry(
+        &self,
+        request: TelegramPermissionRequest,
+        agent_log: &[StreamEnvelope],
+        cursor_store: &dyn TelegramCursorStore,
+        dead_letters: Option<&dyn TelegramDeadLetterSink>,
+    ) -> Result<TelegramDispatchResult> {
+        if self.is_completed(&request, agent_log) {
+            return Ok(TelegramDispatchResult::Skipped(
+                TelegramSkipReason::AlreadyCompleted,
+            ));
+        }
+
+        let completion_key = request.completion_key();
+        if let Some(dead_letters) = dead_letters {
+            if dead_letters
+                .contains(&completion_key)
+                .await
+                .context("check Telegram dead-letter state")?
+            {
+                return Ok(TelegramDispatchResult::Skipped(
+                    TelegramSkipReason::AlreadyDeadLettered,
+                ));
+            }
+        }
+
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            match self.dispatch_once(request.clone(), cursor_store).await {
+                HandlerOutcome::Completed(completion) => {
+                    return Ok(TelegramDispatchResult::Delivered(TelegramDispatchOutcome {
+                        completion,
+                        attempts,
+                    }));
+                }
+                HandlerOutcome::RetryTransient(error) => {
+                    if let Some(backoff) = self.retry_policy().backoff_for_attempt(attempts) {
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+
+                    let record = TelegramDeadLetterRecord::from_error(&request, attempts, error)?;
+                    if let Some(dead_letters) = dead_letters {
+                        dead_letters
+                            .record(&record)
+                            .await
+                            .context("record Telegram dead-letter")?;
+                    }
+                    self.clear_in_flight(request.completion_key(), cursor_store)
+                        .await?;
+                    return Ok(TelegramDispatchResult::DeadLettered(record));
+                }
+                HandlerOutcome::Failed(error) => {
+                    let record = TelegramDeadLetterRecord::from_error(&request, attempts, error)?;
+                    if let Some(dead_letters) = dead_letters {
+                        dead_letters
+                            .record(&record)
+                            .await
+                            .context("record Telegram dead-letter")?;
+                    }
+                    self.clear_in_flight(request.completion_key(), cursor_store)
+                        .await?;
+                    return Ok(TelegramDispatchResult::DeadLettered(record));
+                }
+            }
+        }
+    }
+
+    async fn dispatch_once(
+        &self,
+        request: TelegramPermissionRequest,
+        cursor_store: &dyn TelegramCursorStore,
+    ) -> HandlerOutcome<TelegramApprovalResolution> {
+        match self.wait_for_resolution(request, cursor_store).await {
+            Ok(completion) => HandlerOutcome::Completed(completion),
+            Err(TelegramDispatchError::Transient(error)) => HandlerOutcome::RetryTransient(error),
+            Err(TelegramDispatchError::Terminal(error)) => HandlerOutcome::Failed(error),
+        }
+    }
+
     async fn wait_for_resolution(
         &self,
         request: TelegramPermissionRequest,
-    ) -> Result<TelegramApprovalResolution> {
+        cursor_store: &dyn TelegramCursorStore,
+    ) -> std::result::Result<TelegramApprovalResolution, TelegramDispatchError> {
         let _poll_guard = self.poll_serial.lock().await;
         let trace = request.meta.clone().unwrap_or_default();
-        let chat_id = self.resolve_chat_id(&trace).await?;
-        let message = self.post_approval_card(&chat_id, &request, &trace).await?;
-        self.remember_chat_id(chat_id.clone()).await;
+        let mut cursor = self.load_cursor(cursor_store).await?;
+        let chat_id = self
+            .resolve_chat_id(&trace, cursor_store, &mut cursor)
+            .await?;
+
+        let completion_key = request.completion_key();
+        let message_id = if let Some(in_flight) = cursor
+            .in_flight
+            .as_ref()
+            .filter(|record| record.completion_key == completion_key)
+        {
+            in_flight.message_id
+        } else {
+            let message = self.post_approval_card(&chat_id, &request, &trace).await?;
+            cursor.last_chat_id = Some(chat_id.clone());
+            cursor.in_flight = Some(TelegramInFlightApproval::new(
+                completion_key,
+                chat_id.clone(),
+                message.message_id,
+                request.source_offset.clone(),
+            ));
+            self.store_cursor(cursor_store, &cursor).await?;
+            message.message_id
+        };
 
         let deadline = self
             .config
@@ -114,61 +246,70 @@ impl TelegramSubscriber {
         loop {
             if let Some(deadline) = deadline {
                 if tokio::time::Instant::now() >= deadline {
-                    return Err(anyhow!(
+                    return Err(TelegramDispatchError::terminal(anyhow!(
                         "timed out waiting for Telegram approval for session '{}' request '{}'",
                         request.session_id,
                         request_id_key(&request.request_id)
-                    ));
+                    )));
                 }
             }
 
-            match self.fetch_updates(&trace).await {
-                Ok(updates) => {
-                    if let Some(resolution) = self
-                        .match_resolution_update(
-                            &chat_id,
-                            message.message_id,
-                            &request,
-                            &updates,
-                            &trace,
-                        )
-                        .await?
-                    {
-                        return Ok(resolution);
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        session_id = %request.session_id,
-                        request_id = %request_id_key(&request.request_id),
-                        "telegram subscriber polling failed; retrying within active wait"
-                    );
-                }
+            let batch = self.fetch_updates(&trace, cursor.next_update_id).await?;
+            if let Some(chat_id) = batch.observed_chat_id.clone() {
+                cursor.last_chat_id = Some(chat_id);
+            }
+            cursor.next_update_id = max_update_id(cursor.next_update_id, batch.next_update_id);
+
+            if let Some(resolution) = self
+                .match_resolution_update(&chat_id, message_id, &request, &batch.updates, &trace)
+                .await?
+            {
+                cursor.in_flight = None;
+                self.store_cursor(cursor_store, &cursor).await?;
+                return Ok(resolution);
+            }
+
+            if batch.next_update_id.is_some() || batch.observed_chat_id.is_some() {
+                self.store_cursor(cursor_store, &cursor).await?;
             }
 
             tokio::time::sleep(self.config.poll_interval).await;
         }
     }
 
-    async fn resolve_chat_id(&self, trace: &TraceContext) -> Result<String> {
+    async fn resolve_chat_id(
+        &self,
+        trace: &TraceContext,
+        cursor_store: &dyn TelegramCursorStore,
+        cursor: &mut TelegramCursorRecord,
+    ) -> std::result::Result<String, TelegramDispatchError> {
         if let Some(chat_id) = &self.config.chat_id {
             return Ok(chat_id.clone());
         }
 
-        if let Some(chat_id) = self.state.lock().await.last_chat_id.clone() {
+        if let Some(in_flight) = &cursor.in_flight {
+            return Ok(in_flight.chat_id.clone());
+        }
+
+        if let Some(chat_id) = &cursor.last_chat_id {
+            return Ok(chat_id.clone());
+        }
+
+        let batch = self.fetch_updates(trace, cursor.next_update_id).await?;
+        cursor.next_update_id = max_update_id(cursor.next_update_id, batch.next_update_id);
+        if let Some(chat_id) = batch.observed_chat_id {
+            cursor.last_chat_id = Some(chat_id.clone());
+            self.store_cursor(cursor_store, cursor).await?;
             return Ok(chat_id);
         }
 
-        let updates = self.fetch_updates(trace).await?;
-        if let Some(chat_id) = updates.iter().rev().find_map(TelegramUpdate::chat_id) {
-            self.remember_chat_id(chat_id.clone()).await;
-            return Ok(chat_id);
+        if batch.next_update_id.is_some() {
+            self.store_cursor(cursor_store, cursor).await?;
         }
 
-        Err(anyhow!(
+        Err(TelegramDispatchError::terminal(anyhow!(
             "telegram subscriber requires config.chat_id or a prior Telegram chat update"
-        ))
+        )))
     }
 
     async fn post_approval_card(
@@ -176,7 +317,7 @@ impl TelegramSubscriber {
         chat_id: &str,
         request: &TelegramPermissionRequest,
         trace: &TraceContext,
-    ) -> Result<TelegramMessage> {
+    ) -> std::result::Result<TelegramMessage, TelegramDispatchError> {
         let reason = request
             .reason
             .as_deref()
@@ -194,30 +335,32 @@ impl TelegramSubscriber {
         });
         self.telegram_api(trace, "sendMessage", &payload)
             .await
-            .context("send Telegram approval card")
+            .map_err(|error| error.context("send Telegram approval card"))
     }
 
-    async fn fetch_updates(&self, trace: &TraceContext) -> Result<Vec<TelegramUpdate>> {
-        let offset = self.state.lock().await.next_update_id;
+    async fn fetch_updates(
+        &self,
+        trace: &TraceContext,
+        next_update_id: Option<i64>,
+    ) -> std::result::Result<TelegramUpdateBatch, TelegramDispatchError> {
         let timeout = self.config.poll_timeout.as_secs().min(i64::MAX as u64) as i64;
         let payload = json!({
             "allowed_updates": ["message", "callback_query"],
-            "offset": offset,
+            "offset": next_update_id,
             "timeout": timeout,
         });
-        let updates: Vec<TelegramUpdate> = self
-            .telegram_api(trace, "getUpdates", &payload)
-            .await
-            .context("poll Telegram updates")?;
+        let updates: Vec<TelegramUpdate> =
+            self.telegram_api(trace, "getUpdates", &payload)
+                .await
+                .map_err(|error| error.context("poll Telegram updates"))?;
 
-        let mut state = self.state.lock().await;
-        for update in &updates {
-            state.next_update_id = Some(update.update_id + 1);
-            if let Some(chat_id) = update.chat_id() {
-                state.last_chat_id = Some(chat_id);
-            }
-        }
-        Ok(updates)
+        let observed_chat_id = updates.iter().rev().find_map(TelegramUpdate::chat_id);
+        let next_update_id = updates.last().map(|update| update.update_id + 1);
+        Ok(TelegramUpdateBatch {
+            updates,
+            next_update_id,
+            observed_chat_id,
+        })
     }
 
     async fn match_resolution_update(
@@ -227,7 +370,7 @@ impl TelegramSubscriber {
         request: &TelegramPermissionRequest,
         updates: &[TelegramUpdate],
         trace: &TraceContext,
-    ) -> Result<Option<TelegramApprovalResolution>> {
+    ) -> std::result::Result<Option<TelegramApprovalResolution>, TelegramDispatchError> {
         for update in updates {
             let Some(callback) = &update.callback_query else {
                 continue;
@@ -280,7 +423,7 @@ impl TelegramSubscriber {
         callback_query_id: &str,
         text: &str,
         trace: &TraceContext,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), TelegramDispatchError> {
         let payload = json!({
             "callback_query_id": callback_query_id,
             "text": text,
@@ -288,7 +431,7 @@ impl TelegramSubscriber {
         let _: bool = self
             .telegram_api(trace, "answerCallbackQuery", &payload)
             .await
-            .context("acknowledge Telegram callback query")?;
+            .map_err(|error| error.context("acknowledge Telegram callback query"))?;
         Ok(())
     }
 
@@ -300,7 +443,7 @@ impl TelegramSubscriber {
         allow: bool,
         resolved_by: &str,
         trace: &TraceContext,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), TelegramDispatchError> {
         let verdict = if allow { "Approved" } else { "Denied" };
         let payload = json!({
             "chat_id": chat_id,
@@ -311,12 +454,8 @@ impl TelegramSubscriber {
         let _: Value = self
             .telegram_api(trace, "editMessageText", &payload)
             .await
-            .context("edit Telegram approval card")?;
+            .map_err(|error| error.context("edit Telegram approval card"))?;
         Ok(())
-    }
-
-    async fn remember_chat_id(&self, chat_id: String) {
-        self.state.lock().await.last_chat_id = Some(chat_id);
     }
 
     fn user_is_allowed(&self, user_id: &str) -> bool {
@@ -328,7 +467,7 @@ impl TelegramSubscriber {
         trace: &TraceContext,
         method: &str,
         payload: &Value,
-    ) -> Result<T>
+    ) -> std::result::Result<T, TelegramDispatchError>
     where
         T: for<'de> Deserialize<'de>,
     {
@@ -343,40 +482,106 @@ impl TelegramSubscriber {
             .post(url)
             .json(payload)
             .header("content-type", "application/json");
-        request = apply_trace_headers(request, trace)?;
+        request = apply_trace_headers(request, trace)
+            .map_err(TelegramDispatchError::terminal)
+            .map_err(|error| error.context(format!("encode Telegram headers for '{method}'")))?;
+
         let response = request
             .send()
             .await
-            .with_context(|| format!("call Telegram Bot API method '{method}'"))?;
+            .map_err(|error| TelegramDispatchError::transient(anyhow!(error)))
+            .map_err(|error| error.context(format!("call Telegram Bot API method '{method}'")))?;
         let status = response.status();
-        let envelope = response
-            .json::<TelegramApiEnvelope<T>>()
+        let body = response
+            .text()
             .await
-            .with_context(|| format!("decode Telegram Bot API response for '{method}'"))?;
+            .map_err(|error| TelegramDispatchError::transient(anyhow!(error)))
+            .map_err(|error| {
+                error.context(format!("read Telegram Bot API response for '{method}'"))
+            })?;
+
         if !status.is_success() {
-            return Err(anyhow!(
-                "Telegram {method} failed with HTTP {status}: {}",
-                envelope
-                    .description
-                    .unwrap_or_else(|| "unknown Telegram error".to_string())
-            ));
+            let description = telegram_error_description(&body);
+            let error = anyhow!("Telegram {method} failed with HTTP {status}: {description}");
+            return Err(if status_is_transient(status) {
+                TelegramDispatchError::Transient(error)
+            } else {
+                TelegramDispatchError::Terminal(error)
+            });
         }
+
+        let envelope = serde_json::from_str::<TelegramApiEnvelope<T>>(&body)
+            .map_err(anyhow::Error::from)
+            .map_err(TelegramDispatchError::terminal)
+            .map_err(|error| {
+                error.context(format!("decode Telegram Bot API response for '{method}'"))
+            })?;
         if !envelope.ok {
-            return Err(anyhow!(
+            return Err(TelegramDispatchError::terminal(anyhow!(
                 "Telegram {method} returned ok=false: {}",
                 envelope
                     .description
                     .unwrap_or_else(|| "unknown Telegram error".to_string())
-            ));
+            )));
         }
         envelope.result.ok_or_else(|| {
-            anyhow!(
+            TelegramDispatchError::terminal(anyhow!(
                 "Telegram {method} returned no result: {}",
                 envelope
                     .description
                     .unwrap_or_else(|| "missing result".to_string())
-            )
+            ))
         })
+    }
+
+    async fn load_cursor(
+        &self,
+        cursor_store: &dyn TelegramCursorStore,
+    ) -> std::result::Result<TelegramCursorRecord, TelegramDispatchError> {
+        cursor_store
+            .load_cursor()
+            .await
+            .map_err(TelegramDispatchError::terminal)
+            .map_err(|error| error.context("load Telegram cursor state"))
+    }
+
+    async fn store_cursor(
+        &self,
+        cursor_store: &dyn TelegramCursorStore,
+        cursor: &TelegramCursorRecord,
+    ) -> std::result::Result<(), TelegramDispatchError> {
+        let mut snapshot = cursor.clone();
+        snapshot.updated_at_ms = now_ms();
+        cursor_store
+            .store_cursor(&snapshot)
+            .await
+            .map_err(TelegramDispatchError::terminal)
+            .map_err(|error| error.context("persist Telegram cursor state"))?;
+        Ok(())
+    }
+
+    async fn clear_in_flight(
+        &self,
+        completion_key: CompletionKey,
+        cursor_store: &dyn TelegramCursorStore,
+    ) -> Result<()> {
+        let mut cursor = cursor_store
+            .load_cursor()
+            .await
+            .context("load Telegram cursor before clearing in-flight state")?;
+        if cursor
+            .in_flight
+            .as_ref()
+            .is_some_and(|record| record.completion_key == completion_key)
+        {
+            cursor.in_flight = None;
+            cursor.updated_at_ms = now_ms();
+            cursor_store
+                .store_cursor(&cursor)
+                .await
+                .context("clear Telegram in-flight checkpoint")?;
+        }
+        Ok(())
     }
 }
 
@@ -391,12 +596,12 @@ impl DurableSubscriber for TelegramSubscriber {
     fn matches(&self, envelope: &StreamEnvelope) -> Option<Self::Event> {
         let event = decode_permission_event(envelope)?;
         (event.kind == "permission_request")
-            .then_some(event.into_request())
+            .then_some(event.into_request(envelope.source_offset.clone()))
             .flatten()
     }
 
     fn completion_key(&self, event: &Self::Event) -> CompletionKey {
-        CompletionKey::prompt(event.session_id.clone(), event.request_id.clone())
+        event.completion_key()
     }
 
     fn is_completed(&self, event: &Self::Event, log: &[StreamEnvelope]) -> bool {
@@ -422,10 +627,56 @@ impl ActiveSubscriber for TelegramSubscriber {
             fireline.request_id = %request_id_key(&event.request_id),
         );
         let _entered = span.enter();
-        match self.wait_for_resolution(event).await {
-            Ok(completion) => HandlerOutcome::Completed(completion),
+
+        let durable_cursor_store;
+        let memory_cursor_store;
+        let cursor_store: &dyn TelegramCursorStore =
+            if let Some(stream_url) = &self.config.cursor_stream {
+                durable_cursor_store = DurableTelegramCursorStore::new(stream_url.clone());
+                &durable_cursor_store
+            } else {
+                memory_cursor_store = MemoryTelegramCursorStore::new(self.state.clone());
+                &memory_cursor_store
+            };
+
+        let durable_dead_letters;
+        let dead_letters: Option<&dyn TelegramDeadLetterSink> =
+            if let Some(stream_url) = &self.config.dead_letter_stream {
+                durable_dead_letters = DurableTelegramDeadLetterSink::new(stream_url.clone());
+                Some(&durable_dead_letters)
+            } else {
+                None
+            };
+
+        match self
+            .dispatch_with_retry(event, &[], cursor_store, dead_letters)
+            .await
+        {
+            Ok(TelegramDispatchResult::Delivered(outcome)) => {
+                HandlerOutcome::Completed(outcome.completion)
+            }
+            Ok(TelegramDispatchResult::Skipped(TelegramSkipReason::AlreadyCompleted)) => {
+                HandlerOutcome::Failed(anyhow!(
+                    "telegram dispatch skipped because approval_resolved already exists for the canonical completion key"
+                ))
+            }
+            Ok(TelegramDispatchResult::Skipped(TelegramSkipReason::AlreadyDeadLettered)) => {
+                HandlerOutcome::Failed(anyhow!(
+                    "telegram dispatch skipped because the canonical completion key is already dead-lettered"
+                ))
+            }
+            Ok(TelegramDispatchResult::DeadLettered(record)) => HandlerOutcome::Failed(anyhow!(
+                "telegram dispatch dead-lettered canonical key '{}' after {} attempts: {}",
+                record.completion_key.storage_key(),
+                record.attempts,
+                record.last_error
+            )),
             Err(error) => HandlerOutcome::Failed(error),
         }
+    }
+
+    fn retry_policy(&self) -> RetryPolicy {
+        self.config.retry_policy()
     }
 }
 
@@ -493,12 +744,303 @@ pub struct TelegramPermissionRequest {
     pub created_at_ms: i64,
     #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<TraceContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_offset: Option<String>,
 }
 
-#[derive(Debug, Default)]
-struct TelegramSubscriberState {
-    last_chat_id: Option<String>,
-    next_update_id: Option<i64>,
+impl TelegramPermissionRequest {
+    #[must_use]
+    pub fn completion_key(&self) -> CompletionKey {
+        CompletionKey::prompt(self.session_id.clone(), self.request_id.clone())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TelegramInFlightApproval {
+    pub completion_key: CompletionKey,
+    pub chat_id: String,
+    pub message_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_offset: Option<String>,
+}
+
+impl TelegramInFlightApproval {
+    #[must_use]
+    pub fn new(
+        completion_key: CompletionKey,
+        chat_id: String,
+        message_id: i64,
+        source_offset: Option<String>,
+    ) -> Self {
+        Self {
+            completion_key,
+            chat_id,
+            message_id,
+            source_offset,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TelegramCursorRecord {
+    pub subscriber: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_update_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_flight: Option<TelegramInFlightApproval>,
+    pub updated_at_ms: i64,
+}
+
+impl Default for TelegramCursorRecord {
+    fn default() -> Self {
+        Self {
+            subscriber: TELEGRAM_SUBSCRIBER_NAME.to_string(),
+            next_update_id: None,
+            last_chat_id: None,
+            in_flight: None,
+            updated_at_ms: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TelegramDeadLetterRecord {
+    pub completion_key: CompletionKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_offset: Option<String>,
+    pub attempts: u32,
+    pub last_error: String,
+    pub created_at_ms: i64,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<TraceContext>,
+}
+
+impl TelegramDeadLetterRecord {
+    fn from_error(
+        request: &TelegramPermissionRequest,
+        attempts: u32,
+        error: anyhow::Error,
+    ) -> Result<Self> {
+        Ok(Self {
+            completion_key: request.completion_key(),
+            source_offset: request.source_offset.clone(),
+            attempts,
+            last_error: error.to_string(),
+            created_at_ms: now_ms(),
+            meta: request.meta.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramDispatchOutcome {
+    pub completion: TelegramApprovalResolution,
+    pub attempts: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TelegramDispatchResult {
+    Skipped(TelegramSkipReason),
+    Delivered(TelegramDispatchOutcome),
+    DeadLettered(TelegramDeadLetterRecord),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelegramSkipReason {
+    AlreadyCompleted,
+    AlreadyDeadLettered,
+}
+
+#[async_trait]
+trait TelegramCursorStore: Send + Sync {
+    async fn load_cursor(&self) -> Result<TelegramCursorRecord>;
+    async fn store_cursor(&self, record: &TelegramCursorRecord) -> Result<bool>;
+}
+
+#[async_trait]
+trait TelegramDeadLetterSink: Send + Sync {
+    async fn contains(&self, completion_key: &CompletionKey) -> Result<bool>;
+    async fn record(&self, record: &TelegramDeadLetterRecord) -> Result<()>;
+}
+
+#[derive(Debug)]
+pub struct DurableTelegramCursorStore {
+    stream_url: String,
+    cached: Mutex<Option<TelegramCursorRecord>>,
+}
+
+impl DurableTelegramCursorStore {
+    #[must_use]
+    pub fn new(stream_url: impl Into<String>) -> Self {
+        Self {
+            stream_url: stream_url.into(),
+            cached: Mutex::new(None),
+        }
+    }
+
+    async fn replay_cursor(&self) -> Result<TelegramCursorRecord> {
+        let Some(rows) = read_all_json_rows(&self.stream_url).await? else {
+            return Ok(TelegramCursorRecord::default());
+        };
+
+        let mut cursor = TelegramCursorRecord::default();
+        for row in rows {
+            let Ok(envelope) = serde_json::from_value::<StateEnvelope<TelegramCursorRecord>>(row)
+            else {
+                continue;
+            };
+            if envelope.entity_type != TELEGRAM_CURSOR_TYPE {
+                continue;
+            }
+            cursor = merge_cursor_record(Some(&cursor), &envelope.value);
+        }
+        Ok(cursor)
+    }
+}
+
+#[async_trait]
+impl TelegramCursorStore for DurableTelegramCursorStore {
+    async fn load_cursor(&self) -> Result<TelegramCursorRecord> {
+        let mut cached = self.cached.lock().await;
+        if cached.is_none() {
+            *cached = Some(self.replay_cursor().await?);
+        }
+        Ok(cached.clone().unwrap_or_default())
+    }
+
+    async fn store_cursor(&self, record: &TelegramCursorRecord) -> Result<bool> {
+        let mut cached = self.cached.lock().await;
+        let merged = merge_cursor_record(cached.as_ref(), record);
+        if cached.as_ref() == Some(&merged) {
+            return Ok(false);
+        }
+
+        ensure_json_stream_exists(&self.stream_url)
+            .await
+            .with_context(|| format!("ensure Telegram cursor stream '{}'", self.stream_url))?;
+        let producer = json_producer(&self.stream_url, "telegram-cursor");
+        producer.append_json(&StateEnvelope {
+            entity_type: TELEGRAM_CURSOR_TYPE.to_string(),
+            key: TELEGRAM_SUBSCRIBER_NAME.to_string(),
+            headers: StateHeaders {
+                operation: "insert".to_string(),
+            },
+            value: merged.clone(),
+        });
+        producer
+            .flush()
+            .await
+            .context("flush Telegram cursor state")?;
+
+        *cached = Some(merged);
+        Ok(true)
+    }
+}
+
+#[derive(Debug)]
+pub struct DurableTelegramDeadLetterSink {
+    stream_url: String,
+    known_keys: Mutex<Option<HashSet<String>>>,
+}
+
+impl DurableTelegramDeadLetterSink {
+    #[must_use]
+    pub fn new(stream_url: impl Into<String>) -> Self {
+        Self {
+            stream_url: stream_url.into(),
+            known_keys: Mutex::new(None),
+        }
+    }
+
+    async fn replay_keys(&self) -> Result<HashSet<String>> {
+        let Some(rows) = read_all_json_rows(&self.stream_url).await? else {
+            return Ok(HashSet::new());
+        };
+
+        let mut known = HashSet::new();
+        for row in rows {
+            let Ok(envelope) =
+                serde_json::from_value::<StateEnvelope<TelegramDeadLetterRecord>>(row)
+            else {
+                continue;
+            };
+            if envelope.entity_type != TELEGRAM_DEAD_LETTER_TYPE {
+                continue;
+            }
+            known.insert(dead_letter_storage_key(&envelope.value.completion_key));
+        }
+        Ok(known)
+    }
+}
+
+#[async_trait]
+impl TelegramDeadLetterSink for DurableTelegramDeadLetterSink {
+    async fn contains(&self, completion_key: &CompletionKey) -> Result<bool> {
+        let mut known_keys = self.known_keys.lock().await;
+        if known_keys.is_none() {
+            *known_keys = Some(self.replay_keys().await?);
+        }
+        Ok(known_keys
+            .as_ref()
+            .is_some_and(|keys| keys.contains(&dead_letter_storage_key(completion_key))))
+    }
+
+    async fn record(&self, record: &TelegramDeadLetterRecord) -> Result<()> {
+        ensure_json_stream_exists(&self.stream_url)
+            .await
+            .with_context(|| format!("ensure Telegram dead-letter stream '{}'", self.stream_url))?;
+        let producer = json_producer(&self.stream_url, "telegram-dead-letter");
+        producer.append_json(&StateEnvelope {
+            entity_type: TELEGRAM_DEAD_LETTER_TYPE.to_string(),
+            key: dead_letter_storage_key(&record.completion_key),
+            headers: StateHeaders {
+                operation: "insert".to_string(),
+            },
+            value: record.clone(),
+        });
+        producer
+            .flush()
+            .await
+            .context("flush Telegram dead-letter state")?;
+
+        let mut known_keys = self.known_keys.lock().await;
+        let keys = known_keys.get_or_insert_with(HashSet::new);
+        keys.insert(dead_letter_storage_key(&record.completion_key));
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct MemoryTelegramCursorStore {
+    state: Arc<Mutex<TelegramCursorRecord>>,
+}
+
+impl MemoryTelegramCursorStore {
+    fn new(state: Arc<Mutex<TelegramCursorRecord>>) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait]
+impl TelegramCursorStore for MemoryTelegramCursorStore {
+    async fn load_cursor(&self) -> Result<TelegramCursorRecord> {
+        Ok(self.state.lock().await.clone())
+    }
+
+    async fn store_cursor(&self, record: &TelegramCursorRecord) -> Result<bool> {
+        let mut state = self.state.lock().await;
+        let merged = merge_cursor_record(Some(&state), record);
+        if *state == merged {
+            return Ok(false);
+        }
+        *state = merged;
+        Ok(true)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -520,7 +1062,7 @@ struct TelegramPermissionEvent {
 }
 
 impl TelegramPermissionEvent {
-    fn into_request(self) -> Option<TelegramPermissionRequest> {
+    fn into_request(self, source_offset: Option<String>) -> Option<TelegramPermissionRequest> {
         Some(TelegramPermissionRequest {
             kind: self.kind,
             session_id: self.session_id,
@@ -528,6 +1070,7 @@ impl TelegramPermissionEvent {
             reason: self.reason,
             created_at_ms: self.created_at_ms,
             meta: self.meta,
+            source_offset,
         })
     }
 
@@ -548,6 +1091,13 @@ fn decode_permission_event(envelope: &StreamEnvelope) -> Option<TelegramPermissi
     (envelope.entity_type == "permission")
         .then(|| envelope.value_as::<TelegramPermissionEvent>())
         .flatten()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TelegramUpdateBatch {
+    updates: Vec<TelegramUpdate>,
+    next_update_id: Option<i64>,
+    observed_chat_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -609,6 +1159,30 @@ struct TelegramUser {
     id: String,
     #[serde(default)]
     username: Option<String>,
+}
+
+#[derive(Debug)]
+enum TelegramDispatchError {
+    Transient(anyhow::Error),
+    Terminal(anyhow::Error),
+}
+
+impl TelegramDispatchError {
+    fn transient(error: impl Into<anyhow::Error>) -> Self {
+        Self::Transient(error.into())
+    }
+
+    fn terminal(error: impl Into<anyhow::Error>) -> Self {
+        Self::Terminal(error.into())
+    }
+
+    fn context(self, context: impl Into<String>) -> Self {
+        let context = context.into();
+        match self {
+            Self::Transient(error) => Self::Transient(error.context(context)),
+            Self::Terminal(error) => Self::Terminal(error.context(context)),
+        }
+    }
 }
 
 fn apply_trace_headers(
@@ -677,6 +1251,58 @@ fn insert_headers() -> Map<String, Value> {
     headers
 }
 
+fn merge_cursor_record(
+    current: Option<&TelegramCursorRecord>,
+    candidate: &TelegramCursorRecord,
+) -> TelegramCursorRecord {
+    TelegramCursorRecord {
+        subscriber: candidate.subscriber.clone(),
+        next_update_id: max_update_id(
+            current.and_then(|record| record.next_update_id),
+            candidate.next_update_id,
+        ),
+        last_chat_id: candidate
+            .last_chat_id
+            .clone()
+            .or_else(|| current.and_then(|record| record.last_chat_id.clone())),
+        in_flight: candidate.in_flight.clone(),
+        updated_at_ms: candidate.updated_at_ms,
+    }
+}
+
+fn max_update_id(current: Option<i64>, candidate: Option<i64>) -> Option<i64> {
+    match (current, candidate) {
+        (Some(current), Some(candidate)) => Some(current.max(candidate)),
+        (Some(current), None) => Some(current),
+        (None, Some(candidate)) => Some(candidate),
+        (None, None) => None,
+    }
+}
+
+fn dead_letter_storage_key(completion_key: &CompletionKey) -> String {
+    format!(
+        "{TELEGRAM_SUBSCRIBER_NAME}:{}",
+        completion_key.storage_key()
+    )
+}
+
+fn telegram_error_description(body: &str) -> String {
+    serde_json::from_str::<TelegramApiEnvelope<Value>>(body)
+        .ok()
+        .and_then(|envelope| envelope.description)
+        .or_else(|| {
+            let trimmed = body.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
+        .unwrap_or_else(|| "unknown Telegram error".to_string())
+}
+
+fn status_is_transient(status: StatusCode) -> bool {
+    status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
 fn approval_resolved_kind() -> String {
     "approval_resolved".to_string()
 }
@@ -694,6 +1320,91 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_millis() as i64
+}
+
+fn json_producer(stream_url: &str, producer_name: &str) -> Producer {
+    let client = DurableStreamsClient::new();
+    let mut stream = client.stream(stream_url);
+    stream.set_content_type("application/json");
+    stream
+        .producer(format!("{producer_name}-{}", uuid::Uuid::new_v4()))
+        .content_type("application/json")
+        .build()
+}
+
+async fn ensure_json_stream_exists(stream_url: &str) -> Result<()> {
+    let client = DurableStreamsClient::new();
+    let stream = client.stream(stream_url);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match stream
+            .create_with(CreateOptions::new().content_type("application/json"))
+            .await
+        {
+            Ok(_) | Err(StreamError::Conflict) => return Ok(()),
+            Err(error) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                tracing::debug!(?error, stream_url, "retrying Telegram stream creation");
+            }
+            Err(error) => {
+                return Err(anyhow::Error::from(error))
+                    .with_context(|| format!("create Telegram stream '{stream_url}'"));
+            }
+        }
+    }
+}
+
+async fn read_all_json_rows(stream_url: &str) -> Result<Option<Vec<Value>>> {
+    let client = DurableStreamsClient::new();
+    let stream = client.stream(stream_url);
+    let mut reader = match stream
+        .read()
+        .offset(Offset::Beginning)
+        .live(LiveMode::Off)
+        .build()
+    {
+        Ok(reader) => reader,
+        Err(error) => {
+            return Err(anyhow::Error::from(error)).context("build Telegram stream reader");
+        }
+    };
+
+    let mut rows = Vec::new();
+    loop {
+        match reader.next_chunk().await {
+            Ok(Some(chunk)) => {
+                if !chunk.data.is_empty() {
+                    let chunk_rows: Vec<Value> = serde_json::from_slice(&chunk.data)
+                        .context("decode Telegram stream chunk as JSON array")?;
+                    rows.extend(chunk_rows);
+                }
+                if chunk.up_to_date {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(StreamError::NotFound { .. }) => return Ok(None),
+            Err(error) => {
+                return Err(anyhow::Error::from(error))
+                    .with_context(|| format!("read Telegram stream '{stream_url}'"));
+            }
+        }
+    }
+    Ok(Some(rows))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct StateEnvelope<T> {
+    #[serde(rename = "type")]
+    entity_type: String,
+    key: String,
+    headers: StateHeaders,
+    value: T,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct StateHeaders {
+    operation: String,
 }
 
 fn deserialize_string_like<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
