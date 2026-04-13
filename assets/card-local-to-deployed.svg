@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300">
+  <rect width="400" height="300" fill="#0b0b0d" rx="8"/>
+  <g transform="translate(50, 100)">
+    <!-- Laptop -->
+    <g transform="translate(0, 0)">
+      <rect x="0" y="40" width="60" height="40" rx="2" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+      <rect x="-10" y="80" width="80" height="5" rx="2" fill="#30363d"/>
+      <text x="30" y="105" text-anchor="middle" fill="#484f58" font-family="Inter" font-size="10">Local</text>
+    </g>
+    
+    <!-- Cloud -->
+    <g transform="translate(230, 0)">
+      <path d="M10 60 Q10 30 40 30 Q50 30 60 40 Q80 40 80 60 Q80 80 60 80 L20 80 Q10 80 10 60" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+      <text x="45" y="105" text-anchor="middle" fill="#484f58" font-family="Inter" font-size="10">Cloud Fleet</text>
+    </g>
+    
+    <!-- Shared Spec -->
+    <g transform="translate(125, 10)">
+      <rect x="0" y="0" width="50" height="70" rx="2" fill="#1e293b" stroke="#ff6b35" stroke-width="1"/>
+      <line x1="10" y1="20" x2="40" y2="20" stroke="#334155" stroke-width="2"/>
+      <line x1="10" y1="35" x2="40" y2="35" stroke="#334155" stroke-width="2"/>
+      <line x1="10" y1="50" x2="30" y2="50" stroke="#334155" stroke-width="2"/>
+      <text x="25" y="85" text-anchor="middle" fill="#ff6b35" font-family="monospace" font-size="10">agent.ts</text>
+    </g>
+    
+    <!-- Arcing Stream -->
+    <path d="M60 60 Q150 0 230 60" fill="none" stroke="#ff6b35" stroke-width="2" stroke-opacity="0.4" stroke-dasharray="8,4"/>
+  </g>
+</svg>

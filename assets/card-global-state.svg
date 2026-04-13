@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300">
+  <rect width="400" height="300" fill="#0b0b0d" rx="8"/>
+  <g transform="translate(50, 50)">
+    <!-- Central Row -->
+    <rect x="0" y="80" width="300" height="40" rx="4" fill="#161b22" stroke="#ff6b35" stroke-width="1"/>
+    <text x="10" y="105" fill="#8b949e" font-family="monospace" font-size="10">session:abc-123</text>
+    <text x="150" y="105" fill="#ff6b35" font-family="monospace" font-size="10">request:def-456</text>
+    
+    <!-- Fan out -->
+    <path d="M150 120 L50 200" fill="none" stroke="#334155" stroke-width="1" stroke-dasharray="4,2"/>
+    <path d="M150 120 L150 200" fill="none" stroke="#334155" stroke-width="1" stroke-dasharray="4,2"/>
+    <path d="M150 120 L250 200" fill="none" stroke="#334155" stroke-width="1" stroke-dasharray="4,2"/>
+    
+    <circle cx="50" cy="200" r="15" fill="#161b22" stroke="#30363d"/>
+    <circle cx="150" cy="200" r="15" fill="#161b22" stroke="#30363d"/>
+    <circle cx="250" cy="200" r="15" fill="#161b22" stroke="#30363d"/>
+    
+    <text x="50" y="230" text-anchor="middle" fill="#484f58" font-family="Inter" font-size="8">Host A</text>
+    <text x="150" y="230" text-anchor="middle" fill="#484f58" font-family="Inter" font-size="8">Host B</text>
+    <text x="250" y="230" text-anchor="middle" fill="#484f58" font-family="Inter" font-size="8">Dashboard</text>
+  </g>
+</svg>
