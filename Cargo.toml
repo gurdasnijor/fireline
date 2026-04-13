@@ -165,6 +165,9 @@ yopo.workspace = true
 futures.workspace = true
 tokio-tungstenite.workspace = true
 agent-client-protocol-test.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+tracing-opentelemetry.workspace = true
 
 [[bin]]
 name = "fireline"

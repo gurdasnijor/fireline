@@ -139,20 +139,36 @@ pub(crate) fn build_peer_mcp_server(
                         ))
                     })?;
 
-                    let parent_lineage =
-                        current_parent_lineage(active_turn_lookup.as_ref(), &session_id)
-                            .await
-                            .ok_or_else(|| {
-                                sacp::util::internal_error(format!(
-                                    "prompt peer '{}' before active turn projection caught up",
-                                    input.agent_name
-                                ))
-                            })?;
+                    let tool_call_span = tracing::info_span!(
+                        "fireline.tool_call",
+                        tool_name = "prompt_peer",
+                        peer_agent_name = %input.agent_name,
+                        session_id = %session_id,
+                    );
+                    let _tool_call_guard = tool_call_span.enter();
+
+                    wait_for_current_turn_barrier(active_turn_lookup.as_ref(), &session_id)
+                        .await
+                        .ok_or_else(|| {
+                            sacp::util::internal_error(format!(
+                                "prompt peer '{}' before active turn projection caught up",
+                                input.agent_name
+                            ))
+                        })?;
+
+                    let peer_call_span = tracing::info_span!(
+                        "fireline.peer_call.outbound",
+                        peer_agent_name = %input.agent_name,
+                        peer_host_id = %peer.host_id,
+                        session_id = %session_id,
+                    );
+                    let _peer_call_guard = peer_call_span.enter();
+                    let trace_context = transport::TraceContextCarrier::from_current_span();
 
                     let result = transport::dispatch_peer_call(
                         &peer,
                         &input.prompt,
-                        Some(parent_lineage.clone()),
+                        trace_context,
                     )
                     .await
                     .map_err(|e| {
@@ -179,15 +195,12 @@ pub(crate) fn build_peer_mcp_server(
 
 use sacp::Conductor;
 
-async fn current_parent_lineage(
+async fn wait_for_current_turn_barrier(
     active_turn_lookup: &dyn ActiveTurnLookup,
     session_id: &str,
-) -> Option<transport::ParentLineage> {
+) -> Option<()> {
     active_turn_lookup
         .wait_for_current_turn(session_id, Duration::from_millis(250))
         .await
-        .map(|turn| transport::ParentLineage {
-            trace_id: turn.trace_id,
-            parent_prompt_turn_id: Some(turn.prompt_turn_id),
-        })
+        .map(|_| ())
 }

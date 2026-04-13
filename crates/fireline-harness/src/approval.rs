@@ -286,6 +286,13 @@ impl ApprovalGateComponent {
         request_id: &RequestId,
         reason: &str,
     ) -> Result<(), sacp::Error> {
+        let approval_emit_span = tracing::info_span!(
+            "fireline.approval.emit",
+            session_id = %session_id,
+            request_id = %request_id,
+        );
+        let _approval_emit_guard = approval_emit_span.enter();
+
         let Some(producer) = self.state_producer.as_ref() else {
             return Err(sacp::util::internal_error(
                 "approval gate has no state producer; cannot emit permission_request",
@@ -326,6 +333,13 @@ impl ApprovalGateComponent {
         session_id: &SessionId,
         request_id: &RequestId,
     ) -> Result<bool, sacp::Error> {
+        let approval_wait_span = tracing::info_span!(
+            "fireline.approval.wait",
+            session_id = %session_id,
+            request_id = %request_id,
+        );
+        let _approval_wait_guard = approval_wait_span.enter();
+
         let state_stream_url = self
             .state_stream_url
             .as_deref()
@@ -393,6 +407,18 @@ impl ApprovalGateComponent {
                             continue;
                         }
                         let allow = value.get("allow").and_then(Value::as_bool).unwrap_or(false);
+                        let resolved_by = value
+                            .get("resolvedBy")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown");
+                        tracing::info_span!(
+                            "fireline.approval.resolve",
+                            session_id = %session_id,
+                            request_id = %request_id,
+                            allow,
+                            resolved_by = %resolved_by,
+                        )
+                        .in_scope(|| {});
                         return Ok(allow);
                     }
                 }

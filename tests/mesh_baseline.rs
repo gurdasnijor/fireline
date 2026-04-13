@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use agent_client_protocol_test::testy::TestyCommand;
@@ -8,7 +9,13 @@ use durable_streams::{Client as DsClient, Offset};
 use fireline_harness::TopologySpec;
 use fireline_host::bootstrap::{BootstrapConfig, start};
 use futures::{SinkExt, StreamExt};
+use opentelemetry::global;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_sdk::error::OTelSdkResult;
+use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
 use serde_json::Value;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 use uuid::Uuid;
 
 #[path = "support/stream_server.rs"]
@@ -74,6 +81,58 @@ fn testy_bin() -> String {
 
 fn temp_peer_directory() -> PathBuf {
     std::env::temp_dir().join(format!("fireline-peers-{}.toml", Uuid::new_v4()))
+}
+
+#[derive(Debug, Clone, Default)]
+struct TestSpanExporter {
+    spans: Arc<Mutex<Vec<SpanData>>>,
+}
+
+impl SpanExporter for TestSpanExporter {
+    fn export(&self, batch: Vec<SpanData>) -> impl Future<Output = OTelSdkResult> + Send {
+        let spans = self.spans.clone();
+        async move {
+            spans.lock().unwrap().extend(batch);
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct TelemetryCapture {
+    spans: Arc<Mutex<Vec<SpanData>>>,
+}
+
+impl TelemetryCapture {
+    fn clear(&self) {
+        self.spans.lock().unwrap().clear();
+    }
+
+    fn snapshot(&self) -> Vec<SpanData> {
+        self.spans.lock().unwrap().clone()
+    }
+}
+
+fn telemetry_capture() -> &'static TelemetryCapture {
+    static CAPTURE: OnceLock<TelemetryCapture> = OnceLock::new();
+    static INIT: OnceLock<()> = OnceLock::new();
+
+    let capture = CAPTURE.get_or_init(TelemetryCapture::default);
+    INIT.get_or_init(|| {
+        let tracer_provider = SdkTracerProvider::builder()
+            .with_simple_exporter(TestSpanExporter {
+                spans: capture.spans.clone(),
+            })
+            .build();
+        let tracer = tracer_provider.tracer("fireline-mesh-baseline");
+        global::set_tracer_provider(tracer_provider);
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer().with_test_writer().without_time())
+            .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .try_init()
+            .expect("initialize mesh baseline tracing");
+    });
+    capture
 }
 
 #[tokio::test]
@@ -235,6 +294,146 @@ async fn mesh_baseline_exposes_peer_tools_and_prompts_remote_peer_over_acp() -> 
     Ok(())
 }
 
+#[tokio::test]
+async fn peer_trace_context_propagates_across_prompt_peer() -> Result<()> {
+    let telemetry = telemetry_capture();
+    telemetry.clear();
+
+    let peer_directory_path = temp_peer_directory();
+    let stream_server = stream_server::TestStreamServer::spawn().await?;
+
+    let handle_b = start(BootstrapConfig {
+        host: "127.0.0.1".parse::<IpAddr>()?,
+        port: 0,
+        name: "agent-b".to_string(),
+        host_key: format!("runtime:{}", Uuid::new_v4()),
+        node_id: "node:test-mesh".to_string(),
+        agent_command: vec![testy_bin()],
+        mounted_resources: Vec::new(),
+        state_stream: None,
+        durable_streams_url: stream_server.base_url.clone(),
+        peer_directory_path: peer_directory_path.clone(),
+        control_plane_url: None,
+        topology: TopologySpec::default(),
+    })
+    .await?;
+
+    let handle_a = start(BootstrapConfig {
+        host: "127.0.0.1".parse::<IpAddr>()?,
+        port: 0,
+        name: "agent-a".to_string(),
+        host_key: format!("runtime:{}", Uuid::new_v4()),
+        node_id: "node:test-mesh".to_string(),
+        agent_command: vec![testy_bin()],
+        mounted_resources: Vec::new(),
+        state_stream: None,
+        durable_streams_url: stream_server.base_url.clone(),
+        peer_directory_path: peer_directory_path.clone(),
+        control_plane_url: None,
+        topology: TopologySpec::default(),
+    })
+    .await?;
+
+    let _ = yopo::prompt(
+        WebSocketTransport {
+            url: handle_a.acp_url.clone(),
+        },
+        TestyCommand::CallTool {
+            server: "fireline-peer".to_string(),
+            tool: "prompt_peer".to_string(),
+            params: serde_json::json!({
+                "agentName": "agent-b",
+                "prompt": TestyCommand::Echo {
+                    message: "trace propagation".to_string(),
+                }
+                .to_prompt(),
+            }),
+        }
+        .to_prompt(),
+    )
+    .await?;
+
+    let client = DsClient::new();
+    let stream_a = client.stream(&handle_a.state_stream_url);
+    let stream_b = client.stream(&handle_b.state_stream_url);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let (parent_prompt, child_prompt) = loop {
+        let body_a = read_stream_body(&stream_a).await?;
+        let body_b = read_stream_body(&stream_b).await?;
+
+        let parent =
+            find_prompt_request(&body_a, |text| text.contains("\"tool\":\"prompt_peer\""));
+        let child = find_prompt_request(&body_b, |text| text.contains("trace propagation"));
+
+        if let (Some(parent), Some(child)) = (parent, child) {
+            break (parent, child);
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for parent and child prompt_request rows");
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let spans = wait_for_spans(telemetry, Duration::from_secs(5), |spans| {
+        let outbound = find_named_span(spans, "fireline.peer_call.outbound");
+        let inbound = find_named_span(spans, "fireline.peer_call.inbound");
+        let child_prompt_span = spans.iter().find(|span| {
+            span.name == "fireline.session.prompt"
+                && span_attribute_eq(span, "session_id", &child_prompt.session_id)
+        });
+        outbound.is_some() && inbound.is_some() && child_prompt_span.is_some()
+    })
+    .await?;
+
+    let outbound = find_named_span(&spans, "fireline.peer_call.outbound")
+        .expect("missing fireline.peer_call.outbound span");
+    let inbound = find_named_span(&spans, "fireline.peer_call.inbound")
+        .expect("missing fireline.peer_call.inbound span");
+    let child_prompt_span = spans
+        .iter()
+        .find(|span| {
+            span.name == "fireline.session.prompt"
+                && span_attribute_eq(span, "session_id", &child_prompt.session_id)
+        })
+        .expect("missing child fireline.session.prompt span");
+
+    assert_eq!(
+        inbound.span_context.trace_id(),
+        outbound.span_context.trace_id(),
+        "peer inbound span should inherit the outbound peer call trace id"
+    );
+    assert_eq!(
+        inbound.parent_span_id,
+        outbound.span_context.span_id(),
+        "peer inbound span should point at the outbound peer-call span"
+    );
+    assert!(
+        inbound.parent_span_is_remote,
+        "peer inbound span should record a remote parent"
+    );
+    assert_eq!(
+        child_prompt_span.span_context.trace_id(),
+        outbound.span_context.trace_id(),
+        "child session/prompt span should stay on the propagated trace"
+    );
+    assert_eq!(
+        child_prompt_span.parent_span_id,
+        inbound.span_context.span_id(),
+        "child session/prompt span should hang off the inbound peer span"
+    );
+    assert_ne!(
+        parent_prompt.request_id, child_prompt.request_id,
+        "cross-host prompt_peer should still allocate a fresh child request id"
+    );
+
+    handle_a.shutdown().await?;
+    handle_b.shutdown().await?;
+    stream_server.shutdown().await;
+    Ok(())
+}
+
 #[derive(Debug)]
 struct PromptRequestEvent {
     request_id: String,
@@ -271,4 +470,44 @@ fn parse_state_events(body: &str) -> Vec<Value> {
                 .collect()
         }
     }
+}
+
+async fn read_stream_body(stream: &durable_streams::DurableStream) -> Result<String> {
+    let mut reader = stream.read().offset(Offset::Beginning).build()?;
+    let mut body = String::new();
+    while let Some(chunk) = reader.next_chunk().await? {
+        body.push_str(std::str::from_utf8(&chunk.data)?);
+        if chunk.up_to_date {
+            break;
+        }
+    }
+    Ok(body)
+}
+
+async fn wait_for_spans(
+    telemetry: &TelemetryCapture,
+    timeout: Duration,
+    predicate: impl Fn(&[SpanData]) -> bool,
+) -> Result<Vec<SpanData>> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let spans = telemetry.snapshot();
+        if predicate(&spans) {
+            return Ok(spans);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for expected trace spans");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn find_named_span<'a>(spans: &'a [SpanData], name: &str) -> Option<&'a SpanData> {
+    spans.iter().find(|span| span.name == name)
+}
+
+fn span_attribute_eq(span: &SpanData, key: &str, expected: &str) -> bool {
+    span.attributes.iter().any(|attribute| {
+        attribute.key.as_str() == key && attribute.value.to_string() == expected
+    })
 }

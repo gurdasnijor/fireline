@@ -8,7 +8,15 @@
 use anyhow::{Context, Result};
 use fireline_acp_ids::SessionId;
 use futures::{SinkExt, StreamExt};
+use opentelemetry::{
+    Context as OtelContext,
+    propagation::{Extractor, Injector, TextMapPropagator},
+    trace::TraceContextExt,
+};
+use opentelemetry_sdk::propagation::{BaggagePropagator, TraceContextPropagator};
 use serde_json::{Map, Value};
+use tracing::Span;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use super::Peer;
 
@@ -20,9 +28,108 @@ pub(crate) struct PeerCallResult {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ParentLineage {
-    pub trace_id: Option<String>,
-    pub parent_prompt_turn_id: Option<String>,
+pub(crate) struct TraceContextCarrier {
+    pub traceparent: String,
+    pub tracestate: Option<String>,
+    pub baggage: Option<String>,
+}
+
+impl TraceContextCarrier {
+    pub(crate) fn from_current_span() -> Option<Self> {
+        Self::from_span(&Span::current())
+    }
+
+    pub(crate) fn from_span(span: &Span) -> Option<Self> {
+        Self::from_context(&span.context())
+    }
+
+    fn from_context(context: &OtelContext) -> Option<Self> {
+        let mut meta = Map::new();
+        {
+            let mut injector = JsonMetaInjector(&mut meta);
+            TraceContextPropagator::new().inject_context(context, &mut injector);
+            BaggagePropagator::new().inject_context(context, &mut injector);
+        }
+        Self::from_meta(&meta)
+    }
+
+    fn from_meta(meta: &Map<String, Value>) -> Option<Self> {
+        let traceparent = meta
+            .get("traceparent")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?
+            .to_string();
+
+        Some(Self {
+            traceparent,
+            tracestate: meta
+                .get("tracestate")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            baggage: meta
+                .get("baggage")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+        })
+    }
+
+    fn into_meta(self) -> Map<String, Value> {
+        let mut meta = Map::new();
+        meta.insert("traceparent".to_string(), Value::String(self.traceparent));
+        if let Some(tracestate) = self.tracestate {
+            meta.insert("tracestate".to_string(), Value::String(tracestate));
+        }
+        if let Some(baggage) = self.baggage {
+            meta.insert("baggage".to_string(), Value::String(baggage));
+        }
+        meta
+    }
+}
+
+struct JsonMetaInjector<'a>(&'a mut Map<String, Value>);
+
+impl Injector for JsonMetaInjector<'_> {
+    fn set(&mut self, key: &str, value: String) {
+        self.0.insert(key.to_string(), Value::String(value));
+    }
+}
+
+struct JsonMetaExtractor<'a>(&'a Map<String, Value>);
+
+impl Extractor for JsonMetaExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(Value::as_str)
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(String::as_str).collect()
+    }
+}
+
+pub fn extract_remote_trace_context(line: &str) -> Option<OtelContext> {
+    let meta = jsonrpc_meta(line)?;
+    let extractor = JsonMetaExtractor(&meta);
+    let context = TraceContextPropagator::new().extract(&extractor);
+    let context = BaggagePropagator::new().extract_with_context(&context, &extractor);
+    context
+        .span()
+        .span_context()
+        .is_valid()
+        .then_some(context)
+}
+
+fn jsonrpc_meta(line: &str) -> Option<Map<String, Value>> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    value
+        .get("params")
+        .and_then(|params| params.get("_meta"))
+        .and_then(Value::as_object)
+        .cloned()
 }
 
 struct WebSocketTransport {
@@ -80,13 +187,13 @@ impl sacp::ConnectTo<sacp::Client> for WebSocketTransport {
 pub(crate) async fn dispatch_peer_call(
     peer: &Peer,
     prompt_text: &str,
-    parent_lineage: Option<ParentLineage>,
+    trace_context: Option<TraceContextCarrier>,
 ) -> Result<PeerCallResult> {
     let transport = WebSocketTransport {
         url: peer.acp_url.clone(),
     };
     let prompt_text = prompt_text.to_string();
-    let init_request = initialize_request(parent_lineage);
+    let init_request = initialize_request(trace_context);
 
     sacp::Client
         .builder()
@@ -109,10 +216,18 @@ pub(crate) async fn dispatch_peer_call(
         .connect_with(transport, async move |cx| {
             cx.send_request(init_request).block_task().await?;
 
+            let session_new_span =
+                tracing::info_span!("fireline.session.new", peer_agent_name = %peer.agent_name);
+            let _session_new_guard = session_new_span.enter();
             cx.build_session(std::path::Path::new("."))
                 .block_task()
                 .run_until(async |mut session| {
                     let child_session_id = session.session_id().clone();
+                    let session_prompt_span = tracing::info_span!(
+                        "fireline.session.prompt",
+                        session_id = %child_session_id,
+                    );
+                    let _session_prompt_guard = session_prompt_span.enter();
                     session.send_prompt(&prompt_text)?;
 
                     let mut response_text = String::new();
@@ -155,34 +270,16 @@ pub(crate) async fn dispatch_peer_call(
 }
 
 fn initialize_request(
-    parent_lineage: Option<ParentLineage>,
+    trace_context: Option<TraceContextCarrier>,
 ) -> agent_client_protocol::InitializeRequest {
     let mut init = agent_client_protocol::InitializeRequest::new(
         agent_client_protocol::ProtocolVersion::LATEST,
     );
 
-    let Some(lineage) = parent_lineage else {
+    let Some(trace_context) = trace_context else {
         return init;
     };
 
-    let mut fireline = Map::new();
-    if let Some(trace_id) = lineage.trace_id {
-        fireline.insert("traceId".to_string(), Value::String(trace_id));
-    }
-    if let Some(parent_prompt_turn_id) = lineage.parent_prompt_turn_id {
-        fireline.insert(
-            "parentPromptTurnId".to_string(),
-            Value::String(parent_prompt_turn_id),
-        );
-    }
-
-    if fireline.is_empty() {
-        return init;
-    }
-
-    let mut meta = Map::new();
-    meta.insert("fireline".to_string(), Value::Object(fireline));
-
-    init = init.meta(meta);
+    init = init.meta(trace_context.into_meta());
     init
 }
