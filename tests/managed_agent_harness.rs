@@ -53,10 +53,7 @@ async fn append_rebuild_padding_events(state_stream_url: &str, count: usize) -> 
     let mut stream = client.stream(state_stream_url);
     stream.set_content_type("application/json");
     let producer = stream
-        .producer(format!(
-            "approval-rebuild-padding-{}",
-            uuid::Uuid::new_v4()
-        ))
+        .producer(format!("approval-rebuild-padding-{}", uuid::Uuid::new_v4()))
         .content_type("application/json")
         .build();
     let payload = "pad".repeat(1024);
@@ -98,6 +95,19 @@ async fn session_permission_request_ids(
                 .and_then(|id| id.as_str())
                 .map(str::to_string)
         })
+        .collect())
+}
+
+async fn session_permission_events(
+    state_stream_url: &str,
+    session_id: &str,
+) -> Result<Vec<serde_json::Value>> {
+    let events = read_all_events(state_stream_url).await?;
+    Ok(events
+        .into_iter()
+        .filter(|env| env.envelope_type() == Some("permission"))
+        .filter_map(|env| env.value().cloned())
+        .filter(|value| value.get("sessionId").and_then(|id| id.as_str()) == Some(session_id))
         .collect())
 }
 
@@ -416,6 +426,95 @@ async fn harness_approval_gate_timeout_errors_cleanly() -> Result<()> {
         assert_eq!(
             permission_events, 1,
             "INVARIANT (Harness): timeout path should emit exactly one permission_request and no approval_resolved"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    runtime.shutdown().await?;
+    result
+}
+
+#[tokio::test]
+async fn harness_auto_approve_resolves_with_same_completion_spine() -> Result<()> {
+    let topology = TopologySpec {
+        components: vec![
+            TopologyComponentSpec {
+                name: "approval_gate".to_string(),
+                config: Some(serde_json::json!({
+                    "timeoutMs": 15000,
+                    "policies": [
+                        {
+                            "match": { "kind": "promptContains", "needle": "pause_here" },
+                            "action": "requireApproval",
+                            "reason": "test policy: auto-approve"
+                        }
+                    ]
+                })),
+            },
+            TopologyComponentSpec {
+                name: "auto_approve".to_string(),
+                config: None,
+            },
+        ],
+    };
+    let spec = ManagedAgentHarnessSpec::new("harness-auto-approve").with_topology(topology);
+    let runtime = LocalRuntimeHarness::spawn_with(spec).await?;
+
+    let result = async {
+        let session_id = create_session(runtime.acp_url()).await?;
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            prompt_session(
+                runtime.acp_url(),
+                &session_id,
+                "please pause_here but let auto approve resolve it",
+            ),
+        )
+        .await
+        .context("auto-approve prompt did not complete within timeout")?
+        .context(
+            "INVARIANT (AutoApprove): prompt should complete once auto_approve appends approval_resolved",
+        )?;
+
+        let permission_events =
+            wait_for_event_count(runtime.state_stream_url(), "permission", 2, DEFAULT_TIMEOUT)
+                .await?;
+        assert!(
+            permission_events.len() >= 2,
+            "INVARIANT (AutoApprove): stream must record both permission_request and approval_resolved envelopes",
+        );
+
+        let session_events = session_permission_events(runtime.state_stream_url(), &session_id).await?;
+        let request = session_events
+            .iter()
+            .find(|value| value.get("kind").and_then(|kind| kind.as_str()) == Some("permission_request"))
+            .context("auto-approve flow must emit permission_request")?;
+        let resolved = session_events
+            .iter()
+            .find(|value| value.get("kind").and_then(|kind| kind.as_str()) == Some("approval_resolved"))
+            .context("auto-approve flow must emit approval_resolved")?;
+
+        assert_eq!(
+            request.get("requestId"),
+            resolved.get("requestId"),
+            "INVARIANT (AutoApprove): auto_approve must reuse the same canonical requestId as the passive/manual approval path",
+        );
+        assert_eq!(
+            request.get("sessionId"),
+            resolved.get("sessionId"),
+            "INVARIANT (AutoApprove): auto_approve completion must remain session-scoped",
+        );
+        assert_eq!(
+            resolved.get("allow").and_then(|value| value.as_bool()),
+            Some(true),
+            "INVARIANT (AutoApprove): auto_approve must resolve with allow=true",
+        );
+        assert_eq!(
+            resolved.get("resolvedBy").and_then(|value| value.as_str()),
+            Some("auto_approve"),
+            "INVARIANT (AutoApprove): auto_approve should identify itself on the shared approval_resolved envelope shape",
         );
 
         Ok(())

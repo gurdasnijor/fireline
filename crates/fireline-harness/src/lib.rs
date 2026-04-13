@@ -2,6 +2,7 @@
 
 pub mod approval;
 pub mod audit;
+pub mod auto_approve;
 pub mod budget;
 pub mod context;
 pub mod durable_subscriber;
@@ -17,8 +18,10 @@ pub mod webhook_subscriber;
 
 pub use approval::{
     ApprovalAction, ApprovalConfig, ApprovalGateComponent, ApprovalMatch, ApprovalPolicy,
+    approval_resolution_envelope, permission_request_envelope,
 };
 pub use audit::{AuditConfig, AuditDirection, AuditRecord, AuditSink, AuditTracer};
+pub use auto_approve::{AutoApproveConfig, AutoApproveSubscriber, AutoApproveSubscriberComponent};
 pub use budget::{BudgetAction, BudgetComponent, BudgetConfig};
 pub use context::{
     ContextConfig, ContextInjectionComponent, ContextPlacement, ContextSource, DatetimeSource,
