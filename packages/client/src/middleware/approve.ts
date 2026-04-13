@@ -13,7 +13,7 @@ import { cloneDefined } from './shared.js'
  * @remarks Anthropic primitive: Middleware.
  */
 export function approve(options: {
-  readonly scope: 'tool_calls' | 'all'
+  readonly scope: 'tool_calls' | 'prompts' | 'all'
   readonly timeoutMs?: number
 }): ApproveMiddleware {
   return {

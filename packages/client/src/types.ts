@@ -137,7 +137,7 @@ export interface ApproveMiddleware {
   /** Stable discriminator for approval middleware. */
   readonly kind: 'approve'
   /** Approval scope applied by the harness topology. */
-  readonly scope: 'tool_calls' | 'all'
+  readonly scope: 'tool_calls' | 'prompts' | 'all'
   /** Optional timeout for outstanding approvals. */
   readonly timeoutMs?: number
 }

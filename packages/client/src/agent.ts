@@ -1,7 +1,7 @@
 import { SandboxAdmin } from './admin.js'
 import { connectAcp, type ConnectedAcp } from './connect.js'
 import { appendApprovalResolved } from './events.js'
-import type { RequestId, SessionId } from './acp-ids.js'
+import type { RequestId, SessionId, ToolCallId } from './acp-ids.js'
 import type { HarnessHandle, SandboxHandle } from './types.js'
 
 /**
@@ -59,6 +59,20 @@ export class FirelineAgent<Name extends string = string> implements HarnessHandl
       streamUrl: this.state.url,
       sessionId,
       requestId,
+      allow: outcome.allow,
+      resolvedBy: outcome.resolvedBy,
+    })
+  }
+
+  async resolveToolPermission(
+    sessionId: SessionId,
+    toolCallId: ToolCallId,
+    outcome: ResolvePermissionOutcome,
+  ): Promise<void> {
+    await appendApprovalResolved({
+      streamUrl: this.state.url,
+      sessionId,
+      toolCallId,
       allow: outcome.allow,
       resolvedBy: outcome.resolvedBy,
     })

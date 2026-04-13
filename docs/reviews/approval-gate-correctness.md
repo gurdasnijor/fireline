@@ -6,6 +6,8 @@ Date: 2026-04-12
 
 This review covers the current implementation in `crates/fireline-harness/src/approval.rs` as shipped today, without starting the broader DurableSubscriber generalization proposed in `docs/proposals/durable-subscriber.md`.
 
+As of the tool-call interception follow-up, `approve({ scope: 'tool_calls' })` no longer lowers to a prompt-wide fallback. Tool-scoped approval now intercepts ACP `session/request_permission` and keys durable replay on canonical `(session_id, tool_call_id)`. Prompt-wide approval remains available only through explicit prompt-scoped config such as `approve({ scope: 'prompts' })`.
+
 ## What Was Proved
 
 1. Crash and resume round-trip is now exercised end to end.
@@ -40,7 +42,7 @@ The harness layer is reliable for prompt timeout and crash/rebuild proofs, but i
 
 ## Remaining Edge Cases
 
-1. Approval is still session-scoped after the first allow.
+1. Prompt-scoped approval is still session-scoped after the first allow.
    Once a session is marked approved, later matching prompts in that same session bypass the gate. This is the implementation the harness tests depend on today. It is safe for the current design, but it is weaker than prompt-turn-scoped approval and should not be silently carried into DurableSubscriber generalization.
 
 2. Deterministic ids use prompt identity, not a first-class `prompt_turn_id`.

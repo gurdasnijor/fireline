@@ -244,6 +244,24 @@ function middlewareToComponents(middleware: Middleware, name: string): TopologyC
         },
       ]
     case 'approve':
+      if (middleware.scope === 'tool_calls') {
+        return [
+          {
+            name: 'approval_gate',
+            config: {
+              ...(middleware.timeoutMs ? { timeoutMs: middleware.timeoutMs } : {}),
+              policies: [
+                {
+                  match: { kind: 'toolPrefix', prefix: '' },
+                  action: 'requireApproval',
+                  reason: 'approval required for tool call',
+                },
+              ],
+            },
+          },
+        ]
+      }
+
       return [
         {
           name: 'approval_gate',
@@ -253,10 +271,7 @@ function middlewareToComponents(middleware: Middleware, name: string): TopologyC
               {
                 match: { kind: 'promptContains', needle: '' },
                 action: 'requireApproval',
-                reason:
-                  middleware.scope === 'tool_calls'
-                    ? 'approval fallback: prompt-level gate until tool-call interception lands'
-                    : 'approval required for every prompt',
+                reason: 'approval required for every prompt',
               },
             ],
           },
