@@ -1199,6 +1199,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_replays_until_durable_cursor_ack_then_skips() -> Result<()> {
+        let stream_server = TestStreamServer::spawn().await?;
+        let cursor_stream_url =
+            stream_server.stream_url(&format!("cursor-replay-{}", uuid::Uuid::new_v4()));
+        let server = TestWebhookServer::spawn(VecDeque::from([
+            StatusCode::OK,
+            StatusCode::OK,
+        ]))
+        .await?;
+        let subscriber = WebhookSubscriber::new(subscriber_config(server.url.clone()));
+
+        let first_result = subscriber
+            .dispatch_with_retry(
+                prompt_event(),
+                &[],
+                &DurableWebhookCursorStore::new(cursor_stream_url.clone()),
+                None,
+            )
+            .await?;
+        let first = match first_result {
+            WebhookDispatchResult::Delivered(outcome) => outcome,
+            other => panic!("expected first replay attempt to deliver, got {other:?}"),
+        };
+        assert_eq!(first.attempts, 1);
+        assert_eq!(server.captured().await.len(), 1);
+
+        let replay_result = subscriber
+            .dispatch_with_retry(
+                prompt_event(),
+                &[],
+                &DurableWebhookCursorStore::new(cursor_stream_url.clone()),
+                None,
+            )
+            .await?;
+        let replay = match replay_result {
+            WebhookDispatchResult::Delivered(outcome) => outcome,
+            other => panic!("expected replay without cursor ack to redeliver, got {other:?}"),
+        };
+        assert_eq!(replay.attempts, 1);
+        assert_eq!(
+            server.captured().await.len(),
+            2,
+            "without persisted completion or cursor ack, replay should redeliver the same envelope"
+        );
+
+        let ack_store = DurableWebhookCursorStore::new(cursor_stream_url.clone());
+        assert!(
+            ack_store
+                .acknowledge_cursor(&WebhookCursorRecord::new(
+                    "slack-approvals",
+                    replay.source_offset.to_string(),
+                ))
+                .await?
+        );
+
+        let skipped = subscriber
+            .dispatch_with_retry(
+                prompt_event(),
+                &[],
+                &DurableWebhookCursorStore::new(cursor_stream_url),
+                None,
+            )
+            .await?;
+        assert_eq!(
+            skipped,
+            WebhookDispatchResult::Skipped(WebhookSkipReason::AlreadyAcknowledged)
+        );
+
+        server.shutdown().await;
+        stream_server.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn completion_append_and_cursor_ack_are_monotonic() -> Result<()> {
         let stream_server = TestStreamServer::spawn().await?;
         let state_stream_url = stream_server.stream_url(&format!("state-{}", uuid::Uuid::new_v4()));
@@ -1260,10 +1334,33 @@ mod tests {
             cursor_store.load_cursor().await?,
             Some(Offset::at("0000000000000002_0000000000000000"))
         );
-        let reloaded = DurableWebhookCursorStore::new(cursor_stream_url);
+        let reloaded = DurableWebhookCursorStore::new(cursor_stream_url.clone());
         assert_eq!(
             reloaded.load_cursor().await?,
             Some(Offset::at("0000000000000002_0000000000000000"))
+        );
+        assert!(
+            !reloaded
+                .acknowledge_cursor(&WebhookCursorRecord::new(
+                    "slack-approvals",
+                    "0000000000000002_0000000000000000"
+                ))
+                .await?,
+            "equal offsets must not regress cursor state"
+        );
+        assert!(
+            reloaded
+                .acknowledge_cursor(&WebhookCursorRecord::new(
+                    "slack-approvals",
+                    "0000000000000003_0000000000000000"
+                ))
+                .await?,
+            "a newer offset should advance the durable cursor after reload"
+        );
+        let advanced = DurableWebhookCursorStore::new(cursor_stream_url);
+        assert_eq!(
+            advanced.load_cursor().await?,
+            Some(Offset::at("0000000000000003_0000000000000000"))
         );
 
         stream_server.shutdown().await;
@@ -1321,6 +1418,77 @@ mod tests {
         );
 
         server.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn durable_dead_letters_persist_retry_exhaustion_and_gate_replay() -> Result<()> {
+        let stream_server = TestStreamServer::spawn().await?;
+        let dead_letter_stream_url =
+            stream_server.stream_url(&format!("dead-letter-{}", uuid::Uuid::new_v4()));
+        let server = TestWebhookServer::spawn(VecDeque::from([
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ]))
+        .await?;
+        let subscriber = WebhookSubscriber::new(subscriber_config(server.url.clone()));
+        let dead_letters = DurableWebhookDeadLetterSink::new(dead_letter_stream_url.clone());
+
+        let result = subscriber
+            .dispatch_with_retry(
+                prompt_event(),
+                &[],
+                &MemoryCursorStore::default(),
+                Some(&dead_letters),
+            )
+            .await?;
+        let record = match result {
+            WebhookDispatchResult::DeadLettered(record) => record,
+            other => panic!("expected retry exhaustion to dead-letter, got {other:?}"),
+        };
+        assert_eq!(record.attempts, 3);
+        assert_eq!(
+            record
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.traceparent.as_deref()),
+            Some("00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01")
+        );
+
+        let rows = read_all_json_rows(&dead_letter_stream_url)
+            .await?
+            .expect("dead-letter stream rows");
+        assert_eq!(rows.len(), 1);
+        let stored: StateEnvelope<WebhookDeadLetterRecord> =
+            serde_json::from_value(rows.into_iter().next().expect("dead-letter row"))?;
+        assert_eq!(stored.entity_type, WEBHOOK_DEAD_LETTER_TYPE);
+        assert_eq!(
+            stored.key,
+            dead_letter_storage_key("slack-approvals", &record.completion_key)
+        );
+        assert_eq!(stored.value, record);
+
+        let skipped = subscriber
+            .dispatch_with_retry(
+                prompt_event(),
+                &[],
+                &MemoryCursorStore::default(),
+                Some(&DurableWebhookDeadLetterSink::new(dead_letter_stream_url)),
+            )
+            .await?;
+        assert_eq!(
+            skipped,
+            WebhookDispatchResult::Skipped(WebhookSkipReason::AlreadyDeadLettered)
+        );
+        assert_eq!(
+            server.captured().await.len(),
+            3,
+            "replay after durable dead-letter persistence must not redeliver the event"
+        );
+
+        server.shutdown().await;
+        stream_server.shutdown().await;
         Ok(())
     }
 }
