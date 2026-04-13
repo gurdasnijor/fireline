@@ -1,62 +1,114 @@
 # Code Review Agent
 
-Can an AI review my code and still stop before it changes anything important? That is the real product question behind most "AI coding assistant" demos. People do not just want a faster bot. They want a reviewer that can move at machine speed without quietly rewriting files behind their back.
+The buyer question is not "can an AI look at my repo?" It is "can it review a
+real diff at machine speed without quietly changing anything?"
 
-This demo shows the Fireline version of that story. You point an ACP-speaking coding agent at a real Git repo. It reads the code, proposes fixes, and when it reaches a file write Fireline turns that moment into a durable approval request instead of a hidden side effect. You can watch the run live because the state stream is the source of truth, not a pile of in-memory callbacks.
+This example is the Fireline answer:
 
-## What Happens
+- mount the repo into the sandbox read-only
+- run a review prompt against the real workspace
+- read the review text back from the durable state stream
 
-1. The agent gets mounted into a repo at `/workspace`.
-2. `approve({ scope: 'tool_calls' })` makes every dangerous tool call pausable.
-3. The script prints the `stateStream` URL you can open in the `live-monitoring` demo.
-4. The first pending approval becomes a durable record in `@fireline/state`.
+That gives you a trustworthy review surface first. If you later want the agent
+to draft patches, you can add the approval workflow on top of the same
+infrastructure.
+
+## What This Example Shows
+
+1. The repo is mounted into `/workspace` as a read-only resource.
+2. A coding agent reviews the mounted repo as if it were a PR.
+3. Fireline records the run to a durable state stream.
+4. The script prints the review text plus the `stateStream` URL you can open in
+   `examples/live-monitoring`.
 
 ## The Code
 
 ```ts
 const handle = await compose(
-  sandbox({ resources: [localPath(repoPath, '/workspace')] }),
-  middleware([
-    trace(),
-    approve({ scope: 'tool_calls' }),
-    secretsProxy({
-      ANTHROPIC_API_KEY: { ref: 'env:ANTHROPIC_API_KEY' },
-    }),
-  ]),
+  sandbox({
+    provider: 'local',
+    resources: [localPath(repoPath, '/workspace', true)],
+    envVars: process.env.ANTHROPIC_API_KEY
+      ? { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY }
+      : undefined,
+  }),
+  middleware([trace()]),
   agent(agentCommand),
 ).start({ serverUrl, name: 'code-review-agent' })
 ```
 
-That one line is the behavior contract: run a real coding agent in a real repo, but make file-changing tool calls human-gated and observable.
+The important detail is the resource mount:
+
+- the agent sees the real repo at `/workspace`
+- the mount is read-only, so review cannot silently turn into writes
+- the state stream still records the whole run for dashboards and later audit
 
 ## Run It
 
+Prerequisites:
+
+- a Fireline host reachable at `FIRELINE_URL` or `http://127.0.0.1:4440`
+- Node `>=20`
+- `pnpm`
+- either:
+  - `ANTHROPIC_API_KEY` for the default `claude-agent-acp` path, or
+  - a local ACP test agent via `AGENT_COMMAND`
+
+Install dependencies:
+
 ```bash
-pnpm --dir .. install --ignore-workspace --lockfile=false
-cd examples/code-review-agent
 pnpm install
+cd examples/code-review-agent
+pnpm install --ignore-workspace --lockfile=false
+```
+
+Fast deterministic smoke on current `main`:
+
+```bash
+AGENT_COMMAND=/absolute/path/to/fireline/target/debug/fireline-testy-prompt \
+pnpm start
+```
+
+The scripted agent just echoes the review prompt, which makes the run stable
+and testable.
+
+Default product-shaped run with Claude Agent ACP:
+
+```bash
 REPO_PATH=/path/to/git/repo \
 ANTHROPIC_API_KEY=... \
 pnpm start
 ```
 
-The script prints a `stateStream` URL. Point `examples/live-monitoring` at that URL and you get the product experience a buyer actually cares about: a code-review agent they can trust.
+The script prints the `stateStream` URL. Point `examples/live-monitoring` at
+that URL and you get the product experience a buyer actually cares about: a
+review agent inspecting a real repo with a durable audit trail.
 
-## The Primitive Behind This Example
+## Why This Is The Right Story
 
-The conceptual foundation for this example is the passive durable workflow
-pattern described in [durable-subscriber.md](../../docs/proposals/durable-subscriber.md).
+This example is not trying to be "AI writes code." It is the safer first step:
 
-In the target architecture, a tool-call approval flow like this is modeled as a
-`DurableSubscriber::Passive` wait keyed by the canonical ACP prompt-request
-reference `(SessionId, RequestId)`, not by a Fireline-minted review id. The
-approval request is durable because it is written to the session stream, and the
-resolution path is durable because the matching completion is appended back to
-that same stream.
+- hand the agent a real repo
+- keep the mount read-only
+- get a review you can inspect, store, and replay later
 
-[acp-canonical-identifiers.md](../../docs/proposals/acp-canonical-identifiers.md)
-is the other half of the story: it defines why the stable identity for this
-approval is the ACP prompt request itself. This README is describing the product
-shape that substrate enables, not claiming the fully generalized
-`DurableSubscriber` runtime is already the implementation behind this example
-today.
+That is a more compelling product story than a toy diff parser because it maps
+to the real adoption path teams take: review first, patching later.
+
+## Honest Notes On Current `main`
+
+- This example avoids `secretsProxy()`.
+  `mono-4t4` is still open, so the current safe path for the demo is direct
+  `sandbox({ envVars })` or a local test-agent override.
+- The deterministic smoke path uses `fireline-testy-prompt`.
+  That proves the repo-mount plus state-stream readback path. The Claude path
+  is the one that turns this into a real review workflow.
+- The repo mount is intentionally read-only.
+  If you want the agent to propose edits and wait for approval before applying
+  them, pair this example with [approval-workflow](../approval-workflow/README.md).
+
+## Read Next
+
+- [Approval Workflow](../approval-workflow/README.md)
+- [Observation](../../docs/guide/observation.md)
+- [Resources](../../docs/guide/resources.md)
