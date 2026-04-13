@@ -1,11 +1,26 @@
 # pi-acp → OpenClaw — Operator Script (Live Driver)
 
-> Status: skeleton — 2026-04-12, Jessica (PM-B)
+> Status: polished v0.2 — 2026-04-12, Jessica (PM-B)
 >
 > This is the stage-side companion to `pi-acp-to-openclaw.md`. The other doc
 > describes the *story*; this doc is the *driver*: exactly what the operator
 > types, exactly what the audience sees, and exactly which parts are live,
 > pre-staged, or mocked.
+
+## Current readiness (as of 2026-04-12)
+
+| Gate | Status | Blocker | Demo impact |
+|---|---|---|---|
+| T1 `fireline deploy` wrapper | ✓ LANDED | — | Step 5 command set is real |
+| T2 Tier A local Docker smoke | ⚠ partial | session/load after restart broken (`mono-thnc.2.3`) | Step 3 signature moment may downgrade to PRE-STAGED |
+| T3 peer-to-peer replay | ✓ LANDED `d543eac` | — | Step 6 has driver script ready |
+| T4.1 five OTel spans | ◐ in flight on w25 | — | Pane C / Step 7 fidelity depends on this |
+| T4.2 peer `_meta` propagation | ○ blocked | canonical-ids Phase 4 (`mono-vkpp.6`) | Step 6 trace tree lineage across agents degrades if not green; acceptable fallback |
+| T5.1 Betterstack scaffold | ✓ LANDED `46f3f9f` | — | env vars + ingestion verified |
+| T5.2 Saved dashboard view | ○ blocked | T4.1 emitting | Pane C layout prepared preemptively |
+| `.6.1` agent.ts + reviewer.ts | ✓ LANDED `dbfac8a` | — | demo assets frozen |
+| `.6.2` `--resume` CLI verify | ○ blocked | canonical-ids Phase 5 (`mono-vkpp.7`) | see Step 3 fallback |
+| `.6.3` Slack vs CLI approver | ○ user decision pending | — | Step 4 path TBD |
 >
 > Every step must be labeled with its honesty class:
 >
@@ -38,10 +53,11 @@ Operator runs through this in the dressing room, not on stage:
 | P3 | Host binary present | `which fireline && fireline --version` | prints version |
 | P4 | Anthropic key loaded | `echo $ANTHROPIC_API_KEY \| head -c 10; echo` | first 10 chars visible |
 | P5 | GitHub token loaded (for tools using `api.github.com`) | `echo $GITHUB_TOKEN \| head -c 10; echo` | first 10 chars visible |
-| P6 | Demo agent file present | `ls demo/agent.ts demo/reviewer.ts` | both files exist |
-| P7 | CF Containers deployment healthy (if Step 3 live) | `wrangler tail <deployment-name> --format pretty` in spare terminal | clean event stream, no crash loop |
-| P8 | OTel backend reachable (if Step 5 live) | open Betterstack dashboard in browser; confirm source receiving heartbeat | at least one recent event in last 60s |
+| P6 | Demo assets present (frozen locked versions) | `ls docs/demos/assets/agent.ts docs/demos/assets/reviewer.ts docs/demos/assets/README.md` | all three exist; see `docs/demos/assets/README.md` invariants |
+| P7 | Local Docker image present + passes smoke | `docker image ls fireline-host-quickstart:embedded-smoke` and `docker run --rm ... /healthz` | image tag present, `/healthz` returns 200 |
+| P8 | OTel backend reachable (Betterstack) | `set -a; source deploy/observability/betterstack.env; set +a` then curl smoke per `deploy/observability/README.md §Smoke-test ingestion` | HTTP 202 Accepted |
 | P9 | Backup terminal prewarmed with fallback commands | separate tmux/cmux pane with fallback scripts open | operator can switch in <3s |
+| P10 | Step 3 restart/resume gate check | Run `docs/demos/scripts/replay-peer-to-peer.sh` through to the kill-and-resume phase | session continues post-restart. **If it does not** (per `mono-thnc.2.3` open bug), Step 3 downgrades to PRE-STAGED before showtime |
 
 **If any pre-flight fails, the owning step must be downgraded to PRE-STAGED or
 cut before going live.**
@@ -70,10 +86,10 @@ cut before going live.**
 **What the operator types in Pane A:**
 
 ```bash
-npx fireline demo/agent.ts
+npx fireline docs/demos/assets/agent.ts
 ```
 
-**Agent file (`demo/agent.ts`) — shown briefly on overhead:**
+**Agent file (`docs/demos/assets/agent.ts`, frozen at `dbfac8a`) — shown briefly on overhead:**
 
 ```ts
 import { compose, agent, sandbox, middleware } from '@fireline/client'
@@ -106,7 +122,7 @@ budget, secrets proxy. No glue code. No deploy pipeline yet — this is local."
 
 **Fallback:** if `npx fireline` hangs on first-run install, the operator has a
 prewarmed terminal (Pane B backup) where the binary is already resident and can
-fail over with `fireline demo/agent.ts` in <3s.
+fail over with `fireline docs/demos/assets/agent.ts` in <3s.
 
 ---
 
@@ -149,7 +165,7 @@ kill -9 $(pgrep -f 'fireline .*agent.ts' | head -1)
 # (Or Ctrl-C the visible host process in Pane A.)
 
 # Then immediately:
-npx fireline demo/agent.ts --resume <session-id-shown-in-step-1>
+npx fireline docs/demos/assets/agent.ts --resume <session-id-shown-in-step-1>
 ```
 
 **What the audience should see:**
@@ -165,11 +181,18 @@ npx fireline demo/agent.ts --resume <session-id-shown-in-step-1>
 the agent was doing — midsentence — resumes, because state lives in
 durable-streams, not in the host's RAM."
 
-**Fallback:** if `--resume` semantics aren't yet wired into the published CLI
-(verify during pre-flight P3), operator uses the lower-level
-`fireline --load-session <id>` path or drops this to PRE-STAGED (screen capture
-from a rehearsal run). **THIS STEP IS THE SIGNATURE MOMENT — DO NOT DEMO LIVE
-IF PRE-FLIGHT P3 IS UNSTABLE.**
+**DEMO-RISK (open):** `mono-thnc.2.3` — in local-Docker smoke, session/load
+does NOT complete after `docker stop/start` even though durable-stream rows
+persist. If this bug is unresolved by Rehearsal 1, Step 3's live resume path
+does not work. Pre-flight P10 is the concrete go/no-go gate.
+
+**Fallback:** if `--resume` or post-restart session/load doesn't complete
+(pre-flight P3 or P10), operator uses the lower-level `fireline
+--load-session <id>` path (if it behaves differently), OR drops this to
+PRE-STAGED (screen capture from a rehearsal run that was captured before the
+regression). **THIS STEP IS THE SIGNATURE MOMENT — DO NOT DEMO LIVE IF
+PRE-FLIGHT P10 FAILS.** The PRE-STAGED version preserves the narrative
+without the gamble; the trade-off is a lower ceiling, not a broken demo.
 
 ---
 
@@ -255,16 +278,31 @@ explicitly greenlit on the day.
 
 ---
 
-### Step 6 — Peer fleet (stretch)
+### Step 6 — Peer fleet
 
-**Class: PRE-STAGED by default; upgradable to LIVE if FQA-5 P2P passes with
-room to spare**
+**Class: LIVE (gated on T4.1 emitting peer span names); PRE-STAGED fallback via `d543eac` replay**
 
-Run `reviewer.ts` in a second deploy; show Pane C with both agents appearing
-in the fleet surface and a cross-agent call lineage rendered via OTel span
-parent/child relationships (T4 `fireline.peer.call.out/in` spans).
+FQA-5 (`047f087`) proved the peer-to-peer ACP flow works end-to-end; w25
+captured it as a replay driver at `d543eac`:
 
-**Fallback:** revert to screen capture of a prior rehearsal.
+- Reference doc: `docs/demos/peer-to-peer-demo-capture.md`
+- Driver script: `docs/demos/scripts/replay-peer-to-peer.sh`
+
+**LIVE path:**
+
+```bash
+# Pane A — in the demo working dir:
+./docs/demos/scripts/replay-peer-to-peer.sh
+```
+
+Pane C should render the cross-agent lineage via `fireline.peer.call.out/in`
+span parent/child (once T4.1 emits + T5.2 saved view is baked). If T4.2
+peer `_meta.traceparent` propagation is not live (canonical-ids Phase 4
+gate), the lineage renders as two adjacent traces instead of one parent
+trace — still coherent, less dramatic.
+
+**Fallback:** re-run the replay script end-to-end but off-stage and play
+the recording. Script + recording = deterministic fallback.
 
 ---
 
@@ -306,23 +344,20 @@ write dashboard code. The dashboard is a projection."
   nothing works, skip to Step 7 and close strong on the observation surface
   (which runs off historical stream data, not live model calls).
 
-## Open TODOs for this script to be stage-ready
+## Open TODOs (linked to bd beads)
 
-- [ ] Lock `demo/agent.ts` and `demo/reviewer.ts` final form; commit to repo
-      under `docs/demos/assets/` so CI verifies they still compile
-- [ ] Rehearsal run #1 — full script end-to-end; capture timing per step
-- [ ] Record PRE-STAGED fallback captures for steps 3, 4, 5, 6 (one rehearsal
-      where everything works cleanly)
-- [ ] Confirm `--resume` CLI flag exists or adjust Step 3 to the concrete
-      command that works today (pending PM-A canonical-ids status)
-- [ ] Pre-stage Slack app + webhook URL for Step 4; validate pre-flight P8
-- [ ] Pre-stage CF Containers deployment name + wrangler tail command for
-      Step 5 (contingent on T2 landing)
-- [ ] Lock Betterstack dashboard saved view URL for Step 7 (contingent on T5)
-- [ ] Rehearsal run #2 — deliberately trigger each fallback path and confirm
-      recovery stays within narrative
-- [ ] Two-operator dry-run (one on keys, one on narration) in final
-      staging environment
+- [x] Lock `agent.ts` + `reviewer.ts` under `docs/demos/assets/` — **DONE** `dbfac8a` (`mono-thnc.6.1`)
+- [ ] `--resume` CLI flag verification or concrete working equivalent — `mono-thnc.6.2` (blocked on canonical-ids Phase 5, see `mono-thnc.2.3` for in-scope gap)
+- [ ] Slack app pre-stage OR local-CLI approver decision for Step 4 — `mono-thnc.6.3` (awaiting user decision)
+- [ ] Pre-flight checklist dry-run (P1–P10) — `mono-thnc.6.4`
+- [ ] Rehearsal 1 — full-live attempt + fallback capture — `mono-thnc.7` (blocked on T2/T3/T4/T5/.6)
+- [ ] Rehearsal 2 — deliberate-fail drill — `mono-thnc.8` (blocked on Rehearsal 1)
+- [ ] FQA-1/4/5 screencast captures — `mono-thnc.9` (FQA-5 driver already landed at `d543eac`; FQA-1 + FQA-4 captures queued)
+- [ ] Betterstack saved-view URL bake-in — `mono-thnc.5.2` (blocked on T4.1 emitting)
+- [ ] Rotate Betterstack token post-demo — `mono-thnc.10`
+
+Two-operator dry-run (one on keys, one on narration) is a Rehearsal 2
+acceptance criterion, not a separate bead.
 
 ## References
 
