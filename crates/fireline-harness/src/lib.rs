@@ -10,6 +10,7 @@ pub mod durable_subscriber;
 mod host_topology;
 pub mod peer_routing;
 pub mod routes_acp;
+pub mod resolve_awakeable;
 pub mod secrets;
 pub mod shared_terminal;
 pub mod state_projector;
@@ -48,6 +49,7 @@ pub use peer_routing::{
     PEER_DELIVERY_ACK_ENTITY_TYPE, PeerDeliveryAcknowledged, PeerDispatchSuccess,
     PeerRoutingDispatcher, PeerRoutingEvent, PeerRoutingSubscriber,
 };
+pub use resolve_awakeable::{AwakeableResolver, ResolveError};
 pub use routes_acp::{AcpRouteState, BaseComponentsFactory};
 pub use secrets::{
     CredentialResolver, CredentialResolverError, InjectionRule, InjectionScope, InjectionTarget,
