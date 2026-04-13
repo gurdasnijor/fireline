@@ -172,6 +172,14 @@ impl<T> AwakeableRejected<T> {
     }
 }
 
+/// Decoded awakeable completion, including winning trace context.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AwakeableResolution<T> {
+    pub key: AwakeableKey,
+    pub value: T,
+    pub trace_context: Option<TraceContext>,
+}
+
 /// Passive durable-subscriber profile backing the imperative awakeable surface.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AwakeableSubscriber;
@@ -184,7 +192,10 @@ impl AwakeableSubscriber {
         Self
     }
 
-    pub fn completion_for_key<T>(key: &AwakeableKey, log: &[StreamEnvelope]) -> Result<T>
+    pub fn completion_record_for_key<T>(
+        key: &AwakeableKey,
+        log: &[StreamEnvelope],
+    ) -> Result<AwakeableResolution<T>>
     where
         T: DeserializeOwned,
     {
@@ -199,7 +210,12 @@ impl AwakeableSubscriber {
             .and_then(|(kind, envelope)| match kind {
                 Some(AWAKEABLE_RESOLVED_KIND) => envelope
                     .value_as::<AwakeableResolved<T>>()
-                    .map(|resolved| resolved.value)
+                    .map(|resolved| AwakeableResolution {
+                        key: key.clone(),
+                        value: resolved.value,
+                        trace_context: (!resolved.trace_context.is_empty())
+                            .then_some(resolved.trace_context),
+                    })
                     .ok_or_else(|| {
                         anyhow!(
                             "decode awakeable_resolved payload for key {}",
@@ -207,14 +223,15 @@ impl AwakeableSubscriber {
                         )
                     }),
                 Some(AWAKEABLE_REJECTED_KIND) => {
-                    let rejected = envelope
-                        .value_as::<AwakeableRejected<Value>>()
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "decode awakeable_rejected payload for key {}",
-                                key.storage_key()
-                            )
-                        })?;
+                    let rejected =
+                        envelope
+                            .value_as::<AwakeableRejected<Value>>()
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "decode awakeable_rejected payload for key {}",
+                                    key.storage_key()
+                                )
+                            })?;
                     Err(anyhow!(
                         "awakeable '{}' rejected: {}",
                         key.storage_key(),
@@ -223,6 +240,13 @@ impl AwakeableSubscriber {
                 }
                 _ => unreachable!("awakeable completion must be resolved or rejected"),
             })
+    }
+
+    pub fn completion_for_key<T>(key: &AwakeableKey, log: &[StreamEnvelope]) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        Self::completion_record_for_key(key, log).map(|resolved| resolved.value)
     }
 }
 
@@ -257,7 +281,7 @@ impl PassiveSubscriber for AwakeableSubscriber {}
 #[must_use]
 pub struct AwakeableFuture<T> {
     key: AwakeableKey,
-    inner: Pin<Box<dyn Future<Output = Result<T>> + Send + 'static>>,
+    inner: Pin<Box<dyn Future<Output = Result<AwakeableResolution<T>>> + Send + 'static>>,
 }
 
 impl<T> AwakeableFuture<T>
@@ -286,9 +310,9 @@ where
                             key_for_wait.storage_key()
                         )
                     })?;
-                AwakeableSubscriber::completion_for_key::<T>(&key_for_wait, &log)
+                AwakeableSubscriber::completion_record_for_key::<T>(&key_for_wait, &log)
             })
-                as Pin<Box<dyn Future<Output = Result<T>> + Send + 'static>>,
+                as Pin<Box<dyn Future<Output = Result<AwakeableResolution<T>>> + Send + 'static>>,
             Err(error) => Box::pin(async move { Err(error) }),
         };
 
@@ -299,6 +323,12 @@ where
     pub fn key(&self) -> &AwakeableKey {
         &self.key
     }
+
+    pub fn into_resolution(
+        self,
+    ) -> Pin<Box<dyn Future<Output = Result<AwakeableResolution<T>>> + Send + 'static>> {
+        self.inner
+    }
 }
 
 impl<T> Future for AwakeableFuture<T>
@@ -308,7 +338,11 @@ where
     type Output = Result<T>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
-        self.inner.as_mut().poll(cx)
+        match self.inner.as_mut().poll(cx) {
+            Poll::Ready(Ok(resolved)) => Poll::Ready(Ok(resolved.value)),
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 

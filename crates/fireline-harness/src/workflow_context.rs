@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
-use fireline_acp_ids::SessionId;
+use anyhow::Result;
+use fireline_acp_ids::{RequestId, SessionId};
 use serde::de::DeserializeOwned;
 
 use crate::awakeable::{AwakeableFuture, AwakeableKey, AwakeableSubscriber};
+use crate::awakeable_race::{AwakeableRaceWinner, race_awakeables};
 use crate::durable_subscriber::DurableSubscriberDriver;
 
 /// Minimal Rust-side workflow context for durable awakeable waits.
@@ -65,5 +67,24 @@ impl WorkflowContext {
         T: DeserializeOwned + Send + 'static,
     {
         self.awakeable(AwakeableKey::session(session_id))
+    }
+
+    pub fn prompt_awakeable<T>(
+        &self,
+        session_id: SessionId,
+        request_id: RequestId,
+    ) -> AwakeableFuture<T>
+    where
+        T: DeserializeOwned + Send + 'static,
+    {
+        self.awakeable(AwakeableKey::prompt(session_id, request_id))
+    }
+
+    pub async fn race<T, I>(&self, awakeables: I) -> Result<AwakeableRaceWinner<T>>
+    where
+        I: IntoIterator<Item = AwakeableFuture<T>>,
+        T: DeserializeOwned + Send + 'static,
+    {
+        race_awakeables(awakeables).await
     }
 }

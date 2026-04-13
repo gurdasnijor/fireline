@@ -186,7 +186,7 @@ async function hasTerminalCompletion(
     live: false,
     offset: '-1',
   })
-  const rows = await response.json()
+  const rows = (await response.json()) as StreamEnvelope[]
   return rows.some((row) => matchesResolvedEnvelope(row, key) || matchesRejectedEnvelope(row, key))
 }
 

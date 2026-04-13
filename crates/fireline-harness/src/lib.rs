@@ -5,13 +5,15 @@ pub mod approval;
 pub mod audit;
 pub mod auto_approve;
 pub mod awakeable;
+pub mod awakeable_race;
+pub mod awakeable_timeout;
 pub mod budget;
 pub mod context;
 pub mod durable_subscriber;
 mod host_topology;
 pub mod peer_routing;
-pub mod routes_acp;
 pub mod resolve_awakeable;
+pub mod routes_acp;
 pub mod secrets;
 pub mod shared_terminal;
 pub mod state_projector;
@@ -30,9 +32,12 @@ pub use audit::{AuditConfig, AuditDirection, AuditRecord, AuditSink, AuditTracer
 pub use auto_approve::{AutoApproveConfig, AutoApproveSubscriber, AutoApproveSubscriberComponent};
 pub use awakeable::{
     AWAKEABLE_REJECTED_KIND, AWAKEABLE_RESOLVED_KIND, AWAKEABLE_WAITING_KIND, AwakeableFuture,
-    AwakeableKey, AwakeableRejected, AwakeableResolved, AwakeableSubscriber, AwakeableWaiting,
-    awakeable_rejection_envelope, awakeable_resolution_envelope, awakeable_waiting_envelope,
+    AwakeableKey, AwakeableRejected, AwakeableResolution, AwakeableResolved, AwakeableSubscriber,
+    AwakeableWaiting, awakeable_rejection_envelope, awakeable_resolution_envelope,
+    awakeable_waiting_envelope,
 };
+pub use awakeable_race::{AwakeableRaceWinner, race_awakeables};
+pub use awakeable_timeout::AwakeableTimeoutError;
 pub use budget::{BudgetAction, BudgetComponent, BudgetConfig};
 pub use context::{
     ContextConfig, ContextInjectionComponent, ContextPlacement, ContextSource, DatetimeSource,
