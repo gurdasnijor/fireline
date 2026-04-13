@@ -20,7 +20,7 @@
 | T5.2 Saved dashboard view | ○ blocked | T4.1 emitting | Pane C layout prepared preemptively |
 | `.6.1` agent.ts + reviewer.ts | ✓ LANDED `dbfac8a` | — | demo assets frozen |
 | `.6.2` `--resume` CLI verify | ○ blocked | canonical-ids Phase 5 (`mono-vkpp.7`) | see Step 3 fallback |
-| `.6.3` Slack vs CLI approver | ○ user decision pending | — | Step 4 path TBD |
+| `.6.3` Chat SDK approval bridge | ○ platform pending user decision | — | Step 4 goes LIVE once platform selected + bridge wired; local-CLI approver is fallback |
 >
 > Every step must be labeled with its honesty class:
 >
@@ -36,7 +36,7 @@
 Aligned with the `DEMO-PLAN.md` priority order:
 
 1. **Demo 1 — Unkillable Agent** (signature story, highest confidence)
-2. **Demo 2 — Approval Gate** (depends on Slack/webhook glue being stage-safe)
+2. **Demo 2 — Approval Gate** (depends on Chat SDK bridge + chosen-platform auth being stage-safe)
 3. **Demo 3 — Live Dashboard** (background backdrop)
 
 Demos 4 (Flamecast in 200 lines) and 5 (Provider Swap) are stretch and not part
@@ -202,7 +202,7 @@ without the gamble; the trade-off is a lower ceiling, not a broken demo.
 
 ### Step 4 — Approval gate (Demo 2)
 
-**Class: LIVE (if Slack glue pre-flight P8 passes) otherwise PRE-STAGED**
+**Class: LIVE via Chat SDK bridge (target platform TBD per `mono-thnc.6.3`); PRE-STAGED / local-CLI fallback otherwise**
 
 **Action in Pane A:**
 
@@ -213,19 +213,29 @@ policy — e.g., "delete `demo/scratch.txt`".
 
 - Pane B streams: agent proposes the `delete_file` tool call
 - Pane B pauses: `approval_requested` event emitted, no execution yet
-- A Slack notification appears (on projector or phone) with Approve / Deny buttons
+- A message card appears in the chosen chat platform (Slack / Discord /
+  Linear / Telegram — target is a single Chat SDK call) on the projector
+  with Approve / Deny buttons
 - Operator taps Approve
 - Pane B resumes: tool executes, agent confirms deletion
 
 **Narration beat:** "The approval is durable. If I crashed the host right now
 between the request and the tap, the approval would still be there when the
-host came back up. This isn't a modal — it's infrastructure."
+host came back up. This isn't a modal — it's infrastructure. And the chat
+surface isn't a Fireline UI — it's your team's existing ops surface. Chat SDK
+means that's one line of config."
 
-**Fallback:** if the Slack webhook path fails (check pre-flight P8), operator
-has a local "approver" CLI tool (`fireline approve --session <id> --request-id <id>`)
-that resolves via the same durable-streams write. Narration: "Approver happens
-to be a CLI in this path — the Slack app is one of many resolvers on the same
-substrate."
+**Implementation note (for `mono-thnc.6.3`):** the bridge is a durable-stream
+subscriber on `permission_request` events, emitting a Chat SDK card via the
+selected platform adapter. The Approve/Deny webhook appends
+`approval_resolved` back on the state stream. ~50–100 LOC TS. Reference:
+https://chat-sdk.dev/docs.
+
+**Fallback:** if the Chat SDK bridge misbehaves, operator falls back to the
+local CLI approver (`fireline approve --session <id> --request-id <id>`).
+Same durable-streams write path, so the agent resume is identical; narration
+pivots to: "The approver is a CLI in this path — the chat card is one of
+many resolvers on the same substrate."
 
 ---
 
@@ -332,10 +342,54 @@ write dashboard code. The dashboard is a projection."
 | 1 | LIVE | pi-acp binary resident | none |
 | 2 | LIVE | none | none |
 | 3 | LIVE **(contingent)** | resume session id from Step 1 | if P3 fails: screen capture |
-| 4 | LIVE or PRE-STAGED | Slack app registered + webhook URL | Approve/Deny button layout if Slack fails |
+| 4 | LIVE or PRE-STAGED | Chat SDK target platform bot authed + channel created + webhook URL | Approve/Deny card shape if bridge fails; local CLI approver if Chat SDK itself fails |
 | 5 | LIVE / PRE-STAGED / MOCKED (T1+T2 gated) | local docker image pre-built; volume dir prepared | CF Containers deploy (deferred; never LIVE at demo) |
 | 6 | PRE-STAGED (default) | second agent already deployed | lineage graph frame |
 | 7 | LIVE | dashboard layout + saved view | none |
+
+## Rehearsal 1 acceptance checklist (mirrors `mono-thnc.7`)
+
+Use this on the day. Pass = all items checked; fail = any item unchecked goes
+to Rehearsal 2 drill.
+
+### Execution
+- [ ] All 7 steps run from the script top-to-bottom without deviation
+- [ ] Each LIVE step executes LIVE; each PRE-STAGED step's asset is on-disk
+      and ready to play
+- [ ] Step 3 (unkillable agent) either LIVE (post-`mono-thnc.2.3` fix) or
+      cleanly PRE-STAGED per P10 outcome
+- [ ] Step 4 (approval gate) either Chat SDK LIVE or local-CLI fallback
+      exercised
+- [ ] Step 6 (peer fleet) replay script runs end-to-end against current main
+
+### Timing
+- [ ] Seconds-per-step captured in a timing table (target total: <20 min
+      stage time excluding narration pauses)
+- [ ] No step hung >10s beyond expected response
+
+### Fallback captures
+- [ ] `docs/demos/assets/recordings/step-3-resume.mp4` exists (even if the
+      LIVE path works, the capture is the Rehearsal 2 fail drill's reference)
+- [ ] `docs/demos/assets/recordings/step-4-approval.mp4` exists with both
+      Chat-SDK-LIVE and local-CLI-fallback branches captured
+- [ ] `docs/demos/assets/recordings/step-5-docker-deploy.mp4` exists
+- [ ] `docs/demos/assets/recordings/step-6-peer-fleet.mp4` exists (replay
+      driver at `d543eac`)
+
+### Observation surface (Pane C)
+- [ ] Betterstack dashboard saved-view is loaded in a tab with the dashboard
+      variable `session_id` bound for auto-filter
+- [ ] All 5 T5.2 panels render real spans within 30s of Step 1 prompt
+- [ ] Trace tree for the demo session is visually readable (no overwhelming
+      sibling traces polluting the view)
+
+### Narration
+- [ ] Narrator has a per-step script of the "beat" lines memorized or on a
+      side panel
+- [ ] Two-operator roles confirmed: one on keys (this document's driver),
+      one on narration + audience eye contact
+
+Fail in any bucket → Rehearsal 2 drill targets that specific gap.
 
 ## Failure recovery plan
 
@@ -352,7 +406,7 @@ write dashboard code. The dashboard is a projection."
 
 - [x] Lock `agent.ts` + `reviewer.ts` under `docs/demos/assets/` — **DONE** `dbfac8a` (`mono-thnc.6.1`)
 - [ ] `--resume` CLI flag verification or concrete working equivalent — `mono-thnc.6.2` (blocked on canonical-ids Phase 5, see `mono-thnc.2.3` for in-scope gap)
-- [ ] Slack app pre-stage OR local-CLI approver decision for Step 4 — `mono-thnc.6.3` (awaiting user decision)
+- [ ] Chat SDK approval bridge for Step 4 — `mono-thnc.6.3` (platform selection awaiting user; implementation ~50–100 LOC TS)
 - [ ] Pre-flight checklist dry-run (P1–P10) — `mono-thnc.6.4`
 - [ ] Rehearsal 1 — full-live attempt + fallback capture — `mono-thnc.7` (blocked on T2/T3/T4/T5/.6)
 - [ ] Rehearsal 2 — deliberate-fail drill — `mono-thnc.8` (blocked on Rehearsal 1)
