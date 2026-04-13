@@ -1,80 +1,107 @@
 import { existsSync } from 'node:fs'
-import { createRequire } from 'node:module'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-/**
- * Binary lookup strategy (esbuild/turbo pattern):
- *   1. Environment variable override (FIRELINE_BIN / FIRELINE_STREAMS_BIN)
- *   2. Platform-specific optional dep (stubbed for now)
- *   3. `target/debug/<bin>` relative to the workspace root (dev fallback)
- */
-
-const PLATFORM_PACKAGES: Record<string, string> = {
-  'darwin-arm64': '@fireline/cli-darwin-arm64',
-  'darwin-x64': '@fireline/cli-darwin-x64',
-  'linux-arm64': '@fireline/cli-linux-arm64',
-  'linux-x64': '@fireline/cli-linux-x64',
-  'win32-x64': '@fireline/cli-win32-x64',
-}
+export type BinaryName = 'fireline' | 'fireline-streams' | 'fireline-agents'
+export type BinarySource = 'env' | 'release' | 'debug'
 
 export interface BinaryLookup {
   /** Name of the executable. */
-  readonly name: 'fireline' | 'fireline-streams' | 'fireline-agents'
+  readonly name: BinaryName
   /** Env var that overrides the lookup. */
   readonly envVar: string
+  /** Optional start directory for walking up to `target/{release,debug}`. */
+  readonly searchFrom?: string
 }
 
-export function resolveBinary(lookup: BinaryLookup): string {
+export interface ResolvedBinary {
+  readonly name: BinaryName
+  readonly path: string
+  readonly source: BinarySource
+}
+
+export class BinaryResolutionError extends Error {
+  readonly kind: 'env-missing' | 'not-found'
+  readonly lookup: BinaryLookup
+
+  constructor(
+    kind: 'env-missing' | 'not-found',
+    lookup: BinaryLookup,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'BinaryResolutionError'
+    this.kind = kind
+    this.lookup = lookup
+  }
+}
+
+const DEFAULT_SEARCH_FROM = dirname(fileURLToPath(import.meta.url))
+
+export function findBinary(lookup: BinaryLookup): ResolvedBinary | null {
   const envOverride = process.env[lookup.envVar]
-  if (envOverride && existsSync(envOverride)) return envOverride
+  if (envOverride && existsSync(envOverride)) {
+    return {
+      name: lookup.name,
+      path: envOverride,
+      source: 'env',
+    }
+  }
   if (envOverride) {
-    throw new Error(
+    throw new BinaryResolutionError(
+      'env-missing',
+      lookup,
       `${lookup.envVar}=${envOverride} but no binary exists at that path`,
     )
   }
 
-  // Platform package (lookup only — package may not be installed)
-  const platformKey = `${process.platform}-${process.arch}`
-  const platformPkg = PLATFORM_PACKAGES[platformKey]
-  if (platformPkg) {
-    try {
-      const require_ = createRequire(import.meta.url)
-      const pkgJsonPath = require_.resolve(`${platformPkg}/package.json`)
-      const binPath = join(dirname(pkgJsonPath), 'bin', lookup.name)
-      if (existsSync(binPath)) return binPath
-    } catch {
-      // platform package not installed; fall through to dev fallback
+  const searchFrom = lookup.searchFrom ?? DEFAULT_SEARCH_FROM
+  for (const source of ['release', 'debug'] as const) {
+    const candidate = findTargetBinary(lookup.name, source, searchFrom)
+    if (candidate) {
+      return {
+        name: lookup.name,
+        path: candidate,
+        source,
+      }
     }
   }
 
-  // Dev fallback: find target/debug/<name> walking up from this file
-  const devPath = findDevBinary(lookup.name)
-  if (devPath) return devPath
+  return null
+}
 
-  throw new Error(
+export function resolveBinary(lookup: BinaryLookup): ResolvedBinary {
+  const resolved = findBinary(lookup)
+  if (resolved) {
+    return resolved
+  }
+  throw new BinaryResolutionError(
+    'not-found',
+    lookup,
     [
-      `Could not find '${lookup.name}' binary.`,
-      `Tried:`,
-      `  - $${lookup.envVar} (not set or file does not exist)`,
-      `  - ${platformPkg ?? `no platform package for ${platformKey}`} (not installed)`,
-      `  - target/debug/${lookup.name} (not found walking up from ${import.meta.url})`,
-      ``,
-      `Fix: run 'cargo build --bin ${lookup.name}' from the fireline workspace root,`,
+      `Could not find '${lookup.name}'.`,
+      `Tried ${lookup.envVar}, target/release/${lookup.name}, and target/debug/${lookup.name}.`,
+      `Fix: run 'cargo build --release --bin ${lookup.name}' from the fireline workspace root,`,
       `or set ${lookup.envVar} to an absolute path.`,
     ].join('\n'),
   )
 }
 
-function findDevBinary(name: string): string | null {
-  let dir = dirname(fileURLToPath(import.meta.url))
+function findTargetBinary(
+  name: BinaryName,
+  source: Exclude<BinarySource, 'env'>,
+  searchFrom: string,
+): string | null {
+  let dir = searchFrom
   for (let i = 0; i < 10; i++) {
-    const candidate = resolve(dir, 'target', 'debug', name)
-    if (existsSync(candidate)) return candidate
-    const release = resolve(dir, 'target', 'release', name)
-    if (existsSync(release)) return release
+    const candidate = resolve(dir, 'target', source, name)
+    if (existsSync(candidate)) {
+      return candidate
+    }
     const parent = dirname(dir)
-    if (parent === dir) break
+    if (parent === dir) {
+      break
+    }
     dir = parent
   }
   return null

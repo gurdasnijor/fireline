@@ -1,16 +1,24 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import {
   createDeployExecutionPlan,
   createDockerBuildPlan,
   createTargetScaffoldPlan,
   deploy,
+  loadSpec,
   parseArgs,
+  unwrapDefaultExport,
   writeTargetScaffold,
 } from './cli.js'
+import { findBinary } from './resolve-binary.js'
+
+const TEST_FILE = fileURLToPath(import.meta.url)
+const CLI_PACKAGE_DIR = resolve(dirname(TEST_FILE), '..')
+const REPO_ROOT = resolve(CLI_PACKAGE_DIR, '..', '..')
 
 test('parseArgs parses build flags', () => {
   const args = parseArgs([
@@ -101,6 +109,69 @@ test('parseArgs requires --to for deploy', () => {
     () => parseArgs(['deploy', 'agent.ts']),
     /deploy requires --to <platform>/,
   )
+})
+
+test('unwrapDefaultExport peels nested tsImport default wrappers', () => {
+  const harness = fixtureSpec('demo')
+  const wrapped = { __esModule: true, default: { __esModule: true, default: harness } }
+  assert.equal(unwrapDefaultExport(wrapped), harness)
+})
+
+test('loadSpec accepts docs demo assets via the CLI loader', async () => {
+  const spec = await loadSpec(resolve(REPO_ROOT, 'docs/demos/assets/agent.ts'))
+  assert.equal(spec.kind, 'harness')
+  assert.equal(typeof spec.start, 'function')
+})
+
+test('findBinary prefers target/release over target/debug', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fireline-binary-'))
+  await mkdir(join(root, 'target', 'release'), { recursive: true })
+  await mkdir(join(root, 'target', 'debug'), { recursive: true })
+  await writeFile(join(root, 'target', 'release', 'fireline'), '')
+  await writeFile(join(root, 'target', 'debug', 'fireline'), '')
+
+  const resolved = findBinary({
+    name: 'fireline',
+    envVar: 'FIRELINE_BIN',
+    searchFrom: join(root, 'nested', 'dir'),
+  })
+
+  assert.equal(resolved?.source, 'release')
+  assert.match(String(resolved?.path), /target\/release\/fireline$/)
+})
+
+test('findBinary falls back to target/debug when release is absent', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fireline-binary-'))
+  await mkdir(join(root, 'target', 'debug'), { recursive: true })
+  await writeFile(join(root, 'target', 'debug', 'fireline-streams'), '')
+
+  const resolved = findBinary({
+    name: 'fireline-streams',
+    envVar: 'FIRELINE_STREAMS_BIN',
+    searchFrom: join(root, 'nested', 'dir'),
+  })
+
+  assert.equal(resolved?.source, 'debug')
+  assert.match(String(resolved?.path), /target\/debug\/fireline-streams$/)
+})
+
+test('findBinary honors env overrides before target lookup', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fireline-binary-'))
+  const envBin = join(root, 'fireline')
+  await writeFile(envBin, '')
+  process.env.FIRELINE_BIN = envBin
+
+  try {
+    const resolved = findBinary({
+      name: 'fireline',
+      envVar: 'FIRELINE_BIN',
+      searchFrom: join(root, 'nested', 'dir'),
+    })
+    assert.equal(resolved?.source, 'env')
+    assert.equal(resolved?.path, envBin)
+  } finally {
+    delete process.env.FIRELINE_BIN
+  }
 })
 
 test('createDockerBuildPlan wires embedded spec build arg', () => {

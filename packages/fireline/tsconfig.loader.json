@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "baseUrl": "../..",
+    "paths": {
+      "@fireline/client": ["packages/client/src/index.ts"],
+      "@fireline/client/*": ["packages/client/src/*"],
+      "@fireline/state": ["packages/state/src/index.ts"],
+      "@fireline/state/*": ["packages/state/src/*"]
+    }
+  }
+}

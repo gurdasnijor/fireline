@@ -102,6 +102,11 @@ cut before going live.**
 
 **Class: LIVE**
 
+**Prereq (done before going on stage):** from the repo root, run `pnpm
+install` once, then `cargo build --release --bin fireline --bin
+fireline-streams`. The live command below assumes those local artifacts
+already exist.
+
 **What the operator types in Pane A:**
 
 ```bash
@@ -139,9 +144,9 @@ export default compose(
 **Narration beat:** "15 lines of agent. The middleware is real — trace, approve,
 budget, secrets proxy. No glue code. No deploy pipeline yet — this is local."
 
-**Fallback:** if `npx fireline` hangs on first-run install, the operator has a
-prewarmed terminal (Pane B backup) where the binary is already resident and can
-fail over with `fireline docs/demos/assets/agent.ts` in <3s.
+**Fallback:** if the local bin shims are stale, the operator has a
+prewarmed terminal (Pane B backup) and can rerun the same verified
+command: `npx fireline docs/demos/assets/agent.ts`.
 
 ---
 

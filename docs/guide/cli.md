@@ -8,6 +8,7 @@ connect to the printed URL. The currently shipped verb surface is:
 
 - `run` — boot a spec locally
 - `build` — build a hosted image from a spec
+- `deploy` — hand the hosted image off to a native platform CLI
 - `agents` — install ACP agents from the public registry
 
 Package source:
@@ -17,6 +18,11 @@ Package source:
 ## Usage
 
 ```bash
+# From this repo: install JS deps once, build the Rust binaries once, then run the spec.
+pnpm install
+cargo build --release --bin fireline --bin fireline-streams
+npx fireline docs/demos/assets/agent.ts
+
 # Default: boot everything, provision the spec, print endpoints, wait for Ctrl+C.
 npx fireline run agent.ts
 
@@ -81,9 +87,11 @@ export default compose(
 2. Verifies the default export is a `Harness` (has `.start()`)
 3. Resolves the `fireline-streams` and `fireline` Rust binaries (see
    [Binary resolution](#binary-resolution))
-4. Spawns `fireline-streams` on the streams port
-5. Spawns `fireline --control-plane --port <port> --durable-streams-url
-   …` on the control-plane port
+4. Reuses `fireline-streams` on the streams port if `GET /healthz`
+   already returns `200`; otherwise spawns it
+5. Refuses early if the chosen Fireline host port already answers
+   `GET /healthz`; otherwise spawns
+   `fireline --control-plane --port <port> --durable-streams-url …`
 6. Waits for both `/healthz` endpoints to report 200
 7. Calls `spec.start({ serverUrl, stateStream, name })` — which goes
    through the normal HTTP provisioning path
@@ -171,15 +179,17 @@ The CLI looks for the Rust binaries in this order (esbuild / turbo
 pattern):
 
 1. `$FIRELINE_BIN` / `$FIRELINE_STREAMS_BIN` env vars
-2. Platform-specific optional npm dependency
-   (`@fireline/cli-darwin-arm64`, etc.) — **not yet published**
-3. `target/debug/<name>` or `target/release/<name>` walking up from the
-   CLI's own directory (dev fallback)
+2. `target/release/<name>` walking up from the CLI's own directory
+3. `target/debug/<name>` walking up from the CLI's own directory
+
+If one binary is only present in `target/release` and the other only in
+`target/debug`, the CLI uses the mixed pair and logs that mismatch as an
+info message. It does not auto-build.
 
 For local dev against this workspace, build once before invoking:
 
 ```bash
-cargo build --bin fireline --bin fireline-streams
+cargo build --release --bin fireline --bin fireline-streams
 ```
 
 ## Exit codes
@@ -197,8 +207,9 @@ cargo build --bin fireline --bin fireline-streams
 - `fireline build` packages the hosted image locally, but `fireline deploy --to <platform>` and `fireline push` are deferred to later phases.
 - The `--repl` flag is a stub. Connect any ACP client (pi-acp, use-acp,
   claude-code, a custom client) to the printed ACP URL.
-- Platform-specific npm packages are not published yet, so `npx
-  fireline` only works against a local `cargo build` today.
+- Platform-specific npm packages are not published yet, so repo-local
+  `npx fireline` still depends on a local workspace checkout with
+  `pnpm install` plus the Rust binaries above.
 - The CLI spawns an HTTP control plane. The longer-term plan is an
   embedded in-process conductor with stdio transport; see
   [docs/proposals/declarative-agent-api-design.md](../proposals/declarative-agent-api-design.md).

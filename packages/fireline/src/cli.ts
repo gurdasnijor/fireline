@@ -2,10 +2,15 @@ import { ChildProcess, spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, dirname, parse as parsePath, resolve as resolvePath } from 'node:path'
+import { dirname, parse as parsePath, resolve as resolvePath } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { tsImport } from 'tsx/esm/api'
-import { resolveBinary } from './resolve-binary.js'
+import {
+  BinaryResolutionError,
+  type ResolvedBinary,
+  findBinary,
+  resolveBinary,
+} from './resolve-binary.js'
 
 export type BuildTarget = 'cloudflare' | 'docker' | 'docker-compose' | 'fly' | 'k8s'
 export type DeployTarget = 'cloudflare-containers' | 'docker-compose' | 'fly' | 'k8s'
@@ -72,6 +77,9 @@ const defaultCliRuntime: CliRuntime = {
   runChild,
   writeTargetScaffold,
 }
+
+const WORKSPACE_ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), '../../..')
+const SPEC_LOADER_TSCONFIG = resolvePath(WORKSPACE_ROOT, 'packages/fireline/tsconfig.loader.json')
 
 const GENERAL_HELP = `
 fireline — run specs locally, build hosted images, deploy them, or install ACP agents
@@ -349,7 +357,7 @@ function helpText(topic: ParsedArgs['helpFor']): string {
 
 async function runAgents(args: ParsedArgs): Promise<number> {
   const agentsBin = resolveBinary({ name: 'fireline-agents', envVar: 'FIRELINE_AGENTS_BIN' })
-  return await runChild(agentsBin, args.passthroughArgs)
+  return await runChild(agentsBin.path, args.passthroughArgs)
 }
 
 function parseIntArg(value: string | undefined, flag: string): number {
@@ -409,8 +417,8 @@ async function run(args: ParsedArgs): Promise<number> {
   const specPath = resolvePath(process.cwd(), args.file!)
   const spec = await loadSpec(specPath)
 
-  const streamsBin = resolveBinary({ name: 'fireline-streams', envVar: 'FIRELINE_STREAMS_BIN' })
-  const firelineBin = resolveBinary({ name: 'fireline', envVar: 'FIRELINE_BIN' })
+  const { firelineBin, streamsBin } = resolveRunBinaries()
+  maybeLogBinaryMismatch(firelineBin, streamsBin)
 
   const teardown: Array<() => Promise<void> | void> = []
   let shutdownSignal: number | null = null
@@ -433,24 +441,34 @@ async function run(args: ParsedArgs): Promise<number> {
   }
 
   try {
-    const streamsProc = spawn(streamsBin, [], {
-      stdio: ['ignore', 'inherit', 'inherit'],
-      env: { ...process.env, PORT: String(args.streamsPort) },
-    })
-    teardown.push(() => stopChild(streamsProc))
-    await waitForHttp(`http://127.0.0.1:${args.streamsPort}/healthz`, 10_000, 'fireline-streams')
+    const streamsHealthz = `http://127.0.0.1:${args.streamsPort}/healthz`
+    const reusingStreams = await isHealthy(streamsHealthz)
+    if (reusingStreams) {
+      console.log(`fireline: reusing fireline-streams at :${args.streamsPort}`)
+    } else {
+      const streamsProc = spawn(streamsBin.path, [], {
+        stdio: ['ignore', 'inherit', 'inherit'],
+        env: { ...process.env, PORT: String(args.streamsPort) },
+      })
+      teardown.push(() => stopChild(streamsProc))
+      await waitForHttp(streamsHealthz, 10_000, 'fireline-streams')
+    }
 
+    const hostHealthz = `http://127.0.0.1:${args.port}/healthz`
+    if (await isHealthy(hostHealthz)) {
+      throw new Error(`Port ${args.port} already in use; stop the other process or pass --port <n>`)
+    }
     const controlPlaneArgs = [
       '--control-plane',
       '--port', String(args.port),
       '--durable-streams-url', `http://127.0.0.1:${args.streamsPort}/v1/stream`,
     ]
-    const firelineProc = spawn(firelineBin, controlPlaneArgs, {
+    const firelineProc = spawn(firelineBin.path, controlPlaneArgs, {
       stdio: ['ignore', 'inherit', 'inherit'],
       env: { ...process.env },
     })
     teardown.push(() => stopChild(firelineProc))
-    await waitForHttp(`http://127.0.0.1:${args.port}/healthz`, 15_000, 'fireline')
+    await waitForHttp(hostHealthz, 15_000, 'fireline')
 
     const startOptions: Record<string, unknown> = {
       serverUrl: `http://127.0.0.1:${args.port}`,
@@ -537,10 +555,13 @@ export interface LoadedSpec {
   readonly start: (options: Record<string, unknown>) => Promise<{ readonly id: string; readonly acp: { readonly url: string }; readonly state: { readonly url: string } }>
 }
 
-async function loadSpec(specPath: string): Promise<LoadedSpec> {
+export async function loadSpec(specPath: string): Promise<LoadedSpec> {
   const parentURL = pathToFileURL(`${dirname(specPath)}/`).href
-  const mod = await tsImport(`./${basename(specPath)}`, parentURL)
-  const candidate = (mod as { default?: unknown }).default
+  const mod = await tsImport(pathToFileURL(specPath).href, {
+    parentURL,
+    ...(existsSync(SPEC_LOADER_TSCONFIG) ? { tsconfig: SPEC_LOADER_TSCONFIG } : {}),
+  })
+  const candidate = unwrapDefaultExport((mod as { default?: unknown }).default ?? mod)
   if (!candidate || typeof candidate !== 'object') {
     throw new Error(
       `${specPath} must have a default export. Got: ${typeof candidate}\n` +
@@ -554,6 +575,33 @@ async function loadSpec(specPath: string): Promise<LoadedSpec> {
     )
   }
   return candidate as LoadedSpec
+}
+
+export function unwrapDefaultExport(value: unknown): unknown {
+  let current = value
+  const seen = new Set<object>()
+  while (
+    current &&
+    typeof current === 'object' &&
+    typeof (current as { start?: unknown }).start !== 'function' &&
+    'default' in (current as Record<string, unknown>)
+  ) {
+    if (seen.has(current as object)) {
+      break
+    }
+    seen.add(current as object)
+    current = (current as { default?: unknown }).default
+  }
+  return current
+}
+
+async function isHealthy(url: string): Promise<boolean> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(500) })
+    return res.ok
+  } catch {
+    return false
+  }
 }
 
 async function waitForHttp(url: string, timeoutMs: number, label: string): Promise<void> {
@@ -620,6 +668,63 @@ async function runChild(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolveWait) => setTimeout(resolveWait, ms))
+}
+
+function resolveRunBinaries(): {
+  firelineBin: ResolvedBinary
+  streamsBin: ResolvedBinary
+} {
+  const firelineBin = tryFindRunBinary({ name: 'fireline', envVar: 'FIRELINE_BIN' })
+  const streamsBin = tryFindRunBinary({
+    name: 'fireline-streams',
+    envVar: 'FIRELINE_STREAMS_BIN',
+  })
+  const missing = [firelineBin, streamsBin].filter((entry) => entry === null)
+  if (missing.length > 0) {
+    throw new Error(
+      [
+        'Could not find required Fireline binaries.',
+        'Run exactly:',
+        '  cargo build --release --bin fireline --bin fireline-streams',
+      ].join('\n'),
+    )
+  }
+  return {
+    firelineBin: firelineBin!,
+    streamsBin: streamsBin!,
+  }
+}
+
+function tryFindRunBinary(
+  lookup: Parameters<typeof findBinary>[0],
+): ResolvedBinary | null {
+  try {
+    return findBinary(lookup)
+  } catch (error) {
+    if (
+      error instanceof BinaryResolutionError &&
+      error.kind === 'env-missing'
+    ) {
+      throw error
+    }
+    throw error
+  }
+}
+
+function maybeLogBinaryMismatch(
+  firelineBin: ResolvedBinary,
+  streamsBin: ResolvedBinary,
+): void {
+  if (
+    firelineBin.source === 'env' ||
+    streamsBin.source === 'env' ||
+    firelineBin.source === streamsBin.source
+  ) {
+    return
+  }
+  console.info(
+    `fireline: using ${firelineBin.name} from target/${firelineBin.source} and ${streamsBin.name} from target/${streamsBin.source}`,
+  )
 }
 
 interface PrintedHandle {
@@ -1018,4 +1123,9 @@ function requireScaffoldPath(target: DeployTarget, scaffoldPath: string | null):
 function decorateMissingDeployToolError(plan: DeployExecutionPlan, error: unknown): Error {
   const message = (error as Error)?.message ?? String(error)
   return new Error(`${message}\nInstall ${plan.command} and retry.\n${plan.installHint}`)
+}
+
+const invokedPath = process.argv[1] ? resolvePath(process.argv[1]) : null
+if (invokedPath && invokedPath === fileURLToPath(import.meta.url)) {
+  void main(process.argv.slice(2))
 }

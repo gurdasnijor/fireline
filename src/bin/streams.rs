@@ -12,10 +12,10 @@ use std::net::IpAddr;
 #[derive(Debug, Parser)]
 #[command(
     name = "fireline-streams",
-    about = "Standalone durable-streams server for local Fireline development"
+    about = "Standalone durable-streams server for local development"
 )]
 struct Cli {
-    /// Bind port for the durable-streams listener.
+    /// Bind port for the embedded durable-streams listener.
     #[arg(long, env = "PORT", default_value_t = 7474)]
     port: u16,
 
@@ -24,22 +24,21 @@ struct Cli {
     host: String,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
-    let host: IpAddr = cli.host.parse().context("parse durable-streams host")?;
+    run(cli)
+}
 
+#[tokio::main]
+async fn run(cli: Cli) -> Result<()> {
+    let host: IpAddr = cli.host.parse()?;
     let router = fireline_session::build_stream_router(None)?;
     let listener = tokio::net::TcpListener::bind((host, cli.port))
         .await
         .context("bind durable-streams listener")?;
 
     let addr = listener.local_addr()?;
-    eprintln!(
-        "durable-streams ready at http://{}:{}/v1/stream",
-        addr.ip(),
-        addr.port()
-    );
+    eprintln!("durable-streams ready at http://{}:{}/v1/stream", addr.ip(), addr.port());
 
     axum::serve(listener, router)
         .await
