@@ -1,92 +1,92 @@
 # Telegram Demo
 
-This is the TypeScript demo spec for the Telegram pivot: `telegram()` is composed into the middleware array, and the Rust host turns that into the `TelegramSubscriber` DurableSubscriber profile landed by `mono-axr.11`.
+You do not want another operator dashboard for simple agent work. You want to text the agent, see the reply in the same chat, and approve risky tool calls without leaving Telegram. Most stacks solve that by bolting a bot bridge onto a separate control plane.
 
-This directory stays local until `mono-axr.6` lands the real `telegram()` middleware lowering on `main`. The Rust profile is already live; this example is the compose-surface draft that sits on top of it.
+This example shows the Fireline version of that flow. `telegram(...)` is composed directly into the spec, the host lowers it into the `TelegramSubscriber` durable-subscriber profile on `main`, and the same durable stream keeps the chat surface, approval state, and restart recovery in sync. No separate bridge process is the product story anymore.
 
-## What This Example Is For
+## What This Example Shows
 
-- show the 15-line `compose(...)` file used in Demo Step 3
-- keep Telegram in the same substrate as `trace()` and `approve()`
-- avoid the old separate `examples/telegram-bridge` process as the demo path
+1. `telegram({ token: { ref: 'env:TELEGRAM_BOT_TOKEN' }, scope: 'tool_calls' })` turns Telegram into the chat surface for the agent.
+2. `approve({ scope: 'tool_calls' })` makes risky tool calls pause and wait for an inline Telegram decision.
+3. Optional `TELEGRAM_CHAT_ID` and `TELEGRAM_ALLOWED_USER_IDS` keep delivery scoped to the right chat and operator.
+4. The script only provisions the spec. The durable-subscriber profile on the host keeps polling Telegram after the launch command exits.
 
-The runtime story this file targets is:
-
-1. start the agent with `telegram({ token: { ref: 'env:TELEGRAM_BOT_TOKEN' }, events: ['permission_request'] })`
-2. DM the bot on Telegram
-3. Fireline turns the inbound message into the session prompt path
-4. a tool-call approval becomes an inline Approve / Deny card in Telegram
-5. tap a button and the same session resumes in the same chat
-
-## Prereqs
-
-- `TELEGRAM_BOT_TOKEN` exported from `deploy/telegram/bridge.env`
-- Fireline host reachable at `FIRELINE_URL` or `http://127.0.0.1:4440`
-- `pi-acp` installed on `PATH`, or `AGENT_COMMAND` set to another ACP agent
-- optional `REPO_PATH` if you do not want the repo root mounted at `/workspace`
-
-If you need the older bot bootstrap and health probe patterns, use
-[telegram-bridge](../telegram-bridge/README.md) as reference only. It is not
-the demo path anymore.
-
-## The Spec
+## The Code
 
 ```ts
-import { agent, compose, middleware, sandbox } from '@fireline/client'
-import { approve, telegram, trace } from '@fireline/client/middleware'
-import { localPath } from '@fireline/client/resources'
-
-const repoPath = process.env.REPO_PATH ?? '../..'
-const agentCommand = (process.env.AGENT_COMMAND ?? 'pi-acp').split(' ')
-
-export default compose(
-  sandbox({ resources: [localPath(repoPath, '/workspace')], labels: { demo: 'telegram-demo' } }),
+const spec = compose(
+  sandbox({
+    resources: [localPath(repoPath, '/workspace')],
+    labels: { demo: 'telegram-demo', channel: 'telegram' },
+  }),
   middleware([
     trace(),
     approve({ scope: 'tool_calls' }),
-    telegram({ token: { ref: 'env:TELEGRAM_BOT_TOKEN' }, events: ['permission_request'] }),
+    telegram({
+      token: { ref: 'env:TELEGRAM_BOT_TOKEN' },
+      chatId: process.env.TELEGRAM_CHAT_ID,
+      allowedUserIds,
+      scope: 'tool_calls',
+    }),
   ]),
   agent(agentCommand),
 )
 ```
 
-That is the whole point of the pivot: Telegram is just another middleware entry
-that lowers into a DurableSubscriber profile inside the host.
+That is the post-pivot claim: Telegram is just another middleware entry in the Fireline topology, backed by the same durable-subscriber substrate as the rest of the runtime.
 
-One current surface detail: the merged TypeScript API on `main` models
-TelegramSubscriber matching through `events`, not the earlier draft
-`scope: 'tool_calls'` shorthand from the operator script.
+## Run It
 
-## Run
+The quickest path is the Fireline CLI:
 
 ```bash
-pnpm --dir .. install --ignore-workspace --lockfile=false
+cp deploy/telegram/bridge.env.example deploy/telegram/bridge.env
+$EDITOR deploy/telegram/bridge.env
+set -a
+source deploy/telegram/bridge.env
+set +a
+
+npx fireline run examples/telegram-demo/agent.ts
+```
+
+By default the example uses `npx -y @agentclientprotocol/claude-agent-acp`. Override `AGENT_COMMAND` if you want a different ACP agent.
+
+If you already have a Fireline host running and want the lower-level TypeScript provisioning path instead:
+
+```bash
 cd examples/telegram-demo
-pnpm install
+pnpm install --ignore-workspace --lockfile=false
 set -a
 source ../../deploy/telegram/bridge.env
 set +a
 pnpm start
 ```
 
-The script prints the Fireline `stateStream` URL once the harness starts.
+The script prints the ACP URL and `stateStream` URL for the provisioned runtime. After that, talk to the bot in Telegram.
 
-## Demo Flow
+## Demo Prompt
 
-Send the bot a DM that forces a gated tool call, for example:
+A good first chat is:
+
+```text
+Read README.md and summarize what this repository does in two sentences.
+```
+
+To force the approval path, send:
 
 ```text
 Delete /workspace/dist, but stop and ask me before you run the tool.
 ```
 
-Expected behavior once the full Step 3 and Step 4 demo path is on `main`:
+Expected behavior:
 
-- the first reply streams back into the Telegram chat as message edits
-- the approval gate renders an inline keyboard card in the same chat
-- tapping Approve or Deny appends the durable completion and unblocks the run
+- the reply streams into the Telegram chat
+- the risky tool call pauses before it runs
+- Telegram renders an inline Approve / Deny action
+- tapping a button resumes the same durable session
 
-## Optional Smoke
+## Preflight
 
-`pnpm smoke` is a lightweight preflight for the compose spec. It validates the
-Telegram token with `getMe` and checks that the example still carries
-`trace`, `approve`, and `telegram` middleware in the expected order.
+`pnpm smoke` is the lightweight example check. It always validates the compose surface and, when `TELEGRAM_BOT_TOKEN` is present, also calls Telegram `getMe` to confirm the bot token is live.
+
+For the older bridge bootstrap and probing story, use [telegram-bridge](../telegram-bridge/README.md) only as background reference. It is no longer the front-door example.
