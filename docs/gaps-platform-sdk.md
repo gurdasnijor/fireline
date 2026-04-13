@@ -8,7 +8,7 @@
 >
 > Evidence base: [`investigations/package-api-ergonomics-gaps.md`](investigations/package-api-ergonomics-gaps.md) — grounded in the Flamecast port with line-number citations.
 >
-> Date: 2026-04-12
+> Date: 2026-04-13
 
 ---
 
@@ -28,13 +28,13 @@ const db = await fireline.db()
 const reviewer = await compose(
   sandbox({ resources: [localPath('.', '/workspace')] }),
   middleware([trace(), approve({ scope: 'tool_calls' })]),
-  agent(['pi-acp']),
+  agent(['claude-acp']),
 ).as('reviewer').start()
 
 const writer = await compose(
   sandbox({ resources: [localPath('.', '/workspace')] }),
   middleware([trace()]),
-  agent(['pi-acp']),
+  agent(['claude-acp']),
 ).as('writer').start()
 
 // 3. Connect to an agent — returns the ACP SDK's ClientSideConnection
@@ -44,7 +44,7 @@ await conn.prompt({ sessionId, prompt: [{ type: 'text', text: 'Review this repo.
 
 // 4. Query state — all agents, all sessions, one unified view
 db.sessions        // reviewer + writer sessions
-db.promptTurns     // all turns across all agents
+db.promptRequests // all requests across all agents
 
 // 5. React to approval requests (subscribe, don't poll)
 db.permissions.subscribe(rows => {
@@ -72,7 +72,7 @@ What changes from today:
 | `openNodeAcpConnection(handle.acp.url, ...)` — 39 LOC | `reviewer.connect()` → ACP SDK `ClientSideConnection` |
 | `createFirelineDB({ stateStreamUrl: handle.state.url })` | `fireline.db()` — implicit stream, env-configured |
 | Raw `DurableStream.append(JSON.stringify(...))` | `reviewer.resolvePermission(sessionId, requestId, outcome)` |
-| `examples/shared/wait.ts` — 21-line helper | `db.permissions.subscribe(rows => ...)` — already exists |
+| ad-hoc wait helpers in older examples | `db.permissions.subscribe(rows => ...)` — current direct pattern |
 | `import { Sandbox } from '../../packages/client/src/...'` | `import { ... } from '@fireline/client'` |
 
 ---
@@ -119,7 +119,7 @@ The Flamecast port required **2,262 lines of glue** to bridge "sandbox provision
 
 **What exists:** `SandboxHandle` returns raw `acp.url`. The ACP SDK ships [`ClientSideConnection`](https://github.com/agentclientprotocol/typescript-sdk/blob/main/src/acp.ts#L531) with `newSession`, `prompt`, `loadSession`, `cancel`. But there's no bridge from Fireline to an initialized connection.
 
-**What every app writes:** 39 lines of WebSocket setup, stream bridging, 8 stubbed Client methods. Duplicated in `examples/shared/acp-node.ts` AND `examples/flamecast-client/shared/acp-node.ts`.
+**What apps still write today:** 39 lines of WebSocket setup, stream bridging, and stubbed Client methods when they need a raw ACP bridge. The old shared helper is gone, but app-local copies still exist where `agent.connect()` would remove the glue entirely.
 
 **Target:**
 ```typescript
@@ -134,7 +134,7 @@ await conn.cancel({ sessionId })
 
 Fireline adds the transport setup only: endpoint → WebSocket → initialized `ClientSideConnection`. After that, you're in the ACP SDK's world. Works for Node, browser (without React), server-side orchestrators. React apps can still use `use-acp` directly.
 
-**Evidence:** `examples/flamecast-client/shared/acp-node.ts:29-63`, `server.ts:447-449`, every example in `examples/`.
+**Evidence:** `examples/flamecast-client/shared/acp-node.ts:29-63`, `examples/flamecast-client/server.ts:447-449`.
 
 **Work:** ~40 LOC.
 
@@ -152,10 +152,9 @@ const db = await fireline.db()
 
 // Global view — all agents, all sessions
 db.sessions
-db.promptTurns
+db.promptRequests
 db.permissions
 db.chunks
-db.childSessionEdges
 ```
 
 No URL. No separate package import. `fireline.db()` connects to the local embedded durable stream by default. For remote environments, `FIRELINE_STREAM_URL` env var overrides — the code never changes.
@@ -296,7 +295,7 @@ agent.status             // live, from state stream
 
 | Gap | Work | Eliminates | Priority |
 |-----|------|-----------|----------|
-| **P1 `agent.connect()`** | ~40 LOC | `shared/acp-node.ts` (39 LOC x2) | Must have |
+| **P1 `agent.connect()`** | ~40 LOC | app-local ACP bridge helpers | Must have |
 | **P2 `fireline.db()`** | ~20 LOC | Separate `@fireline/state` import, raw URLs, manual preload | Must have |
 | **P3 Durable approvals** | 0 LOC (Rust done) | Approval wait is already durable in conductor | Documented |
 | **P4 Approval resolution** | **1 line** (re-export) + ~10 LOC (agent method) | `appendApprovalResolved` exists in events.ts, not re-exported | Must have |
@@ -337,10 +336,9 @@ interface FirelineAgent {
 // fireline.db() returns this. Internally wraps @fireline/state's createFirelineDB.
 interface FirelineDB {
   sessions: ObservableCollection<SessionRow>
-  promptTurns: ObservableCollection<PromptTurnRow>
+  promptRequests: ObservableCollection<PromptRequestRow>
   permissions: ObservableCollection<PermissionRow>
   chunks: ObservableCollection<ChunkRow>
-  childSessionEdges: ObservableCollection<ChildSessionEdgeRow>
   // ... other collections
 
   close(): void
@@ -359,6 +357,6 @@ Wire examples as workspace consumers of `@fireline/client`. Delete raw source pa
 
 ---
 
-After Phase 1, `examples/shared/` disappears entirely (no more `acp-node.ts`, `resolve-approval.ts`, or `wait.ts`). After Phase 1-3, the Flamecast port drops from 2,262 lines of glue to Flamecast-specific UI adaptation only.
+The old `examples/shared/` cleanup is already landed on `main`. After Phase 1-3, the remaining per-app glue drops to Flamecast-specific UI adaptation only.
 
 **Total Phase 1 work: ~110 LOC TypeScript, zero Rust.**
