@@ -275,6 +275,9 @@ async fn prepare_runtime(config: BootstrapConfig, bound_port: u16) -> Result<Pre
     let session_index = SessionIndex::new();
     let state_materializer =
         StateMaterializer::new(vec![std::sync::Arc::new(session_index.clone())]);
+    // Keep a clone of the agent command around so we can thread it into
+    // the `host_spec` envelope further down — SharedTerminal::spawn
+    // consumes the original.
     let agent_command_for_spec = config.agent_command.clone();
     let shared_terminal = SharedTerminal::spawn(config.agent_command).await?;
     ensure_named_streams(&stream_base_url, &audit_stream_names(&config.topology)?).await?;
@@ -315,6 +318,11 @@ async fn prepare_runtime(config: BootstrapConfig, bound_port: u16) -> Result<Pre
         }),
     };
 
+    // Emit stream events BEFORE the materializer preloads, so
+    // the stream has content when the materializer subscribes.
+    // Without this ordering, preload connects to an empty stream,
+    // the worker finds nothing to replay, and exits — causing
+    // "state materializer worker exited before preload completed."
     let persisted_spec = PersistedHostSpec::new(
         host_key.clone(),
         node_id.clone(),

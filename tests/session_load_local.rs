@@ -1,5 +1,6 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
 use agent_client_protocol::{
@@ -7,7 +8,7 @@ use agent_client_protocol::{
     PromptRequest, ProtocolVersion, SessionNotification, SessionUpdate,
 };
 use agent_client_protocol_test::testy::TestyCommand;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use durable_streams::{Client as DsClient, Offset};
 use fireline_harness::TopologySpec;
 use fireline_host::bootstrap::{BootstrapConfig, start};
@@ -17,6 +18,7 @@ use fireline_sandbox::{
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::sync::Arc;
+use tokio::process::{Child, Command as TokioCommand};
 use uuid::Uuid;
 
 #[path = "support/stream_server.rs"]
@@ -422,6 +424,77 @@ async fn session_load_finds_provider_created_session_from_fresh_direct_host() ->
     Ok(())
 }
 
+#[tokio::test]
+async fn healthz_only_turns_green_after_session_index_is_ready_for_load_session() -> Result<()> {
+    let stream_server = stream_server::TestStreamServer::spawn().await?;
+    let state_stream = format!("fireline-session-load-healthz-{}", Uuid::new_v4());
+    let state_stream_url = stream_server.stream_url(&state_stream);
+    let cwd = repo_root();
+    let first_port = reserve_port()?;
+    let second_port = reserve_port()?;
+
+    let mut first = spawn_direct_host_process(
+        first_port,
+        &state_stream,
+        &stream_server.base_url,
+        &state_stream_url,
+        &resumable_testy_bin(),
+    )
+    .await?;
+
+    let result = async {
+        wait_for_http_ok(
+            &format!("http://127.0.0.1:{first_port}/healthz"),
+            &mut first,
+        )
+        .await?;
+        let first_acp_url = format!("ws://127.0.0.1:{first_port}/acp");
+        let session_id = create_session(&first_acp_url, &cwd).await?;
+        wait_for_session_row(&state_stream_url, &session_id).await?;
+        shutdown_process(&mut first).await;
+
+        let mut restarted = spawn_direct_host_process(
+            second_port,
+            &state_stream,
+            &stream_server.base_url,
+            &state_stream_url,
+            &resumable_testy_bin(),
+        )
+        .await?;
+
+        let restarted_result = async {
+            wait_for_http_ok(
+                &format!("http://127.0.0.1:{second_port}/healthz"),
+                &mut restarted,
+            )
+            .await?;
+
+            let response = load_session_and_prompt(
+                &format!("ws://127.0.0.1:{second_port}/acp"),
+                &session_id,
+                &cwd,
+                &TestyCommand::Echo {
+                    message: "healthz gate preserved replay readiness".to_string(),
+                }
+                .to_prompt(),
+            )
+            .await?;
+
+            assert_eq!(response, "healthz gate preserved replay readiness");
+            Ok(())
+        }
+        .await;
+
+        shutdown_process(&mut restarted).await;
+        restarted_result
+    }
+    .await;
+
+    shutdown_process(&mut first).await;
+    stream_server.shutdown().await;
+    result
+}
+
 async fn create_session(acp_url: &str, cwd: &Path) -> Result<String> {
     let cwd = cwd.to_path_buf();
 
@@ -575,4 +648,69 @@ async fn wait_for_session_row(state_stream_url: &str, session_id: &str) -> Resul
 
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+async fn spawn_direct_host_process(
+    port: u16,
+    state_stream: &str,
+    durable_streams_url: &str,
+    advertised_state_stream_url: &str,
+    agent_bin: &str,
+) -> Result<Child> {
+    let mut command = TokioCommand::new(fireline_bin());
+    command
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--name")
+        .arg("session-load-healthz")
+        .arg("--state-stream")
+        .arg(state_stream)
+        .arg("--durable-streams-url")
+        .arg(durable_streams_url)
+        .arg("--")
+        .arg(agent_bin)
+        .env(
+            "FIRELINE_ADVERTISED_STATE_STREAM_URL",
+            advertised_state_stream_url,
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    command
+        .spawn()
+        .context("spawn direct-host fireline for session/load readiness test")
+}
+
+async fn wait_for_http_ok(url: &str, child: &mut Child) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            anyhow::bail!("fireline exited before becoming ready: {status}");
+        }
+
+        match reqwest::get(url).await {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(_) | Err(_) if tokio::time::Instant::now() >= deadline => {
+                anyhow::bail!("timed out waiting for fireline at {url}");
+            }
+            Ok(_) | Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+}
+
+async fn shutdown_process(child: &mut Child) {
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+}
+
+fn reserve_port() -> Result<u16> {
+    let listener = std::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        .context("bind ephemeral port for direct-host session/load test")?;
+    Ok(listener.local_addr()?.port())
 }
