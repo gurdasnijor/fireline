@@ -213,6 +213,7 @@ impl ActiveSubscriber for AutoApproveSubscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval_resolution_envelope;
     use crate::durable_subscriber::{DurableSubscriberDriver, SubscriberMode, SubscriberRegistration};
 
     #[test]
