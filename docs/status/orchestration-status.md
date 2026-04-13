@@ -3,6 +3,8 @@
 > Live coordination doc for three parallel Opus orchestrators + their dispatched agents.
 >
 > Updated: 2026-04-12
+>
+> **Beads board (`bd status`) is the authoritative task state.** This doc is coordination scratch only — cross-PM notes, dispatch queues, landing notes, risk decisions. Work items and status live in `bd`.
 
 ## Three-role model
 
