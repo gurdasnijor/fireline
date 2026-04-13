@@ -36,8 +36,9 @@ describe('durable-subscriber middleware surface', () => {
           keyBy: 'session_request',
         }),
         telegram({
-          token: { ref: 'secret:telegram-bot' },
+          token: 'env:TELEGRAM_BOT_TOKEN',
           chatId: '1234',
+          scope: 'tool_calls',
         }),
         autoApprove(),
       ]),
@@ -74,12 +75,16 @@ describe('durable-subscriber middleware surface', () => {
         },
       },
       {
-        name: 'telegram_subscriber',
+        name: 'telegram',
         config: {
-          token: { ref: 'secret:telegram-bot' },
+          botToken: 'env:TELEGRAM_BOT_TOKEN',
+          apiBaseUrl: 'https://api.telegram.org',
           chatId: '1234',
-          events: ['permission_request'],
-          keyBy: 'session_request',
+          allowedUserIds: [],
+          pollIntervalMs: 1_000,
+          pollTimeoutMs: 30_000,
+          parseMode: 'html',
+          scope: 'tool_calls',
         },
       },
       {
@@ -105,7 +110,7 @@ describe('durable-subscriber middleware surface', () => {
 
   it('requires a telegram target or token', () => {
     expect(() => telegram({})).toThrowError(
-      'telegram middleware requires either target or token',
+      'telegram middleware requires token for live lowering; target-only routing is not supported by TelegramSubscriberConfig',
     )
   })
 

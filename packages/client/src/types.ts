@@ -426,17 +426,31 @@ export interface TelegramMiddleware {
   readonly kind: 'telegram'
   /** Optional human-readable profile name used in logs and diagnostics. */
   readonly name?: string
-  /** Optional host-owned target alias for production routing. */
+  /** Optional host-owned target alias for future routing extensions. */
   readonly target?: string
-  /** Optional token reference for local/dev parity. */
+  /** Telegram bot token or host-resolved token reference. */
   readonly token?: string | DurableSubscriberSecretRef
   /** Optional Telegram chat/channel routing identifier. */
   readonly chatId?: string
-  /** Events observed by the future Telegram `ActiveSubscriber` profile. */
+  /** Optional allow-list of Telegram user ids allowed to resolve approvals. */
+  readonly allowedUserIds?: readonly string[]
+  /** Active approval scope supported by the current Rust TelegramSubscriber. */
+  readonly scope?: 'tool_calls'
+  /** Optional Telegram Bot API base URL. */
+  readonly apiBaseUrl?: string
+  /** Optional approval timeout in milliseconds. */
+  readonly approvalTimeoutMs?: number
+  /** Poll interval for Telegram update fetches in milliseconds. */
+  readonly pollIntervalMs?: number
+  /** Long-poll timeout for Telegram update fetches in milliseconds. */
+  readonly pollTimeoutMs?: number
+  /** Message rendering mode used for approval cards. */
+  readonly parseMode?: 'html' | 'markdown_v2'
+  /** Legacy placeholder selectors retained until the TS/Rust surfaces fully converge. */
   readonly events?: readonly DurableSubscriberEventSelector[]
-  /** Canonical completion-key strategy; raw string keys are intentionally unsupported. */
+  /** Legacy placeholder key strategy retained until the TS/Rust surfaces fully converge. */
   readonly keyBy?: Exclude<DurableSubscriberKeyStrategy, 'session'>
-  /** Optional bounded retry policy owned by the infrastructure plane. */
+  /** Legacy placeholder retry policy retained until the TS/Rust surfaces fully converge. */
   readonly retry?: DurableSubscriberRetryPolicy
 }
 
