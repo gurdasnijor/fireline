@@ -76,7 +76,7 @@ jobs:
         run: pnpm --filter @fireline/client lint
 
       - name: Smoke test @fireline/client current surface
-        run: pnpm --filter @fireline/client test -- db-plane-separation.test.ts
+        run: pnpm --filter @fireline/client test -- db-plane-separation.test.ts workflow-awakeable.test.ts
 
       - name: Test @fireline/client ACP integration when touched
         if: steps.targets.outputs.run_acp_test == 'true'
