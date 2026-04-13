@@ -31,18 +31,21 @@ Raw API calls are the fastest path to a demo, but they leave you owning everythi
 Fireline's core setup model is one call: choose the sandbox, choose the control rules, choose the agent, then start it.
 
 ```typescript
-import { compose, agent, sandbox, middleware } from '@fireline/client'
-import { trace, approve, budget } from '@fireline/client/middleware'
+import fireline, { agent, compose, middleware, sandbox } from '@fireline/client'
+import { approve, budget, trace } from '@fireline/client/middleware'
 import { localPath } from '@fireline/client/resources'
 
-const handle = await compose(
+const reviewer = compose(
   sandbox({ resources: [localPath('.', '/workspace')] }),
   middleware([trace(), approve({ scope: 'tool_calls' }), budget({ tokens: 500_000 })]),
-  agent(['claude-code-acp']),
-).start({ serverUrl: 'http://localhost:4440' })
+  agent(['claude-acp']),
+).as('reviewer')
+
+const handle = await reviewer.start({ serverUrl: 'http://localhost:4440' })
+const db = await fireline.db({ stateStreamUrl: handle.state.url })
 ```
 
-That one handle gives your app one URL for talking to the agent and one URL for watching live state.
+That one handle gives your app `handle.connect()` for the session plane and `fireline.db({ stateStreamUrl: handle.state.url })` for live observation.
 
 ## Who uses it
 
