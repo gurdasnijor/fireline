@@ -39,6 +39,12 @@ npx fireline build agent.ts --target fly
 # Build, scaffold, and invoke the native deploy tool.
 npx fireline deploy agent.ts --to fly
 
+# Resolve a named hosted target from ~/.fireline/hosted.json.
+npx fireline deploy agent.ts --target production
+
+# Use the configured default target when one is declared.
+npx fireline deploy agent.ts
+
 # Pass extra args through to the native deploy tool.
 npx fireline deploy agent.ts --to k8s -- --namespace fireline
 
@@ -236,14 +242,16 @@ call a Fireline-owned deploy API.
 Usage:
 
 ```bash
-fireline deploy <file.ts> --to <platform> [flags] [-- <native-flags...>]
+fireline deploy <file.ts> [--to <platform> | --target <name>] [flags] [-- <native-flags...>]
 ```
 
 Flags:
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--to <platform>` | required | Native deploy target: `fly`, `cloudflare-containers`, `docker-compose`, or `k8s` |
+| `--to <platform>` | from hosted target or required | Native deploy target: `fly`, `cloudflare-containers`, `docker-compose`, or `k8s` |
+| `--target <name>` | from `defaultTarget` | Hosted target lookup from `~/.fireline/hosted.json` |
+| `--token <value>` | none | Override the auth token injected into the native deploy CLI |
 | `--state-stream <s>` | from spec | Override the baked-in durable state stream name |
 | `--name <s>` | from spec | Override the baked-in deployment name |
 | `--provider <p>` | from spec | Override the baked-in `sandbox.provider` |
@@ -262,8 +270,49 @@ Current native CLI mapping:
 Example:
 
 ```bash
+fireline deploy agent.ts --target production
 fireline deploy agent.ts --to fly -- --remote-only
 ```
+
+### Hosted target config
+
+`deploy` can resolve a named hosted target from:
+
+```text
+~/.fireline/hosted.json
+```
+
+Example:
+
+```json
+{
+  "defaultTarget": "production",
+  "targets": {
+    "production": {
+      "provider": "fly",
+      "region": "lax",
+      "resourceNaming": {
+        "appName": "reviewer-prod"
+      },
+      "authRef": "FLY_API_TOKEN"
+    },
+    "edge": {
+      "provider": "cloudflare-containers",
+      "authRef": "CLOUDFLARE_API_TOKEN"
+    }
+  }
+}
+```
+
+Resolution rules:
+
+1. `--token <value>` wins if provided.
+2. `--target <name>` selects a named target from the hosted config.
+3. If `--target` is omitted, `defaultTarget` is used when present.
+4. Token lookup falls back to `authRef`, then `FIRELINE_<TARGET>_TOKEN`, then provider defaults such as `FLY_API_TOKEN` or `CLOUDFLARE_API_TOKEN`, then `FIRELINE_TOKEN`.
+5. Interactive prompting is deferred; there is no prompt path yet.
+
+If both `--target` and `--to` are provided, the configured target provider and explicit `--to` must agree.
 
 ## `fireline agents`
 
@@ -290,6 +339,10 @@ the registry install surface.
 | `FIRELINE_BIN` | Override the path to the `fireline` binary |
 | `FIRELINE_STREAMS_BIN` | Override the path to the `fireline-streams` binary |
 | `FIRELINE_AGENTS_BIN` | Override the path to the `fireline-agents` binary |
+| `FIRELINE_<TARGET>_TOKEN` | Named hosted-target auth token fallback for `deploy` |
+| `FLY_API_TOKEN` | Fly deploy auth token |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare Containers deploy auth token |
+| `FIRELINE_TOKEN` | Generic deploy auth fallback when no target-specific env is present |
 
 ## Binary Resolution
 
