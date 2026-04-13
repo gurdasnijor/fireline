@@ -803,6 +803,7 @@ mod tests {
                 resolved_by: None,
                 reason: Some("bootstrap".to_string()),
                 created_at_ms: now_ms(),
+                meta: None,
             })?),
         });
         producer
