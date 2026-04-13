@@ -14,8 +14,8 @@ use std::sync::{Arc, OnceLock};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::PeerRegistry;
 use super::transport;
+use super::{PeerRegistry, resolve_prompt_trace_context};
 use crate::ToolDescriptor;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -135,37 +135,35 @@ pub(crate) fn build_peer_mcp_server(
                         ))
                     })?;
 
-                    let tool_call_span = tracing::info_span!(
-                        "fireline.tool_call",
-                        tool_name = "prompt_peer",
-                        peer_agent_name = %input.agent_name,
-                        session_id = %session_id,
-                    );
-                    let _tool_call_guard = tool_call_span.enter();
-
-                    let peer_call_span = tracing::info_span!(
-                        "fireline.peer_call.outbound",
-                        peer_agent_name = %input.agent_name,
-                        peer_host_id = %peer.host_id,
-                        session_id = %session_id,
-                    );
+                    let peer_call_span =
+                        if let Some(prompt_context) = resolve_prompt_trace_context(&session_id) {
+                            tracing::info_span!(
+                                parent: &prompt_context.prompt_span,
+                                "fireline.peer.call.out",
+                                fireline.session_id = %session_id,
+                                fireline.request_id = %prompt_context.request_id,
+                                rpc.system = "jsonrpc",
+                                rpc.method = "initialize",
+                            )
+                        } else {
+                            tracing::info_span!(
+                                "fireline.peer.call.out",
+                                fireline.session_id = %session_id,
+                                rpc.system = "jsonrpc",
+                                rpc.method = "initialize",
+                            )
+                        };
                     let _peer_call_guard = peer_call_span.enter();
                     let trace_context = transport::TraceContextCarrier::from_current_span();
 
-                    let result = transport::dispatch_peer_call(
-                        &peer,
-                        &input.prompt,
-                        trace_context,
-                    )
-                    .await
-                    .map_err(|e| {
-                        sacp::util::internal_error(format!(
-                            "prompt peer '{}': {e}",
-                            input.agent_name
-                        ))
-                    })?;
-
-                    let _ = session_id;
+                    let result = transport::dispatch_peer_call(&peer, &input.prompt, trace_context)
+                        .await
+                        .map_err(|e| {
+                            sacp::util::internal_error(format!(
+                                "prompt peer '{}': {e}",
+                                input.agent_name
+                            ))
+                        })?;
 
                     Ok(PromptPeerOutput {
                         host_id: peer.host_id,
