@@ -78,6 +78,7 @@ test('repl controller surfaces pending approvals and resolves them', async () =>
 
   await controller.submit('{"command":"write_file","path":"/workspace/test.txt","content":"hello"}')
   controller.setPendingApproval({
+    createdAt: Date.parse('2026-04-13T12:34:56.000Z'),
     requestId: 'request-123',
     reason: 'approval fallback: prompt-level gate until tool-call interception lands',
     sessionId: 'session-123',
@@ -98,6 +99,9 @@ test('repl controller surfaces pending approvals and resolves them', async () =>
 
   assert.match(output, /Tool Approval/i)
   assert.match(output, /write_file/)
+  assert.match(output, /session session-123/)
+  assert.match(output, /request request-123/)
+  assert.match(output, /created 2026-04-13T12:34:56\.000Z/)
   assert.match(output, /"path": "\/workspace\/test\.txt"/)
   assert.match(output, /approval fallback: prompt-level gate until tool-call interception/i)
   assert.match(output, /lands/i)
